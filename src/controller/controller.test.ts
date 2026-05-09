@@ -457,14 +457,28 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   const authDir = installTempAuthFiles(t, rig.tempDir);
 
   let restarts = 0;
+  const retryStarts: any[] = [];
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
+  };
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[]) => {
+    retryStarts.push({ binding, input });
+    return { threadId: binding.threadId, turnId: 'turn-2' };
   };
   (rig.controller as any).queueTurnRender = async () => {};
   (rig.controller as any).completeTurn = async () => {};
   (rig.controller as any).clearObservedTurnWatcher = () => {};
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
   (rig.controller as any).activeTurns.set('turn-1', active);
 
   await (rig.controller as any).handleNotification({
@@ -485,8 +499,33 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   });
 
   assert.equal(restarts, 1);
+  assert.deepEqual(retryStarts, [{
+    binding: { threadId: 'thread-1', cwd: rig.tempDir },
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+  }]);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_b/.test(message)));
+  assert.ok(rig.sentMessages.includes('Retrying the same request with the new auth...'));
+  assert.ok((rig.controller as any).activeTurns.has('turn-2'));
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Usage limit exceeded again', codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-2',
+      willRetry: false,
+    },
+  });
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-2',
+    state: 'completed',
+  });
+
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.ok(rig.sentMessages.some(message => /no unused auth candidate is available/.test(message)));
 });
 
 test('Codex error notifications are shown on the active Telegram turn', async (t) => {

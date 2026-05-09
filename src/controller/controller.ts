@@ -139,6 +139,7 @@ interface ActiveTurn {
   buffer: string;
   finalText: string | null;
   interruptRequested: boolean;
+  authRetry: AuthRetryContext | null;
   statusMessageText: string | null;
   statusNeedsRebase: boolean;
   segments: ActiveTurnSegment[];
@@ -227,9 +228,20 @@ interface PendingAuthChoiceList {
   createdAt: number;
 }
 
+interface AuthRetryContext {
+  input: TurnInput[];
+  threadId: string;
+  cwd: string | null;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  failedAuthTargets: Set<string>;
+}
+
 interface PendingAuthRotation {
   scopeId: string;
   reason: string;
+  retry: AuthRetryContext | null;
 }
 
 type ApprovalAction = 'accept' | 'session' | 'deny';
@@ -856,7 +868,11 @@ export class BridgeSessionCore {
     if (isCodexAuthRotationError(params)) {
       const scopeId = active?.scopeId ?? (threadId ? this.findChatByThread(threadId) : null);
       if (scopeId) {
-        this.pendingAuthRotation = { scopeId, reason: message };
+        this.pendingAuthRotation = {
+          scopeId,
+          reason: message,
+          retry: active?.authRetry ? cloneAuthRetryContext(active.authRetry) : null,
+        };
       }
     }
     this.updateStatus();
@@ -1161,6 +1177,7 @@ export class BridgeSessionCore {
     threadId: string,
     turnId: string,
     previewMessageId: number,
+    authRetry: AuthRetryContext | null = null,
   ): Promise<void> {
     const active = this.createActiveTurnState(
       scopeId,
@@ -1171,6 +1188,7 @@ export class BridgeSessionCore {
       turnId,
       previewMessageId,
     );
+    active.authRetry = authRetry;
     this.activeTurns.set(turnId, active);
     const pendingError = this.pendingTurnErrors.get(turnId);
     if (pendingError) {
@@ -1222,6 +1240,7 @@ export class BridgeSessionCore {
       buffer: '',
       finalText: null,
       interruptRequested: false,
+      authRetry: null,
       statusMessageText: null,
       statusNeedsRebase: false,
       segments: [],
@@ -1344,7 +1363,10 @@ export class BridgeSessionCore {
           active.resolver();
           this.activeTurns.delete(active.turnId);
           this.updateStatus();
-          await this.maybeRunPendingAuthRotation();
+          const retriedAfterAuthRotation = await this.maybeRunPendingAuthRotation();
+          if (!retriedAfterAuthRotation && active.authRetry) {
+            this.authRotationFailedTargets.clear();
+          }
           await this.withLock(scopeId, async () => this.startQueuedPromptIfPresent(scopeId));
         }
         return;
@@ -2154,44 +2176,79 @@ export class BridgeSessionCore {
     await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false);
   }
 
-  private async maybeRunPendingAuthRotation(): Promise<void> {
+  private async maybeRunPendingAuthRotation(): Promise<boolean> {
     if (!this.pendingAuthRotation || this.authRotationInProgress) {
-      return;
+      return false;
     }
     if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
-      return;
+      return false;
     }
 
     const rotation = this.pendingAuthRotation;
     this.pendingAuthRotation = null;
     this.authRotationInProgress = true;
     try {
-      const candidate = await this.selectNextCodexAuthCandidate();
+      const failedTargets = rotation.retry?.failedAuthTargets ?? this.authRotationFailedTargets;
+      const candidate = await this.selectNextCodexAuthCandidate(failedTargets);
       const locale = this.localeForChat(rotation.scopeId);
       if (!candidate) {
         await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_no_candidate', {
           error: formatShortStatusError(rotation.reason),
         }));
-        return;
+        return false;
       }
       await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_switching', {
         value: candidate.name,
         error: formatShortStatusError(rotation.reason),
       }));
       await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
+      if (rotation.retry) {
+        await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
+        return true;
+      }
+      return false;
     } catch (error) {
       await this.handleAsyncError('codex.auth_rotation', error, rotation.scopeId);
+      return false;
     } finally {
       this.authRotationInProgress = false;
     }
   }
 
-  private async selectNextCodexAuthCandidate(): Promise<CodexAuthCandidate | null> {
+  private async retryTurnAfterAuthRotation(
+    scopeId: string,
+    locale: AppLocale,
+    retry: AuthRetryContext,
+  ): Promise<void> {
+    await this.sendMessage(scopeId, t(locale, 'auth_auto_retrying'));
+    const binding = {
+      threadId: retry.threadId,
+      cwd: retry.cwd,
+    };
+    const turn = await this.startTurnWithRecovery(scopeId, binding, retry.input);
+    await this.registerActiveTurn(
+      scopeId,
+      retry.chatId,
+      retry.chatType,
+      retry.topicId,
+      turn.threadId,
+      turn.turnId,
+      0,
+      {
+        ...retry,
+        threadId: turn.threadId,
+        cwd: this.store.getBinding(scopeId)?.cwd ?? retry.cwd,
+        failedAuthTargets: new Set(retry.failedAuthTargets),
+      },
+    );
+  }
+
+  private async selectNextCodexAuthCandidate(failedTargets: Set<string>): Promise<CodexAuthCandidate | null> {
     const state = await listCodexAuthState();
     if (state.currentTargetPath) {
-      this.authRotationFailedTargets.add(state.currentTargetPath);
+      failedTargets.add(state.currentTargetPath);
     }
-    const candidates = state.candidates.filter(candidate => !this.authRotationFailedTargets.has(candidate.path));
+    const candidates = state.candidates.filter(candidate => !failedTargets.has(candidate.path));
     if (candidates.length === 0) {
       return null;
     }
@@ -2201,7 +2258,7 @@ export class BridgeSessionCore {
       : -1;
     for (let offset = 1; offset <= state.candidates.length; offset += 1) {
       const candidate = state.candidates[(currentIndex + offset + state.candidates.length) % state.candidates.length];
-      if (candidate && !this.authRotationFailedTargets.has(candidate.path)) {
+      if (candidate && !failedTargets.has(candidate.path)) {
         return candidate;
       }
     }
@@ -2810,7 +2867,24 @@ export class BridgeSessionCore {
     try {
       const input = await this.buildTurnInput(binding, { ...event, text }, locale);
       const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
-      await this.registerActiveTurn(scopeId, event.chatId, event.chatType, event.topicId, turnState.threadId, turnState.turnId, previewMessageId);
+      await this.registerActiveTurn(
+        scopeId,
+        event.chatId,
+        event.chatType,
+        event.topicId,
+        turnState.threadId,
+        turnState.turnId,
+        previewMessageId,
+        {
+          input,
+          threadId: turnState.threadId,
+          cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+          chatId: event.chatId,
+          chatType: event.chatType,
+          topicId: event.topicId,
+          failedAuthTargets: new Set(),
+        },
+      );
     } catch (error) {
       if (previewMessageId > 0) {
         await this.cleanupTransientPreview(scopeId, previewMessageId);
@@ -3825,6 +3899,18 @@ function authChoiceKeyboard(record: PendingAuthChoiceList): Array<Array<{ text: 
     text: clipButtonText(`${candidate.isCurrent ? '* ' : ''}${candidate.name}`),
     callback_data: `auth:${record.localId}:${index}`,
   }]);
+}
+
+function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {
+  return {
+    input: context.input,
+    threadId: context.threadId,
+    cwd: context.cwd,
+    chatId: context.chatId,
+    chatType: context.chatType,
+    topicId: context.topicId,
+    failedAuthTargets: new Set(context.failedAuthTargets),
+  };
 }
 
 function isCodexAuthRotationError(params: any): boolean {
