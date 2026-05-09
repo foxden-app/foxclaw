@@ -154,6 +154,97 @@ export interface CodexMcpResourceContent {
   uri: string | null;
 }
 
+export interface CodexHookMetadata {
+  key: string;
+  eventName: string;
+  handlerType: string;
+  enabled: boolean;
+  trustStatus: string;
+  sourcePath: string;
+  pluginId: string | null;
+  command: string | null;
+  statusMessage: string | null;
+}
+
+export interface CodexHooksListEntry {
+  cwd: string;
+  hooks: CodexHookMetadata[];
+  errors: Array<{ path: string; message: string }>;
+  warnings: string[];
+}
+
+export interface CodexPluginSummary {
+  id: string;
+  name: string;
+  enabled: boolean;
+  installed: boolean;
+  source: string;
+  availability: string;
+  authPolicy: string;
+  installPolicy: string;
+  keywords: string[];
+}
+
+export interface CodexPluginMarketplace {
+  name: string;
+  displayName: string | null;
+  path: string | null;
+  plugins: CodexPluginSummary[];
+}
+
+export interface CodexPluginSkillSummary {
+  name: string;
+  description: string;
+  shortDescription: string | null;
+  enabled: boolean;
+  path: string | null;
+}
+
+export interface CodexPluginDetail {
+  marketplaceName: string;
+  marketplacePath: string | null;
+  summary: CodexPluginSummary;
+  description: string | null;
+  skills: CodexPluginSkillSummary[];
+  hooks: Array<{ key: string; eventName: string }>;
+  apps: Array<{ id: string; name: string; description: string | null; needsAuth: boolean }>;
+  mcpServers: string[];
+}
+
+export interface CodexAppInfo {
+  id: string;
+  name: string;
+  description: string | null;
+  isEnabled: boolean;
+  isAccessible: boolean;
+  installUrl: string | null;
+  distributionChannel: string | null;
+  pluginDisplayNames: string[];
+}
+
+export interface CodexExperimentalFeature {
+  name: string;
+  displayName: string | null;
+  enabled: boolean;
+  defaultEnabled: boolean;
+  stage: string;
+  description: string | null;
+}
+
+export interface CodexConfigRequirements {
+  allowedApprovalPolicies: string[] | null;
+  allowedSandboxModes: string[] | null;
+  allowedWebSearchModes: string[] | null;
+  enforceResidency: string | null;
+  featureRequirements: Record<string, boolean> | null;
+}
+
+export interface CodexModelProviderCapabilities {
+  webSearch: boolean;
+  imageGeneration: boolean;
+  namespaceTools: boolean;
+}
+
 export type ReviewTarget =
   | { type: 'uncommittedChanges' }
   | { type: 'baseBranch'; branch: string }

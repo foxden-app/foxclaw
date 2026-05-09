@@ -11,9 +11,16 @@ import type {
   ChatSessionSettings,
   CodexAccountInfo,
   CodexAccountRateLimits,
+  CodexAppInfo,
   CodexCollaborationMode,
+  CodexConfigRequirements,
+  CodexExperimentalFeature,
+  CodexHooksListEntry,
   CodexMcpResourceContent,
   CodexMcpServerStatus,
+  CodexModelProviderCapabilities,
+  CodexPluginDetail,
+  CodexPluginMarketplace,
   CodexRateLimitSnapshot,
   CodexRateLimitWindow,
   CodexSkillMetadata,
@@ -518,8 +525,17 @@ export class BridgeSessionCore {
           '/auth',
           '/auth_reload',
           '/logout confirm',
+          '/loaded',
           '/skills [query]',
           '/skill <name>',
+          '/hooks',
+          '/plugins [query]',
+          '/plugin <name>',
+          '/apps',
+          '/features',
+          '/config',
+          '/requirements',
+          '/provider',
           '/mcp',
           '/review',
           '/fork [name]',
@@ -750,6 +766,10 @@ export class BridgeSessionCore {
         await this.handleDiffCommand(scopeId, locale);
         return;
       }
+      case 'loaded': {
+        await this.handleLoadedCommand(scopeId, locale);
+        return;
+      }
       case 'skills': {
         await this.handleSkillsCommand(scopeId, locale, args);
         return;
@@ -764,6 +784,42 @@ export class BridgeSessionCore {
       }
       case 'skill_disable': {
         await this.handleSkillConfigCommand(scopeId, locale, args, false);
+        return;
+      }
+      case 'hooks': {
+        await this.handleHooksCommand(scopeId, locale);
+        return;
+      }
+      case 'plugins': {
+        await this.handlePluginsCommand(scopeId, locale, args);
+        return;
+      }
+      case 'plugin': {
+        await this.handlePluginCommand(scopeId, locale, args);
+        return;
+      }
+      case 'plugin_skill': {
+        await this.handlePluginSkillCommand(scopeId, locale, args);
+        return;
+      }
+      case 'apps': {
+        await this.handleAppsCommand(scopeId, locale, args);
+        return;
+      }
+      case 'features': {
+        await this.handleFeaturesCommand(scopeId, locale);
+        return;
+      }
+      case 'config': {
+        await this.handleConfigCommand(scopeId, locale);
+        return;
+      }
+      case 'requirements': {
+        await this.handleRequirementsCommand(scopeId, locale);
+        return;
+      }
+      case 'provider': {
+        await this.handleProviderCommand(scopeId, locale);
         return;
       }
       case 'mcp': {
@@ -1012,6 +1068,14 @@ export class BridgeSessionCore {
         await this.handleTurnDiffUpdated(notification.params);
         return;
       }
+      case 'thread/status/changed': {
+        await this.handleThreadStatusChanged(notification.params);
+        return;
+      }
+      case 'thread/tokenUsage/updated': {
+        await this.handleThreadTokenUsageUpdated(notification.params);
+        return;
+      }
       case 'thread/name/updated':
       case 'thread/archived':
       case 'thread/unarchived':
@@ -1035,12 +1099,23 @@ export class BridgeSessionCore {
         await this.handleSkillsChangedNotification();
         return;
       }
+      case 'app/list/updated': {
+        await this.handleAppListUpdated(notification.params);
+        return;
+      }
       case 'mcpServer/startupStatus/updated': {
         await this.handleMcpStartupStatusUpdated(notification.params);
         return;
       }
       case 'mcpServer/oauthLogin/completed': {
         await this.handleMcpOauthLoginCompleted(notification.params);
+        return;
+      }
+      case 'warning':
+      case 'guardianWarning':
+      case 'deprecationNotice':
+      case 'configWarning': {
+        await this.handleBridgeWarningNotification(notification.method, notification.params);
         return;
       }
       default:
@@ -1161,6 +1236,45 @@ export class BridgeSessionCore {
     this.latestTurnDiffs.set(scopeId, { scopeId, threadId, turnId, diff, updatedAt: Date.now() });
   }
 
+  private async handleThreadStatusChanged(params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    if (!threadId) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      return;
+    }
+    const status = normalizeThreadStatusLabel(params?.status);
+    if (status === 'idle') {
+      return;
+    }
+    const locale = this.localeForChat(scopeId);
+    await this.sendMessage(scopeId, t(locale, 'thread_status_changed', { threadId, status }));
+  }
+
+  private async handleThreadTokenUsageUpdated(params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    if (!threadId) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      return;
+    }
+    const usage = formatThreadTokenUsage(params?.tokenUsage);
+    if (!usage) {
+      return;
+    }
+    const locale = this.localeForChat(scopeId);
+    await this.sendMessage(scopeId, t(locale, 'thread_token_usage_high', {
+      threadId,
+      percent: usage.percent,
+      total: usage.total,
+      limit: usage.limit,
+    }));
+  }
+
   private async handleThreadLifecycleNotification(method: string, params: any): Promise<void> {
     const threadId = stringOrNull(params?.threadId);
     if (!threadId) {
@@ -1227,6 +1341,11 @@ export class BridgeSessionCore {
     this.logger.info('codex.skills_changed');
   }
 
+  private async handleAppListUpdated(params: any): Promise<void> {
+    const count = Array.isArray(params?.data) ? params.data.length : 0;
+    await this.notifyBoundScopes(`Apps list updated${count ? ` (${count})` : ''}.`);
+  }
+
   private async handleMcpStartupStatusUpdated(params: any): Promise<void> {
     const name = stringOrNull(params?.name);
     const status = stringOrNull(params?.status);
@@ -1245,6 +1364,18 @@ export class BridgeSessionCore {
     const message = success
       ? `MCP ${name} OAuth login completed.`
       : `MCP ${name} OAuth login failed: ${String(params?.error ?? 'unknown')}`;
+    await this.notifyBoundScopes(message);
+  }
+
+  private async handleBridgeWarningNotification(method: string, params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    const scopeId = threadId ? this.findChatByThread(threadId) : null;
+    const locale = scopeId ? this.localeForChat(scopeId) : 'en';
+    const message = formatWarningNotification(locale, method, params);
+    if (scopeId) {
+      await this.sendMessage(scopeId, message);
+      return;
+    }
     await this.notifyBoundScopes(message);
   }
 
@@ -2952,6 +3083,11 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, formatDiffMessage(locale, diff.diff));
   }
 
+  private async handleLoadedCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const threadIds = await this.app.listLoadedThreads();
+    await this.sendMessage(scopeId, formatLoadedThreadsMessage(locale, threadIds));
+  }
+
   private async handleSkillsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const forceReload = args[0]?.toLowerCase() === 'reload';
     const query = (forceReload ? args.slice(1) : args).join(' ').trim();
@@ -2981,6 +3117,72 @@ export class BridgeSessionCore {
     }
     await this.app.writeSkillConfig({ name }, enabled);
     await this.sendMessage(scopeId, t(locale, enabled ? 'skill_enabled' : 'skill_disabled', { name }));
+  }
+
+  private async handleHooksCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    const entries = await this.app.listHooks(binding?.cwd ?? this.config.defaultCwd);
+    await this.sendMessage(scopeId, formatHooksMessage(locale, entries));
+  }
+
+  private async handlePluginsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const query = args.join(' ').trim() || null;
+    const binding = this.store.getBinding(scopeId);
+    const marketplaces = await this.app.listPlugins(binding?.cwd ?? this.config.defaultCwd);
+    await this.sendMessage(scopeId, formatPluginsMessage(locale, marketplaces, query));
+  }
+
+  private async handlePluginCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const name = args.join(' ').trim();
+    if (!name) {
+      await this.sendMessage(scopeId, t(locale, 'usage_plugin'));
+      return;
+    }
+    const plugin = await this.app.readPlugin(name);
+    if (!plugin) {
+      await this.sendMessage(scopeId, t(locale, 'plugin_not_found', { name }));
+      return;
+    }
+    await this.sendMessage(scopeId, formatPluginDetailMessage(locale, plugin));
+  }
+
+  private async handlePluginSkillCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const [marketplace, plugin, ...skillParts] = args;
+    const skill = skillParts.join(' ').trim();
+    if (!marketplace || !plugin || !skill) {
+      await this.sendMessage(scopeId, t(locale, 'usage_plugin_skill'));
+      return;
+    }
+    const contents = await this.app.readPluginSkill(marketplace, plugin, skill);
+    await this.sendMessage(scopeId, formatPluginSkillMessage(locale, marketplace, plugin, skill, contents));
+  }
+
+  private async handleAppsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const forceRefetch = args[0]?.toLowerCase() === 'reload';
+    const binding = this.store.getBinding(scopeId);
+    const apps = await this.app.listApps(binding?.threadId ?? null, forceRefetch);
+    await this.sendMessage(scopeId, formatAppsMessage(locale, apps, forceRefetch));
+  }
+
+  private async handleFeaturesCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const features = await this.app.listExperimentalFeatures();
+    await this.sendMessage(scopeId, formatFeaturesMessage(locale, features));
+  }
+
+  private async handleConfigCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+    await this.sendMessage(scopeId, formatConfigMessage(locale, result));
+  }
+
+  private async handleRequirementsCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const requirements = await this.app.readConfigRequirements();
+    await this.sendMessage(scopeId, formatRequirementsMessage(locale, requirements));
+  }
+
+  private async handleProviderCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const capabilities = await this.app.readModelProviderCapabilities();
+    await this.sendMessage(scopeId, formatProviderMessage(locale, capabilities));
   }
 
   private async handleMcpCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -4895,6 +5097,239 @@ function formatMcpResourceMessage(
 function formatDiffMessage(locale: AppLocale, diff: string): string {
   const clipped = diff.length > 3500 ? `${diff.slice(0, 3500)}\n...` : diff;
   return `${t(locale, 'diff_title')}\n${clipped}`;
+}
+
+function formatLoadedThreadsMessage(locale: AppLocale, threadIds: string[]): string {
+  const lines = [t(locale, 'loaded_title')];
+  if (threadIds.length === 0) {
+    lines.push(t(locale, 'loaded_empty'));
+    return lines.join('\n');
+  }
+  for (const threadId of threadIds.slice(0, 30)) {
+    lines.push(`- ${threadId}`);
+  }
+  if (threadIds.length > 30) {
+    lines.push(t(locale, 'list_truncated', { count: threadIds.length - 30 }));
+  }
+  return lines.join('\n');
+}
+
+function formatHooksMessage(locale: AppLocale, entries: CodexHooksListEntry[]): string {
+  const hooks = entries.flatMap(entry => entry.hooks.map(hook => ({ cwd: entry.cwd, hook })));
+  const lines = [t(locale, 'hooks_title')];
+  if (hooks.length === 0) {
+    lines.push(t(locale, 'hooks_empty'));
+  } else {
+    for (const { hook } of hooks.slice(0, 30)) {
+      lines.push(`${hook.enabled ? '*' : '-'} ${hook.key} (${hook.eventName}, ${hook.trustStatus})`);
+      const detail = [hook.pluginId ? `plugin=${hook.pluginId}` : null, hook.statusMessage, hook.command].filter(Boolean).join(' · ');
+      if (detail) {
+        lines.push(`  ${truncateInline(detail, 140)}`);
+      }
+    }
+    if (hooks.length > 30) {
+      lines.push(t(locale, 'list_truncated', { count: hooks.length - 30 }));
+    }
+  }
+  const warnings = entries.flatMap(entry => entry.warnings);
+  const errors = entries.flatMap(entry => entry.errors);
+  if (warnings.length > 0) {
+    lines.push('', t(locale, 'hooks_warnings'));
+    lines.push(...warnings.slice(0, 5).map(warning => `- ${truncateInline(warning, 160)}`));
+  }
+  if (errors.length > 0) {
+    lines.push('', t(locale, 'hooks_errors'));
+    lines.push(...errors.slice(0, 5).map(error => `- ${truncateInline(`${error.path}: ${error.message}`, 180)}`));
+  }
+  return lines.join('\n');
+}
+
+function formatPluginsMessage(locale: AppLocale, marketplaces: CodexPluginMarketplace[], query: string | null): string {
+  const plugins = marketplaces.flatMap(marketplace => marketplace.plugins.map(plugin => ({ marketplace, plugin })))
+    .filter(entry => !query
+      || entry.plugin.name.toLowerCase().includes(query.toLowerCase())
+      || entry.plugin.id.toLowerCase().includes(query.toLowerCase()));
+  const lines = [t(locale, 'plugins_title')];
+  if (query) lines.push(t(locale, 'plugins_filter', { value: query }));
+  if (plugins.length === 0) {
+    lines.push(t(locale, 'plugins_empty'));
+  } else {
+    for (const { marketplace, plugin } of plugins.slice(0, 30)) {
+      const state = `${plugin.installed ? 'installed' : 'not-installed'}, ${plugin.enabled ? 'on' : 'off'}`;
+      lines.push(`${plugin.enabled ? '*' : '-'} ${plugin.name} (${state})`);
+      lines.push(`  ${plugin.id} · ${marketplace.displayName || marketplace.name}`);
+    }
+    if (plugins.length > 30) {
+      lines.push(t(locale, 'list_truncated', { count: plugins.length - 30 }));
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatPluginDetailMessage(locale: AppLocale, plugin: CodexPluginDetail): string {
+  const lines = [
+    t(locale, 'plugin_title', { name: plugin.summary.name || plugin.summary.id }),
+    `id: ${plugin.summary.id}`,
+    `marketplace: ${plugin.marketplaceName}`,
+    `state: ${plugin.summary.installed ? 'installed' : 'not-installed'}, ${plugin.summary.enabled ? 'on' : 'off'}`,
+    plugin.description ? truncateInline(plugin.description, 400) : null,
+  ].filter((line): line is string => Boolean(line));
+  if (plugin.skills.length > 0) {
+    lines.push('', `skills: ${plugin.skills.slice(0, 12).map(skill => skill.name).join(', ')}`);
+  }
+  if (plugin.hooks.length > 0) {
+    lines.push(`hooks: ${plugin.hooks.slice(0, 12).map(hook => `${hook.eventName}:${hook.key}`).join(', ')}`);
+  }
+  if (plugin.apps.length > 0) {
+    lines.push(`apps: ${plugin.apps.slice(0, 12).map(app => app.name || app.id).join(', ')}`);
+  }
+  if (plugin.mcpServers.length > 0) {
+    lines.push(`mcp: ${plugin.mcpServers.slice(0, 12).join(', ')}`);
+  }
+  return lines.join('\n');
+}
+
+function formatPluginSkillMessage(locale: AppLocale, marketplace: string, plugin: string, skill: string, contents: string | null): string {
+  const lines = [t(locale, 'plugin_skill_title', { marketplace, plugin, skill })];
+  if (!contents) {
+    lines.push(t(locale, 'plugin_skill_empty'));
+    return lines.join('\n');
+  }
+  lines.push(truncateInline(contents, 3500));
+  return lines.join('\n');
+}
+
+function formatAppsMessage(locale: AppLocale, apps: CodexAppInfo[], forceRefetch: boolean): string {
+  const lines = [t(locale, 'apps_title')];
+  if (forceRefetch) lines.push(t(locale, 'apps_reloaded'));
+  if (apps.length === 0) {
+    lines.push(t(locale, 'apps_empty'));
+  } else {
+    for (const app of apps.slice(0, 30)) {
+      const state = `${app.isEnabled ? 'on' : 'off'}, ${app.isAccessible ? 'accessible' : 'blocked'}`;
+      lines.push(`${app.isEnabled ? '*' : '-'} ${app.name} (${state})`);
+      if (app.description) lines.push(`  ${truncateInline(app.description, 120)}`);
+    }
+    if (apps.length > 30) {
+      lines.push(t(locale, 'list_truncated', { count: apps.length - 30 }));
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatFeaturesMessage(locale: AppLocale, features: CodexExperimentalFeature[]): string {
+  const lines = [t(locale, 'features_title')];
+  if (features.length === 0) {
+    lines.push(t(locale, 'features_empty'));
+    return lines.join('\n');
+  }
+  for (const feature of features.slice(0, 40)) {
+    lines.push(`${feature.enabled ? '*' : '-'} ${feature.displayName || feature.name} (${feature.stage})`);
+    if (feature.description) lines.push(`  ${truncateInline(feature.description, 120)}`);
+  }
+  if (features.length > 40) {
+    lines.push(t(locale, 'list_truncated', { count: features.length - 40 }));
+  }
+  return lines.join('\n');
+}
+
+function formatConfigMessage(locale: AppLocale, result: Record<string, unknown>): string {
+  const config = result.config && typeof result.config === 'object' ? result.config as Record<string, unknown> : {};
+  const layers = Array.isArray(result.layers) ? result.layers : [];
+  const keys = ['model', 'model_provider', 'approval_policy', 'sandbox_mode', 'web_search', 'service_tier', 'profile', 'review_model'];
+  const lines = [t(locale, 'config_title')];
+  for (const key of keys) {
+    const value = config[key];
+    lines.push(`${key}: ${value === null || value === undefined ? '-' : formatConfigValue(value)}`);
+  }
+  lines.push(t(locale, 'config_layers', { count: layers.length }));
+  return lines.join('\n');
+}
+
+function formatRequirementsMessage(locale: AppLocale, requirements: CodexConfigRequirements | null): string {
+  const lines = [t(locale, 'requirements_title')];
+  if (!requirements) {
+    lines.push(t(locale, 'requirements_empty'));
+    return lines.join('\n');
+  }
+  lines.push(`approval: ${requirements.allowedApprovalPolicies?.join(', ') ?? '-'}`);
+  lines.push(`sandbox: ${requirements.allowedSandboxModes?.join(', ') ?? '-'}`);
+  lines.push(`web_search: ${requirements.allowedWebSearchModes?.join(', ') ?? '-'}`);
+  lines.push(`residency: ${requirements.enforceResidency ?? '-'}`);
+  if (requirements.featureRequirements) {
+    const features = Object.entries(requirements.featureRequirements)
+      .map(([key, value]) => `${key}=${value ? 'on' : 'off'}`)
+      .join(', ');
+    lines.push(`features: ${truncateInline(features, 500)}`);
+  }
+  return lines.join('\n');
+}
+
+function formatProviderMessage(locale: AppLocale, capabilities: CodexModelProviderCapabilities): string {
+  return [
+    t(locale, 'provider_title'),
+    `webSearch: ${t(locale, capabilities.webSearch ? 'yes' : 'no')}`,
+    `imageGeneration: ${t(locale, capabilities.imageGeneration ? 'yes' : 'no')}`,
+    `namespaceTools: ${t(locale, capabilities.namespaceTools ? 'yes' : 'no')}`,
+  ].join('\n');
+}
+
+function formatWarningNotification(locale: AppLocale, method: string, params: any): string {
+  if (method === 'configWarning') {
+    return [
+      t(locale, 'warning_config_title'),
+      String(params?.summary ?? t(locale, 'unknown')),
+      params?.path ? `path: ${String(params.path)}` : null,
+      params?.details ? truncateInline(String(params.details), 600) : null,
+    ].filter(Boolean).join('\n');
+  }
+  if (method === 'deprecationNotice') {
+    return [
+      t(locale, 'warning_deprecation_title'),
+      String(params?.summary ?? t(locale, 'unknown')),
+      params?.details ? truncateInline(String(params.details), 600) : null,
+    ].filter(Boolean).join('\n');
+  }
+  if (method === 'guardianWarning') {
+    return `${t(locale, 'warning_guardian_title')}\n${String(params?.message ?? t(locale, 'unknown'))}`;
+  }
+  return `${t(locale, 'warning_title')}\n${String(params?.message ?? t(locale, 'unknown'))}`;
+}
+
+function normalizeThreadStatusLabel(raw: any): string {
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (typeof raw?.type === 'string') {
+    return raw.type;
+  }
+  return 'unknown';
+}
+
+function formatThreadTokenUsage(raw: any): { percent: number; total: number; limit: number } | null {
+  const total = Number(raw?.total?.totalTokens ?? 0);
+  const limit = Number(raw?.modelContextWindow ?? 0);
+  if (!Number.isFinite(total) || !Number.isFinite(limit) || total <= 0 || limit <= 0) {
+    return null;
+  }
+  const percent = Math.round((total / limit) * 100);
+  return percent >= 85 ? { percent, total, limit } : null;
+}
+
+function formatConfigValue(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(formatConfigValue).join(', ');
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 1) {
+      return keys[0]!;
+    }
+  }
+  return truncateInline(JSON.stringify(value), 160);
 }
 
 function renderMcpElicitationMessage(

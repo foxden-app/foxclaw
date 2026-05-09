@@ -12,6 +12,7 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - App-server account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, and guarded `/logout confirm`
 - Active-turn steering, review, diff, and thread lifecycle controls: `/steer`, `/review`, `/diff`, `/fork`, `/undo`, `/rename`, `/compact`, `/archive`, and `/unarchive`
 - Skills and MCP panels with `/skills`, `/skill`, `/skill_enable`, `/skill_disable`, `/mcp`, `/mcp_reload`, `/mcp_login`, and `/mcp_resource`
+- Read-only diagnostics for loaded threads, hooks, plugins, apps, feature flags, config requirements, and provider capabilities
 - Deep-link sync from Telegram into `Codex.app` with `/open` and `/reveal`
 - Inline approval buttons for command, file-change, and granular permission approvals
 - MCP elicitation cards for structured questions raised by tools during a turn
@@ -132,6 +133,14 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/compact`
 - `/archive`, `/unarchive <n>`
 - `/skills [query]`, `/skill <name>`, `/skill_enable <name>`, `/skill_disable <name>`
+- `/loaded`
+- `/hooks`
+- `/plugins [query]`, `/plugin <name>`, `/plugin_skill <marketplace> <plugin> <skill>`
+- `/apps [reload]`
+- `/features`
+- `/config`
+- `/requirements`
+- `/provider`
 - `/mcp`, `/mcp_reload`, `/mcp_login <server>`, `/mcp_resource <server> <uri>`
 - `/models`, `/model`, `/effort`, `/permissions`, `/access`, `/mode`, `/plan`, and `/agent` open the same panel with the relevant section focused when no value is provided
 - `/model <model>`, `/effort <effort>`, `/permissions <read-only|default|full-access>`, `/access <read-only|default|full-access>`, and `/mode <default|plan>` still apply values directly
@@ -179,6 +188,7 @@ Recommended mobile app-server controls:
 - Use `/steer <message>` while a turn is active to add constraints without interrupting the turn
 - Use `/account`, `/quota`, and `/login_device` to inspect or repair Codex auth from Telegram
 - Use `/skills` and `/mcp` when a remote run behaves differently from Codex App and you need to inspect enabled skills or MCP server health
+- Use `/hooks`, `/plugins`, `/apps`, `/features`, `/config`, `/requirements`, and `/provider` for read-only remote diagnostics before changing config on the host
 
 ## Behavior Boundaries
 
