@@ -7,6 +7,12 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type {
   AppLocale,
+  ChatSessionSettings,
+  CodexAccountInfo,
+  CodexAccountRateLimits,
+  CodexCollaborationMode,
+  CodexRateLimitSnapshot,
+  CodexRateLimitWindow,
   CollaborationModeValue,
   ModelInfo,
   PendingApprovalRecord,
@@ -173,24 +179,45 @@ interface QueuedPromptRequest {
   text: string;
 }
 
+interface PendingUserInputOption {
+  label: string;
+  description: string | null;
+}
+
+interface PendingUserInputQuestion {
+  id: string;
+  header: string | null;
+  question: string;
+  options: PendingUserInputOption[];
+}
+
+interface PendingUserInputRequest {
+  localId: string;
+  serverRequestId: string;
+  chatId: string;
+  threadId: string;
+  turnId: string | null;
+  questions: PendingUserInputQuestion[];
+  answers: Map<string, string>;
+  messageId: number | null;
+  createdAt: number;
+}
+
 type ApprovalAction = 'accept' | 'session' | 'deny';
 class UserFacingError extends Error {}
 const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
-const PLAN_MODE_DEVELOPER_INSTRUCTIONS = [
-  '<collaboration_mode>Plan</collaboration_mode>',
-  'In Plan mode, inspect and reason as needed, then present a concise plan before making code, file, git, or deployment changes. Ask the user to switch back to Agent mode before implementation work.',
-].join('\n');
-const AGENT_MODE_DEVELOPER_INSTRUCTIONS = '<collaboration_mode>Default</collaboration_mode>';
 
 export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
   private observedThreadWatchers = new Map<string, ObservedThreadWatcher>();
   private queuedPrompts = new Map<string, QueuedPromptRequest>();
+  private pendingTurnErrors = new Map<string, string>();
+  private pendingUserInputs = new Map<string, PendingUserInputRequest>();
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
-  private attachedThreads = new Map<string, CollaborationModeValue>();
+  private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
   /** Last threads-panel pagination state per scope (Telegram inline nav + /open index alignment). */
@@ -280,6 +307,8 @@ export class BridgeSessionCore {
 
   async stop(): Promise<void> {
     this.queuedPrompts.clear();
+    this.pendingTurnErrors.clear();
+    this.pendingUserInputs.clear();
     this.clearObservedThreadWatchers();
     await this.abandonActiveTurns();
     this.bot.stop();
@@ -319,6 +348,10 @@ export class BridgeSessionCore {
         await this.handleCommand(event, locale, command.name, command.args);
         return;
       }
+      if (event.attachments.length === 0 && this.hasPendingUserInput(scopeId)) {
+        await this.handleUserInputTextReply(event, locale);
+        return;
+      }
       if (this.findActiveTurn(scopeId)) {
         await this.sendMessage(scopeId, t(locale, 'another_turn_running'));
         return;
@@ -328,6 +361,10 @@ export class BridgeSessionCore {
     }
     this.store.insertAudit('inbound', scopeId, 'telegram.message', summarizeTelegramInput(event.text, event.attachments));
     const command = event.attachments.length === 0 ? parseCommand(event.text) : null;
+    if (!command && event.attachments.length === 0 && this.hasPendingUserInput(scopeId)) {
+      await this.handleUserInputTextReply(event, locale);
+      return;
+    }
     const decision = resolveTelegramAddressing({
       text: event.text,
       attachmentsCount: event.attachments.length,
@@ -412,6 +449,7 @@ export class BridgeSessionCore {
           t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
+        lines.push(...await this.buildCodexUsageStatusLines(locale));
         await this.sendMessage(scopeId, lines.join('\n'));
         return;
       }
@@ -619,6 +657,17 @@ export class BridgeSessionCore {
       await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort' | 'access', settingsMatch[2]!, locale);
       return;
     }
+    const userInputMatch = /^ui:([a-f0-9]+):(\d+):(\d+)$/.exec(event.data);
+    if (userInputMatch) {
+      await this.handleUserInputCallback(
+        event,
+        userInputMatch[1]!,
+        Number.parseInt(userInputMatch[2]!, 10),
+        Number.parseInt(userInputMatch[3]!, 10),
+        locale,
+      );
+      return;
+    }
     const match = /^approval:([a-f0-9]+):(accept|session|deny)$/.exec(event.data);
     if (!match) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
@@ -687,9 +736,7 @@ export class BridgeSessionCore {
         return;
       }
       case 'error': {
-        this.lastError = JSON.stringify(notification.params ?? {});
-        this.logger.error('codex.notification.error', notification.params);
-        this.updateStatus();
+        await this.handleCodexErrorNotification(notification.params);
         return;
       }
       default:
@@ -723,17 +770,159 @@ export class BridgeSessionCore {
       }
       case 'item/tool/requestUserInput': {
         const params = request.params as any;
-        const scopeId = this.findChatByThread(params.threadId);
-        if (scopeId) {
-          await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'interactive_input_unsupported'));
-        }
-        await this.app.respond(request.id, { answers: {} });
+        await this.handleUserInputRequest(request.id, params);
         return;
       }
       default: {
         await this.app.respondError(request.id, `Unsupported server request: ${request.method}`);
       }
     }
+  }
+
+  private async handleCodexErrorNotification(params: any): Promise<void> {
+    const message = formatCodexNotificationError(params);
+    this.lastError = message;
+    this.logger.error('codex.notification.error', params);
+
+    const turnId = stringOrNull(params?.turnId);
+    const threadId = stringOrNull(params?.threadId);
+    const active = turnId
+      ? this.activeTurns.get(turnId) ?? null
+      : threadId
+        ? this.findActiveTurnByThreadId(threadId)
+        : null;
+
+    if (active) {
+      await this.recordActiveTurnError(active, message);
+    } else if (turnId) {
+      this.pendingTurnErrors.set(turnId, message);
+    }
+    this.updateStatus();
+  }
+
+  private async recordActiveTurnError(active: ActiveTurn, message: string): Promise<void> {
+    const locale = this.localeForChat(active.scopeId);
+    const text = t(locale, 'codex_turn_error', { error: message });
+    active.finalText = text;
+    active.buffer = text;
+    const segment = ensureTurnSegment(active, `${active.turnId}:codex-error`, 'final_answer', 'final_answer');
+    segment.text = text;
+    segment.completed = true;
+    await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
+  }
+
+  private async handleUserInputRequest(serverRequestId: string | number, params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    const scopeId = threadId ? this.findChatByThread(threadId) : null;
+    if (!threadId || !scopeId) {
+      await this.app.respondError(serverRequestId, `No chat binding found for thread ${threadId ?? '(unknown)'}`);
+      return;
+    }
+
+    const questions = parseUserInputQuestions(params);
+    if (questions.length === 0) {
+      await this.app.respond(serverRequestId, { answers: {} });
+      return;
+    }
+
+    const record: PendingUserInputRequest = {
+      localId: crypto.randomBytes(8).toString('hex'),
+      serverRequestId: String(serverRequestId),
+      chatId: scopeId,
+      threadId,
+      turnId: stringOrNull(params?.turnId),
+      questions,
+      answers: new Map(),
+      messageId: null,
+      createdAt: Date.now(),
+    };
+    this.pendingUserInputs.set(record.localId, record);
+    const locale = this.localeForChat(scopeId);
+    const messageId = await this.sendMessage(
+      scopeId,
+      renderUserInputMessage(locale, record),
+      userInputKeyboard(record),
+    );
+    record.messageId = messageId;
+  }
+
+  private hasPendingUserInput(scopeId: string): boolean {
+    return this.findPendingUserInputForScope(scopeId) !== null;
+  }
+
+  private findPendingUserInputForScope(scopeId: string): PendingUserInputRequest | null {
+    for (const record of this.pendingUserInputs.values()) {
+      if (record.chatId === scopeId) {
+        return record;
+      }
+    }
+    return null;
+  }
+
+  private async handleUserInputCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    questionIndex: number,
+    optionIndex: number,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingUserInputs.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_mismatch'));
+      return;
+    }
+    const question = record.questions[questionIndex];
+    const option = question?.options[optionIndex];
+    if (!question || !option) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    record.answers.set(question.id, option.label);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_recorded'));
+    await this.refreshOrFinishUserInput(record, locale);
+  }
+
+  private async handleUserInputTextReply(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
+    const record = this.findPendingUserInputForScope(event.scopeId);
+    if (!record) {
+      return;
+    }
+    const answer = event.text.trim();
+    if (!answer) {
+      await this.sendMessage(event.scopeId, t(locale, 'user_input_empty_answer'));
+      return;
+    }
+    const unanswered = record.questions.filter(question => !record.answers.has(question.id));
+    if (unanswered.length !== 1) {
+      await this.sendMessage(event.scopeId, t(locale, 'user_input_use_buttons'));
+      return;
+    }
+    record.answers.set(unanswered[0]!.id, answer);
+    await this.refreshOrFinishUserInput(record, locale);
+  }
+
+  private async refreshOrFinishUserInput(record: PendingUserInputRequest, locale: AppLocale): Promise<void> {
+    const completed = record.questions.every(question => record.answers.has(question.id));
+    if (completed) {
+      this.pendingUserInputs.delete(record.localId);
+      await this.app.respond(record.serverRequestId, {
+        answers: Object.fromEntries(record.answers.entries()),
+      });
+    }
+
+    if (record.messageId === null) {
+      return;
+    }
+    await this.editMessage(
+      record.chatId,
+      record.messageId,
+      renderUserInputMessage(locale, record, completed),
+      completed ? [] : userInputKeyboard(record),
+    );
   }
 
   private async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
@@ -745,7 +934,6 @@ export class BridgeSessionCore {
       approvalPolicy: access.approvalPolicy,
       sandboxMode: access.sandboxMode,
       model: settings?.model ?? null,
-      developerInstructions: developerInstructionsForCollaborationMode(settings?.collaborationMode ?? null),
     });
     return this.storeThreadSession(scopeId, session, 'seed');
   }
@@ -753,15 +941,18 @@ export class BridgeSessionCore {
   private async startTurnWithRecovery(scopeId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, input: TurnInput[]): Promise<{ threadId: string; turnId: string }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
+    const cwd = binding.cwd ?? this.config.defaultCwd;
+    const collaborationMode = await this.buildNativeCollaborationMode(settings, cwd);
     try {
       const turn = await this.app.startTurn({
         threadId: binding.threadId,
         input,
         approvalPolicy: access.approvalPolicy,
         sandboxMode: access.sandboxMode,
-        cwd: binding.cwd ?? this.config.defaultCwd,
+        cwd,
         model: settings?.model ?? null,
         effort: settings?.reasoningEffort ?? null,
+        collaborationMode,
       });
       return { threadId: binding.threadId, turnId: turn.id };
     } catch (error) {
@@ -773,14 +964,17 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
       const nextSettings = this.store.getChatSettings(scopeId);
       const nextAccess = this.resolveEffectiveAccess(scopeId, nextSettings);
+      const replacementCwd = replacement.cwd ?? this.config.defaultCwd;
+      const replacementCollaborationMode = await this.buildNativeCollaborationMode(nextSettings, replacementCwd);
       const turn = await this.app.startTurn({
         threadId: replacement.threadId,
         input,
         approvalPolicy: nextAccess.approvalPolicy,
         sandboxMode: nextAccess.sandboxMode,
-        cwd: replacement.cwd ?? this.config.defaultCwd,
+        cwd: replacementCwd,
         model: nextSettings?.model ?? null,
         effort: nextSettings?.reasoningEffort ?? null,
+        collaborationMode: replacementCollaborationMode,
       });
       return { threadId: replacement.threadId, turnId: turn.id };
     }
@@ -915,6 +1109,11 @@ export class BridgeSessionCore {
       previewMessageId,
     );
     this.activeTurns.set(turnId, active);
+    const pendingError = this.pendingTurnErrors.get(turnId);
+    if (pendingError) {
+      this.pendingTurnErrors.delete(turnId);
+      await this.recordActiveTurnError(active, pendingError);
+    }
     if (previewMessageId > 0) {
       this.store.saveActiveTurnPreview({
         turnId,
@@ -1233,16 +1432,13 @@ export class BridgeSessionCore {
   }
 
   private async ensureThreadReady(scopeId: string, binding: ThreadBinding): Promise<ThreadBinding> {
-    const settings = this.store.getChatSettings(scopeId);
-    const mode = resolveCollaborationMode(settings?.collaborationMode ?? null);
     const attachmentKey = attachedThreadKey(scopeId, binding.threadId);
-    if (this.attachedThreads.get(attachmentKey) === mode) {
+    if (this.attachedThreads.has(attachmentKey)) {
       return binding;
     }
     try {
       const session = await this.app.resumeThread({
         threadId: binding.threadId,
-        developerInstructions: developerInstructionsForCollaborationMode(mode),
       });
       return this.storeThreadSession(scopeId, session, 'seed');
     } catch (error) {
@@ -1324,10 +1520,8 @@ export class BridgeSessionCore {
   }
 
   private async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
-    const settings = this.store.getChatSettings(scopeId);
     const session = await this.app.resumeThread({
       threadId,
-      developerInstructions: developerInstructionsForCollaborationMode(settings?.collaborationMode ?? null),
     });
     return this.storeThreadSession(scopeId, session, 'replace');
   }
@@ -1349,7 +1543,7 @@ export class BridgeSessionCore {
     };
     this.store.setBinding(scopeId, normalized.threadId, normalized.cwd);
     this.store.setChatSettings(scopeId, model, effort);
-    this.attachedThreads.set(attachedThreadKey(scopeId, normalized.threadId), resolveCollaborationMode(this.store.getChatSettings(scopeId)?.collaborationMode ?? null));
+    this.attachedThreads.add(attachedThreadKey(scopeId, normalized.threadId));
     this.updateStatus();
     return normalized;
   }
@@ -1812,6 +2006,103 @@ export class BridgeSessionCore {
       t(locale, 'mode_configured', { value: formatCollaborationModeLabel(locale, mode) }),
       t(locale, 'applies_next_turn'),
     ].join('\n'));
+  }
+
+  private async buildNativeCollaborationMode(
+    settings: ChatSessionSettings | null,
+    cwd: string,
+  ): Promise<CodexCollaborationMode | null> {
+    const mode = resolveCollaborationMode(settings?.collaborationMode ?? null);
+    try {
+      const [config, presets] = await Promise.all([
+        this.app.readEffectiveConfig(cwd),
+        this.app.listCollaborationModes(),
+      ]);
+      const preset = presets.find(entry => entry.mode === mode) ?? null;
+      const model = settings?.model ?? preset?.model ?? config.model;
+      if (!model) {
+        this.logger.warn('codex.collaboration_mode_model_unavailable', { mode, cwd });
+        return null;
+      }
+      const reasoningEffort = mode === 'plan'
+        ? settings?.reasoningEffort
+          ?? config.planModeReasoningEffort
+          ?? preset?.reasoningEffort
+          ?? config.modelReasoningEffort
+          ?? null
+        : settings?.reasoningEffort
+          ?? config.modelReasoningEffort
+          ?? preset?.reasoningEffort
+          ?? null;
+      return {
+        mode,
+        settings: {
+          model,
+          reasoning_effort: reasoningEffort,
+          developer_instructions: config.developerInstructions,
+        },
+      };
+    } catch (error) {
+      this.logger.warn('codex.collaboration_mode_failed', {
+        mode,
+        cwd,
+        error: formatUserError(error),
+      });
+      return null;
+    }
+  }
+
+  private async buildCodexUsageStatusLines(locale: AppLocale): Promise<string[]> {
+    const [accountResult, limitsResult] = await Promise.allSettled([
+      this.app.readAccount(),
+      this.app.readAccountRateLimits(),
+    ]);
+    const account = accountResult.status === 'fulfilled' ? accountResult.value : null;
+    if (accountResult.status === 'rejected') {
+      this.logger.warn('codex.account_status_failed', { error: formatUserError(accountResult.reason) });
+    }
+    if (limitsResult.status === 'rejected') {
+      this.logger.warn('codex.rate_limits_failed', { error: formatUserError(limitsResult.reason) });
+    }
+    const lines: string[] = [];
+    if (account) {
+      lines.push(t(locale, 'status_codex_account', { value: formatCodexAccountLabel(account) }));
+    }
+    if (limitsResult.status !== 'fulfilled') {
+      lines.push(t(locale, 'status_codex_usage_unavailable', { error: formatShortStatusError(limitsResult.reason) }));
+      return lines;
+    }
+    const snapshot = selectCodexRateLimitSnapshot(limitsResult.value);
+    const planType = snapshot?.planType ?? account?.planType ?? null;
+    if (planType) {
+      lines.push(t(locale, 'status_codex_plan', { value: formatPlanTypeLabel(planType) }));
+    }
+    if (!snapshot) {
+      lines.push(t(locale, 'status_codex_usage_unavailable', { error: t(locale, 'unknown') }));
+      return lines;
+    }
+    lines.push(t(locale, 'status_codex_usage_title', { value: snapshot.limitName ?? snapshot.limitId ?? 'codex' }));
+    for (const [kind, window] of [['primary', snapshot.primary], ['secondary', snapshot.secondary]] as const) {
+      if (!window) {
+        continue;
+      }
+      lines.push(t(locale, 'status_codex_usage_window', {
+        window: formatRateLimitWindowLabel(locale, window, kind),
+        percent: formatUsagePercent(window.usedPercent),
+        reset: window.resetsAt
+          ? t(locale, 'status_codex_usage_reset', { value: formatLocalTimestamp(window.resetsAt) })
+          : '',
+      }));
+    }
+    if (snapshot.credits?.unlimited) {
+      lines.push(t(locale, 'status_codex_credits', { value: locale === 'zh' ? '无限' : 'unlimited' }));
+    } else if (snapshot.credits?.balance && snapshot.credits.balance !== '0') {
+      lines.push(t(locale, 'status_codex_credits', { value: snapshot.credits.balance }));
+    }
+    if (snapshot.rateLimitReachedType) {
+      lines.push(t(locale, 'status_codex_limit_reached', { value: formatPlanTypeLabel(snapshot.rateLimitReachedType) }));
+    }
+    return lines;
   }
 
   private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
@@ -3212,14 +3503,197 @@ function resolveCollaborationMode(mode: CollaborationModeValue | null | undefine
   return mode ?? DEFAULT_COLLABORATION_MODE;
 }
 
-function developerInstructionsForCollaborationMode(mode: CollaborationModeValue | null | undefined): string {
-  return resolveCollaborationMode(mode) === 'plan'
-    ? PLAN_MODE_DEVELOPER_INSTRUCTIONS
-    : AGENT_MODE_DEVELOPER_INSTRUCTIONS;
-}
-
 function attachedThreadKey(scopeId: string, threadId: string): string {
   return `${scopeId}:${threadId}`;
+}
+
+function formatCodexNotificationError(params: any): string {
+  const message = stringOrNull(params?.error?.message);
+  if (message) {
+    return message;
+  }
+  const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
+  if (code) {
+    return code;
+  }
+  return JSON.stringify(params?.error ?? params ?? {});
+}
+
+function parseUserInputQuestions(params: any): PendingUserInputQuestion[] {
+  const rawQuestions = Array.isArray(params?.questions)
+    ? params.questions
+    : params?.question
+      ? [params.question]
+      : [];
+  const seenIds = new Set<string>();
+  return rawQuestions
+    .map((raw: any, index: number): PendingUserInputQuestion | null => {
+      const fallbackId = `q${index + 1}`;
+      const rawId = stringOrNull(raw?.id) ?? fallbackId;
+      const id = seenIds.has(rawId) ? `${rawId}_${index + 1}` : rawId;
+      seenIds.add(id);
+      const header = stringOrNull(raw?.header);
+      const question = stringOrNull(raw?.question) ?? stringOrNull(raw?.prompt) ?? stringOrNull(raw?.text) ?? '';
+      const options = Array.isArray(raw?.options)
+        ? raw.options
+            .map((option: any): PendingUserInputOption | null => {
+              const label = stringOrNull(option?.label) ?? stringOrNull(option?.value) ?? stringOrNull(option);
+              if (!label) {
+                return null;
+              }
+              return {
+                label,
+                description: stringOrNull(option?.description),
+              };
+            })
+            .filter((option: PendingUserInputOption | null): option is PendingUserInputOption => option !== null)
+        : [];
+      if (!header && !question && options.length === 0) {
+        return null;
+      }
+      return { id, header, question, options };
+    })
+    .filter((question: PendingUserInputQuestion | null): question is PendingUserInputQuestion => question !== null);
+}
+
+function renderUserInputMessage(
+  locale: AppLocale,
+  record: PendingUserInputRequest,
+  completed = false,
+): string {
+  const lines = [
+    t(locale, 'user_input_requested'),
+    t(locale, 'line_thread', { value: record.threadId }),
+  ];
+  if (record.turnId) {
+    lines.push(t(locale, 'line_turn', { value: record.turnId }));
+  }
+
+  record.questions.forEach((question, index) => {
+    lines.push('');
+    const title = question.header || question.question || question.id;
+    lines.push(`${index + 1}. ${title}`);
+    if (question.header && question.question) {
+      lines.push(question.question);
+    }
+    question.options.forEach((option, optionIndex) => {
+      const description = option.description ? ` - ${option.description}` : '';
+      lines.push(`${optionIndex + 1}) ${option.label}${description}`);
+    });
+    const answer = record.answers.get(question.id);
+    if (answer) {
+      lines.push(t(locale, 'user_input_selected', { value: answer }));
+    }
+  });
+
+  lines.push('');
+  lines.push(t(locale, completed ? 'user_input_submitted' : 'user_input_reply_hint'));
+  return lines.join('\n');
+}
+
+function userInputKeyboard(record: PendingUserInputRequest): Array<Array<{ text: string; callback_data: string }>> {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  record.questions.forEach((question, questionIndex) => {
+    if (record.answers.has(question.id) || question.options.length === 0) {
+      return;
+    }
+    rows.push(question.options.map((option, optionIndex) => ({
+      text: clipButtonText(record.questions.length > 1 ? `${questionIndex + 1}. ${option.label}` : option.label),
+      callback_data: `ui:${record.localId}:${questionIndex}:${optionIndex}`,
+    })));
+  });
+  return rows;
+}
+
+function clipButtonText(text: string): string {
+  const trimmed = text.replace(/\s+/g, ' ').trim();
+  return trimmed.length > 48 ? `${trimmed.slice(0, 47)}...` : trimmed;
+}
+
+function stringOrNull(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function selectCodexRateLimitSnapshot(limits: CodexAccountRateLimits | null): CodexRateLimitSnapshot | null {
+  return limits?.rateLimitsByLimitId?.codex
+    ?? Object.values(limits?.rateLimitsByLimitId ?? {})[0]
+    ?? limits?.rateLimits
+    ?? null;
+}
+
+function formatCodexAccountLabel(account: CodexAccountInfo): string {
+  if (account.type === 'chatgpt') {
+    return 'ChatGPT';
+  }
+  if (account.type === 'apiKey') {
+    return 'API key';
+  }
+  if (account.type === 'amazonBedrock') {
+    return 'Amazon Bedrock';
+  }
+  return formatPlanTypeLabel(account.type || 'unknown');
+}
+
+function formatPlanTypeLabel(value: string): string {
+  const words = value
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length === 0) {
+    return 'Unknown';
+  }
+  return words
+    .map((word) => word.toLowerCase() === 'api' ? 'API' : `${word[0]!.toUpperCase()}${word.slice(1)}`)
+    .join(' ');
+}
+
+function formatRateLimitWindowLabel(locale: AppLocale, window: CodexRateLimitWindow, fallback: 'primary' | 'secondary'): string {
+  const minutes = window.windowDurationMins;
+  if (!minutes || minutes <= 0) {
+    return fallback === 'primary'
+      ? (locale === 'zh' ? '短周期' : 'Primary window')
+      : (locale === 'zh' ? '长周期' : 'Secondary window');
+  }
+  if (minutes % 10080 === 0) {
+    const days = minutes / 1440;
+    return locale === 'zh' ? `${formatCompactNumber(days)}天` : `${formatCompactNumber(days)}d window`;
+  }
+  if (minutes % 1440 === 0) {
+    const days = minutes / 1440;
+    return locale === 'zh' ? `${formatCompactNumber(days)}天` : `${formatCompactNumber(days)}d window`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return locale === 'zh' ? `${formatCompactNumber(hours)}小时` : `${formatCompactNumber(hours)}h window`;
+  }
+  return locale === 'zh' ? `${formatCompactNumber(minutes)}分钟` : `${formatCompactNumber(minutes)}m window`;
+}
+
+function formatUsagePercent(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '?';
+  }
+  return formatCompactNumber(value);
+}
+
+function formatCompactNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, '');
+}
+
+function formatLocalTimestamp(seconds: number): string {
+  const date = new Date(seconds * 1000);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatShortStatusError(error: unknown): string {
+  const message = formatUserError(error).replace(/\s+/g, ' ').trim();
+  return message.length > 120 ? `${message.slice(0, 117)}...` : message;
 }
 
 function isThreadNotFoundError(error: unknown): boolean {
