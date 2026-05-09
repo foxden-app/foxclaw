@@ -6,6 +6,14 @@ import type { Logger } from '../logger.js';
 import type {
   AppThread,
   AppThreadSnapshot,
+  CodexAccountInfo,
+  CodexAccountRateLimits,
+  CodexCollaborationMode,
+  CodexCollaborationModePreset,
+  CodexCreditsSnapshot,
+  CodexEffectiveConfig,
+  CodexRateLimitSnapshot,
+  CodexRateLimitWindow,
   ModelInfo,
   ReasoningEffortValue,
   SandboxModeValue,
@@ -41,12 +49,10 @@ interface StartThreadOptions {
   approvalPolicy: string;
   sandboxMode: SandboxModeValue;
   model: string | null;
-  developerInstructions: string | null;
 }
 
 interface ResumeThreadOptions {
   threadId: string;
-  developerInstructions: string | null;
 }
 
 export interface TextTurnInput {
@@ -70,6 +76,7 @@ interface StartTurnOptions {
   cwd: string | null;
   model: string | null;
   effort: ReasoningEffortValue | null;
+  collaborationMode: CodexCollaborationMode | null;
 }
 
 export class CodexAppClient extends EventEmitter {
@@ -153,7 +160,7 @@ export class CodexAppClient extends EventEmitter {
       config: null,
       serviceName: null,
       baseInstructions: null,
-      developerInstructions: options.developerInstructions,
+      developerInstructions: null,
       personality: null,
       ephemeral: null,
       experimentalRawEvents: true,
@@ -168,7 +175,7 @@ export class CodexAppClient extends EventEmitter {
       cwd: null,
       approvalPolicy: null,
       baseInstructions: null,
-      developerInstructions: options.developerInstructions,
+      developerInstructions: null,
       config: null,
       sandbox: null,
       model: null,
@@ -181,7 +188,7 @@ export class CodexAppClient extends EventEmitter {
   }
 
   async startTurn(options: StartTurnOptions): Promise<{ id: string; status: string }> {
-    const result = await this.request('turn/start', {
+    const params: Record<string, unknown> = {
       threadId: options.threadId,
       input: options.input,
       cwd: options.cwd,
@@ -192,7 +199,11 @@ export class CodexAppClient extends EventEmitter {
       summary: null,
       personality: null,
       outputSchema: null,
-    });
+    };
+    if (options.collaborationMode) {
+      params.collaborationMode = options.collaborationMode;
+    }
+    const result = await this.request('turn/start', params);
     return (result as any).turn;
   }
 
@@ -206,6 +217,53 @@ export class CodexAppClient extends EventEmitter {
       cursor = typeof (result as any).nextCursor === 'string' ? (result as any).nextCursor : null;
     } while (cursor);
     return models;
+  }
+
+  async readAccount(): Promise<CodexAccountInfo | null> {
+    const result = await this.request('account/read', { refreshToken: false });
+    const account = (result as any)?.account;
+    if (!account || typeof account !== 'object') {
+      return null;
+    }
+    return {
+      type: typeof account.type === 'string' ? account.type : 'unknown',
+      email: typeof account.email === 'string' ? account.email : null,
+      planType: typeof account.planType === 'string' ? account.planType : null,
+      requiresOpenaiAuth: Boolean((result as any)?.requiresOpenaiAuth),
+    };
+  }
+
+  async readAccountRateLimits(): Promise<CodexAccountRateLimits | null> {
+    const result = await this.request('account/rateLimits/read', undefined);
+    if (!result || typeof result !== 'object') {
+      return null;
+    }
+    return {
+      rateLimits: mapRateLimitSnapshot((result as any).rateLimits),
+      rateLimitsByLimitId: mapRateLimitsByLimitId((result as any).rateLimitsByLimitId),
+    };
+  }
+
+  async readEffectiveConfig(cwd: string | null): Promise<CodexEffectiveConfig> {
+    const result = await this.request('config/read', {
+      includeLayers: false,
+      cwd,
+    });
+    const config = (result as any)?.config ?? {};
+    return {
+      model: typeof config.model === 'string' ? config.model : null,
+      modelReasoningEffort: normalizeReasoningEffort(config.model_reasoning_effort),
+      planModeReasoningEffort: normalizeReasoningEffort(config.plan_mode_reasoning_effort),
+      developerInstructions: typeof config.developer_instructions === 'string' && config.developer_instructions.trim()
+        ? config.developer_instructions
+        : null,
+    };
+  }
+
+  async listCollaborationModes(): Promise<CodexCollaborationModePreset[]> {
+    const result = await this.request('collaborationMode/list', {});
+    const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
+    return rows.map(mapCollaborationModePreset);
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
@@ -489,6 +547,81 @@ function mapModel(raw: any): ModelInfo {
     supportedReasoningEfforts: efforts,
     defaultReasoningEffort: String(raw.defaultReasoningEffort) as ReasoningEffortValue,
   };
+}
+
+function mapRateLimitsByLimitId(raw: any): Record<string, CodexRateLimitSnapshot> | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const entries = Object.entries(raw)
+    .map(([key, value]) => [key, mapRateLimitSnapshot(value)] as const)
+    .filter((entry): entry is readonly [string, CodexRateLimitSnapshot] => entry[1] !== null);
+  return entries.length > 0 ? Object.fromEntries(entries) : null;
+}
+
+function mapCollaborationModePreset(raw: any): CodexCollaborationModePreset {
+  return {
+    name: String(raw?.name ?? ''),
+    mode: normalizeCollaborationMode(raw?.mode),
+    model: typeof raw?.model === 'string' ? raw.model : null,
+    reasoningEffort: normalizeReasoningEffort(raw?.reasoning_effort),
+  };
+}
+
+function normalizeCollaborationMode(value: unknown): 'default' | 'plan' | null {
+  return value === 'default' || value === 'plan' ? value : null;
+}
+
+function normalizeReasoningEffort(value: unknown): ReasoningEffortValue | null {
+  return typeof value === 'string' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)
+    ? value as ReasoningEffortValue
+    : null;
+}
+
+function mapRateLimitSnapshot(raw: any): CodexRateLimitSnapshot | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  return {
+    limitId: typeof raw.limitId === 'string' ? raw.limitId : null,
+    limitName: typeof raw.limitName === 'string' ? raw.limitName : null,
+    primary: mapRateLimitWindow(raw.primary),
+    secondary: mapRateLimitWindow(raw.secondary),
+    credits: mapCreditsSnapshot(raw.credits),
+    planType: typeof raw.planType === 'string' ? raw.planType : null,
+    rateLimitReachedType: typeof raw.rateLimitReachedType === 'string' ? raw.rateLimitReachedType : null,
+  };
+}
+
+function mapRateLimitWindow(raw: any): CodexRateLimitWindow | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const usedPercent = Number(raw.usedPercent);
+  return {
+    usedPercent: Number.isFinite(usedPercent) ? usedPercent : 0,
+    windowDurationMins: numberOrNull(raw.windowDurationMins),
+    resetsAt: numberOrNull(raw.resetsAt),
+  };
+}
+
+function mapCreditsSnapshot(raw: any): CodexCreditsSnapshot | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  return {
+    hasCredits: Boolean(raw.hasCredits),
+    unlimited: Boolean(raw.unlimited),
+    balance: raw.balance === null || raw.balance === undefined ? null : String(raw.balance),
+  };
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
 }
 
 function mapSandboxPolicy(mode: SandboxModeValue): { type: 'readOnly' | 'workspaceWrite' | 'dangerFullAccess' } {

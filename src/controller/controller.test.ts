@@ -8,7 +8,7 @@ import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { TelegramMessagingPort } from '../channels/telegram/telegram_messaging_port.js';
 import { BridgeStore } from '../store/database.js';
 import { BridgeController } from './controller.js';
-import type { TelegramTextEvent } from '../telegram/gateway.js';
+import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
 
 const loggerStub = {
   debug(): void {},
@@ -78,11 +78,25 @@ function createWeixinEvent(text: string): TelegramTextEvent {
   };
 }
 
+function createCallback(data: string, messageId = 1): TelegramCallbackEvent {
+  return {
+    chatId: '99',
+    topicId: null,
+    scopeId: 'telegram:99::root',
+    userId: '42',
+    data,
+    callbackQueryId: 'callback-1',
+    messageId,
+  };
+}
+
 function createControllerRig() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-controller-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const sentMessages: string[] = [];
   const sentHtmlMessages: string[] = [];
+  const editedMessages: string[] = [];
+  const callbackAnswers: string[] = [];
   const deletedMessageIds: number[] = [];
   const bot = {
     sendMessage: async (_chatId: string, text: string) => {
@@ -93,13 +107,17 @@ function createControllerRig() {
       sentHtmlMessages.push(text);
       return 1000 + sentHtmlMessages.length;
     },
-    editMessage: async () => {},
+    editMessage: async (_chatId: string, _messageId: number, text: string) => {
+      editedMessages.push(text);
+    },
     editHtmlMessage: async () => {},
     deleteMessage: async (_chatId: string, messageId: number) => {
       deletedMessageIds.push(messageId);
     },
     sendTypingInThread: async () => {},
-    answerCallback: async () => {},
+    answerCallback: async (_callbackQueryId: string, text?: string) => {
+      callbackAnswers.push(text ?? 'OK');
+    },
   };
   const weixinPort = {
     sendPlain: async (_scopeId: string, text: string) => {
@@ -120,11 +138,23 @@ function createControllerRig() {
   const app = {
     isConnected: () => true,
     getUserAgent: () => 'test-agent',
+    readAccount: async () => null,
+    readAccountRateLimits: async () => null,
+    readEffectiveConfig: async () => ({
+      model: 'gpt-5.5',
+      modelReasoningEffort: 'xhigh',
+      planModeReasoningEffort: 'xhigh',
+      developerInstructions: null,
+    }),
+    listCollaborationModes: async () => [
+      { name: 'Plan', mode: 'plan', model: null, reasoningEffort: 'medium' },
+      { name: 'Default', mode: 'default', model: null, reasoningEffort: null },
+    ],
   };
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
   const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound);
   (controller as any).updateStatus = () => {};
-  return { controller, store, sentMessages, sentHtmlMessages, deletedMessageIds, tempDir };
+  return { controller, store, sentMessages, sentHtmlMessages, editedMessages, callbackAnswers, deletedMessageIds, tempDir };
 }
 
 test('registerActiveTurn returns without waiting for turn completion', async (t) => {
@@ -249,6 +279,141 @@ test('/mode, /plan, and /agent update collaboration mode settings', async (t) =>
   await (rig.controller as any).handleCommand(createEvent('/agent'), 'en', 'agent', []);
   assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'default');
   assert.equal(rig.sentMessages[2], 'Mode set to: Agent\nApplies on the next turn.');
+});
+
+test('startTurnWithRecovery passes native Codex collaboration mode', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setChatCollaborationMode('telegram:99::root', 'plan');
+  const calls: any[] = [];
+  (rig.controller as any).app.startTurn = async (options: any) => {
+    calls.push(options);
+    return { id: 'turn-1', status: 'running' };
+  };
+
+  await (rig.controller as any).startTurnWithRecovery(
+    'telegram:99::root',
+    { threadId: 'thread-1', cwd: rig.tempDir },
+    [{ type: 'text', text: 'hi', text_elements: [] }],
+  );
+
+  assert.deepEqual(calls[0]?.collaborationMode, {
+    mode: 'plan',
+    settings: {
+      model: 'gpt-5.5',
+      reasoning_effort: 'xhigh',
+      developer_instructions: null,
+    },
+  });
+});
+
+test('/status includes Codex account usage without exposing email', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  (rig.controller as any).app.readAccount = async () => ({
+    type: 'chatgpt',
+    email: 'user@example.com',
+    planType: 'plus',
+    requiresOpenaiAuth: false,
+  });
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 63, windowDurationMins: 300, resetsAt: null },
+      secondary: { usedPercent: 56.5, windowDurationMins: 10080, resetsAt: null },
+      credits: { hasCredits: false, unlimited: false, balance: '0' },
+      planType: 'plus',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
+
+  assert.equal(rig.sentMessages.length, 1);
+  assert.match(rig.sentMessages[0]!, /Codex account: ChatGPT/);
+  assert.match(rig.sentMessages[0]!, /Codex plan: Plus/);
+  assert.match(rig.sentMessages[0]!, /Codex usage \(codex\):/);
+  assert.match(rig.sentMessages[0]!, /5h window: 63% used/);
+  assert.match(rig.sentMessages[0]!, /7d window: 56.5% used/);
+  assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
+});
+
+test('Codex error notifications are shown on the active Telegram turn', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Usage limit exceeded', codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+
+  assert.ok(rig.sentMessages.includes('Codex error: Usage limit exceeded'));
+});
+
+test('requestUserInput is bridged through Telegram callbacks', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'request-1',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [
+          { label: 'Yes', description: 'Implement now' },
+          { label: 'No', description: 'Stop here' },
+        ],
+      }],
+    },
+  });
+
+  const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
+  assert.ok(pending);
+  assert.match(rig.sentMessages[0]!, /Codex needs input:/);
+
+  await (rig.controller as any).handleCallback(createCallback(`ui:${pending.localId}:0:0`, 1));
+
+  assert.deepEqual(responses, [{
+    requestId: 'request-1',
+    result: { answers: { confirm: 'Yes' } },
+  }]);
+  assert.equal(rig.callbackAnswers[0], 'Answer recorded');
+  assert.match(rig.editedMessages[0]!, /Submitted to Codex\./);
 });
 
 test('completed turns automatically start a queued prompt', async (t) => {
