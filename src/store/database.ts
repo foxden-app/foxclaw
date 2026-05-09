@@ -58,6 +58,7 @@ export class BridgeStore {
         cwd TEXT,
         model_provider TEXT,
         status TEXT NOT NULL DEFAULT 'idle',
+        archived INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (chat_id, idx)
       );
@@ -73,6 +74,7 @@ export class BridgeStore {
         reason TEXT,
         command TEXT,
         cwd TEXT,
+        payload_json TEXT,
         message_id INTEGER,
         created_at INTEGER NOT NULL,
         resolved_at INTEGER
@@ -102,10 +104,12 @@ export class BridgeStore {
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
     this.ensureColumn('thread_cache', 'status', "TEXT NOT NULL DEFAULT 'idle'");
+    this.ensureColumn('thread_cache', 'archived', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('chat_settings', 'locale', 'TEXT');
     this.ensureColumn('chat_settings', 'access_preset', 'TEXT');
     this.ensureColumn('chat_settings', 'collaboration_mode', 'TEXT');
     this.ensureColumn('chat_settings', 'service_tier', 'TEXT');
+    this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     migrateLegacyBridgeScopeIds(this.db);
   }
 
@@ -139,6 +143,10 @@ export class BridgeStore {
       VALUES (?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET thread_id = excluded.thread_id, cwd = excluded.cwd, updated_at = excluded.updated_at
     `).run(chatId, threadId, cwd, Date.now());
+  }
+
+  clearBinding(chatId: string): void {
+    this.db.prepare('DELETE FROM chat_bindings WHERE chat_id = ?').run(chatId);
   }
 
   getChatSettings(chatId: string): ChatSessionSettings | null {
@@ -232,11 +240,11 @@ export class BridgeStore {
     return Number(row.count);
   }
 
-  cacheThreadList(chatId: string, threads: Array<Omit<CachedThread, 'index'> & { listIndex?: number }>): void {
+  cacheThreadList(chatId: string, threads: Array<Omit<CachedThread, 'index' | 'archived'> & { listIndex?: number; archived?: boolean }>): void {
     const deleteStmt = this.db.prepare('DELETE FROM thread_cache WHERE chat_id = ?');
     const insertStmt = this.db.prepare(`
-      INSERT INTO thread_cache (chat_id, idx, thread_id, name, preview, cwd, model_provider, status, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO thread_cache (chat_id, idx, thread_id, name, preview, cwd, model_provider, status, archived, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     deleteStmt.run(chatId);
     threads.forEach((thread, index) => {
@@ -250,6 +258,7 @@ export class BridgeStore {
         thread.cwd,
         thread.modelProvider,
         thread.status,
+        thread.archived ? 1 : 0,
         thread.updatedAt,
       );
     });
@@ -257,7 +266,7 @@ export class BridgeStore {
 
   getCachedThread(chatId: string, index: number): CachedThread | null {
     const row = this.db.prepare(`
-      SELECT idx, thread_id, name, preview, cwd, model_provider, status, updated_at
+      SELECT idx, thread_id, name, preview, cwd, model_provider, status, archived, updated_at
       FROM thread_cache
       WHERE chat_id = ? AND idx = ?
     `).get(chatId, index) as Record<string, unknown> | undefined;
@@ -270,13 +279,14 @@ export class BridgeStore {
       cwd: row.cwd === null ? null : String(row.cwd),
       modelProvider: row.model_provider === null ? null : String(row.model_provider),
       status: String(row.status) as CachedThread['status'],
+      archived: Boolean(row.archived),
       updatedAt: Number(row.updated_at),
     };
   }
 
   listCachedThreads(chatId: string): CachedThread[] {
     const rows = this.db.prepare(`
-      SELECT idx, thread_id, name, preview, cwd, model_provider, status, updated_at
+      SELECT idx, thread_id, name, preview, cwd, model_provider, status, archived, updated_at
       FROM thread_cache
       WHERE chat_id = ?
       ORDER BY idx ASC
@@ -289,6 +299,7 @@ export class BridgeStore {
       cwd: row.cwd === null ? null : String(row.cwd),
       modelProvider: row.model_provider === null ? null : String(row.model_provider),
       status: String(row.status) as CachedThread['status'],
+      archived: Boolean(row.archived),
       updatedAt: Number(row.updated_at),
     }));
   }
@@ -296,8 +307,8 @@ export class BridgeStore {
   savePendingApproval(record: PendingApprovalRecord): void {
     this.db.prepare(`
       INSERT INTO pending_approvals (
-        local_id, server_request_id, kind, chat_id, thread_id, turn_id, item_id, approval_id, reason, command, cwd, message_id, created_at, resolved_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        local_id, server_request_id, kind, chat_id, thread_id, turn_id, item_id, approval_id, reason, command, cwd, payload_json, message_id, created_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       record.localId,
       record.serverRequestId,
@@ -310,6 +321,7 @@ export class BridgeStore {
       record.reason,
       record.command,
       record.cwd,
+      record.payloadJson,
       record.messageId,
       record.createdAt,
       record.resolvedAt,
@@ -380,7 +392,7 @@ export class BridgeStore {
     return {
       localId: String(row.local_id),
       serverRequestId: String(row.server_request_id),
-      kind: row.kind === 'fileChange' ? 'fileChange' : 'command',
+      kind: row.kind === 'fileChange' ? 'fileChange' : row.kind === 'permissions' ? 'permissions' : 'command',
       chatId: String(row.chat_id),
       threadId: String(row.thread_id),
       turnId: String(row.turn_id),
@@ -389,6 +401,7 @@ export class BridgeStore {
       reason: row.reason === null ? null : String(row.reason),
       command: row.command === null ? null : String(row.command),
       cwd: row.cwd === null ? null : String(row.cwd),
+      payloadJson: row.payload_json === null ? null : String(row.payload_json),
       messageId: row.message_id === null ? null : Number(row.message_id),
       createdAt: Number(row.created_at),
       resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at)

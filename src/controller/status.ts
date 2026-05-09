@@ -30,8 +30,8 @@ export function renderActiveTurnStatus(locale: AppLocale, snapshot: ActiveTurnSt
 
 export function formatApprovalKinds(locale: AppLocale, kinds: ReadonlySet<PendingApprovalRecord['kind']>): string {
   const values = [...kinds].map(kind => locale === 'zh'
-    ? kind === 'fileChange' ? '文件修改' : '命令执行'
-    : kind === 'fileChange' ? 'file change' : 'command');
+    ? kind === 'fileChange' ? '文件修改' : kind === 'permissions' ? '权限扩展' : '命令执行'
+    : kind === 'fileChange' ? 'file change' : kind === 'permissions' ? 'permissions' : 'command');
   if (values.length === 0) {
     return locale === 'zh' ? '审批' : 'approval';
   }

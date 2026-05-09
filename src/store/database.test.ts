@@ -81,6 +81,7 @@ test('BridgeStore caches thread lists and pending approvals', () => {
       cwd: null,
       modelProvider: null,
       status: 'active',
+      archived: false,
       updatedAt: 200,
     });
     assert.equal(store.listCachedThreads(S2).length, 2);
@@ -111,6 +112,7 @@ test('BridgeStore caches thread lists and pending approvals', () => {
       reason: 'Needs confirmation',
       command: 'rm -rf build',
       cwd: '/repo/a',
+      payloadJson: null,
       messageId: null,
       createdAt: 123,
       resolvedAt: null,

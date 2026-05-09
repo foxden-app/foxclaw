@@ -20,11 +20,17 @@
 | 访问权限预设 | `thread/start` 和 `turn/start` 里的旧 approval/sandbox 字段 | `/permissions`、`/access` |
 | Plan/Agent 模式 | `collaborationMode/list`、`turn/start.collaborationMode` | `/mode`、`/plan`、`/agent` |
 | 账号状态 | `account/read`、`account/rateLimits/read` | `/status`，以及当前本地 `auth.json_*` 切换 `/auth` |
+| 原生登录和额度 | `account/login/start`、`account/login/cancel`、`account/logout`、`account/sendAddCreditsNudgeEmail` 及账号通知 | `/account`、`/quota`、`/quota_nudge`、`/login_device`、`/login_cancel`、`/logout confirm` |
 | Codex App 同步 | Codex deep link，不是 app-server RPC | `/reveal`、`/focus`、`/open` 后同步 |
-| 审批 | `item/commandExecution/requestApproval`、`item/fileChange/requestApproval` | Telegram 内联审批按钮 |
+| 审批 | `item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、`item/permissions/requestApproval` | Telegram 内联审批按钮 |
 | 工具向用户提问 | `item/tool/requestUserInput` | Telegram 按钮和文本回复 |
+| MCP 向用户提问 | `mcpServer/elicitation/request` | Telegram 问题卡片、按钮和 JSON 文本回复 |
 | 观察外部 turn | `thread/read` 加 session log fallback | `/watch`、`/unwatch` |
-| turn 控制辅助 | bridge 本地控制逻辑 | `/takeover`、`/queue` |
+| turn 控制辅助 | bridge 本地控制逻辑、`turn/steer` | `/takeover`、`/queue`、`/steer` |
+| 线程生命周期 | `thread/fork`、`thread/rollback`、`thread/name/set`、`thread/compact/start`、`thread/archive`、`thread/unarchive` 及相关通知 | `/fork`、`/undo`、`/rename`、`/compact`、`/archive`、`/threads archived`、`/unarchive` |
+| Review 和 diff | `review/start`、`turn/diff/updated` | `/review`、`/diff` |
+| Skills | `skills/list`、`skills/config/write`、`skills/changed` | `/skills`、`/skill`、`/skill_enable`、`/skill_disable` |
+| MCP 管理 | `mcpServerStatus/list`、`config/mcpServer/reload`、`mcpServer/oauth/login`、`mcpServer/resource/read` 及相关通知 | `/mcp`、`/mcp_reload`、`/mcp_login`、`/mcp_resource` |
 
 ## 优先候选短名单
 
@@ -32,34 +38,34 @@
 
 | 勾选 | 候选功能 | 上游 API | 建议 Telegram 入口 | 价值 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| [ ] | 运行中补充指令 | `turn/steer` | `/steer <message>`，也可以考虑 active turn 期间普通消息自动 steer | 可以在 Codex 还在跑时追加约束或纠正，不用 interrupt 或 queue | 如果 active turn 不可 steer，应回退到当前“已有 turn 正在运行”的行为 |
-| [ ] | 原生登录管理 | `account/login/start`、`account/login/cancel`、`account/logout`、`account/login/completed`、`account/updated` | `/login`、`/login_device`、`/logout`、`/account` | 用 app-server 官方登录流替代或补充当前 `auth.json_*` 文件切换 | Telegram 上最适合 device-code 登录；API key 登录有聊天记录泄密风险，需要强确认 |
-| [ ] | 账号额度操作 | `account/rateLimits/read`、`account/rateLimits/updated`、`account/sendAddCreditsNudgeEmail` | `/quota`、`/quota_notify_owner` | 不打开桌面也能看 quota 和触发额度提醒 | `/status` 已有部分额度信息；发送邮件提醒是新功能，必须显式操作 |
-| [ ] | Skills 浏览器 | `skills/list`、`skills/changed`、`skills/config/write` | `/skills`、`/skill <name>`、`/skill_enable`、`/skill_disable` | 远程查看和管理 Codex skills | 建议先做只读列表，再做启用/禁用 |
-| [ ] | MCP 状态面板 | `mcpServerStatus/list`、`mcpServer/startupStatus/updated`、`config/mcpServer/reload` | `/mcp`、`/mcp_reload` | 远程排查工具不可用、MCP 启动失败、认证失败 | 非常适合用紧凑状态消息展示 |
-| [ ] | MCP OAuth 登录 | `mcpServer/oauth/login`、`mcpServer/oauthLogin/completed` | `/mcp_login <server>` | 从 Telegram 修复 connector/MCP 认证 | 发送授权 URL，并在完成后回报结果 |
-| [ ] | MCP 资源读取 | `mcpServer/resource/read` | `/mcp_resource <server> <uri>` | 直接读取 MCP server 提供的上下文资源 | 文本好处理；二进制需要裁剪或只显示元信息 |
-| [ ] | MCP elicitation | `mcpServer/elicitation/request` | active turn 期间内联问题卡片/按钮 | 有些 MCP server 会中途向用户要结构化输入，不支持会卡住能力 | UI 可复用现有 `requestUserInput` 思路 |
-| [ ] | 细粒度权限请求 | `item/permissions/requestApproval` | 内联权限审批卡片 | 新版 granular permissions 需要这个，否则部分流程会失败 | 要清晰展示文件/网络权限范围 |
-| [ ] | 代码审查 | `review/start` | `/review`、`/review base <branch>`、`/review commit <sha>` | 手机端很适合触发 review，然后阅读 findings | 复用现有 turn 渲染，加 review 专用状态即可 |
-| [ ] | fork 线程 | `thread/fork` | `/fork [name]` | 在尝试高风险路径前复制一份对话分支 | 成功后建议把 Telegram 绑定到新 fork |
-| [ ] | rollback 线程 | `thread/rollback` | `/undo [n]` 或 `/rollback [n]` | 从上下文中移除最近坏 turn | `n > 1` 建议二次确认 |
-| [ ] | 重命名线程 | `thread/name/set`、`thread/name/updated` | `/rename <name>` | 让 `/threads` 更容易浏览 | 低风险、高体验收益 |
-| [ ] | 手动压缩上下文 | `thread/compact/start` | `/compact` | 手机端继续长线程前主动压缩上下文 | 进度通过普通 turn/item 事件回来 |
-| [ ] | 归档/取消归档线程 | `thread/archive`、`thread/unarchive` 及通知 | `/archive`、`/unarchive <n>` | 远程整理线程列表 | 当前 `/threads` 隐藏 archived，需要新增 archived 列表模式 |
-| [ ] | 完整 diff 展示 | `turn/diff/updated` | 实时或最终“变更”卡片 | 不只靠工具摘要，也能看到本轮实际改动 | diff 可能很长，需要裁剪 |
+| [x] | 运行中补充指令 | `turn/steer` | `/steer <message>`，也可以考虑 active turn 期间普通消息自动 steer | 可以在 Codex 还在跑时追加约束或纠正，不用 interrupt 或 queue | 已实现显式 `/steer`；普通文本仍保留当前 queue/takeover 语义 |
+| [x] | 原生登录管理 | `account/login/start`、`account/login/cancel`、`account/logout`、`account/login/completed`、`account/updated` | `/login`、`/login_device`、`/logout`、`/account` | 用 app-server 官方登录流替代或补充当前 `auth.json_*` 文件切换 | 已实现 device-code 登录；API key 登录仍不开放 |
+| [x] | 账号额度操作 | `account/rateLimits/read`、`account/rateLimits/updated`、`account/sendAddCreditsNudgeEmail` | `/quota`、`/quota_nudge` | 不打开桌面也能看 quota 和触发额度提醒 | 发送邮件提醒要求 `confirm` |
+| [x] | Skills 浏览器 | `skills/list`、`skills/changed`、`skills/config/write` | `/skills`、`/skill <name>`、`/skill_enable`、`/skill_disable` | 远程查看和管理 Codex skills | 已支持列表、详情、启用/禁用 |
+| [x] | MCP 状态面板 | `mcpServerStatus/list`、`mcpServer/startupStatus/updated`、`config/mcpServer/reload` | `/mcp`、`/mcp_reload` | 远程排查工具不可用、MCP 启动失败、认证失败 | 已支持状态和 reload |
+| [x] | MCP OAuth 登录 | `mcpServer/oauth/login`、`mcpServer/oauthLogin/completed` | `/mcp_login <server>` | 从 Telegram 修复 connector/MCP 认证 | 已支持授权 URL 和完成通知 |
+| [x] | MCP 资源读取 | `mcpServer/resource/read` | `/mcp_resource <server> <uri>` | 直接读取 MCP server 提供的上下文资源 | 已支持文本/JSON 摘要，长内容裁剪 |
+| [x] | MCP elicitation | `mcpServer/elicitation/request` | active turn 期间内联问题卡片/按钮 | 有些 MCP server 会中途向用户要结构化输入，不支持会卡住能力 | 已支持 accept/decline/cancel 和 JSON 文本回复 |
+| [x] | 细粒度权限请求 | `item/permissions/requestApproval` | 内联权限审批卡片 | 新版 granular permissions 需要这个，否则部分流程会失败 | 已支持权限摘要和 approve/deny |
+| [x] | 代码审查 | `review/start` | `/review`、`/review base <branch>`、`/review commit <sha>` | 手机端很适合触发 review，然后阅读 findings | 已复用 turn 渲染 |
+| [x] | fork 线程 | `thread/fork` | `/fork [name]` | 在尝试高风险路径前复制一份对话分支 | 成功后 Telegram 绑定到新 fork |
+| [x] | rollback 线程 | `thread/rollback` | `/undo [n]` 或 `/rollback [n]` | 从上下文中移除最近坏 turn | 已支持 active-turn guard |
+| [x] | 重命名线程 | `thread/name/set`、`thread/name/updated` | `/rename <name>` | 让 `/threads` 更容易浏览 | 已支持命令和通知 |
+| [x] | 手动压缩上下文 | `thread/compact/start` | `/compact` | 手机端继续长线程前主动压缩上下文 | 已作为普通 turn 注册渲染 |
+| [x] | 归档/取消归档线程 | `thread/archive`、`thread/unarchive` 及通知 | `/archive`、`/unarchive <n>` | 远程整理线程列表 | 已支持 `/threads archived` |
+| [x] | 完整 diff 展示 | `turn/diff/updated` | 实时或最终“变更”卡片 | 不只靠工具摘要，也能看到本轮实际改动 | 已支持 `/diff` 读取最近 diff，长内容裁剪 |
 
 ## 线程和 Turn 管理
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `turn/steer` | `/steer <message>` 或 active-turn 普通文本自动 steer | 高 | 你明确提到想要 |
-| [ ] | `thread/fork` | `/fork [name]` | 高 | 很适合试不同方案 |
-| [ ] | `thread/rollback` | `/undo [n]`、`/rollback [n]` | 高 | 需要确认和 active-turn guard |
-| [ ] | `thread/name/set` | `/rename <name>` | 高 | 同时监听 `thread/name/updated` |
-| [ ] | `thread/archive` | `/archive` | 中 | 如果归档当前线程，应停止 watch 并清理绑定 |
-| [ ] | `thread/unarchive` | `/threads archived`、`/unarchive <n>` | 中 | 需要 archived 线程列表 |
-| [ ] | `thread/compact/start` | `/compact` | 中 | 长上下文时有用 |
+| [x] | `turn/steer` | `/steer <message>` 或 active-turn 普通文本自动 steer | 高 | 已实现显式 `/steer` |
+| [x] | `thread/fork` | `/fork [name]` | 高 | 已实现，并切换绑定到 fork 后线程 |
+| [x] | `thread/rollback` | `/undo [n]`、`/rollback [n]` | 高 | 已实现 active-turn guard |
+| [x] | `thread/name/set` | `/rename <name>` | 高 | 已实现，并监听 `thread/name/updated` |
+| [x] | `thread/archive` | `/archive` | 中 | 已实现，归档当前线程后清理绑定 |
+| [x] | `thread/unarchive` | `/threads archived`、`/unarchive <n>` | 中 | 已实现 archived 线程列表 |
+| [x] | `thread/compact/start` | `/compact` | 中 | 已实现，作为 turn 渲染 |
 | [ ] | `thread/loaded/list` | `/loaded` 或合并进 `/status` | 低 | 主要是诊断 |
 | [ ] | `thread/unsubscribe` | watch/open 切换后的内部清理 | 低 | 如果以后改成原生订阅，可减少 app-server 订阅 |
 | [ ] | `thread/metadata/update` | 暂不做直接用户命令 | 低 | 目前主要是 git metadata |
@@ -82,24 +88,24 @@
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `account/read` | `/account` | 高 | `/status` 已部分展示；可以做一个专门的简洁视图 |
-| [ ] | `account/login/start` with `chatgptDeviceCode` | `/login_device` | 高 | 最适合 Telegram：显示设备登录 URL 和 code |
+| [x] | `account/read` | `/account` | 高 | 已实现专门视图 |
+| [x] | `account/login/start` with `chatgptDeviceCode` | `/login_device` | 高 | 已实现，显示设备登录 URL 和 code |
 | [ ] | `account/login/start` with `chatgpt` | `/login_browser` | 中 | 对桌面宿主机有用，从手机触发价值稍低 |
 | [ ] | `account/login/start` with `apiKey` | `/login_api_key` | 低/高风险 | 除非强需求，否则不建议；密钥会留在聊天记录 |
-| [ ] | `account/login/cancel` | `/login_cancel` | 中 | 做登录流就需要取消入口 |
-| [ ] | `account/logout` | `/logout` | 中 | 需要确认 |
-| [ ] | `account/login/completed`、`account/updated` | 通知登录/登出结果 | 高 | 登录 UX 必需 |
-| [ ] | `account/rateLimits/read`、`account/rateLimits/updated` | `/quota` | 高 | `/status` 已部分展示；可以做更完整的额度页 |
-| [ ] | `account/sendAddCreditsNudgeEmail` | `/quota_notify_owner` | 低/中 | 对 workspace 用户有用；必须显式确认 |
+| [x] | `account/login/cancel` | `/login_cancel` | 中 | 已实现 |
+| [x] | `account/logout` | `/logout` | 中 | 已实现 `/logout confirm` |
+| [x] | `account/login/completed`、`account/updated` | 通知登录/登出结果 | 高 | 已实现 |
+| [x] | `account/rateLimits/read`、`account/rateLimits/updated` | `/quota` | 高 | 已实现 |
+| [x] | `account/sendAddCreditsNudgeEmail` | `/quota_nudge` | 低/中 | 已实现 `/quota_nudge <credits|usage_limit> confirm` |
 | [ ] | `account/chatgptAuthTokens/refresh` server request | 内部响应流程 | 低 | 只有 app-server 要求 bridge 刷新 token 时才需要 |
 
 ## Skills、Hooks、Plugins、Apps
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `skills/list` | `/skills [query]` | 高 | 你明确提到想要 |
-| [ ] | `skills/changed` | 让 `/skills` 缓存失效 | 高 | 收到变更通知后，下次按需重新 list |
-| [ ] | `skills/config/write` | `/skill_enable`、`/skill_disable` | 中 | 先做只读 skills，再做写配置 |
+| [x] | `skills/list` | `/skills [query]` | 高 | 已实现 |
+| [x] | `skills/changed` | 让 `/skills` 缓存失效 | 高 | 已实现通知 |
+| [x] | `skills/config/write` | `/skill_enable`、`/skill_disable` | 中 | 已实现 |
 | [ ] | `hooks/list` | `/hooks` | 中 | 适合排查 hook 行为 |
 | [ ] | `plugin/list` | `/plugins` | 中 | 上游标注插件 API 还在开发中，建议先只读 |
 | [ ] | `plugin/read` | `/plugin <id>` | 中 | 展示 manifest、skills、hooks、apps、MCP 摘要 |
@@ -116,23 +122,23 @@
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `mcpServerStatus/list` | `/mcp` | 高 | 你明确提到想要 |
-| [ ] | `mcpServer/startupStatus/updated` | 更新 active `/mcp` 面板或通知失败 | 高 | 很适合远程诊断 |
-| [ ] | `config/mcpServer/reload` | `/mcp_reload` | 高 | 不重启 bridge 也能 reload config |
-| [ ] | `mcpServer/oauth/login` | `/mcp_login <server>` | 高 | 返回授权 URL |
-| [ ] | `mcpServer/oauthLogin/completed` | 通知成功/失败 | 高 | OAuth UX 必需 |
-| [ ] | `mcpServer/resource/read` | `/mcp_resource <server> <uri>` | 中 | 文本资源适合 Telegram；blob 需要裁剪/元信息 |
+| [x] | `mcpServerStatus/list` | `/mcp` | 高 | 已实现 |
+| [x] | `mcpServer/startupStatus/updated` | 更新 active `/mcp` 面板或通知失败 | 高 | 已实现通知 |
+| [x] | `config/mcpServer/reload` | `/mcp_reload` | 高 | 已实现 |
+| [x] | `mcpServer/oauth/login` | `/mcp_login <server>` | 高 | 已实现，返回授权 URL |
+| [x] | `mcpServer/oauthLogin/completed` | 通知成功/失败 | 高 | 已实现通知 |
+| [x] | `mcpServer/resource/read` | `/mcp_resource <server> <uri>` | 中 | 已实现文本/JSON 摘要 |
 | [ ] | `mcpServer/tool/call` | `/mcp_call <server> <tool> <json>` | 低/高风险 | 直接调用工具会绕开 agent 判断，建议只做 admin/debug |
-| [ ] | `mcpServer/elicitation/request` server request | 内联问题卡片/按钮 | 高 | MCP 工具向用户提问时必需 |
+| [x] | `mcpServer/elicitation/request` server request | 内联问题卡片/按钮 | 高 | 已实现 |
 | [ ] | `item/mcpToolCall/progress` | 活动卡展示 MCP 进度 | 中 | 更接近 Codex App 的状态展示 |
 
 ## Review 和代码检查
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `review/start` | `/review`、`/review base <branch>`、`/review commit <sha>` | 高 | 很适合 Telegram 触发和阅读 |
+| [x] | `review/start` | `/review`、`/review base <branch>`、`/review commit <sha>` | 高 | 已实现 |
 | [ ] | `enteredReviewMode`、`exitedReviewMode` item types | review 专用渲染 | 中 | 最终 review 文本作为持久消息 |
-| [ ] | `turn/diff/updated` | `/diff` 或 live “变更”卡片 | 中 | 改文件后有用；diff 要裁剪 |
+| [x] | `turn/diff/updated` | `/diff` 或 live “变更”卡片 | 中 | 已实现 `/diff` 读取最近 diff，输出裁剪 |
 | [ ] | `thread/turns/list` | `/history`、`/history <thread>` | 中 | 不 resume 线程也能读历史 |
 | [ ] | `fuzzyFileSearch` | `/files <query>` | 低/中 | 从 Telegram 选择路径时有用 |
 | [ ] | `fuzzyFileSearch/sessionStart/update/stop` 及通知 | 交互式文件选择器 | 低 | UI 工作量比一次性搜索大 |
@@ -207,8 +213,8 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 | [x] | `item/commandExecution/requestApproval` | 已实现 | 现有内联审批 | 已完成 |
 | [x] | `item/fileChange/requestApproval` | 已实现 | 现有内联审批 | 已完成 |
 | [x] | `item/tool/requestUserInput` | 已实现 | 现有按钮/文本回答 | 已完成 |
-| [ ] | `item/permissions/requestApproval` | 缺失 | 细粒度权限审批卡片 | 高 |
-| [ ] | `mcpServer/elicitation/request` | 缺失 | MCP 问题卡片 | 高 |
+| [x] | `item/permissions/requestApproval` | 已实现 | 细粒度权限审批卡片 | 已完成 |
+| [x] | `mcpServer/elicitation/request` | 已实现 | MCP 问题卡片 | 已完成 |
 | [ ] | `item/tool/call` | 缺失 | 动态工具执行桥接 | 低/实验 |
 | [ ] | `account/chatgptAuthTokens/refresh` | 缺失 | 如果 app-server 委托客户端刷新 token，则响应它 | 低 |
 | [ ] | `attestation/generate` | 缺失 | 生成或拒绝 attestation | 低 |
@@ -219,44 +225,44 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 | 勾选 | Notification | Telegram 用途 | 优先级 |
 | --- | --- | --- | --- |
 | [ ] | `thread/status/changed` | 更新 `/threads`、`/where`、活动卡片 | 中 |
-| [ ] | `thread/name/updated` | 同步重命名到线程缓存 | 如果做 `/rename` 则高 |
-| [ ] | `thread/archived`、`thread/unarchived`、`thread/closed` | 线程生命周期通知 | 中 |
+| [x] | `thread/name/updated` | 同步重命名到线程缓存 | 已完成 |
+| [x] | `thread/archived`、`thread/unarchived`、`thread/closed` | 线程生命周期通知 | 已完成 |
 | [ ] | `thread/tokenUsage/updated` | 实时 token/成本卡片 | 中 |
-| [ ] | `turn/diff/updated` | 当前 diff/变更视图 | 中 |
+| [x] | `turn/diff/updated` | 当前 diff/变更视图 | 已完成 |
 | [ ] | `item/reasoning/summaryTextDelta`、`summaryPartAdded` | 更好的 reasoning summary 渲染 | 低/中 |
 | [ ] | `item/commandExecution/outputDelta` | 命令输出片段实时显示 | 中 |
 | [ ] | `item/fileChange/patchUpdated` | 更好的 live edit 摘要 | 中 |
 | [ ] | `item/mcpToolCall/progress` | MCP progress 状态 | 中 |
 | [ ] | `serverRequest/resolved` | 更可靠地清理审批/问题卡片 | 中 |
-| [ ] | `account/updated`、`account/login/completed`、`account/rateLimits/updated` | 账号面板和额度提醒 | 如果做登录管理则高 |
-| [ ] | `skills/changed` | skills 列表缓存失效 | 如果做 skills browser 则高 |
-| [ ] | `mcpServer/startupStatus/updated`、`mcpServer/oauthLogin/completed` | MCP 诊断和 OAuth 结果 | 如果做 MCP browser 则高 |
+| [x] | `account/updated`、`account/login/completed`、`account/rateLimits/updated` | 账号面板和额度提醒 | 已完成 |
+| [x] | `skills/changed` | skills 列表缓存失效 | 已完成 |
+| [x] | `mcpServer/startupStatus/updated`、`mcpServer/oauthLogin/completed` | MCP 诊断和 OAuth 结果 | 已完成 |
 | [ ] | `app/list/updated` | connector 列表刷新 | 如果做 apps browser 则中 |
 | [ ] | `remoteControl/status/changed` | remote control 状态 | 中 |
 | [ ] | `warning`、`configWarning`、`guardianWarning`、`deprecationNotice` | 管理/状态 warning | 中 |
 
 ## 建议实现顺序
 
-1. `turn/steer`
-   - 增加 `CodexAppClient.steerTurn()`。
-   - 增加 `/steer <text>`。
-   - 决定 active-turn 普通文本是自动 steer，还是必须显式 `/steer`。
+1. `turn/steer`（已完成）
+   - 已增加 `CodexAppClient.steerTurn()`。
+   - 已增加 `/steer <text>`。
+   - 当前采用显式 `/steer`，active turn 期间普通文本继续沿用现有 queue/takeover 语义。
 
-2. 登录和账号面板
-   - 增加原生 `/account`、`/login_device`、`/login_cancel`、`/logout`、`/quota`。
+2. 登录和账号面板（已完成）
+   - 已增加原生 `/account`、`/login_device`、`/login_cancel`、`/logout confirm`、`/quota`、`/quota_nudge`。
    - 保留当前 `/auth` auth 文件轮换，作为高级/本地 fallback。
 
-3. Skills 和 MCP 只读面板
-   - 增加 `/skills`、`/mcp`、`/mcp_reload`、`/mcp_login`。
-   - 支持 `skills/changed`、MCP startup、OAuth completion 通知。
+3. Skills 和 MCP 面板（已完成）
+   - 已增加 `/skills`、`/skill`、`/skill_enable`、`/skill_disable`、`/mcp`、`/mcp_reload`、`/mcp_login`、`/mcp_resource`。
+   - 已支持 `skills/changed`、MCP startup、OAuth completion 通知。
 
-4. 补缺失的 server requests
-   - 增加 `item/permissions/requestApproval`。
-   - 增加 `mcpServer/elicitation/request`。
+4. 补缺失的 server requests（已完成）
+   - 已增加 `item/permissions/requestApproval`。
+   - 已增加 `mcpServer/elicitation/request`。
 
-5. 线程管理和 review
-   - 增加 `/rename`、`/fork`、`/undo`、`/compact`、`/review`。
-   - 按这些命令需要，再补生命周期和 diff 渲染。
+5. 线程管理和 review（已完成）
+   - 已增加 `/rename`、`/fork`、`/undo`、`/compact`、`/archive`、`/unarchive`、`/review`、`/diff`。
+   - 已补生命周期通知和 diff 缓存/展示。
 
-6. 低优先级管理面和实验面
+6. 低优先级管理面和实验面（仍未实现）
    - Plugins、apps、config 写入、直接 command/fs/process、realtime、外部 agent import。
