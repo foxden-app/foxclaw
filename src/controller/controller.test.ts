@@ -246,8 +246,18 @@ function createControllerRig() {
     archiveThread: async () => {},
     unarchiveThread: async () => null,
     startReview: async () => ({ turnId: 'turn-review', reviewThreadId: 'thread-1' }),
+    listLoadedThreads: async () => [],
     listSkills: async () => [],
     writeSkillConfig: async () => {},
+    listHooks: async () => [],
+    listPlugins: async () => [],
+    readPlugin: async () => null,
+    readPluginSkill: async () => null,
+    listApps: async () => [],
+    readConfig: async () => ({ config: {}, layers: [], origins: {} }),
+    readConfigRequirements: async () => null,
+    listExperimentalFeatures: async () => [],
+    readModelProviderCapabilities: async () => ({ webSearch: false, imageGeneration: false, namespaceTools: false }),
     listMcpServerStatus: async () => [],
     reloadMcpServers: async () => {},
     loginMcpServer: async () => 'https://mcp.example/auth',
@@ -1069,6 +1079,161 @@ test('skills and MCP commands render app-server data', async (t) => {
 
   assert.match(rig.sentMessages[0]!, /Skill A/);
   assert.match(rig.sentMessages[1]!, /linear: authenticated/);
+});
+
+test('diagnostic read-only commands render app-server inventory', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  (rig.controller as any).app.listLoadedThreads = async () => ['thread-1'];
+  (rig.controller as any).app.listHooks = async () => [{
+    cwd: rig.tempDir,
+    hooks: [{
+      key: 'format',
+      eventName: 'post-edit',
+      handlerType: 'command',
+      enabled: true,
+      trustStatus: 'trusted',
+      sourcePath: path.join(rig.tempDir, 'hooks.toml'),
+      pluginId: null,
+      command: 'npm run format',
+      statusMessage: null,
+    }],
+    errors: [],
+    warnings: [],
+  }];
+  (rig.controller as any).app.listPlugins = async () => [{
+    name: 'local',
+    displayName: 'Local',
+    path: path.join(rig.tempDir, 'marketplace.json'),
+    plugins: [{
+      id: 'plugin-a',
+      name: 'Plugin A',
+      enabled: true,
+      installed: true,
+      source: 'local',
+      availability: 'available',
+      authPolicy: 'none',
+      installPolicy: 'allow',
+      keywords: [],
+    }],
+  }];
+  (rig.controller as any).app.readPlugin = async () => ({
+    marketplaceName: 'local',
+    marketplacePath: null,
+    summary: {
+      id: 'plugin-a',
+      name: 'Plugin A',
+      enabled: true,
+      installed: true,
+      source: 'local',
+      availability: 'available',
+      authPolicy: 'none',
+      installPolicy: 'allow',
+      keywords: [],
+    },
+    description: 'Plugin details',
+    skills: [{ name: 'plugin-skill', description: 'Skill', shortDescription: null, enabled: true, path: null }],
+    hooks: [{ key: 'format', eventName: 'post-edit' }],
+    apps: [{ id: 'app-a', name: 'App A', description: null, needsAuth: false }],
+    mcpServers: ['linear'],
+  });
+  (rig.controller as any).app.readPluginSkill = async () => '# Plugin skill';
+  (rig.controller as any).app.listApps = async () => [{
+    id: 'app-a',
+    name: 'App A',
+    description: 'Connector',
+    isEnabled: true,
+    isAccessible: true,
+    installUrl: null,
+    distributionChannel: 'local',
+    pluginDisplayNames: ['Plugin A'],
+  }];
+  (rig.controller as any).app.listExperimentalFeatures = async () => [{
+    name: 'apps',
+    displayName: 'Apps',
+    enabled: true,
+    defaultEnabled: false,
+    stage: 'beta',
+    description: 'Connector apps',
+  }];
+  (rig.controller as any).app.readConfig = async () => ({
+    config: { model: 'gpt-5', approval_policy: 'never', sandbox_mode: 'read-only' },
+    layers: [{ name: 'user', version: '1', config: {} }],
+    origins: {},
+  });
+  (rig.controller as any).app.readConfigRequirements = async () => ({
+    allowedApprovalPolicies: ['never'],
+    allowedSandboxModes: ['read-only'],
+    allowedWebSearchModes: ['disabled'],
+    enforceResidency: null,
+    featureRequirements: { apps: true },
+  });
+  (rig.controller as any).app.readModelProviderCapabilities = async () => ({
+    webSearch: true,
+    imageGeneration: false,
+    namespaceTools: true,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/loaded'), 'en', 'loaded', []);
+  await (rig.controller as any).handleCommand(createEvent('/hooks'), 'en', 'hooks', []);
+  await (rig.controller as any).handleCommand(createEvent('/plugins'), 'en', 'plugins', []);
+  await (rig.controller as any).handleCommand(createEvent('/plugin plugin-a'), 'en', 'plugin', ['plugin-a']);
+  await (rig.controller as any).handleCommand(createEvent('/plugin_skill local plugin-a plugin-skill'), 'en', 'plugin_skill', ['local', 'plugin-a', 'plugin-skill']);
+  await (rig.controller as any).handleCommand(createEvent('/apps'), 'en', 'apps', []);
+  await (rig.controller as any).handleCommand(createEvent('/features'), 'en', 'features', []);
+  await (rig.controller as any).handleCommand(createEvent('/config'), 'en', 'config', []);
+  await (rig.controller as any).handleCommand(createEvent('/requirements'), 'en', 'requirements', []);
+  await (rig.controller as any).handleCommand(createEvent('/provider'), 'en', 'provider', []);
+
+  assert.match(rig.sentMessages[0]!, /thread-1/);
+  assert.match(rig.sentMessages[1]!, /format/);
+  assert.match(rig.sentMessages[2]!, /Plugin A/);
+  assert.match(rig.sentMessages[3]!, /Plugin details/);
+  assert.match(rig.sentMessages[4]!, /# Plugin skill/);
+  assert.match(rig.sentMessages[5]!, /App A/);
+  assert.match(rig.sentMessages[6]!, /Apps/);
+  assert.match(rig.sentMessages[7]!, /model: gpt-5/);
+  assert.match(rig.sentMessages[8]!, /approval: never/);
+  assert.match(rig.sentMessages[9]!, /webSearch: yes/);
+});
+
+test('diagnostic notifications are routed to bound Telegram scope', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+
+  await (rig.controller as any).handleNotification({
+    method: 'thread/status/changed',
+    params: { threadId: 'thread-1', status: { type: 'systemError' } },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'thread/tokenUsage/updated',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      tokenUsage: {
+        modelContextWindow: 1000,
+        total: { totalTokens: 900 },
+      },
+    },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'warning',
+    params: { threadId: 'thread-1', message: 'Heads up' },
+  });
+
+  assert.match(rig.sentMessages[0]!, /systemError/);
+  assert.match(rig.sentMessages[1]!, /90%/);
+  assert.match(rig.sentMessages[2]!, /Heads up/);
 });
 
 test('thread management commands call fork, rename, rollback, compact, archive, and review APIs', async (t) => {

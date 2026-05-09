@@ -139,3 +139,19 @@ Acceptance criteria:
 - [x] Risky operations keep explicit commands or confirmation words (`/logout confirm`, `/quota_nudge ... confirm`)
 - [x] Server requests that can block active turns (`permissions` and MCP elicitation) have Telegram-side response paths
 - [x] Regression tests cover account/login, steering, permissions approval, MCP elicitation, Skills/MCP panels, and thread lifecycle commands
+
+## Phase 11: Read-Only Diagnostics Bridge
+
+- [x] Add `/loaded` for app-server loaded thread ids
+- [x] Add `/hooks` for hook inventory and hook load warnings/errors
+- [x] Add `/plugins`, `/plugin <name>`, and `/plugin_skill <marketplace> <plugin> <skill>` for plugin inventory and skill preview
+- [x] Add `/apps [reload]` plus `app/list/updated` notifications
+- [x] Add `/features`, `/config`, `/requirements`, and `/provider` for safe remote diagnosis of feature flags, effective config, managed requirements, and provider capabilities
+- [x] Add lightweight notifications for `thread/status/changed`, high-water `thread/tokenUsage/updated`, `warning`, `guardianWarning`, `deprecationNotice`, and `configWarning`
+
+Acceptance criteria:
+
+- [x] New commands are read-only except explicit reload/refetch operations
+- [x] Config output is summarized and avoids dumping full developer instructions or arbitrary config blobs into Telegram
+- [x] Notification routing targets the bound thread scope when thread ids are available
+- [x] Regression tests cover the new diagnostic commands and notification routing

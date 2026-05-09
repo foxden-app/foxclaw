@@ -31,6 +31,7 @@
 | Review 和 diff | `review/start`、`turn/diff/updated` | `/review`、`/diff` |
 | Skills | `skills/list`、`skills/config/write`、`skills/changed` | `/skills`、`/skill`、`/skill_enable`、`/skill_disable` |
 | MCP 管理 | `mcpServerStatus/list`、`config/mcpServer/reload`、`mcpServer/oauth/login`、`mcpServer/resource/read` 及相关通知 | `/mcp`、`/mcp_reload`、`/mcp_login`、`/mcp_resource` |
+| 诊断面板 | `thread/loaded/list`、`hooks/list`、`plugin/list`、`plugin/read`、`plugin/skill/read`、`app/list`、`config/read`、`configRequirements/read`、`experimentalFeature/list`、`modelProvider/capabilities/read` | `/loaded`、`/hooks`、`/plugins`、`/plugin`、`/plugin_skill`、`/apps`、`/config`、`/requirements`、`/features`、`/provider` |
 
 ## 优先候选短名单
 
@@ -66,7 +67,7 @@
 | [x] | `thread/archive` | `/archive` | 中 | 已实现，归档当前线程后清理绑定 |
 | [x] | `thread/unarchive` | `/threads archived`、`/unarchive <n>` | 中 | 已实现 archived 线程列表 |
 | [x] | `thread/compact/start` | `/compact` | 中 | 已实现，作为 turn 渲染 |
-| [ ] | `thread/loaded/list` | `/loaded` 或合并进 `/status` | 低 | 主要是诊断 |
+| [x] | `thread/loaded/list` | `/loaded` 或合并进 `/status` | 低 | 已实现 `/loaded` |
 | [ ] | `thread/unsubscribe` | watch/open 切换后的内部清理 | 低 | 如果以后改成原生订阅，可减少 app-server 订阅 |
 | [ ] | `thread/metadata/update` | 暂不做直接用户命令 | 低 | 目前主要是 git metadata |
 | [ ] | `thread/inject_items` | 高级导入/调试命令 | 低 | 容易误用，不像普通 Telegram 功能 |
@@ -106,17 +107,17 @@
 | [x] | `skills/list` | `/skills [query]` | 高 | 已实现 |
 | [x] | `skills/changed` | 让 `/skills` 缓存失效 | 高 | 已实现通知 |
 | [x] | `skills/config/write` | `/skill_enable`、`/skill_disable` | 中 | 已实现 |
-| [ ] | `hooks/list` | `/hooks` | 中 | 适合排查 hook 行为 |
-| [ ] | `plugin/list` | `/plugins` | 中 | 上游标注插件 API 还在开发中，建议先只读 |
-| [ ] | `plugin/read` | `/plugin <id>` | 中 | 展示 manifest、skills、hooks、apps、MCP 摘要 |
-| [ ] | `plugin/skill/read` | `/plugin_skill <plugin> <skill>` | 中 | 预览远程 plugin skill markdown |
+| [x] | `hooks/list` | `/hooks` | 中 | 已实现只读列表 |
+| [x] | `plugin/list` | `/plugins` | 中 | 已实现只读列表 |
+| [x] | `plugin/read` | `/plugin <id>` | 中 | 已实现 manifest、skills、hooks、apps、MCP 摘要 |
+| [x] | `plugin/skill/read` | `/plugin_skill <plugin> <skill>` | 中 | 已实现远程 plugin skill markdown 预览 |
 | [ ] | `plugin/install` | `/plugin_install <id>` | 低/中 | 仍在开发中；可能改 MCP/app 配置 |
 | [ ] | `plugin/uninstall` | `/plugin_uninstall <id>` | 低/中 | 需要确认 |
 | [ ] | `marketplace/add` | `/marketplace_add <repo>` | 低 | 会改配置，建议 admin-only |
 | [ ] | `marketplace/remove` | `/marketplace_remove <name>` | 低 | 会改配置并删除文件 |
 | [ ] | `marketplace/upgrade` | `/marketplace_upgrade [name]` | 低/中 | plugin 浏览器稳定后再做 |
 | [ ] | `plugin/share/list/save/updateTargets/delete` | `/plugin_share ...` | 低 | plugin 管理成熟前价值不大 |
-| [ ] | `app/list`、`app/list/updated` | `/apps` | 中 | 查看 connector；以后可支持 app mention 输入 |
+| [x] | `app/list`、`app/list/updated` | `/apps` | 中 | 已实现只读列表和变更通知 |
 
 ## MCP
 
@@ -147,13 +148,13 @@
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `config/read` | `/config` | 中 | 当前内部已用一部分；可暴露安全摘要 |
-| [ ] | `configRequirements/read` | `/requirements` | 中 | 展示托管约束、允许的 policy、网络规则 |
+| [x] | `config/read` | `/config` | 中 | 已实现安全摘要，不展示完整敏感配置 |
+| [x] | `configRequirements/read` | `/requirements` | 中 | 已实现托管约束摘要 |
 | [ ] | `config/value/write` | `/config_set <key> <value>` | 低/高风险 | 改用户配置，必须确认且做 allow-list |
 | [ ] | `config/batchWrite` | 结构化设置面板的内部 helper | 低/高风险 | 未来 settings UI 可能需要 |
-| [ ] | `experimentalFeature/list` | `/features` | 中 | 看 apps/plugins/memories 等是否可用 |
+| [x] | `experimentalFeature/list` | `/features` | 中 | 已实现只读列表 |
 | [ ] | `experimentalFeature/enablement/set` | `/feature_enable <name>` | 低/高风险 | 进程级运行时修改，建议 admin-only |
-| [ ] | `modelProvider/capabilities/read` | 合并进 `/models` 或 `/status` | 中 | 解释 provider 限制 |
+| [x] | `modelProvider/capabilities/read` | 合并进 `/models` 或 `/status` | 中 | 已实现 `/provider` |
 | [ ] | `model/rerouted`、`model/verification` | reroute/验证通知 | 中 | 解释为什么模型被切换或需要额外验证 |
 
 ## 文件、命令、进程
@@ -224,10 +225,10 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 
 | 勾选 | Notification | Telegram 用途 | 优先级 |
 | --- | --- | --- | --- |
-| [ ] | `thread/status/changed` | 更新 `/threads`、`/where`、活动卡片 | 中 |
+| [x] | `thread/status/changed` | 更新 `/threads`、`/where`、活动卡片 | 已完成轻量通知 |
 | [x] | `thread/name/updated` | 同步重命名到线程缓存 | 已完成 |
 | [x] | `thread/archived`、`thread/unarchived`、`thread/closed` | 线程生命周期通知 | 已完成 |
-| [ ] | `thread/tokenUsage/updated` | 实时 token/成本卡片 | 中 |
+| [x] | `thread/tokenUsage/updated` | 实时 token/成本卡片 | 已完成高水位提醒 |
 | [x] | `turn/diff/updated` | 当前 diff/变更视图 | 已完成 |
 | [ ] | `item/reasoning/summaryTextDelta`、`summaryPartAdded` | 更好的 reasoning summary 渲染 | 低/中 |
 | [ ] | `item/commandExecution/outputDelta` | 命令输出片段实时显示 | 中 |
@@ -237,9 +238,9 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 | [x] | `account/updated`、`account/login/completed`、`account/rateLimits/updated` | 账号面板和额度提醒 | 已完成 |
 | [x] | `skills/changed` | skills 列表缓存失效 | 已完成 |
 | [x] | `mcpServer/startupStatus/updated`、`mcpServer/oauthLogin/completed` | MCP 诊断和 OAuth 结果 | 已完成 |
-| [ ] | `app/list/updated` | connector 列表刷新 | 如果做 apps browser 则中 |
+| [x] | `app/list/updated` | connector 列表刷新 | 已完成 |
 | [ ] | `remoteControl/status/changed` | remote control 状态 | 中 |
-| [ ] | `warning`、`configWarning`、`guardianWarning`、`deprecationNotice` | 管理/状态 warning | 中 |
+| [x] | `warning`、`configWarning`、`guardianWarning`、`deprecationNotice` | 管理/状态 warning | 已完成轻量通知 |
 
 ## 建议实现顺序
 
@@ -264,5 +265,6 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
    - 已增加 `/rename`、`/fork`、`/undo`、`/compact`、`/archive`、`/unarchive`、`/review`、`/diff`。
    - 已补生命周期通知和 diff 缓存/展示。
 
-6. 低优先级管理面和实验面（仍未实现）
-   - Plugins、apps、config 写入、直接 command/fs/process、realtime、外部 agent import。
+6. 低优先级管理面和实验面（部分已完成）
+   - 已完成只读 Plugins、apps、config/requirements/features/provider 诊断面。
+   - 仍未实现：config 写入、直接 command/fs/process、realtime、外部 agent import。

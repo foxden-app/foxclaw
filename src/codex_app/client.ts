@@ -8,13 +8,23 @@ import type {
   AppThreadSnapshot,
   CodexAccountInfo,
   CodexAccountRateLimits,
+  CodexAppInfo,
   CodexCollaborationMode,
   CodexCollaborationModePreset,
+  CodexConfigRequirements,
   CodexCreditsSnapshot,
   CodexEffectiveConfig,
+  CodexExperimentalFeature,
+  CodexHookMetadata,
+  CodexHooksListEntry,
   CodexLoginDeviceCode,
   CodexMcpResourceContent,
   CodexMcpServerStatus,
+  CodexModelProviderCapabilities,
+  CodexPluginDetail,
+  CodexPluginMarketplace,
+  CodexPluginSkillSummary,
+  CodexPluginSummary,
   CodexRateLimitSnapshot,
   CodexRateLimitWindow,
   CodexSkillsListEntry,
@@ -148,6 +158,18 @@ export class CodexAppClient extends EventEmitter {
     });
     const rows = Array.isArray((result as any).data) ? (result as any).data : [];
     return rows.map(mapThread);
+  }
+
+  async listLoadedThreads(): Promise<string[]> {
+    const threadIds: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const result = await this.request('thread/loaded/list', { cursor, limit: 100 });
+      const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
+      threadIds.push(...rows.filter((value: unknown): value is string => typeof value === 'string'));
+      cursor = typeof (result as any)?.nextCursor === 'string' ? (result as any).nextCursor : null;
+    } while (cursor);
+    return threadIds;
   }
 
   async readThread(threadId: string, includeTurns = false): Promise<AppThread | null> {
@@ -383,6 +405,80 @@ export class CodexAppClient extends EventEmitter {
       path: selector.path ?? null,
       enabled,
     });
+  }
+
+  async listHooks(cwd: string | null): Promise<CodexHooksListEntry[]> {
+    const result = await this.request('hooks/list', { cwds: cwd ? [cwd] : [] });
+    const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
+    return rows.map(mapHooksListEntry);
+  }
+
+  async listPlugins(cwd: string | null): Promise<CodexPluginMarketplace[]> {
+    const result = await this.request('plugin/list', {
+      cwds: cwd ? [cwd] : null,
+      marketplaceKinds: null,
+    });
+    const rows = Array.isArray((result as any)?.marketplaces) ? (result as any).marketplaces : [];
+    return rows.map(mapPluginMarketplace);
+  }
+
+  async readPlugin(pluginName: string, options: { marketplacePath?: string | null; remoteMarketplaceName?: string | null } = {}): Promise<CodexPluginDetail | null> {
+    const result = await this.request('plugin/read', {
+      pluginName,
+      marketplacePath: options.marketplacePath ?? null,
+      remoteMarketplaceName: options.remoteMarketplaceName ?? null,
+    });
+    const plugin = (result as any)?.plugin;
+    return plugin && typeof plugin === 'object' ? mapPluginDetail(plugin) : null;
+  }
+
+  async readPluginSkill(remoteMarketplaceName: string, remotePluginId: string, skillName: string): Promise<string | null> {
+    const result = await this.request('plugin/skill/read', { remoteMarketplaceName, remotePluginId, skillName });
+    return typeof (result as any)?.contents === 'string' ? (result as any).contents : null;
+  }
+
+  async listApps(threadId?: string | null, forceRefetch = false): Promise<CodexAppInfo[]> {
+    const apps: CodexAppInfo[] = [];
+    let cursor: string | null = null;
+    do {
+      const result = await this.request('app/list', { cursor, limit: 100, threadId: threadId ?? null, forceRefetch });
+      const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
+      apps.push(...rows.map(mapAppInfo));
+      cursor = typeof (result as any)?.nextCursor === 'string' ? (result as any).nextCursor : null;
+    } while (cursor);
+    return apps;
+  }
+
+  async readConfig(cwd: string | null, includeLayers = true): Promise<Record<string, unknown>> {
+    const result = await this.request('config/read', { cwd, includeLayers });
+    return result && typeof result === 'object' ? result as Record<string, unknown> : {};
+  }
+
+  async readConfigRequirements(): Promise<CodexConfigRequirements | null> {
+    const result = await this.request('configRequirements/read', undefined);
+    const requirements = (result as any)?.requirements;
+    return requirements && typeof requirements === 'object' ? mapConfigRequirements(requirements) : null;
+  }
+
+  async listExperimentalFeatures(): Promise<CodexExperimentalFeature[]> {
+    const features: CodexExperimentalFeature[] = [];
+    let cursor: string | null = null;
+    do {
+      const result = await this.request('experimentalFeature/list', { cursor, limit: 100 });
+      const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
+      features.push(...rows.map(mapExperimentalFeature));
+      cursor = typeof (result as any)?.nextCursor === 'string' ? (result as any).nextCursor : null;
+    } while (cursor);
+    return features;
+  }
+
+  async readModelProviderCapabilities(): Promise<CodexModelProviderCapabilities> {
+    const result = await this.request('modelProvider/capabilities/read', {});
+    return {
+      webSearch: Boolean((result as any)?.webSearch),
+      imageGeneration: Boolean((result as any)?.imageGeneration),
+      namespaceTools: Boolean((result as any)?.namespaceTools),
+    };
   }
 
   async listMcpServerStatus(detail: 'full' | 'toolsAndAuthOnly' = 'full'): Promise<CodexMcpServerStatus[]> {
@@ -764,6 +860,130 @@ function mapSkillMetadata(raw: any) {
   };
 }
 
+function mapHooksListEntry(raw: any): CodexHooksListEntry {
+  const hooks = Array.isArray(raw?.hooks) ? raw.hooks : [];
+  const errors = Array.isArray(raw?.errors) ? raw.errors : [];
+  const warnings = Array.isArray(raw?.warnings) ? raw.warnings : [];
+  return {
+    cwd: String(raw?.cwd ?? ''),
+    hooks: hooks.map(mapHookMetadata),
+    errors: errors.map((entry: any) => ({
+      path: String(entry?.path ?? ''),
+      message: String(entry?.message ?? formatRawError(entry)),
+    })),
+    warnings: warnings.map((entry: unknown) => String(entry)),
+  };
+}
+
+function mapHookMetadata(raw: any): CodexHookMetadata {
+  return {
+    key: String(raw?.key ?? ''),
+    eventName: formatRawLabel(raw?.eventName),
+    handlerType: formatRawLabel(raw?.handlerType),
+    enabled: Boolean(raw?.enabled),
+    trustStatus: formatRawLabel(raw?.trustStatus),
+    sourcePath: String(raw?.sourcePath ?? ''),
+    pluginId: typeof raw?.pluginId === 'string' ? raw.pluginId : null,
+    command: typeof raw?.command === 'string' ? raw.command : null,
+    statusMessage: typeof raw?.statusMessage === 'string' ? raw.statusMessage : null,
+  };
+}
+
+function mapPluginMarketplace(raw: any): CodexPluginMarketplace {
+  const iface = raw?.interface && typeof raw.interface === 'object' ? raw.interface : {};
+  const plugins = Array.isArray(raw?.plugins) ? raw.plugins : [];
+  return {
+    name: String(raw?.name ?? ''),
+    displayName: typeof iface.displayName === 'string' ? iface.displayName : null,
+    path: typeof raw?.path === 'string' ? raw.path : null,
+    plugins: plugins.map(mapPluginSummary),
+  };
+}
+
+function mapPluginSummary(raw: any): CodexPluginSummary {
+  const keywords = Array.isArray(raw?.keywords) ? raw.keywords : [];
+  return {
+    id: String(raw?.id ?? ''),
+    name: String(raw?.name ?? raw?.id ?? ''),
+    enabled: Boolean(raw?.enabled),
+    installed: Boolean(raw?.installed),
+    source: formatRawLabel(raw?.source),
+    availability: formatRawLabel(raw?.availability),
+    authPolicy: formatRawLabel(raw?.authPolicy),
+    installPolicy: formatRawLabel(raw?.installPolicy),
+    keywords: keywords.map((entry: unknown) => String(entry)),
+  };
+}
+
+function mapPluginSkillSummary(raw: any): CodexPluginSkillSummary {
+  return {
+    name: String(raw?.name ?? ''),
+    description: String(raw?.description ?? ''),
+    shortDescription: typeof raw?.shortDescription === 'string' ? raw.shortDescription : null,
+    enabled: Boolean(raw?.enabled),
+    path: typeof raw?.path === 'string' ? raw.path : null,
+  };
+}
+
+function mapPluginDetail(raw: any): CodexPluginDetail {
+  const skills = Array.isArray(raw?.skills) ? raw.skills : [];
+  const hooks = Array.isArray(raw?.hooks) ? raw.hooks : [];
+  const apps = Array.isArray(raw?.apps) ? raw.apps : [];
+  const mcpServers = Array.isArray(raw?.mcpServers) ? raw.mcpServers : [];
+  return {
+    marketplaceName: String(raw?.marketplaceName ?? ''),
+    marketplacePath: typeof raw?.marketplacePath === 'string' ? raw.marketplacePath : null,
+    summary: mapPluginSummary(raw?.summary),
+    description: typeof raw?.description === 'string' ? raw.description : null,
+    skills: skills.map(mapPluginSkillSummary),
+    hooks: hooks.map((entry: any) => ({ key: String(entry?.key ?? ''), eventName: formatRawLabel(entry?.eventName) })),
+    apps: apps.map((entry: any) => ({
+      id: String(entry?.id ?? ''),
+      name: String(entry?.name ?? ''),
+      description: typeof entry?.description === 'string' ? entry.description : null,
+      needsAuth: Boolean(entry?.needsAuth),
+    })),
+    mcpServers: mcpServers.map((entry: unknown) => String(entry)),
+  };
+}
+
+function mapAppInfo(raw: any): CodexAppInfo {
+  const plugins = Array.isArray(raw?.pluginDisplayNames) ? raw.pluginDisplayNames : [];
+  return {
+    id: String(raw?.id ?? ''),
+    name: String(raw?.name ?? raw?.id ?? ''),
+    description: typeof raw?.description === 'string' ? raw.description : null,
+    isEnabled: raw?.isEnabled !== false,
+    isAccessible: Boolean(raw?.isAccessible),
+    installUrl: typeof raw?.installUrl === 'string' ? raw.installUrl : null,
+    distributionChannel: typeof raw?.distributionChannel === 'string' ? raw.distributionChannel : null,
+    pluginDisplayNames: plugins.map((entry: unknown) => String(entry)),
+  };
+}
+
+function mapExperimentalFeature(raw: any): CodexExperimentalFeature {
+  return {
+    name: String(raw?.name ?? ''),
+    displayName: typeof raw?.displayName === 'string' ? raw.displayName : null,
+    enabled: Boolean(raw?.enabled),
+    defaultEnabled: Boolean(raw?.defaultEnabled),
+    stage: formatRawLabel(raw?.stage),
+    description: typeof raw?.description === 'string' ? raw.description : null,
+  };
+}
+
+function mapConfigRequirements(raw: any): CodexConfigRequirements {
+  return {
+    allowedApprovalPolicies: stringArrayOrNull(raw?.allowedApprovalPolicies),
+    allowedSandboxModes: stringArrayOrNull(raw?.allowedSandboxModes),
+    allowedWebSearchModes: stringArrayOrNull(raw?.allowedWebSearchModes),
+    enforceResidency: raw?.enforceResidency === null || raw?.enforceResidency === undefined ? null : formatRawLabel(raw.enforceResidency),
+    featureRequirements: raw?.featureRequirements && typeof raw.featureRequirements === 'object'
+      ? Object.fromEntries(Object.entries(raw.featureRequirements).map(([key, value]) => [key, Boolean(value)]))
+      : null,
+  };
+}
+
 function mapMcpServerStatus(raw: any): CodexMcpServerStatus {
   const tools = raw?.tools && typeof raw.tools === 'object' ? Object.keys(raw.tools) : [];
   const resources = Array.isArray(raw?.resources) ? raw.resources : [];
@@ -820,6 +1040,29 @@ function formatRawError(raw: unknown): string {
   }
   if (raw && typeof raw === 'object' && 'message' in raw && typeof (raw as any).message === 'string') {
     return (raw as any).message;
+  }
+  return JSON.stringify(raw);
+}
+
+function stringArrayOrNull(raw: unknown): string[] | null {
+  return Array.isArray(raw) ? raw.map((entry: unknown) => formatRawLabel(entry)) : null;
+}
+
+function formatRawLabel(raw: unknown): string {
+  if (raw === null || raw === undefined) {
+    return 'unknown';
+  }
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (typeof raw === 'number' || typeof raw === 'boolean') {
+    return String(raw);
+  }
+  if (typeof raw === 'object') {
+    const keys = Object.keys(raw);
+    if (keys.length === 1) {
+      return keys[0]!;
+    }
   }
   return JSON.stringify(raw);
 }
