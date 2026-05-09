@@ -127,6 +127,11 @@ export class CodexAppClient extends EventEmitter {
     this.connected = false;
   }
 
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
+  }
+
   async listThreads(options: ListThreadsOptions): Promise<AppThread[]> {
     const result = await this.request('thread/list', {
       limit: options.limit,
@@ -289,16 +294,20 @@ export class CodexAppClient extends EventEmitter {
       launcher.unref();
     }
     this.port = await reservePort();
-    this.child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
+    const child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    this.child.stderr?.on('data', chunk => {
+    this.child = child;
+    child.stderr?.on('data', chunk => {
       this.logger.debug('codex.app-server.stderr', chunk.toString().trim());
     });
-    this.child.stdout?.on('data', chunk => {
+    child.stdout?.on('data', chunk => {
       this.logger.debug('codex.app-server.stdout', chunk.toString().trim());
     });
-    this.child.on('exit', (code, signal) => {
+    child.on('exit', (code, signal) => {
+      if (this.child !== child) {
+        return;
+      }
       this.child = null;
       this.handleDisconnect({ code, signal, source: 'process-exit' });
     });
@@ -322,6 +331,9 @@ export class CodexAppClient extends EventEmitter {
             this.connected = true;
             ws.addEventListener('message', message => this.handleMessage(String(message.data)));
             ws.addEventListener('close', () => {
+              if (this.socket !== ws) {
+                return;
+              }
               this.socket = null;
               this.handleDisconnect({ code: 'ws-close', source: 'websocket-close' });
             });

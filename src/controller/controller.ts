@@ -415,6 +415,7 @@ export class BridgeSessionCore {
           '/mode [default|plan]',
           '/plan',
           '/agent',
+          '/auth_reload',
           '/models',
           '/permissions',
           '/permissions <read-only|default|full-access>',
@@ -451,6 +452,11 @@ export class BridgeSessionCore {
         ];
         lines.push(...await this.buildCodexUsageStatusLines(locale));
         await this.sendMessage(scopeId, lines.join('\n'));
+        return;
+      }
+      case 'auth_reload':
+      case 'codex_restart': {
+        await this.handleAuthReloadCommand(scopeId, locale);
         return;
       }
       case 'where': {
@@ -2006,6 +2012,22 @@ export class BridgeSessionCore {
       t(locale, 'mode_configured', { value: formatCollaborationModeLabel(locale, mode) }),
       t(locale, 'applies_next_turn'),
     ].join('\n'));
+  }
+
+  private async handleAuthReloadCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
+      await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
+      return;
+    }
+
+    await this.sendMessage(scopeId, t(locale, 'auth_reload_restarting'));
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    await this.app.restart();
+
+    const lines = [t(locale, 'auth_reload_done')];
+    lines.push(...await this.buildCodexUsageStatusLines(locale));
+    await this.sendMessage(scopeId, lines.join('\n'));
   }
 
   private async buildNativeCollaborationMode(

@@ -138,6 +138,7 @@ function createControllerRig() {
   const app = {
     isConnected: () => true,
     getUserAgent: () => 'test-agent',
+    restart: async () => {},
     readAccount: async () => null,
     readAccountRateLimits: async () => null,
     readEffectiveConfig: async () => ({
@@ -346,6 +347,57 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.match(rig.sentMessages[0]!, /5h window: 63% used/);
   assert.match(rig.sentMessages[0]!, /7d window: 56.5% used/);
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
+});
+
+test('/auth_reload restarts Codex app-server and reports refreshed usage', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async () => ({
+    type: 'chatgpt',
+    email: 'user@example.com',
+    planType: 'team',
+    requiresOpenaiAuth: false,
+  });
+  (rig.controller as any).app.readAccountRateLimits = async () => null;
+
+  await (rig.controller as any).handleCommand(createEvent('/auth_reload'), 'en', 'auth_reload', []);
+
+  assert.equal(restarts, 1);
+  assert.equal(rig.sentMessages[0], 'Restarting Codex app-server to reload auth...');
+  assert.match(rig.sentMessages[1]!, /Codex app-server restarted/);
+  assert.match(rig.sentMessages[1]!, /Codex account: ChatGPT/);
+  assert.match(rig.sentMessages[1]!, /Codex usage: unavailable/);
+});
+
+test('/auth_reload is blocked while a turn is active', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth_reload'), 'en', 'auth_reload', []);
+
+  assert.equal(restarts, 0);
+  assert.equal(
+    rig.sentMessages[0],
+    'Cannot reload Codex auth while a turn, approval, or question is active. Wait or use /interrupt first.',
+  );
 });
 
 test('Codex error notifications are shown on the active Telegram turn', async (t) => {
