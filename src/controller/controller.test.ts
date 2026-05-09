@@ -108,6 +108,21 @@ function installTempAuthFiles(t: TestContext, tempDir: string): string {
   return authDir;
 }
 
+function installTempCodexHome(t: TestContext, tempDir: string): string {
+  const codexHome = path.join(tempDir, '.codex-home');
+  fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previous;
+    }
+  });
+  return codexHome;
+}
+
 function createControllerRig() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-controller-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
@@ -332,6 +347,7 @@ test('startTurnWithRecovery passes native Codex collaboration mode', async (t) =
 
 test('/status includes Codex account usage without exposing email', async (t) => {
   const rig = createControllerRig();
+  installTempCodexHome(t, rig.tempDir);
   t.after(() => {
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
@@ -365,6 +381,91 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.match(rig.sentMessages[0]!, /5h window: 63% used/);
   assert.match(rig.sentMessages[0]!, /7d window: 56.5% used/);
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
+});
+
+test('/status includes local Codex token history from session logs', async (t) => {
+  const rig = createControllerRig();
+  const codexHome = installTempCodexHome(t, rig.tempDir);
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const sessionDir = path.join(codexHome, 'sessions', '2026', '05', '09');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionDir, 'rollout-a.jsonl'), [
+    JSON.stringify({
+      payload: {
+        turn_id: 'turn-a',
+        info: {
+          last_token_usage: {
+            input_tokens: 10,
+            cached_input_tokens: 1,
+            output_tokens: 2,
+            reasoning_output_tokens: 1,
+            total_tokens: 12,
+          },
+          total_token_usage: {
+            input_tokens: 10,
+            cached_input_tokens: 1,
+            output_tokens: 2,
+            reasoning_output_tokens: 1,
+            total_tokens: 12,
+          },
+        },
+      },
+    }),
+    JSON.stringify({
+      payload: {
+        turn_id: 'turn-a',
+        info: {
+          last_token_usage: {
+            input_tokens: 20,
+            cached_input_tokens: 3,
+            output_tokens: 5,
+            reasoning_output_tokens: 2,
+            total_tokens: 25,
+          },
+          total_token_usage: {
+            input_tokens: 30,
+            cached_input_tokens: 4,
+            output_tokens: 7,
+            reasoning_output_tokens: 3,
+            total_tokens: 37,
+          },
+        },
+      },
+    }),
+  ].join('\n'));
+  fs.writeFileSync(path.join(sessionDir, 'rollout-b.jsonl'), `${JSON.stringify({
+    payload: {
+      turn_id: 'turn-b',
+      info: {
+        last_token_usage: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 4,
+          total_tokens: 110,
+        },
+        total_token_usage: {
+          input_tokens: 100,
+          cached_input_tokens: 20,
+          output_tokens: 10,
+          reasoning_output_tokens: 4,
+          total_tokens: 110,
+        },
+      },
+    },
+  })}\n`);
+
+  await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
+
+  assert.match(rig.sentMessages[0]!, /Codex local history: 2 sessions, 2 turns, 3 usage records/);
+  assert.match(
+    rig.sentMessages[0]!,
+    /Codex local tokens: total 147; input 130, output 17, cached input 24, reasoning output 7/,
+  );
 });
 
 test('/auth_reload restarts Codex app-server and reports refreshed usage', async (t) => {

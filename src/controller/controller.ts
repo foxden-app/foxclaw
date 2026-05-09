@@ -67,6 +67,7 @@ import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseWeixinBridgeScope } from '../core/bridge_scope.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
+import { readCodexLocalUsageStats, type CodexLocalUsageStats } from '../codex_app/local_usage.js';
 import {
   normalizeTurnActivityEvent,
   type RawExecCommandEvent,
@@ -249,6 +250,7 @@ class UserFacingError extends Error {}
 const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
+const CODEX_LOCAL_USAGE_CACHE_MS = 30_000;
 
 export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
@@ -260,6 +262,7 @@ export class BridgeSessionCore {
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
   private authRotationFailedTargets = new Set<string>();
+  private localUsageCache: { expiresAt: number; stats: CodexLocalUsageStats } | null = null;
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
@@ -499,6 +502,7 @@ export class BridgeSessionCore {
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
         lines.push(...await this.buildCodexUsageStatusLines(locale));
+        lines.push(...await this.buildCodexLocalUsageStatusLines(locale));
         await this.sendMessage(scopeId, lines.join('\n'));
         return;
       }
@@ -2379,6 +2383,42 @@ export class BridgeSessionCore {
     return lines;
   }
 
+  private async buildCodexLocalUsageStatusLines(locale: AppLocale): Promise<string[]> {
+    try {
+      const stats = await this.readCachedCodexLocalUsageStats();
+      if (stats.sessionFiles === 0 || stats.sessionsWithUsage === 0) {
+        return [];
+      }
+      return [
+        t(locale, 'status_codex_local_history', {
+          sessions: formatTokenCount(stats.sessionsWithUsage),
+          turns: formatTokenCount(stats.turns),
+          events: formatTokenCount(stats.usageEvents),
+        }),
+        t(locale, 'status_codex_local_tokens', {
+          total: formatTokenCount(stats.totals.totalTokens),
+          input: formatTokenCount(stats.totals.inputTokens),
+          output: formatTokenCount(stats.totals.outputTokens),
+          cached: formatTokenCount(stats.totals.cachedInputTokens),
+          reasoning: formatTokenCount(stats.totals.reasoningOutputTokens),
+        }),
+      ];
+    } catch (error) {
+      this.logger.warn('codex.local_usage_failed', { error: formatUserError(error) });
+      return [t(locale, 'status_codex_local_usage_unavailable', { error: formatShortStatusError(error) })];
+    }
+  }
+
+  private async readCachedCodexLocalUsageStats(): Promise<CodexLocalUsageStats> {
+    const now = Date.now();
+    if (this.localUsageCache && this.localUsageCache.expiresAt > now) {
+      return this.localUsageCache.stats;
+    }
+    const stats = await readCodexLocalUsageStats();
+    this.localUsageCache = { stats, expiresAt: now + CODEX_LOCAL_USAGE_CACHE_MS };
+    return stats;
+  }
+
   private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
     const scopeId = event.scopeId;
     if (args.length === 0) {
@@ -4098,6 +4138,13 @@ function formatUsagePercent(value: number): string {
 
 function formatCompactNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, '');
+}
+
+function formatTokenCount(value: number): string {
+  if (!Number.isFinite(value)) {
+    return '?';
+  }
+  return Math.round(value).toLocaleString('en-US');
 }
 
 function formatLocalTimestamp(seconds: number): string {
