@@ -34,6 +34,7 @@ export interface CachedThread {
   cwd: string | null;
   modelProvider: string | null;
   status: ThreadStatusKind;
+  archived: boolean;
   updatedAt: number;
 }
 
@@ -113,6 +114,52 @@ export interface CodexAccountRateLimits {
   rateLimitsByLimitId: Record<string, CodexRateLimitSnapshot> | null;
 }
 
+export interface CodexLoginDeviceCode {
+  type: 'chatgptDeviceCode';
+  loginId: string;
+  verificationUrl: string;
+  userCode: string;
+}
+
+export interface CodexSkillMetadata {
+  name: string;
+  description: string;
+  shortDescription: string | null;
+  path: string;
+  scope: string;
+  enabled: boolean;
+  displayName: string | null;
+  defaultPrompt: string | null;
+}
+
+export interface CodexSkillsListEntry {
+  cwd: string;
+  skills: CodexSkillMetadata[];
+  errors: string[];
+}
+
+export interface CodexMcpServerStatus {
+  name: string;
+  authStatus: string;
+  toolNames: string[];
+  resourceUris: string[];
+  resourceTemplateUris: string[];
+}
+
+export interface CodexMcpResourceContent {
+  type: string;
+  text: string | null;
+  blob: string | null;
+  mimeType: string | null;
+  uri: string | null;
+}
+
+export type ReviewTarget =
+  | { type: 'uncommittedChanges' }
+  | { type: 'baseBranch'; branch: string }
+  | { type: 'commit'; sha: string; title: string | null }
+  | { type: 'custom'; instructions: string };
+
 export interface CodexEffectiveConfig {
   model: string | null;
   modelReasoningEffort: ReasoningEffortValue | null;
@@ -153,7 +200,7 @@ export interface ModelServiceTier {
   description: string;
 }
 
-export type ApprovalKind = 'command' | 'fileChange';
+export type ApprovalKind = 'command' | 'fileChange' | 'permissions';
 
 export interface PendingApprovalRecord {
   localId: string;
@@ -168,6 +215,7 @@ export interface PendingApprovalRecord {
   reason: string | null;
   command: string | null;
   cwd: string | null;
+  payloadJson: string | null;
   messageId: number | null;
   createdAt: number;
   resolvedAt: number | null;

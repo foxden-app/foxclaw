@@ -9,8 +9,12 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
 - Chat-scoped preference control with `/setup`: model, reasoning effort, Fast service tier, access preset, and Agent/Plan mode
 - Quick Fast service-tier control with `/fast on`, `/fast off`, and `/fast toggle`
+- App-server account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, and guarded `/logout confirm`
+- Active-turn steering, review, diff, and thread lifecycle controls: `/steer`, `/review`, `/diff`, `/fork`, `/undo`, `/rename`, `/compact`, `/archive`, and `/unarchive`
+- Skills and MCP panels with `/skills`, `/skill`, `/skill_enable`, `/skill_disable`, `/mcp`, `/mcp_reload`, `/mcp_login`, and `/mcp_resource`
 - Deep-link sync from Telegram into `Codex.app` with `/open` and `/reveal`
-- Inline approval buttons for command and file-change approvals
+- Inline approval buttons for command, file-change, and granular permission approvals
+- MCP elicitation cards for structured questions raised by tools during a turn
 - SQLite persistence for bindings, offsets, approvals, and audit logs
 - Stable segmented live rendering across private chat and topic/group modes
 - Bottom activity cards for `thinking`, `browsing`, `approval`, `interrupt`, and tool summaries
@@ -110,9 +114,25 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/setup` opens the unified preference panel
 - `/fast <on|off|toggle>` toggles the current chat's Fast service tier when the selected model supports it
 - `/status`
+- `/account`
+- `/quota`
+- `/quota_nudge <credits|usage_limit> confirm`
+- `/login_device`, `/login_cancel [id]`, `/logout confirm`
 - `/threads [query]`
+- `/threads archived`
 - `/open <n>`
 - `/new [cwd]`
+- `/steer <message>`
+- `/takeover <message>`, `/queue <message>`
+- `/review [base <branch>|commit <sha>|custom <instructions>]`
+- `/diff`
+- `/fork [name]`
+- `/undo [n]`, `/rollback [n]`
+- `/rename <name>`
+- `/compact`
+- `/archive`, `/unarchive <n>`
+- `/skills [query]`, `/skill <name>`, `/skill_enable <name>`, `/skill_disable <name>`
+- `/mcp`, `/mcp_reload`, `/mcp_login <server>`, `/mcp_resource <server> <uri>`
 - `/models`, `/model`, `/effort`, `/permissions`, `/access`, `/mode`, `/plan`, and `/agent` open the same panel with the relevant section focused when no value is provided
 - `/model <model>`, `/effort <effort>`, `/permissions <read-only|default|full-access>`, `/access <read-only|default|full-access>`, and `/mode <default|plan>` still apply values directly
 - `/reveal`
@@ -153,6 +173,12 @@ Recommended mobile preference flow:
 - Send `/setup` to review the current model, effort, Fast, access, and Agent/Plan mode in one message
 - Use `/fast on` or `/fast off` when you only need to switch the service tier
 - Use direct commands such as `/model gpt-5`, `/effort high`, `/permissions full-access`, and `/mode plan` when copy-paste is faster than tapping buttons
+
+Recommended mobile app-server controls:
+
+- Use `/steer <message>` while a turn is active to add constraints without interrupting the turn
+- Use `/account`, `/quota`, and `/login_device` to inspect or repair Codex auth from Telegram
+- Use `/skills` and `/mcp` when a remote run behaves differently from Codex App and you need to inspect enabled skills or MCP server health
 
 ## Behavior Boundaries
 

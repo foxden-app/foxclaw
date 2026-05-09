@@ -12,12 +12,17 @@ import type {
   CodexAccountInfo,
   CodexAccountRateLimits,
   CodexCollaborationMode,
+  CodexMcpResourceContent,
+  CodexMcpServerStatus,
   CodexRateLimitSnapshot,
   CodexRateLimitWindow,
+  CodexSkillMetadata,
+  CodexSkillsListEntry,
   CollaborationModeValue,
   ModelInfo,
   PendingApprovalRecord,
   ReasoningEffortValue,
+  ReviewTarget,
   RuntimeStatus,
   ThreadBinding,
   ThreadSessionState,
@@ -69,7 +74,7 @@ import {
 } from '../telegram/text.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
-import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseWeixinBridgeScope } from '../core/bridge_scope.js';
+import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
 import { readCodexLocalUsageStats, type CodexLocalUsageStats } from '../codex_app/local_usage.js';
@@ -211,6 +216,22 @@ interface PendingUserInputRequest {
   createdAt: number;
 }
 
+interface PendingMcpElicitation {
+  localId: string;
+  serverRequestId: string;
+  chatId: string;
+  threadId: string;
+  turnId: string | null;
+  serverName: string;
+  mode: 'form' | 'url';
+  message: string;
+  url: string | null;
+  requestedSchema: unknown;
+  content: unknown;
+  messageId: number | null;
+  createdAt: number;
+}
+
 interface CodexAuthCandidate {
   name: string;
   path: string;
@@ -251,6 +272,7 @@ interface PendingAuthRotation {
 }
 
 type ApprovalAction = 'accept' | 'session' | 'deny';
+type McpElicitationAction = 'accept' | 'decline' | 'cancel';
 class UserFacingError extends Error {}
 const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
@@ -263,6 +285,10 @@ export class BridgeSessionCore {
   private queuedPrompts = new Map<string, QueuedPromptRequest>();
   private pendingTurnErrors = new Map<string, string>();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
+  private pendingMcpElicitations = new Map<string, PendingMcpElicitation>();
+  private pendingLoginsByScope = new Map<string, string>();
+  private pendingLoginScopesById = new Map<string, string>();
+  private latestTurnDiffs = new Map<string, { scopeId: string; threadId: string; turnId: string; diff: string; updatedAt: number }>();
   private pendingAuthChoiceLists = new Map<string, PendingAuthChoiceList>();
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
@@ -362,6 +388,10 @@ export class BridgeSessionCore {
     this.queuedPrompts.clear();
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
+    this.pendingMcpElicitations.clear();
+    this.pendingLoginsByScope.clear();
+    this.pendingLoginScopesById.clear();
+    this.latestTurnDiffs.clear();
     this.pendingAuthChoiceLists.clear();
     this.pendingAuthRotation = null;
     this.clearObservedThreadWatchers();
@@ -403,6 +433,10 @@ export class BridgeSessionCore {
         await this.handleCommand(event, locale, command.name, command.args);
         return;
       }
+      if (event.attachments.length === 0 && this.hasPendingMcpElicitation(scopeId)) {
+        await this.handleMcpElicitationTextReply(event, locale);
+        return;
+      }
       if (event.attachments.length === 0 && this.hasPendingUserInput(scopeId)) {
         await this.handleUserInputTextReply(event, locale);
         return;
@@ -418,6 +452,10 @@ export class BridgeSessionCore {
     const command = event.attachments.length === 0 ? parseCommand(event.text) : null;
     if (!command && event.attachments.length === 0 && this.hasPendingUserInput(scopeId)) {
       await this.handleUserInputTextReply(event, locale);
+      return;
+    }
+    if (!command && event.attachments.length === 0 && this.hasPendingMcpElicitation(scopeId)) {
+      await this.handleMcpElicitationTextReply(event, locale);
       return;
     }
     const decision = resolveTelegramAddressing({
@@ -462,10 +500,15 @@ export class BridgeSessionCore {
           '/setup',
           '/fast <on|off|toggle>',
           '/status',
+          '/account',
+          '/quota',
+          '/login_device',
           '/threads [query]',
+          '/threads archived [query]',
           '/open <n>',
           '/watch',
           '/unwatch',
+          '/steer <message>',
           '/takeover <message>',
           '/queue <message>',
           '/new [cwd]',
@@ -474,6 +517,16 @@ export class BridgeSessionCore {
           '/agent',
           '/auth',
           '/auth_reload',
+          '/logout confirm',
+          '/skills [query]',
+          '/skill <name>',
+          '/mcp',
+          '/review',
+          '/fork [name]',
+          '/undo [n]',
+          '/rename <name>',
+          '/compact',
+          '/archive',
           '/models',
           '/permissions',
           '/permissions <read-only|default|full-access>',
@@ -515,6 +568,31 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, lines.join('\n'));
         return;
       }
+      case 'account': {
+        await this.handleAccountCommand(scopeId, locale);
+        return;
+      }
+      case 'quota': {
+        await this.handleQuotaCommand(scopeId, locale);
+        return;
+      }
+      case 'quota_nudge': {
+        await this.handleQuotaNudgeCommand(scopeId, locale, args);
+        return;
+      }
+      case 'login':
+      case 'login_device': {
+        await this.handleLoginDeviceCommand(scopeId, locale);
+        return;
+      }
+      case 'login_cancel': {
+        await this.handleLoginCancelCommand(scopeId, locale, args);
+        return;
+      }
+      case 'logout': {
+        await this.handleLogoutCommand(scopeId, locale, args);
+        return;
+      }
       case 'auth_reload':
       case 'codex_restart': {
         await this.handleAuthReloadCommand(scopeId, locale);
@@ -537,8 +615,9 @@ export class BridgeSessionCore {
         return;
       }
       case 'threads': {
-        const searchTerm = args.join(' ').trim() || null;
-        await this.showThreadsPanel(scopeId, undefined, searchTerm, locale);
+        const archived = args[0]?.toLowerCase() === 'archived';
+        const searchTerm = (archived ? args.slice(1) : args).join(' ').trim() || null;
+        await this.showThreadsPanel(scopeId, undefined, searchTerm, locale, {}, archived);
         return;
       }
       case 'open': {
@@ -550,6 +629,10 @@ export class BridgeSessionCore {
         const thread = this.store.getCachedThread(scopeId, target);
         if (!thread) {
           await this.sendMessage(scopeId, t(locale, 'unknown_cached_thread'));
+          return;
+        }
+        if (thread.archived) {
+          await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
           return;
         }
         this.queuedPrompts.delete(scopeId);
@@ -608,6 +691,10 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'watch_stopped', { threadId: watchedThreadId }));
         return;
       }
+      case 'steer': {
+        await this.handleSteerCommand(event, locale, args);
+        return;
+      }
       case 'takeover': {
         await this.handleTakeoverCommand(event, locale, args);
         return;
@@ -628,6 +715,71 @@ export class BridgeSessionCore {
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
         ].join('\n'));
+        return;
+      }
+      case 'fork': {
+        await this.handleForkCommand(scopeId, locale, args);
+        return;
+      }
+      case 'undo':
+      case 'rollback': {
+        await this.handleRollbackCommand(scopeId, locale, args);
+        return;
+      }
+      case 'rename': {
+        await this.handleRenameCommand(scopeId, locale, args);
+        return;
+      }
+      case 'compact': {
+        await this.handleCompactCommand(event, locale);
+        return;
+      }
+      case 'archive': {
+        await this.handleArchiveCommand(scopeId, locale);
+        return;
+      }
+      case 'unarchive': {
+        await this.handleUnarchiveCommand(scopeId, locale, args);
+        return;
+      }
+      case 'review': {
+        await this.handleReviewCommand(event, locale, args);
+        return;
+      }
+      case 'diff': {
+        await this.handleDiffCommand(scopeId, locale);
+        return;
+      }
+      case 'skills': {
+        await this.handleSkillsCommand(scopeId, locale, args);
+        return;
+      }
+      case 'skill': {
+        await this.handleSkillCommand(scopeId, locale, args);
+        return;
+      }
+      case 'skill_enable': {
+        await this.handleSkillConfigCommand(scopeId, locale, args, true);
+        return;
+      }
+      case 'skill_disable': {
+        await this.handleSkillConfigCommand(scopeId, locale, args, false);
+        return;
+      }
+      case 'mcp': {
+        await this.handleMcpCommand(scopeId, locale, args);
+        return;
+      }
+      case 'mcp_reload': {
+        await this.handleMcpReloadCommand(scopeId, locale);
+        return;
+      }
+      case 'mcp_login': {
+        await this.handleMcpLoginCommand(scopeId, locale, args);
+        return;
+      }
+      case 'mcp_resource': {
+        await this.handleMcpResourceCommand(scopeId, locale, args);
         return;
       }
       case 'mode': {
@@ -771,6 +923,16 @@ export class BridgeSessionCore {
       );
       return;
     }
+    const mcpElicitationMatch = /^mcpel:([a-f0-9]+):(accept|decline|cancel)$/.exec(event.data);
+    if (mcpElicitationMatch) {
+      await this.handleMcpElicitationCallback(
+        event,
+        mcpElicitationMatch[1]!,
+        mcpElicitationMatch[2]! as McpElicitationAction,
+        locale,
+      );
+      return;
+    }
     const match = /^approval:([a-f0-9]+):(accept|session|deny)$/.exec(event.data);
     if (!match) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
@@ -788,7 +950,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    const result = mapApprovalDecision(action);
+    const result = mapApprovalDecision(approval, action);
     await this.app.respond(approval.serverRequestId, result);
     this.store.markApprovalResolved(localId);
     this.clearApprovalTimer(localId);
@@ -842,6 +1004,45 @@ export class BridgeSessionCore {
         await this.handleCodexErrorNotification(notification.params);
         return;
       }
+      case 'turn/started': {
+        await this.handleTurnStartedNotification(notification.params);
+        return;
+      }
+      case 'turn/diff/updated': {
+        await this.handleTurnDiffUpdated(notification.params);
+        return;
+      }
+      case 'thread/name/updated':
+      case 'thread/archived':
+      case 'thread/unarchived':
+      case 'thread/closed': {
+        await this.handleThreadLifecycleNotification(notification.method, notification.params);
+        return;
+      }
+      case 'account/login/completed': {
+        await this.handleAccountLoginCompleted(notification.params);
+        return;
+      }
+      case 'account/updated': {
+        await this.handleAccountUpdated(notification.params);
+        return;
+      }
+      case 'account/rateLimits/updated': {
+        await this.handleRateLimitsUpdated();
+        return;
+      }
+      case 'skills/changed': {
+        await this.handleSkillsChangedNotification();
+        return;
+      }
+      case 'mcpServer/startupStatus/updated': {
+        await this.handleMcpStartupStatusUpdated(notification.params);
+        return;
+      }
+      case 'mcpServer/oauthLogin/completed': {
+        await this.handleMcpOauthLoginCompleted(notification.params);
+        return;
+      }
       default:
         return;
     }
@@ -871,9 +1072,24 @@ export class BridgeSessionCore {
         this.updateStatus();
         return;
       }
+      case 'item/permissions/requestApproval': {
+        const params = request.params as any;
+        const approval = this.createPermissionApprovalRecord(request.id, params);
+        await this.notePendingApprovalStatus(approval.threadId, approval.kind);
+        const locale = this.localeForChat(approval.chatId);
+        const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
+        this.store.updatePendingApprovalMessage(approval.localId, messageId);
+        this.armApprovalTimer(approval.localId);
+        this.updateStatus();
+        return;
+      }
       case 'item/tool/requestUserInput': {
         const params = request.params as any;
         await this.handleUserInputRequest(request.id, params);
+        return;
+      }
+      case 'mcpServer/elicitation/request': {
+        await this.handleMcpElicitationRequest(request.id, request.params as any);
         return;
       }
       default: {
@@ -912,6 +1128,133 @@ export class BridgeSessionCore {
     }
     this.updateStatus();
     await this.maybeRunPendingAuthRotation();
+  }
+
+  private async handleTurnStartedNotification(params: any): Promise<void> {
+    const turnId = stringOrNull(params?.turn?.id);
+    const threadId = stringOrNull(params?.threadId);
+    if (!turnId || !threadId || this.activeTurns.has(turnId)) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId || this.findActiveTurn(scopeId)) {
+      return;
+    }
+    const target = resolveScopeMessageTarget(scopeId);
+    if (!target) {
+      return;
+    }
+    await this.registerActiveTurn(scopeId, target.chatId, target.chatType, target.topicId, threadId, turnId, 0);
+  }
+
+  private async handleTurnDiffUpdated(params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    const turnId = stringOrNull(params?.turnId);
+    const diff = typeof params?.diff === 'string' ? params.diff : '';
+    if (!threadId || !turnId) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      return;
+    }
+    this.latestTurnDiffs.set(scopeId, { scopeId, threadId, turnId, diff, updatedAt: Date.now() });
+  }
+
+  private async handleThreadLifecycleNotification(method: string, params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    if (!threadId) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      return;
+    }
+    const locale = this.localeForChat(scopeId);
+    if (method === 'thread/name/updated') {
+      await this.sendMessage(scopeId, t(locale, 'thread_name_updated', { name: params?.threadName ?? t(locale, 'untitled') }));
+      return;
+    }
+    if (method === 'thread/archived') {
+      await this.sendMessage(scopeId, t(locale, 'thread_archived_notification', { threadId }));
+      return;
+    }
+    if (method === 'thread/unarchived') {
+      await this.sendMessage(scopeId, t(locale, 'thread_unarchived_notification', { threadId }));
+      return;
+    }
+    if (method === 'thread/closed') {
+      this.attachedThreads.delete(attachedThreadKey(scopeId, threadId));
+    }
+  }
+
+  private async handleAccountLoginCompleted(params: any): Promise<void> {
+    const loginId = params?.loginId === null ? null : stringOrNull(params?.loginId);
+    const scopeId = loginId ? this.pendingLoginScopesById.get(loginId) ?? null : null;
+    if (!scopeId) {
+      return;
+    }
+    this.pendingLoginScopesById.delete(loginId!);
+    if (this.pendingLoginsByScope.get(scopeId) === loginId) {
+      this.pendingLoginsByScope.delete(scopeId);
+    }
+    const locale = this.localeForChat(scopeId);
+    const success = Boolean(params?.success);
+    await this.sendMessage(scopeId, success
+      ? t(locale, 'login_completed')
+      : t(locale, 'login_failed', { error: params?.error ?? t(locale, 'unknown') }));
+  }
+
+  private async handleAccountUpdated(params: any): Promise<void> {
+    if (this.pendingLoginScopesById.size > 0) {
+      return;
+    }
+    const scopeId = [...this.pendingLoginsByScope.keys()][0];
+    if (!scopeId) {
+      return;
+    }
+    const locale = this.localeForChat(scopeId);
+    await this.sendMessage(scopeId, t(locale, 'account_updated', {
+      value: [params?.authMode ?? t(locale, 'none'), params?.planType ?? null].filter(Boolean).join(' · '),
+    }));
+  }
+
+  private async handleRateLimitsUpdated(): Promise<void> {
+    this.localUsageCache = null;
+  }
+
+  private async handleSkillsChangedNotification(): Promise<void> {
+    this.logger.info('codex.skills_changed');
+  }
+
+  private async handleMcpStartupStatusUpdated(params: any): Promise<void> {
+    const name = stringOrNull(params?.name);
+    const status = stringOrNull(params?.status);
+    if (!name || !status) {
+      return;
+    }
+    const message = params?.error
+      ? `MCP ${name}: ${status} (${String(params.error)})`
+      : `MCP ${name}: ${status}`;
+    await this.notifyBoundScopes(message);
+  }
+
+  private async handleMcpOauthLoginCompleted(params: any): Promise<void> {
+    const name = stringOrNull(params?.name) ?? 'MCP';
+    const success = Boolean(params?.success);
+    const message = success
+      ? `MCP ${name} OAuth login completed.`
+      : `MCP ${name} OAuth login failed: ${String(params?.error ?? 'unknown')}`;
+    await this.notifyBoundScopes(message);
+  }
+
+  private async notifyBoundScopes(message: string): Promise<void> {
+    const seen = new Set<string>();
+    for (const turn of this.activeTurns.values()) {
+      if (seen.has(turn.scopeId)) continue;
+      seen.add(turn.scopeId);
+      await this.sendMessage(turn.scopeId, message);
+    }
   }
 
   private async recordActiveTurnError(active: ActiveTurn, message: string): Promise<void> {
@@ -1037,6 +1380,115 @@ export class BridgeSessionCore {
       renderUserInputMessage(locale, record, completed),
       completed ? [] : userInputKeyboard(record),
     );
+  }
+
+  private async handleMcpElicitationRequest(serverRequestId: string | number, params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    const scopeId = threadId ? this.findChatByThread(threadId) : null;
+    if (!threadId || !scopeId) {
+      await this.app.respondError(serverRequestId, `No chat binding found for thread ${threadId ?? '(unknown)'}`);
+      return;
+    }
+    const mode = params?.mode === 'url' ? 'url' : 'form';
+    const record: PendingMcpElicitation = {
+      localId: crypto.randomBytes(8).toString('hex'),
+      serverRequestId: String(serverRequestId),
+      chatId: scopeId,
+      threadId,
+      turnId: stringOrNull(params?.turnId),
+      serverName: String(params?.serverName ?? ''),
+      mode,
+      message: String(params?.message ?? ''),
+      url: mode === 'url' ? stringOrNull(params?.url) : null,
+      requestedSchema: mode === 'form' ? params?.requestedSchema ?? null : null,
+      content: null,
+      messageId: null,
+      createdAt: Date.now(),
+    };
+    this.pendingMcpElicitations.set(record.localId, record);
+    const locale = this.localeForChat(scopeId);
+    const messageId = await this.sendMessage(
+      scopeId,
+      renderMcpElicitationMessage(locale, record),
+      mcpElicitationKeyboard(locale, record),
+    );
+    record.messageId = messageId;
+  }
+
+  private hasPendingMcpElicitation(scopeId: string): boolean {
+    return this.findPendingMcpElicitationForScope(scopeId) !== null;
+  }
+
+  private findPendingMcpElicitationForScope(scopeId: string): PendingMcpElicitation | null {
+    for (const record of this.pendingMcpElicitations.values()) {
+      if (record.chatId === scopeId) {
+        return record;
+      }
+    }
+    return null;
+  }
+
+  private async handleMcpElicitationTextReply(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
+    const record = this.findPendingMcpElicitationForScope(event.scopeId);
+    if (!record) {
+      return;
+    }
+    if (record.mode !== 'form') {
+      await this.sendMessage(event.scopeId, t(locale, 'mcp_elicitation_use_buttons'));
+      return;
+    }
+    try {
+      record.content = JSON.parse(event.text);
+    } catch {
+      await this.sendMessage(event.scopeId, t(locale, 'mcp_elicitation_invalid_json'));
+      return;
+    }
+    if (record.messageId !== null) {
+      await this.editMessage(
+        record.chatId,
+        record.messageId,
+        renderMcpElicitationMessage(locale, record),
+        mcpElicitationKeyboard(locale, record),
+      );
+    }
+    await this.sendMessage(event.scopeId, t(locale, 'mcp_elicitation_json_recorded'));
+  }
+
+  private async handleMcpElicitationCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    action: McpElicitationAction,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingMcpElicitations.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'mcp_elicitation_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'mcp_elicitation_mismatch'));
+      return;
+    }
+    if (action === 'accept' && record.mode === 'form' && record.content === null) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'mcp_elicitation_json_required'));
+      return;
+    }
+    const response = {
+      action,
+      content: action === 'accept' ? record.content : null,
+      _meta: null,
+    };
+    await this.app.respond(record.serverRequestId, response);
+    this.pendingMcpElicitations.delete(localId);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+    if (record.messageId !== null) {
+      await this.editMessage(
+        record.chatId,
+        record.messageId,
+        renderMcpElicitationMessage(locale, record, action),
+        [],
+      );
+    }
   }
 
   private async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
@@ -1454,6 +1906,37 @@ export class BridgeSessionCore {
       reason: params.reason ? String(params.reason) : null,
       command: params.command ? String(params.command) : null,
       cwd: params.cwd ? String(params.cwd) : null,
+      payloadJson: null,
+      messageId: null,
+      createdAt: Date.now(),
+      resolvedAt: null,
+    };
+    this.store.savePendingApproval(record);
+    return record;
+  }
+
+  private createPermissionApprovalRecord(serverRequestId: string | number, params: any): PendingApprovalRecord {
+    const threadId = String(params.threadId);
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      throw new Error(`No chat binding found for thread ${threadId}`);
+    }
+    const record: PendingApprovalRecord = {
+      localId: crypto.randomBytes(8).toString('hex'),
+      serverRequestId: String(serverRequestId),
+      kind: 'permissions',
+      chatId: scopeId,
+      threadId,
+      turnId: String(params.turnId ?? ''),
+      itemId: String(params.itemId ?? ''),
+      approvalId: null,
+      reason: params.reason ? String(params.reason) : null,
+      command: null,
+      cwd: params.cwd ? String(params.cwd) : null,
+      payloadJson: JSON.stringify({
+        permissions: params.permissions ?? {},
+        startedAtMs: params.startedAtMs ?? null,
+      }),
       messageId: null,
       createdAt: Date.now(),
       resolvedAt: null,
@@ -1639,7 +2122,7 @@ export class BridgeSessionCore {
       return;
     }
     try {
-      await this.app.respond(approval.serverRequestId, { decision: 'decline' });
+      await this.app.respond(approval.serverRequestId, mapApprovalDecision(approval, 'deny'));
       this.store.markApprovalResolved(localId);
       await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
       const locale = this.localeForChat(approval.chatId);
@@ -2192,7 +2675,7 @@ export class BridgeSessionCore {
   }
 
   private async handleAuthReloadCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
       await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
       return;
     }
@@ -2240,6 +2723,313 @@ export class BridgeSessionCore {
     record.messageId = messageId;
   }
 
+  private async handleAccountCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const account = await this.app.readAccount();
+    const lines = [
+      t(locale, 'account_title'),
+      account
+        ? t(locale, 'account_current', {
+            value: [
+              formatCodexAccountLabel(account),
+              account.email,
+              account.planType ? formatPlanTypeLabel(account.planType) : null,
+            ].filter(Boolean).join(' · '),
+          })
+        : t(locale, 'account_not_signed_in'),
+    ];
+    lines.push(...await this.buildCodexUsageStatusLines(locale));
+    await this.sendMessage(scopeId, lines.join('\n'));
+  }
+
+  private async handleQuotaCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const lines = [t(locale, 'quota_title')];
+    lines.push(...await this.buildCodexUsageStatusLines(locale));
+    await this.sendMessage(scopeId, lines.join('\n'));
+  }
+
+  private async handleQuotaNudgeCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const creditType = args[0] === 'usage_limit' ? 'usage_limit' : args[0] === 'credits' ? 'credits' : null;
+    if (!creditType || args[1] !== 'confirm') {
+      await this.sendMessage(scopeId, t(locale, 'usage_quota_nudge'));
+      return;
+    }
+    await this.app.sendAddCreditsNudgeEmail(creditType);
+    await this.sendMessage(scopeId, t(locale, 'quota_nudge_sent'));
+  }
+
+  private async handleLoginDeviceCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const login = await this.app.startDeviceLogin();
+    const oldLoginId = this.pendingLoginsByScope.get(scopeId);
+    if (oldLoginId) {
+      this.pendingLoginScopesById.delete(oldLoginId);
+    }
+    this.pendingLoginsByScope.set(scopeId, login.loginId);
+    this.pendingLoginScopesById.set(login.loginId, scopeId);
+    await this.sendMessage(scopeId, [
+      t(locale, 'login_device_started'),
+      t(locale, 'login_url', { value: login.verificationUrl }),
+      t(locale, 'login_code', { value: login.userCode }),
+      t(locale, 'login_id', { value: login.loginId }),
+      t(locale, 'login_cancel_hint', { value: login.loginId }),
+    ].join('\n'));
+  }
+
+  private async handleLoginCancelCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const loginId = args[0]?.trim() || this.pendingLoginsByScope.get(scopeId) || null;
+    if (!loginId) {
+      await this.sendMessage(scopeId, t(locale, 'login_cancel_no_pending'));
+      return;
+    }
+    await this.app.cancelLogin(loginId);
+    this.pendingLoginsByScope.delete(scopeId);
+    this.pendingLoginScopesById.delete(loginId);
+    await this.sendMessage(scopeId, t(locale, 'login_cancelled'));
+  }
+
+  private async handleLogoutCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (args[0] !== 'confirm') {
+      await this.sendMessage(scopeId, t(locale, 'usage_logout'));
+      return;
+    }
+    await this.app.logoutAccount();
+    await this.sendMessage(scopeId, t(locale, 'logout_done'));
+  }
+
+  private async handleSteerCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
+    const text = args.join(' ').trim();
+    if (!text) {
+      await this.sendMessage(scopeId, t(locale, 'usage_steer'));
+      return;
+    }
+    const active = this.findActiveTurn(scopeId);
+    if (!active) {
+      await this.sendMessage(scopeId, t(locale, 'no_active_turn'));
+      return;
+    }
+    await this.app.steerTurn(active.threadId, active.turnId, [{
+      type: 'text',
+      text,
+      text_elements: [],
+    }]);
+    await this.sendMessage(scopeId, t(locale, 'steer_sent', { turnId: active.turnId }));
+  }
+
+  private async handleForkCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    const binding = await this.requireReadyBinding(scopeId, locale);
+    if (!binding) return;
+    const settings = this.store.getChatSettings(scopeId);
+    const access = this.resolveEffectiveAccess(scopeId, settings);
+    const session = await this.app.forkThread({
+      threadId: binding.threadId,
+      cwd: binding.cwd ?? this.config.defaultCwd,
+      approvalPolicy: access.approvalPolicy,
+      sandboxMode: access.sandboxMode,
+      model: settings?.model ?? null,
+      serviceTier: settings?.serviceTier ?? null,
+    });
+    const forkBinding = this.storeThreadSession(scopeId, session, 'replace');
+    const requestedName = args.join(' ').trim();
+    if (requestedName) {
+      await this.app.setThreadName(forkBinding.threadId, requestedName);
+    }
+    await this.sendMessage(scopeId, t(locale, 'thread_forked', { threadId: forkBinding.threadId }));
+  }
+
+  private async handleRollbackCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    const binding = await this.requireReadyBinding(scopeId, locale);
+    if (!binding) return;
+    const count = Number.parseInt(args[0] || '1', 10);
+    if (!Number.isFinite(count) || count < 1) {
+      await this.sendMessage(scopeId, t(locale, 'usage_rollback'));
+      return;
+    }
+    if (count > 1 && args[1] !== 'confirm') {
+      await this.sendMessage(scopeId, t(locale, 'rollback_confirm_required', { count }));
+      return;
+    }
+    await this.app.rollbackThread(binding.threadId, count);
+    await this.sendMessage(scopeId, t(locale, 'rollback_done', { count }));
+  }
+
+  private async handleRenameCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const name = args.join(' ').trim();
+    if (!name) {
+      await this.sendMessage(scopeId, t(locale, 'usage_rename'));
+      return;
+    }
+    const binding = await this.requireReadyBinding(scopeId, locale);
+    if (!binding) return;
+    await this.app.setThreadName(binding.threadId, name);
+    await this.sendMessage(scopeId, t(locale, 'rename_done', { name }));
+  }
+
+  private async handleCompactCommand(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
+    if (this.findActiveTurn(event.scopeId)) {
+      await this.sendMessage(event.scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    const binding = await this.requireReadyBinding(event.scopeId, locale);
+    if (!binding) return;
+    await this.app.compactThread(binding.threadId);
+    await this.sendMessage(event.scopeId, t(locale, 'compact_started'));
+  }
+
+  private async handleArchiveCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    const binding = this.store.getBinding(scopeId);
+    if (!binding) {
+      await this.sendMessage(scopeId, t(locale, 'watch_no_thread_bound'));
+      return;
+    }
+    await this.stopWatchingScopeThread(scopeId);
+    await this.app.archiveThread(binding.threadId);
+    this.store.clearBinding(scopeId);
+    this.attachedThreads.delete(attachedThreadKey(scopeId, binding.threadId));
+    await this.sendMessage(scopeId, t(locale, 'archive_done', { threadId: binding.threadId }));
+  }
+
+  private async handleUnarchiveCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const index = Number.parseInt(args[0] || '', 10);
+    if (!Number.isFinite(index)) {
+      await this.sendMessage(scopeId, t(locale, 'usage_unarchive'));
+      return;
+    }
+    const cached = this.store.getCachedThread(scopeId, index);
+    if (!cached || !cached.archived) {
+      await this.sendMessage(scopeId, t(locale, 'unknown_cached_thread'));
+      return;
+    }
+    await this.app.unarchiveThread(cached.threadId);
+    const binding = await this.bindCachedThread(scopeId, cached.threadId);
+    await this.sendMessage(scopeId, t(locale, 'unarchive_done', { threadId: binding.threadId }));
+  }
+
+  private async handleReviewCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (this.findActiveTurn(event.scopeId)) {
+      await this.sendMessage(event.scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    const binding = await this.requireReadyBinding(event.scopeId, locale);
+    if (!binding) return;
+    const target = parseReviewTarget(args);
+    if (!target) {
+      await this.sendMessage(event.scopeId, t(locale, 'usage_review'));
+      return;
+    }
+    const result = await this.app.startReview(binding.threadId, target, 'inline');
+    await this.sendMessage(event.scopeId, t(locale, 'review_started', { turnId: result.turnId || t(locale, 'unknown') }));
+    if (result.turnId) {
+      await this.registerActiveTurn(
+        event.scopeId,
+        event.chatId,
+        event.chatType,
+        event.topicId,
+        result.reviewThreadId,
+        result.turnId,
+        0,
+      );
+    }
+  }
+
+  private async handleDiffCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const diff = this.latestTurnDiffs.get(scopeId);
+    if (!diff?.diff.trim()) {
+      await this.sendMessage(scopeId, t(locale, 'diff_unavailable'));
+      return;
+    }
+    await this.sendMessage(scopeId, formatDiffMessage(locale, diff.diff));
+  }
+
+  private async handleSkillsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const forceReload = args[0]?.toLowerCase() === 'reload';
+    const query = (forceReload ? args.slice(1) : args).join(' ').trim();
+    const entries = await this.listSkillsForScope(scopeId, forceReload);
+    await this.sendMessage(scopeId, formatSkillsMessage(locale, entries, query || null, forceReload));
+  }
+
+  private async handleSkillCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const name = args.join(' ').trim();
+    if (!name) {
+      await this.sendMessage(scopeId, t(locale, 'usage_skill'));
+      return;
+    }
+    const skill = findSkill(await this.listSkillsForScope(scopeId, false), name);
+    if (!skill) {
+      await this.sendMessage(scopeId, t(locale, 'skill_not_found', { name }));
+      return;
+    }
+    await this.sendMessage(scopeId, formatSkillDetailMessage(locale, skill));
+  }
+
+  private async handleSkillConfigCommand(scopeId: string, locale: AppLocale, args: string[], enabled: boolean): Promise<void> {
+    const name = args.join(' ').trim();
+    if (!name) {
+      await this.sendMessage(scopeId, enabled ? t(locale, 'usage_skill_enable') : t(locale, 'usage_skill_disable'));
+      return;
+    }
+    await this.app.writeSkillConfig({ name }, enabled);
+    await this.sendMessage(scopeId, t(locale, enabled ? 'skill_enabled' : 'skill_disabled', { name }));
+  }
+
+  private async handleMcpCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const detail = args[0]?.toLowerCase() === 'brief' ? 'toolsAndAuthOnly' : 'full';
+    const statuses = await this.app.listMcpServerStatus(detail);
+    await this.sendMessage(scopeId, formatMcpStatusMessage(locale, statuses));
+  }
+
+  private async handleMcpReloadCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    await this.app.reloadMcpServers();
+    await this.sendMessage(scopeId, t(locale, 'mcp_reload_done'));
+  }
+
+  private async handleMcpLoginCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const name = args.join(' ').trim();
+    if (!name) {
+      await this.sendMessage(scopeId, t(locale, 'usage_mcp_login'));
+      return;
+    }
+    const url = await this.app.loginMcpServer(name);
+    await this.sendMessage(scopeId, t(locale, 'mcp_login_started', { name, url: url || t(locale, 'unknown') }));
+  }
+
+  private async handleMcpResourceCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const [server, ...uriParts] = args;
+    const uri = uriParts.join(' ').trim();
+    if (!server || !uri) {
+      await this.sendMessage(scopeId, t(locale, 'usage_mcp_resource'));
+      return;
+    }
+    const binding = this.store.getBinding(scopeId);
+    const contents = await this.app.readMcpResource(server, uri, binding?.threadId ?? null);
+    await this.sendMessage(scopeId, formatMcpResourceMessage(locale, server, uri, contents));
+  }
+
+  private async listSkillsForScope(scopeId: string, forceReload: boolean): Promise<CodexSkillsListEntry[]> {
+    const binding = this.store.getBinding(scopeId);
+    return this.app.listSkills(binding?.cwd ?? this.config.defaultCwd, forceReload);
+  }
+
+  private async requireReadyBinding(scopeId: string, locale: AppLocale): Promise<ThreadBinding | null> {
+    const binding = this.store.getBinding(scopeId);
+    if (!binding) {
+      await this.sendMessage(scopeId, t(locale, 'watch_no_thread_bound'));
+      return null;
+    }
+    return this.ensureThreadReady(scopeId, binding);
+  }
+
   private async handleAuthSwitchCallback(
     event: TelegramCallbackEvent,
     localId: string,
@@ -2255,7 +3045,7 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
       return;
     }
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_blocked_active'));
       return;
     }
@@ -2277,7 +3067,7 @@ export class BridgeSessionCore {
     if (!this.pendingAuthRotation || this.authRotationInProgress) {
       return false;
     }
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
       return false;
     }
 
@@ -2643,6 +3433,11 @@ export class BridgeSessionCore {
 
   private async handleThreadOpenCallback(event: TelegramCallbackEvent, threadId: string, locale: AppLocale): Promise<void> {
     const scopeId = event.scopeId;
+    const cached = this.store.listCachedThreads(scopeId).find(thread => thread.threadId === threadId);
+    if (cached?.archived) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_is_archived_use_unarchive'));
+      return;
+    }
     await this.stopWatchingScopeThread(scopeId, threadId);
     let binding: ThreadBinding;
     try {
@@ -2670,11 +3465,12 @@ export class BridgeSessionCore {
       const state = this.threadListPresentationState.get(scopeId) ?? null;
       const listState: ThreadListPresentationState = state ?? {
         offset: 0,
-        pageSize: Math.max(threads.length, 1),
-        hasPreviousPage: false,
-        hasNextPage: false,
-        searchTerm: null,
-      };
+      pageSize: Math.max(threads.length, 1),
+      hasPreviousPage: false,
+      hasNextPage: false,
+      searchTerm: null,
+      archived: threads.some(thread => thread.archived),
+    };
       const text = formatThreadsMessage(locale, threadLikes, binding.threadId, listState.searchTerm, listState);
       const keyboard = parseWeixinBridgeScope(scopeId)
         ? buildThreadsKeyboard(locale, threadLikes)
@@ -2808,6 +3604,7 @@ export class BridgeSessionCore {
       hasPreviousPage: false,
       hasNextPage: false,
       searchTerm: null,
+      archived: false,
     };
     const nextOffset = action === 'prev'
       ? Math.max(0, state.offset - state.pageSize)
@@ -2815,7 +3612,7 @@ export class BridgeSessionCore {
         ? state.offset + state.pageSize
         : 0;
     const nextSearchTerm = action === 'clear' ? null : state.searchTerm;
-    await this.showThreadsPanel(event.scopeId, event.messageId, nextSearchTerm, locale, { offset: nextOffset });
+    await this.showThreadsPanel(event.scopeId, event.messageId, nextSearchTerm, locale, { offset: nextOffset }, Boolean(state.archived));
     await this.messaging.answerCallback(
       event.callbackQueryId,
       t(locale, action === 'clear' ? 'threads_filter_cleared_short' : 'decision_recorded'),
@@ -2828,6 +3625,7 @@ export class BridgeSessionCore {
     searchTerm?: string | null,
     locale = this.localeForChat(scopeId),
     options: { offset?: number } = {},
+    archived = false,
   ): Promise<void> {
     const binding = this.store.getBinding(scopeId);
     const pageSize = Math.max(1, this.config.threadListLimit);
@@ -2835,6 +3633,7 @@ export class BridgeSessionCore {
     const threads = await this.app.listThreads({
       limit: offset + pageSize + 1,
       searchTerm: searchTerm ?? null,
+      archived,
     });
     const visible = threads.slice(offset, offset + pageSize);
     const hasNextPage = threads.length > offset + visible.length;
@@ -2844,6 +3643,7 @@ export class BridgeSessionCore {
       hasPreviousPage: offset > 0,
       hasNextPage,
       searchTerm: searchTerm ?? null,
+      archived,
     };
     this.threadListPresentationState.set(scopeId, presentationState);
 
@@ -2855,6 +3655,7 @@ export class BridgeSessionCore {
       cwd: thread.cwd,
       modelProvider: thread.modelProvider,
       status: thread.status,
+      archived,
       updatedAt: thread.updatedAt,
     }));
     const forDisplay = visible.map((thread, index) => ({
@@ -3972,6 +4773,196 @@ function escapeTelegramHtml(value: string): string {
     .replaceAll('>', '&gt;');
 }
 
+function parseReviewTarget(args: string[]): ReviewTarget | null {
+  if (args.length === 0) {
+    return { type: 'uncommittedChanges' };
+  }
+  const [kind, ...rest] = args;
+  if (kind === 'base') {
+    const branch = rest.join(' ').trim();
+    return branch ? { type: 'baseBranch', branch } : null;
+  }
+  if (kind === 'commit') {
+    const sha = rest[0]?.trim();
+    return sha ? { type: 'commit', sha, title: rest.slice(1).join(' ').trim() || null } : null;
+  }
+  if (kind === 'custom') {
+    const instructions = rest.join(' ').trim();
+    return instructions ? { type: 'custom', instructions } : null;
+  }
+  return { type: 'custom', instructions: args.join(' ').trim() };
+}
+
+function findSkill(entries: CodexSkillsListEntry[], name: string): CodexSkillMetadata | null {
+  const normalized = name.trim().toLowerCase();
+  for (const entry of entries) {
+    const skill = entry.skills.find(candidate =>
+      candidate.name.toLowerCase() === normalized
+      || candidate.displayName?.toLowerCase() === normalized);
+    if (skill) return skill;
+  }
+  return null;
+}
+
+function formatSkillsMessage(locale: AppLocale, entries: CodexSkillsListEntry[], query: string | null, forceReload: boolean): string {
+  const skills = entries.flatMap(entry => entry.skills.map(skill => ({ cwd: entry.cwd, skill })))
+    .filter(entry => !query
+      || entry.skill.name.toLowerCase().includes(query.toLowerCase())
+      || entry.skill.description.toLowerCase().includes(query.toLowerCase()));
+  const lines = [
+    t(locale, 'skills_title'),
+    forceReload ? t(locale, 'skills_reloaded') : null,
+    query ? t(locale, 'skills_filter', { value: query }) : null,
+  ].filter((line): line is string => Boolean(line));
+  if (skills.length === 0) {
+    lines.push(t(locale, 'skills_empty'));
+  } else {
+    for (const { skill } of skills.slice(0, 30)) {
+      const enabled = skill.enabled ? 'on' : 'off';
+      const label = skill.displayName || skill.name;
+      lines.push(`${skill.enabled ? '*' : '-'} ${label} (${enabled})`);
+      const desc = skill.shortDescription || skill.description;
+      if (desc) {
+        lines.push(`  ${truncateInline(desc, 120)}`);
+      }
+    }
+    if (skills.length > 30) {
+      lines.push(t(locale, 'list_truncated', { count: skills.length - 30 }));
+    }
+  }
+  const errors = entries.flatMap(entry => entry.errors);
+  if (errors.length > 0) {
+    lines.push('', t(locale, 'skills_errors'));
+    lines.push(...errors.slice(0, 5).map(error => `- ${truncateInline(error, 160)}`));
+  }
+  return lines.join('\n');
+}
+
+function formatSkillDetailMessage(locale: AppLocale, skill: CodexSkillMetadata): string {
+  return [
+    t(locale, 'skill_title', { name: skill.displayName || skill.name }),
+    t(locale, 'skill_name', { value: skill.name }),
+    t(locale, 'skill_enabled_state', { value: skill.enabled ? t(locale, 'yes') : t(locale, 'no') }),
+    t(locale, 'skill_scope', { value: skill.scope || t(locale, 'unknown') }),
+    t(locale, 'skill_path', { value: skill.path || t(locale, 'unknown') }),
+    '',
+    skill.description || skill.shortDescription || t(locale, 'empty'),
+    skill.defaultPrompt ? `\n${t(locale, 'skill_default_prompt', { value: skill.defaultPrompt })}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function formatMcpStatusMessage(locale: AppLocale, statuses: CodexMcpServerStatus[]): string {
+  const lines = [t(locale, 'mcp_title')];
+  if (statuses.length === 0) {
+    lines.push(t(locale, 'mcp_empty'));
+    return lines.join('\n');
+  }
+  for (const status of statuses) {
+    lines.push(`${status.name}: ${status.authStatus}`);
+    lines.push(`  tools: ${status.toolNames.length ? status.toolNames.slice(0, 12).join(', ') : '-'}`);
+    if (status.resourceUris.length > 0) {
+      lines.push(`  resources: ${status.resourceUris.slice(0, 5).join(', ')}`);
+    }
+    if (status.resourceTemplateUris.length > 0) {
+      lines.push(`  templates: ${status.resourceTemplateUris.slice(0, 5).join(', ')}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatMcpResourceMessage(
+  locale: AppLocale,
+  server: string,
+  uri: string,
+  contents: CodexMcpResourceContent[],
+): string {
+  const lines = [t(locale, 'mcp_resource_title', { server, uri })];
+  if (contents.length === 0) {
+    lines.push(t(locale, 'mcp_resource_empty'));
+    return lines.join('\n');
+  }
+  for (const content of contents.slice(0, 5)) {
+    lines.push(`- ${content.type}${content.mimeType ? ` (${content.mimeType})` : ''}${content.uri ? ` ${content.uri}` : ''}`);
+    if (content.text) {
+      lines.push(truncateInline(content.text, 1500));
+    } else if (content.blob) {
+      lines.push(t(locale, 'mcp_resource_blob', { size: content.blob.length }));
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatDiffMessage(locale: AppLocale, diff: string): string {
+  const clipped = diff.length > 3500 ? `${diff.slice(0, 3500)}\n...` : diff;
+  return `${t(locale, 'diff_title')}\n${clipped}`;
+}
+
+function renderMcpElicitationMessage(
+  locale: AppLocale,
+  record: PendingMcpElicitation,
+  decision?: McpElicitationAction,
+): string {
+  const lines = [
+    t(locale, 'mcp_elicitation_requested'),
+    t(locale, 'mcp_server_name', { value: record.serverName }),
+    t(locale, 'line_thread', { value: record.threadId }),
+  ];
+  if (record.turnId) lines.push(t(locale, 'line_turn', { value: record.turnId }));
+  lines.push(t(locale, 'mcp_elicitation_message', { value: record.message || t(locale, 'empty') }));
+  if (record.url) {
+    lines.push(t(locale, 'mcp_elicitation_url', { value: record.url }));
+  }
+  if (record.mode === 'form') {
+    lines.push(t(locale, 'mcp_elicitation_schema', { value: truncateInline(JSON.stringify(record.requestedSchema ?? {}), 1200) }));
+    lines.push(record.content === null
+      ? t(locale, 'mcp_elicitation_reply_json')
+      : t(locale, 'mcp_elicitation_json_ready'));
+  }
+  if (decision) {
+    lines.push(t(locale, 'line_decision', { value: decision }));
+  }
+  return lines.join('\n');
+}
+
+function mcpElicitationKeyboard(locale: AppLocale, record: PendingMcpElicitation): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: t(locale, 'button_accept'), callback_data: `mcpel:${record.localId}:accept` },
+    { text: t(locale, 'button_decline'), callback_data: `mcpel:${record.localId}:decline` },
+    { text: t(locale, 'button_cancel'), callback_data: `mcpel:${record.localId}:cancel` },
+  ]];
+}
+
+function formatPermissionRequestSummary(locale: AppLocale, permissions: any): string {
+  const lines: string[] = [];
+  if (permissions?.network?.enabled !== undefined && permissions.network.enabled !== null) {
+    lines.push(t(locale, 'permission_network', { value: permissions.network.enabled ? t(locale, 'yes') : t(locale, 'no') }));
+  }
+  const fsPerms = permissions?.fileSystem;
+  if (fsPerms?.read?.length) {
+    lines.push(t(locale, 'permission_read_paths', { value: fsPerms.read.slice(0, 5).join(', ') }));
+  }
+  if (fsPerms?.write?.length) {
+    lines.push(t(locale, 'permission_write_paths', { value: fsPerms.write.slice(0, 5).join(', ') }));
+  }
+  if (Array.isArray(fsPerms?.entries) && fsPerms.entries.length > 0) {
+    lines.push(t(locale, 'permission_entries', { value: truncateInline(JSON.stringify(fsPerms.entries.slice(0, 5)), 500) }));
+  }
+  return lines.join('\n');
+}
+
+function resolveScopeMessageTarget(scopeId: string): { chatId: string; chatType: string; topicId: number | null } | null {
+  if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+    const parsed = parseWeixinBridgeScope(scopeId);
+    return parsed ? { chatId: parsed.fromUserId, chatType: 'private', topicId: null } : null;
+  }
+  try {
+    const parsed = parseTelegramTargetFromBridgeScope(scopeId);
+    return { chatId: parsed.chatId, chatType: parsed.topicId === null ? 'private' : 'supergroup', topicId: parsed.topicId };
+  } catch {
+    return null;
+  }
+}
+
 function approvalKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
   return [[
     { text: t(locale, 'button_allow'), callback_data: `approval:${localId}:accept` },
@@ -4004,7 +4995,11 @@ function whereKeyboard(locale: AppLocale, hasBinding: boolean): Array<Array<{ te
 function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord, decision?: ApprovalAction): string {
   const lines = [
     t(locale, 'approval_requested', {
-      kind: record.kind === 'fileChange' ? t(locale, 'approval_kind_fileChange') : t(locale, 'approval_kind_command'),
+      kind: record.kind === 'fileChange'
+        ? t(locale, 'approval_kind_fileChange')
+        : record.kind === 'permissions'
+          ? t(locale, 'approval_kind_permissions')
+          : t(locale, 'approval_kind_command'),
     }),
     t(locale, 'line_thread', { value: record.threadId }),
     t(locale, 'line_turn', { value: record.turnId }),
@@ -4012,6 +5007,13 @@ function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord,
   if (record.command) lines.push(t(locale, 'line_command', { value: record.command }));
   if (record.cwd) lines.push(t(locale, 'line_cwd', { value: record.cwd }));
   if (record.reason) lines.push(t(locale, 'line_reason', { value: record.reason }));
+  if (record.kind === 'permissions') {
+    const permissions = parseApprovalPayload(record.payloadJson)?.permissions ?? {};
+    const summary = formatPermissionRequestSummary(locale, permissions);
+    if (summary) {
+      lines.push(summary);
+    }
+  }
   if (decision) {
     const decisionKey = decision === 'accept'
       ? 'approval_decision_accept'
@@ -4023,13 +5025,43 @@ function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord,
   return lines.join('\n');
 }
 
-function mapApprovalDecision(action: ApprovalAction): unknown {
+function mapApprovalDecision(record: PendingApprovalRecord, action: ApprovalAction): unknown {
+  if (record.kind === 'permissions') {
+    const requested = parseApprovalPayload(record.payloadJson)?.permissions ?? {};
+    if (action === 'deny') {
+      return { permissions: {}, scope: 'turn' };
+    }
+    return {
+      permissions: grantedPermissionsFromRequest(requested),
+      scope: action === 'session' ? 'session' : 'turn',
+    };
+  }
   const decision = action === 'accept'
     ? 'accept'
     : action === 'session'
       ? 'acceptForSession'
       : 'decline';
   return { decision };
+}
+
+function parseApprovalPayload(payloadJson: string | null): any {
+  if (!payloadJson) return null;
+  try {
+    return JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+}
+
+function grantedPermissionsFromRequest(requested: any): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  if (requested?.network) {
+    result.network = requested.network;
+  }
+  if (requested?.fileSystem) {
+    result.fileSystem = requested.fileSystem;
+  }
+  return result;
 }
 
 function toErrorMeta(error: unknown): Record<string, unknown> {

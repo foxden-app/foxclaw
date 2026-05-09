@@ -12,10 +12,15 @@ import type {
   CodexCollaborationModePreset,
   CodexCreditsSnapshot,
   CodexEffectiveConfig,
+  CodexLoginDeviceCode,
+  CodexMcpResourceContent,
+  CodexMcpServerStatus,
   CodexRateLimitSnapshot,
   CodexRateLimitWindow,
+  CodexSkillsListEntry,
   ModelInfo,
   ReasoningEffortValue,
+  ReviewTarget,
   SandboxModeValue,
   ThreadSessionState,
   ThreadStatusKind,
@@ -42,6 +47,7 @@ export interface JsonRpcServerRequest {
 interface ListThreadsOptions {
   limit: number;
   searchTerm?: string | null;
+  archived?: boolean;
 }
 
 interface StartThreadOptions {
@@ -138,7 +144,7 @@ export class CodexAppClient extends EventEmitter {
       limit: options.limit,
       sortKey: 'updated_at',
       searchTerm: options.searchTerm ?? null,
-      archived: false,
+      archived: options.archived ?? false,
     });
     const rows = Array.isArray((result as any).data) ? (result as any).data : [];
     return rows.map(mapThread);
@@ -216,6 +222,68 @@ export class CodexAppClient extends EventEmitter {
     return (result as any).turn;
   }
 
+  async steerTurn(threadId: string, expectedTurnId: string, input: TurnInput[]): Promise<{ turnId: string }> {
+    const result = await this.request('turn/steer', { threadId, expectedTurnId, input });
+    return { turnId: String((result as any)?.turnId ?? expectedTurnId) };
+  }
+
+  async forkThread(options: {
+    threadId: string;
+    cwd: string | null;
+    approvalPolicy: string;
+    sandboxMode: SandboxModeValue;
+    model: string | null;
+    serviceTier?: string | null;
+  }): Promise<ThreadSessionState> {
+    const params: Record<string, unknown> = {
+      threadId: options.threadId,
+      cwd: options.cwd,
+      approvalPolicy: options.approvalPolicy,
+      sandbox: options.sandboxMode,
+      model: options.model,
+      modelProvider: null,
+      threadSource: null,
+      ephemeral: false,
+    };
+    if (options.serviceTier !== undefined) {
+      params.serviceTier = options.serviceTier;
+    }
+    const result = await this.request('thread/fork', params);
+    return mapThreadSessionState(result);
+  }
+
+  async rollbackThread(threadId: string, numTurns: number): Promise<AppThreadSnapshot | null> {
+    const result = await this.request('thread/rollback', { threadId, numTurns });
+    const thread = (result as any)?.thread;
+    return thread ? mapThreadSnapshot(thread) : null;
+  }
+
+  async setThreadName(threadId: string, name: string): Promise<void> {
+    await this.request('thread/name/set', { threadId, name });
+  }
+
+  async compactThread(threadId: string): Promise<void> {
+    await this.request('thread/compact/start', { threadId });
+  }
+
+  async archiveThread(threadId: string): Promise<void> {
+    await this.request('thread/archive', { threadId });
+  }
+
+  async unarchiveThread(threadId: string): Promise<AppThread | null> {
+    const result = await this.request('thread/unarchive', { threadId });
+    const thread = (result as any)?.thread;
+    return thread ? mapThread(thread) : null;
+  }
+
+  async startReview(threadId: string, target: ReviewTarget, delivery: 'inline' | 'detached' = 'inline'): Promise<{ turnId: string; reviewThreadId: string }> {
+    const result = await this.request('review/start', { threadId, target, delivery });
+    return {
+      turnId: String((result as any)?.turn?.id ?? ''),
+      reviewThreadId: String((result as any)?.reviewThreadId ?? threadId),
+    };
+  }
+
   async listModels(): Promise<ModelInfo[]> {
     const models: ModelInfo[] = [];
     let cursor: string | null = null;
@@ -240,6 +308,31 @@ export class CodexAppClient extends EventEmitter {
       planType: typeof account.planType === 'string' ? account.planType : null,
       requiresOpenaiAuth: Boolean((result as any)?.requiresOpenaiAuth),
     };
+  }
+
+  async startDeviceLogin(): Promise<CodexLoginDeviceCode> {
+    const result = await this.request('account/login/start', { type: 'chatgptDeviceCode' });
+    if ((result as any)?.type !== 'chatgptDeviceCode') {
+      throw new Error(`Unexpected login response: ${JSON.stringify(result)}`);
+    }
+    return {
+      type: 'chatgptDeviceCode',
+      loginId: String((result as any).loginId),
+      verificationUrl: String((result as any).verificationUrl),
+      userCode: String((result as any).userCode),
+    };
+  }
+
+  async cancelLogin(loginId: string): Promise<void> {
+    await this.request('account/login/cancel', { loginId });
+  }
+
+  async logoutAccount(): Promise<void> {
+    await this.request('account/logout', undefined);
+  }
+
+  async sendAddCreditsNudgeEmail(creditType: 'credits' | 'usage_limit'): Promise<void> {
+    await this.request('account/sendAddCreditsNudgeEmail', { creditType });
   }
 
   async readAccountRateLimits(): Promise<CodexAccountRateLimits | null> {
@@ -273,6 +366,54 @@ export class CodexAppClient extends EventEmitter {
     const result = await this.request('collaborationMode/list', {});
     const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
     return rows.map(mapCollaborationModePreset);
+  }
+
+  async listSkills(cwd: string | null, forceReload = false): Promise<CodexSkillsListEntry[]> {
+    const result = await this.request('skills/list', {
+      cwds: cwd ? [cwd] : [],
+      forceReload,
+    });
+    const rows = Array.isArray((result as any)?.data) ? (result as any).data : [];
+    return rows.map(mapSkillsListEntry);
+  }
+
+  async writeSkillConfig(selector: { name?: string | null; path?: string | null }, enabled: boolean): Promise<void> {
+    await this.request('skills/config/write', {
+      name: selector.name ?? null,
+      path: selector.path ?? null,
+      enabled,
+    });
+  }
+
+  async listMcpServerStatus(detail: 'full' | 'toolsAndAuthOnly' = 'full'): Promise<CodexMcpServerStatus[]> {
+    const rows: CodexMcpServerStatus[] = [];
+    let cursor: string | null = null;
+    do {
+      const result = await this.request('mcpServerStatus/list', { cursor, limit: 100, detail });
+      const data = Array.isArray((result as any)?.data) ? (result as any).data : [];
+      rows.push(...data.map(mapMcpServerStatus));
+      cursor = typeof (result as any)?.nextCursor === 'string' ? (result as any).nextCursor : null;
+    } while (cursor);
+    return rows;
+  }
+
+  async reloadMcpServers(): Promise<void> {
+    await this.request('config/mcpServer/reload', undefined);
+  }
+
+  async loginMcpServer(name: string): Promise<string> {
+    const result = await this.request('mcpServer/oauth/login', { name });
+    return String((result as any)?.authorizationUrl ?? (result as any)?.authorization_url ?? '');
+  }
+
+  async readMcpResource(server: string, uri: string, threadId?: string | null): Promise<CodexMcpResourceContent[]> {
+    const result = await this.request('mcpServer/resource/read', {
+      server,
+      uri,
+      threadId: threadId ?? null,
+    });
+    const contents = Array.isArray((result as any)?.contents) ? (result as any).contents : [];
+    return contents.map(mapMcpResourceContent);
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
@@ -520,10 +661,10 @@ function mapThreadStatus(raw: any): ThreadStatusKind {
 function mapThreadSessionState(raw: any): ThreadSessionState {
   return {
     thread: mapThread(raw.thread),
-    model: String(raw.model),
-    modelProvider: String(raw.modelProvider),
+    model: String(raw.model ?? ''),
+    modelProvider: String(raw.modelProvider ?? ''),
     reasoningEffort: raw.reasoningEffort === null ? null : String(raw.reasoningEffort) as ReasoningEffortValue,
-    cwd: String(raw.cwd),
+    cwd: String(raw.cwd ?? ''),
   };
 }
 
@@ -597,6 +738,90 @@ function mapCollaborationModePreset(raw: any): CodexCollaborationModePreset {
     model: typeof raw?.model === 'string' ? raw.model : null,
     reasoningEffort: normalizeReasoningEffort(raw?.reasoning_effort),
   };
+}
+
+function mapSkillsListEntry(raw: any): CodexSkillsListEntry {
+  const skills = Array.isArray(raw?.skills) ? raw.skills : [];
+  const errors = Array.isArray(raw?.errors) ? raw.errors : [];
+  return {
+    cwd: String(raw?.cwd ?? ''),
+    skills: skills.map(mapSkillMetadata),
+    errors: errors.map((entry: unknown) => formatRawError(entry)),
+  };
+}
+
+function mapSkillMetadata(raw: any) {
+  const iface = raw?.interface && typeof raw.interface === 'object' ? raw.interface : {};
+  return {
+    name: String(raw?.name ?? ''),
+    description: String(raw?.description ?? ''),
+    shortDescription: typeof raw?.shortDescription === 'string' ? raw.shortDescription : null,
+    path: String(raw?.path ?? ''),
+    scope: String(raw?.scope ?? ''),
+    enabled: Boolean(raw?.enabled),
+    displayName: typeof iface.displayName === 'string' ? iface.displayName : null,
+    defaultPrompt: typeof iface.defaultPrompt === 'string' ? iface.defaultPrompt : null,
+  };
+}
+
+function mapMcpServerStatus(raw: any): CodexMcpServerStatus {
+  const tools = raw?.tools && typeof raw.tools === 'object' ? Object.keys(raw.tools) : [];
+  const resources = Array.isArray(raw?.resources) ? raw.resources : [];
+  const templates = Array.isArray(raw?.resourceTemplates) ? raw.resourceTemplates : [];
+  return {
+    name: String(raw?.name ?? ''),
+    authStatus: formatMcpAuthStatus(raw?.authStatus),
+    toolNames: tools.sort((left, right) => left.localeCompare(right)),
+    resourceUris: resources
+      .map((entry: any) => typeof entry?.uri === 'string' ? entry.uri : null)
+      .filter((entry: string | null): entry is string => entry !== null),
+    resourceTemplateUris: templates
+      .map((entry: any) => typeof entry?.uriTemplate === 'string'
+        ? entry.uriTemplate
+        : typeof entry?.uri_template === 'string'
+          ? entry.uri_template
+          : null)
+      .filter((entry: string | null): entry is string => entry !== null),
+  };
+}
+
+function mapMcpResourceContent(raw: any): CodexMcpResourceContent {
+  return {
+    type: typeof raw?.text === 'string' ? 'text' : typeof raw?.blob === 'string' ? 'blob' : 'unknown',
+    text: typeof raw?.text === 'string' ? raw.text : null,
+    blob: typeof raw?.blob === 'string' ? raw.blob : null,
+    mimeType: typeof raw?.mimeType === 'string' ? raw.mimeType : null,
+    uri: typeof raw?.uri === 'string' ? raw.uri : null,
+  };
+}
+
+function formatMcpAuthStatus(raw: any): string {
+  if (raw === null || raw === undefined) {
+    return 'unknown';
+  }
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (typeof raw?.status === 'string') {
+    return raw.status;
+  }
+  if (typeof raw?.type === 'string') {
+    return raw.type;
+  }
+  return JSON.stringify(raw);
+}
+
+function formatRawError(raw: unknown): string {
+  if (raw instanceof Error) {
+    return raw.message;
+  }
+  if (typeof raw === 'string') {
+    return raw;
+  }
+  if (raw && typeof raw === 'object' && 'message' in raw && typeof (raw as any).message === 'string') {
+    return (raw as any).message;
+  }
+  return JSON.stringify(raw);
 }
 
 function normalizeCollaborationMode(value: unknown): 'default' | 'plan' | null {

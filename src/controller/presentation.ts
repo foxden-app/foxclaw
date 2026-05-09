@@ -44,6 +44,7 @@ export interface ThreadListPresentationState {
   hasPreviousPage: boolean;
   hasNextPage: boolean;
   searchTerm: string | null;
+  archived?: boolean;
 }
 
 export function formatThreadsMessage(
@@ -62,7 +63,7 @@ export function formatThreadsMessage(
     ? threads.find(thread => thread.threadId === currentThreadId) ?? null
     : null;
   const headerLines = [
-    t(locale, 'threads_recent_title'),
+    t(locale, listState?.archived ? 'threads_archived_title' : 'threads_recent_title'),
     t(locale, 'threads_tap_to_open'),
   ];
   if (searchTerm) {

@@ -122,3 +122,20 @@ Acceptance criteria:
 - [x] Active turns block model, effort, Fast, and mode buttons while allowing access changes
 - [x] `/status`, `/where`, and Weixin copy-paste helpers surface Fast state
 - [x] Regression tests cover service-tier resolution, storage migration, panel presentation, callbacks, command aliases, and turn/start propagation
+
+## Phase 10: App-Server Priority Bridge
+
+- [x] Add active-turn steering with `/steer <message>` backed by `turn/steer`
+- [x] Add native account and quota controls: `/account`, `/quota`, `/quota_nudge`, `/login_device`, `/login_cancel`, and guarded `/logout confirm`
+- [x] Add Skills management: `/skills`, `/skill <name>`, `/skill_enable <name>`, `/skill_disable <name>`, plus `skills/changed` notifications
+- [x] Add MCP management: `/mcp`, `/mcp_reload`, `/mcp_login <server>`, `/mcp_resource <server> <uri>`, startup/OAuth notifications, and MCP elicitation replies
+- [x] Add granular permission approvals for `item/permissions/requestApproval`
+- [x] Add thread and review controls: `/fork`, `/undo`/`/rollback`, `/rename`, `/compact`, `/archive`, `/threads archived`, `/unarchive`, `/review`, and `/diff`
+- [x] Keep implementation anchors in `src/codex_app/client.ts`, `src/controller/controller.ts`, `src/types.ts`, and `src/store/database.ts`
+
+Acceptance criteria:
+
+- [x] Telegram can trigger the priority app-server APIs without desktop Codex App interaction
+- [x] Risky operations keep explicit commands or confirmation words (`/logout confirm`, `/quota_nudge ... confirm`)
+- [x] Server requests that can block active turns (`permissions` and MCP elicitation) have Telegram-side response paths
+- [x] Regression tests cover account/login, steering, permissions approval, MCP elicitation, Skills/MCP panels, and thread lifecycle commands

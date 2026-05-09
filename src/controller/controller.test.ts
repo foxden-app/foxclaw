@@ -213,6 +213,45 @@ function createControllerRig() {
       { name: 'Plan', mode: 'plan', model: null, reasoningEffort: 'medium' },
       { name: 'Default', mode: 'default', model: null, reasoningEffort: null },
     ],
+    steerTurn: async () => ({ turnId: 'turn-1' }),
+    startDeviceLogin: async () => ({
+      type: 'chatgptDeviceCode',
+      loginId: 'login-1',
+      verificationUrl: 'https://auth.example/device',
+      userCode: 'ABCD-1234',
+    }),
+    cancelLogin: async () => {},
+    logoutAccount: async () => {},
+    sendAddCreditsNudgeEmail: async () => {},
+    forkThread: async () => ({
+      thread: {
+        threadId: 'thread-fork',
+        name: null,
+        preview: 'fork',
+        cwd: tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: tempDir,
+    }),
+    rollbackThread: async () => null,
+    setThreadName: async () => {},
+    compactThread: async () => {},
+    archiveThread: async () => {},
+    unarchiveThread: async () => null,
+    startReview: async () => ({ turnId: 'turn-review', reviewThreadId: 'thread-1' }),
+    listSkills: async () => [],
+    writeSkillConfig: async () => {},
+    listMcpServerStatus: async () => [],
+    reloadMcpServers: async () => {},
+    loginMcpServer: async () => 'https://mcp.example/auth',
+    readMcpResource: async () => [],
   };
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
   const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound);
@@ -857,6 +896,247 @@ test('requestUserInput is bridged through Telegram callbacks', async (t) => {
   }]);
   assert.equal(rig.callbackAnswers[0], 'Answer recorded');
   assert.match(rig.editedMessages[0]!, /Submitted to Codex\./);
+});
+
+test('/steer sends same-turn input to the active Codex turn', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const calls: any[] = [];
+  (rig.controller as any).app.steerTurn = async (threadId: string, turnId: string, input: any[]) => {
+    calls.push({ threadId, turnId, input });
+    return { turnId };
+  };
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleCommand(createEvent('/steer focus tests'), 'en', 'steer', ['focus', 'tests']);
+
+  assert.deepEqual(calls, [{
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    input: [{ type: 'text', text: 'focus tests', text_elements: [] }],
+  }]);
+  assert.match(rig.sentMessages.at(-1)!, /Steered active turn turn-1/);
+});
+
+test('device login, cancel, and logout commands call app-server auth APIs', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const calls: string[] = [];
+  (rig.controller as any).app.startDeviceLogin = async () => {
+    calls.push('start');
+    return {
+      type: 'chatgptDeviceCode',
+      loginId: 'login-1',
+      verificationUrl: 'https://auth.example/device',
+      userCode: 'CODE-1',
+    };
+  };
+  (rig.controller as any).app.cancelLogin = async (loginId: string) => {
+    calls.push(`cancel:${loginId}`);
+  };
+  (rig.controller as any).app.logoutAccount = async () => {
+    calls.push('logout');
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/login_device'), 'en', 'login_device', []);
+  await (rig.controller as any).handleCommand(createEvent('/login_cancel'), 'en', 'login_cancel', []);
+  await (rig.controller as any).handleCommand(createEvent('/logout confirm'), 'en', 'logout', ['confirm']);
+
+  assert.deepEqual(calls, ['start', 'cancel:login-1', 'logout']);
+  assert.match(rig.sentMessages[0]!, /CODE-1/);
+});
+
+test('permissions approval server request returns granted permissions', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'perm-1',
+    method: 'item/permissions/requestApproval',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      cwd: rig.tempDir,
+      reason: 'Need network',
+      permissions: {
+        network: { enabled: true },
+        fileSystem: { read: [rig.tempDir], write: null },
+      },
+    },
+  });
+  const row = (rig.store as any).db.prepare('SELECT local_id FROM pending_approvals WHERE kind = ?').get('permissions');
+  await (rig.controller as any).handleCallback(createCallback(`approval:${row.local_id}:session`, 1));
+
+  assert.deepEqual(responses, [{
+    requestId: 'perm-1',
+    result: {
+      permissions: {
+        network: { enabled: true },
+        fileSystem: { read: [rig.tempDir], write: null },
+      },
+      scope: 'session',
+    },
+  }]);
+});
+
+test('MCP elicitation form accepts JSON replies', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'mcp-1',
+    method: 'mcpServer/elicitation/request',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      serverName: 'linear',
+      mode: 'form',
+      message: 'Pick issue',
+      requestedSchema: { type: 'object', properties: { issue: { type: 'string' } } },
+    },
+  });
+  const record = [...(rig.controller as any).pendingMcpElicitations.values()][0];
+  assert.ok(record);
+
+  await (rig.controller as any).handleText(createEvent('{"issue":"ABC-1"}'));
+  await (rig.controller as any).handleCallback(createCallback(`mcpel:${record.localId}:accept`, 1));
+
+  assert.deepEqual(responses, [{
+    requestId: 'mcp-1',
+    result: { action: 'accept', content: { issue: 'ABC-1' }, _meta: null },
+  }]);
+});
+
+test('skills and MCP commands render app-server data', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  (rig.controller as any).app.listSkills = async () => [{
+    cwd: rig.tempDir,
+    skills: [{
+      name: 'skill-a',
+      description: 'Does a thing',
+      shortDescription: null,
+      path: path.join(rig.tempDir, 'SKILL.md'),
+      scope: 'project',
+      enabled: true,
+      displayName: 'Skill A',
+      defaultPrompt: null,
+    }],
+    errors: [],
+  }];
+  (rig.controller as any).app.listMcpServerStatus = async () => [{
+    name: 'linear',
+    authStatus: 'authenticated',
+    toolNames: ['issue_search'],
+    resourceUris: ['linear://me'],
+    resourceTemplateUris: [],
+  }];
+
+  await (rig.controller as any).handleCommand(createEvent('/skills'), 'en', 'skills', []);
+  await (rig.controller as any).handleCommand(createEvent('/mcp'), 'en', 'mcp', []);
+
+  assert.match(rig.sentMessages[0]!, /Skill A/);
+  assert.match(rig.sentMessages[1]!, /linear: authenticated/);
+});
+
+test('thread management commands call fork, rename, rollback, compact, archive, and review APIs', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const calls: string[] = [];
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).app.forkThread = async () => {
+    calls.push('fork');
+    return {
+      thread: {
+        threadId: 'thread-fork',
+        name: null,
+        preview: 'fork',
+        cwd: rig.tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: rig.tempDir,
+    };
+  };
+  (rig.controller as any).app.setThreadName = async (_threadId: string, name: string) => {
+    calls.push(`rename:${name}`);
+  };
+  (rig.controller as any).app.rollbackThread = async (_threadId: string, count: number) => {
+    calls.push(`rollback:${count}`);
+    return null;
+  };
+  (rig.controller as any).app.compactThread = async () => {
+    calls.push('compact');
+  };
+  (rig.controller as any).app.archiveThread = async () => {
+    calls.push('archive');
+  };
+  (rig.controller as any).app.startReview = async () => {
+    calls.push('review');
+    return { turnId: 'turn-review', reviewThreadId: 'thread-fork' };
+  };
+  (rig.controller as any).registerActiveTurn = async () => {};
+
+  await (rig.controller as any).handleCommand(createEvent('/fork trial'), 'en', 'fork', ['trial']);
+  await (rig.controller as any).handleCommand(createEvent('/rename done'), 'en', 'rename', ['done']);
+  await (rig.controller as any).handleCommand(createEvent('/undo 2 confirm'), 'en', 'undo', ['2', 'confirm']);
+  await (rig.controller as any).handleCommand(createEvent('/compact'), 'en', 'compact', []);
+  await (rig.controller as any).handleCommand(createEvent('/review'), 'en', 'review', []);
+  await (rig.controller as any).handleCommand(createEvent('/archive'), 'en', 'archive', []);
+
+  assert.deepEqual(calls, [
+    'fork',
+    'rename:trial',
+    'rename:done',
+    'rollback:2',
+    'compact',
+    'review',
+    'archive',
+  ]);
+  assert.equal(rig.store.getBinding('telegram:99::root'), null);
 });
 
 test('completed turns automatically start a queued prompt', async (t) => {
