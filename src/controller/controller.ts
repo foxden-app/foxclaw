@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
@@ -203,6 +204,34 @@ interface PendingUserInputRequest {
   createdAt: number;
 }
 
+interface CodexAuthCandidate {
+  name: string;
+  path: string;
+  isCurrent: boolean;
+  mtimeMs: number;
+}
+
+interface CodexAuthState {
+  authDir: string;
+  authPath: string;
+  currentTargetPath: string | null;
+  currentLabel: string | null;
+  candidates: CodexAuthCandidate[];
+}
+
+interface PendingAuthChoiceList {
+  localId: string;
+  chatId: string;
+  messageId: number | null;
+  candidates: CodexAuthCandidate[];
+  createdAt: number;
+}
+
+interface PendingAuthRotation {
+  scopeId: string;
+  reason: string;
+}
+
 type ApprovalAction = 'accept' | 'session' | 'deny';
 class UserFacingError extends Error {}
 const OBSERVED_THREAD_POLL_MS = 1500;
@@ -215,6 +244,10 @@ export class BridgeSessionCore {
   private queuedPrompts = new Map<string, QueuedPromptRequest>();
   private pendingTurnErrors = new Map<string, string>();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
+  private pendingAuthChoiceLists = new Map<string, PendingAuthChoiceList>();
+  private pendingAuthRotation: PendingAuthRotation | null = null;
+  private authRotationInProgress = false;
+  private authRotationFailedTargets = new Set<string>();
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
@@ -309,6 +342,8 @@ export class BridgeSessionCore {
     this.queuedPrompts.clear();
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
+    this.pendingAuthChoiceLists.clear();
+    this.pendingAuthRotation = null;
     this.clearObservedThreadWatchers();
     await this.abandonActiveTurns();
     this.bot.stop();
@@ -415,6 +450,7 @@ export class BridgeSessionCore {
           '/mode [default|plan]',
           '/plan',
           '/agent',
+          '/auth',
           '/auth_reload',
           '/models',
           '/permissions',
@@ -457,6 +493,10 @@ export class BridgeSessionCore {
       case 'auth_reload':
       case 'codex_restart': {
         await this.handleAuthReloadCommand(scopeId, locale);
+        return;
+      }
+      case 'auth': {
+        await this.handleAuthCommand(scopeId, locale, args);
         return;
       }
       case 'where': {
@@ -663,6 +703,16 @@ export class BridgeSessionCore {
       await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort' | 'access', settingsMatch[2]!, locale);
       return;
     }
+    const authMatch = /^auth:([a-f0-9]+):(\d+)$/.exec(event.data);
+    if (authMatch) {
+      await this.handleAuthSwitchCallback(
+        event,
+        authMatch[1]!,
+        Number.parseInt(authMatch[2]!, 10),
+        locale,
+      );
+      return;
+    }
     const userInputMatch = /^ui:([a-f0-9]+):(\d+):(\d+)$/.exec(event.data);
     if (userInputMatch) {
       await this.handleUserInputCallback(
@@ -803,7 +853,14 @@ export class BridgeSessionCore {
     } else if (turnId) {
       this.pendingTurnErrors.set(turnId, message);
     }
+    if (isCodexAuthRotationError(params)) {
+      const scopeId = active?.scopeId ?? (threadId ? this.findChatByThread(threadId) : null);
+      if (scopeId) {
+        this.pendingAuthRotation = { scopeId, reason: message };
+      }
+    }
     this.updateStatus();
+    await this.maybeRunPendingAuthRotation();
   }
 
   private async recordActiveTurnError(active: ActiveTurn, message: string): Promise<void> {
@@ -1287,6 +1344,7 @@ export class BridgeSessionCore {
           active.resolver();
           this.activeTurns.delete(active.turnId);
           this.updateStatus();
+          await this.maybeRunPendingAuthRotation();
           await this.withLock(scopeId, async () => this.startQueuedPromptIfPresent(scopeId));
         }
         return;
@@ -2026,6 +2084,143 @@ export class BridgeSessionCore {
     await this.app.restart();
 
     const lines = [t(locale, 'auth_reload_done')];
+    lines.push(...await this.buildCodexUsageStatusLines(locale));
+    await this.sendMessage(scopeId, lines.join('\n'));
+  }
+
+  private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const action = args[0]?.toLowerCase() ?? 'list';
+    if (action === 'reload' || action === 'restart') {
+      await this.handleAuthReloadCommand(scopeId, locale);
+      return;
+    }
+    if (action !== 'list') {
+      await this.sendMessage(scopeId, t(locale, 'usage_auth'));
+      return;
+    }
+
+    const state = await listCodexAuthState();
+    if (state.candidates.length === 0) {
+      await this.sendMessage(scopeId, renderAuthListMessage(locale, state));
+      return;
+    }
+
+    const record: PendingAuthChoiceList = {
+      localId: crypto.randomBytes(8).toString('hex'),
+      chatId: scopeId,
+      messageId: null,
+      candidates: state.candidates,
+      createdAt: Date.now(),
+    };
+    this.pendingAuthChoiceLists.set(record.localId, record);
+    const messageId = await this.sendMessage(
+      scopeId,
+      renderAuthListMessage(locale, state),
+      authChoiceKeyboard(record),
+    );
+    record.messageId = messageId;
+  }
+
+  private async handleAuthSwitchCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    index: number,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingAuthChoiceLists.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
+      return;
+    }
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_blocked_active'));
+      return;
+    }
+    const candidate = record.candidates[index];
+    if (!candidate) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_recorded'));
+    this.pendingAuthChoiceLists.delete(localId);
+    if (record.messageId !== null) {
+      await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_switching', { value: candidate.name }), []);
+    }
+    await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false);
+  }
+
+  private async maybeRunPendingAuthRotation(): Promise<void> {
+    if (!this.pendingAuthRotation || this.authRotationInProgress) {
+      return;
+    }
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0) {
+      return;
+    }
+
+    const rotation = this.pendingAuthRotation;
+    this.pendingAuthRotation = null;
+    this.authRotationInProgress = true;
+    try {
+      const candidate = await this.selectNextCodexAuthCandidate();
+      const locale = this.localeForChat(rotation.scopeId);
+      if (!candidate) {
+        await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_no_candidate', {
+          error: formatShortStatusError(rotation.reason),
+        }));
+        return;
+      }
+      await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_switching', {
+        value: candidate.name,
+        error: formatShortStatusError(rotation.reason),
+      }));
+      await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
+    } catch (error) {
+      await this.handleAsyncError('codex.auth_rotation', error, rotation.scopeId);
+    } finally {
+      this.authRotationInProgress = false;
+    }
+  }
+
+  private async selectNextCodexAuthCandidate(): Promise<CodexAuthCandidate | null> {
+    const state = await listCodexAuthState();
+    if (state.currentTargetPath) {
+      this.authRotationFailedTargets.add(state.currentTargetPath);
+    }
+    const candidates = state.candidates.filter(candidate => !this.authRotationFailedTargets.has(candidate.path));
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const currentIndex = state.currentTargetPath
+      ? state.candidates.findIndex(candidate => candidate.path === state.currentTargetPath)
+      : -1;
+    for (let offset = 1; offset <= state.candidates.length; offset += 1) {
+      const candidate = state.candidates[(currentIndex + offset + state.candidates.length) % state.candidates.length];
+      if (candidate && !this.authRotationFailedTargets.has(candidate.path)) {
+        return candidate;
+      }
+    }
+    return candidates[0] ?? null;
+  }
+
+  private async switchCodexAuthAndRestart(
+    scopeId: string,
+    locale: AppLocale,
+    candidate: CodexAuthCandidate,
+    automatic: boolean,
+  ): Promise<void> {
+    await switchCodexAuth(candidate.path);
+    this.authRotationFailedTargets.delete(candidate.path);
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    await this.app.restart();
+
+    const lines = [t(locale, automatic ? 'auth_auto_done' : 'auth_switch_done', { value: candidate.name })];
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
   }
@@ -3527,6 +3722,118 @@ function resolveCollaborationMode(mode: CollaborationModeValue | null | undefine
 
 function attachedThreadKey(scopeId: string, threadId: string): string {
   return `${scopeId}:${threadId}`;
+}
+
+function codexAuthDir(): string {
+  return process.env.CODEX_AUTH_DIR || path.join(os.homedir(), '.codex');
+}
+
+async function listCodexAuthState(): Promise<CodexAuthState> {
+  const authDir = codexAuthDir();
+  const authPath = path.join(authDir, 'auth.json');
+  const currentTargetPath = await resolveCurrentAuthTarget(authDir, authPath);
+  const candidates: CodexAuthCandidate[] = [];
+  const entries = await fs.readdir(authDir, { withFileTypes: true }).catch((error) => {
+    if (isFileMissingError(error)) {
+      return [];
+    }
+    throw error;
+  });
+
+  for (const entry of entries) {
+    if (!isCodexAuthCandidateName(entry.name)) {
+      continue;
+    }
+    const candidatePath = path.join(authDir, entry.name);
+    const stat = await fs.stat(candidatePath).catch(() => null);
+    if (!stat?.isFile()) {
+      continue;
+    }
+    candidates.push({
+      name: entry.name,
+      path: candidatePath,
+      isCurrent: currentTargetPath === candidatePath,
+      mtimeMs: stat.mtimeMs,
+    });
+  }
+
+  candidates.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
+  return {
+    authDir,
+    authPath,
+    currentTargetPath,
+    currentLabel: currentTargetPath ? path.basename(currentTargetPath) : null,
+    candidates,
+  };
+}
+
+function isCodexAuthCandidateName(name: string): boolean {
+  if (name === 'auth.json' || name.startsWith('.auth.json.')) {
+    return false;
+  }
+  return name.startsWith('auth.json_') || name.startsWith('auth.json.') || name.startsWith('auth.json-');
+}
+
+async function resolveCurrentAuthTarget(authDir: string, authPath: string): Promise<string | null> {
+  const stat = await fs.lstat(authPath).catch(() => null);
+  if (!stat) {
+    return null;
+  }
+  if (stat.isSymbolicLink()) {
+    const target = await fs.readlink(authPath);
+    return path.resolve(authDir, target);
+  }
+  return authPath;
+}
+
+async function switchCodexAuth(targetPath: string): Promise<void> {
+  const state = await listCodexAuthState();
+  const candidate = state.candidates.find(entry => entry.path === targetPath);
+  if (!candidate) {
+    throw new Error(`Auth candidate is no longer available: ${path.basename(targetPath)}`);
+  }
+  const tempLink = path.join(state.authDir, `.auth.json.${process.pid}.${Date.now()}.tmp`);
+  try {
+    await fs.symlink(candidate.path, tempLink);
+    await fs.rename(tempLink, state.authPath);
+  } catch (error) {
+    await fs.unlink(tempLink).catch(() => {});
+    throw error;
+  }
+}
+
+function renderAuthListMessage(locale: AppLocale, state: CodexAuthState): string {
+  const lines = [
+    t(locale, 'auth_list_title'),
+    t(locale, 'auth_current', { value: state.currentLabel ?? t(locale, 'none') }),
+    t(locale, 'auth_dir', { value: state.authDir }),
+  ];
+  if (state.candidates.length === 0) {
+    lines.push(t(locale, 'auth_no_candidates'));
+    return lines.join('\n');
+  }
+  lines.push(t(locale, 'auth_candidate_count', { value: state.candidates.length }));
+  state.candidates.forEach((candidate, index) => {
+    const marker = candidate.isCurrent ? ' *' : '';
+    lines.push(`${index + 1}. ${candidate.name}${marker}`);
+  });
+  return lines.join('\n');
+}
+
+function authChoiceKeyboard(record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
+  return record.candidates.map((candidate, index) => [{
+    text: clipButtonText(`${candidate.isCurrent ? '* ' : ''}${candidate.name}`),
+    callback_data: `auth:${record.localId}:${index}`,
+  }]);
+}
+
+function isCodexAuthRotationError(params: any): boolean {
+  const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
+  if (code && /usageLimitExceeded|auth|unauthorized|forbidden|login/i.test(code)) {
+    return true;
+  }
+  const message = stringOrNull(params?.error?.message) ?? '';
+  return /(usage limit|rate limit|not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message);
 }
 
 function formatCodexNotificationError(params: any): string {

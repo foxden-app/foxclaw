@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppConfig } from '../config.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
@@ -88,6 +88,24 @@ function createCallback(data: string, messageId = 1): TelegramCallbackEvent {
     callbackQueryId: 'callback-1',
     messageId,
   };
+}
+
+function installTempAuthFiles(t: TestContext, tempDir: string): string {
+  const authDir = path.join(tempDir, '.codex');
+  fs.mkdirSync(authDir, { recursive: true });
+  fs.writeFileSync(path.join(authDir, 'auth.json_a'), '{"account":"a"}');
+  fs.writeFileSync(path.join(authDir, 'auth.json_b'), '{"account":"b"}');
+  fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
+  const previous = process.env.CODEX_AUTH_DIR;
+  process.env.CODEX_AUTH_DIR = authDir;
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.CODEX_AUTH_DIR;
+    } else {
+      process.env.CODEX_AUTH_DIR = previous;
+    }
+  });
+  return authDir;
 }
 
 function createControllerRig() {
@@ -398,6 +416,77 @@ test('/auth_reload is blocked while a turn is active', async (t) => {
     rig.sentMessages[0],
     'Cannot reload Codex auth while a turn, approval, or question is active. Wait or use /interrupt first.',
   );
+});
+
+test('/auth lists candidates and switches auth via callback', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /Codex auth files:/);
+  assert.match(rig.sentMessages[0]!, /auth\.json_a \*/);
+  assert.match(rig.sentMessages[0]!, /auth\.json_b/);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:1`, 1));
+
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.equal(rig.callbackAnswers[0], 'Auth selected');
+  assert.match(rig.editedMessages[0]!, /Switching Codex auth to auth\.json_b/);
+  assert.match(rig.sentMessages.at(-1)!, /Codex auth switched to auth\.json_b/);
+});
+
+test('usage limit errors auto-rotate auth after the active turn finishes', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Usage limit exceeded', codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+  assert.equal(restarts, 0);
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_b/.test(message)));
 });
 
 test('Codex error notifications are shown on the active Telegram turn', async (t) => {
