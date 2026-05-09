@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
+  buildSetupPanelKeyboard,
   buildThreadListKeyboard,
   buildThreadsKeyboard,
   clampEffortToModel,
@@ -11,6 +12,7 @@ import {
   formatApprovalPolicyLabel,
   formatModelSettingsMessage,
   formatSandboxModeLabel,
+  formatSetupPanelMessage,
   formatThreadsMessage,
   formatWeixinAccessCopyPaste,
   formatWeixinModelCopyPaste,
@@ -18,6 +20,7 @@ import {
   formatWeixinWhereNavCopyPaste,
   normalizeRequestedEffort,
   resolveRequestedModel,
+  resolveSetupSummaryLine,
 } from './presentation.js';
 import type { AppThread, ChatSessionSettings, ModelInfo } from '../types.js';
 
@@ -170,6 +173,7 @@ test('formatModelSettingsMessage renders current selections', () => {
       isDefault: true,
       supportedReasoningEfforts: ['medium', 'high'],
       defaultReasoningEffort: 'medium',
+      serviceTiers: [],
     },
   ];
   const settings: ChatSessionSettings = {
@@ -179,6 +183,7 @@ test('formatModelSettingsMessage renders current selections', () => {
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
+    serviceTier: null,
     updatedAt: Date.now(),
   };
 
@@ -199,6 +204,7 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
       isDefault: true,
       supportedReasoningEfforts: ['medium', 'high'],
       defaultReasoningEffort: 'medium',
+      serviceTiers: [],
     },
     {
       id: 'model-o4-mini',
@@ -208,6 +214,7 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
       isDefault: false,
       supportedReasoningEfforts: ['low', 'medium'],
       defaultReasoningEffort: 'medium',
+      serviceTiers: [],
     },
   ];
   const settings: ChatSessionSettings = {
@@ -217,6 +224,7 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
+    serviceTier: null,
     updatedAt: Date.now(),
   };
 
@@ -241,6 +249,7 @@ test('resolveRequestedModel matches model ids and display names', () => {
       isDefault: true,
       supportedReasoningEfforts: ['medium', 'high'],
       defaultReasoningEffort: 'medium',
+      serviceTiers: [],
     },
   ];
 
@@ -258,6 +267,7 @@ test('clampEffortToModel falls back to model default when unsupported', () => {
     isDefault: false,
     supportedReasoningEfforts: ['low', 'medium'],
     defaultReasoningEffort: 'medium',
+    serviceTiers: [],
   };
 
   assert.deepEqual(clampEffortToModel(model, 'high'), {
@@ -301,6 +311,78 @@ test('access labels render in chinese locale', () => {
   assert.equal(formatSandboxModeLabel('zh', 'workspace-write'), '工作区可写');
 });
 
+test('setup panel renders summary, focus, rows, and fast controls', () => {
+  const models: ModelInfo[] = [
+    {
+      id: 'model-gpt-5',
+      model: 'gpt-5',
+      displayName: 'GPT-5',
+      description: 'Default model',
+      isDefault: true,
+      supportedReasoningEfforts: ['medium', 'high'],
+      defaultReasoningEffort: 'medium',
+      serviceTiers: [{ id: 'priority', name: 'fast', description: 'Fast lane' }],
+    },
+  ];
+  const settings: ChatSessionSettings = {
+    chatId: 'chat-setup',
+    model: 'gpt-5',
+    reasoningEffort: 'high',
+    locale: 'en',
+    accessPreset: 'full-access',
+    collaborationMode: 'plan',
+    serviceTier: 'priority',
+    updatedAt: 0,
+  };
+  const access = {
+    preset: 'full-access' as const,
+    approvalPolicy: 'never' as const,
+    sandboxMode: 'danger-full-access' as const,
+  };
+
+  const ctx = { focus: 'model' as const, models, settings, access };
+  assert.equal(resolveSetupSummaryLine(ctx), 'gpt-5 · high · fast=on · full-access · plan');
+  const message = formatSetupPanelMessage('en', ctx);
+  assert.match(message, /<b>Session preferences<\/b>/);
+  assert.match(message, /Current: <b>gpt-5 · high · fast=on · full-access · plan<\/b>/);
+  assert.match(message, /Focus: Model/);
+  assert.match(message, /• Fast: on \(fast\)/);
+
+  const keyboard = buildSetupPanelKeyboard('en', ctx);
+  assert.ok(keyboard.some(row => row.some(button => button.callback_data === 'setup:model:gpt-5')));
+  assert.ok(keyboard.some(row => row.some(button => button.callback_data === 'setup:effort:high')));
+  assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
+    { text: '• ⚡ Fast: on', callback_data: 'setup:fast:on' },
+    { text: 'Fast: off', callback_data: 'setup:fast:off' },
+  ]);
+});
+
+test('setup panel shows unsupported fast as noop button', () => {
+  const models: ModelInfo[] = [
+    {
+      id: 'model-gpt-5-codex',
+      model: 'gpt-5-codex',
+      displayName: 'GPT-5 Codex',
+      description: 'No fast tier',
+      isDefault: true,
+      supportedReasoningEfforts: ['medium'],
+      defaultReasoningEffort: 'medium',
+      serviceTiers: [],
+    },
+  ];
+  const access = {
+    preset: 'default' as const,
+    approvalPolicy: 'on-request' as const,
+    sandboxMode: 'workspace-write' as const,
+  };
+  const ctx = { focus: 'fast' as const, models, settings: null, access };
+  assert.equal(resolveSetupSummaryLine(ctx), 'server default · server default · fast=unsupported · default · default');
+  assert.match(formatSetupPanelMessage('en', ctx), /Focus: Fast/);
+  assert.deepEqual(buildSetupPanelKeyboard('en', ctx).at(-3), [
+    { text: 'Fast unsupported', callback_data: 'setup:fast:unsupported' },
+  ]);
+});
+
 test('presentation renders chinese locale strings', () => {
   const threads: AppThread[] = [
     {
@@ -329,6 +411,7 @@ test('presentation renders chinese locale strings', () => {
       isDefault: true,
       supportedReasoningEfforts: ['medium', 'high'],
       defaultReasoningEffort: 'medium',
+      serviceTiers: [],
     },
   ];
   const settings: ChatSessionSettings = {
@@ -338,6 +421,7 @@ test('presentation renders chinese locale strings', () => {
     locale: 'zh',
     accessPreset: null,
     collaborationMode: null,
+    serviceTier: null,
     updatedAt: Date.now(),
   };
   const renderedModels = formatModelSettingsMessage('zh', models, settings);
@@ -385,6 +469,7 @@ test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
       isDefault: true,
       supportedReasoningEfforts: ['medium', 'high'],
       defaultReasoningEffort: 'medium',
+      serviceTiers: [],
     },
     {
       id: 'm2',
@@ -394,6 +479,7 @@ test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
       isDefault: false,
       supportedReasoningEfforts: ['low'],
       defaultReasoningEffort: 'low',
+      serviceTiers: [],
     },
   ];
   const out = formatWeixinModelCopyPaste('en', models, {
@@ -403,6 +489,7 @@ test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
+    serviceTier: null,
     updatedAt: 0,
   });
   assert.match(out, /\/model default/);
@@ -410,6 +497,7 @@ test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
   assert.match(out, /\/model gpt-4/);
   assert.match(out, /\/effort default/);
   assert.match(out, /\/effort medium\n\/effort high/);
+  assert.match(out, /\/fast on\n\/fast off/);
 });
 
 test('formatWeixinAccessCopyPaste lists preset commands', () => {

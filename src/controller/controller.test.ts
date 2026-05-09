@@ -129,6 +129,9 @@ function createControllerRig() {
   const sentMessages: string[] = [];
   const sentHtmlMessages: string[] = [];
   const editedMessages: string[] = [];
+  const editedHtmlMessages: string[] = [];
+  const sentHtmlKeyboards: any[] = [];
+  const editedHtmlKeyboards: any[] = [];
   const callbackAnswers: string[] = [];
   const deletedMessageIds: number[] = [];
   const bot = {
@@ -136,14 +139,18 @@ function createControllerRig() {
       sentMessages.push(text);
       return sentMessages.length;
     },
-    sendHtmlMessage: async (_chatId: string, text: string) => {
+    sendHtmlMessage: async (_chatId: string, text: string, keyboard?: any) => {
       sentHtmlMessages.push(text);
+      sentHtmlKeyboards.push(keyboard ?? []);
       return 1000 + sentHtmlMessages.length;
     },
     editMessage: async (_chatId: string, _messageId: number, text: string) => {
       editedMessages.push(text);
     },
-    editHtmlMessage: async () => {},
+    editHtmlMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
+      editedHtmlMessages.push(text);
+      editedHtmlKeyboards.push(keyboard ?? []);
+    },
     deleteMessage: async (_chatId: string, messageId: number) => {
       deletedMessageIds.push(messageId);
     },
@@ -174,6 +181,28 @@ function createControllerRig() {
     restart: async () => {},
     readAccount: async () => null,
     readAccountRateLimits: async () => null,
+    listModels: async () => [
+      {
+        id: 'model-gpt-5',
+        model: 'gpt-5',
+        displayName: 'GPT-5',
+        description: 'Default test model',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [{ id: 'priority', name: 'fast', description: 'Fast lane' }],
+      },
+      {
+        id: 'model-gpt-5-codex',
+        model: 'gpt-5-codex',
+        displayName: 'GPT-5 Codex',
+        description: 'Codex test model',
+        isDefault: false,
+        supportedReasoningEfforts: ['medium', 'high'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+      },
+    ],
     readEffectiveConfig: async () => ({
       model: 'gpt-5.5',
       modelReasoningEffort: 'xhigh',
@@ -188,7 +217,19 @@ function createControllerRig() {
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
   const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound);
   (controller as any).updateStatus = () => {};
-  return { controller, store, sentMessages, sentHtmlMessages, editedMessages, callbackAnswers, deletedMessageIds, tempDir };
+  return {
+    controller,
+    store,
+    sentMessages,
+    sentHtmlMessages,
+    editedMessages,
+    editedHtmlMessages,
+    sentHtmlKeyboards,
+    editedHtmlKeyboards,
+    callbackAnswers,
+    deletedMessageIds,
+    tempDir,
+  };
 }
 
 test('registerActiveTurn returns without waiting for turn completion', async (t) => {
@@ -296,7 +337,7 @@ test('queue stores the next prompt while a turn is active', async (t) => {
   assert.equal(rig.sentMessages[1], 'Replaced the queued prompt. I will send the new one after the current turn finishes.');
 });
 
-test('/mode, /plan, and /agent update collaboration mode settings', async (t) => {
+test('/mode opens setup panel, while /mode <value> updates collaboration mode settings', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     rig.store.close();
@@ -304,15 +345,16 @@ test('/mode, /plan, and /agent update collaboration mode settings', async (t) =>
   });
 
   await (rig.controller as any).handleCommand(createEvent('/mode'), 'en', 'mode', []);
-  assert.equal(rig.sentMessages[0], 'Current mode: Agent\nUsage: /mode <default|plan>\nAliases: /plan, /agent');
+  assert.match(rig.sentHtmlMessages[0]!, /<b>Session preferences<\/b>/);
+  assert.match(rig.sentHtmlMessages[0]!, /Focus: Mode/);
 
   await (rig.controller as any).handleCommand(createEvent('/mode plan'), 'en', 'mode', ['plan']);
   assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'plan');
-  assert.equal(rig.sentMessages[1], 'Mode set to: Plan\nApplies on the next turn.');
+  assert.equal(rig.sentMessages[0], 'Mode set to: Plan\nApplies on the next turn.');
 
   await (rig.controller as any).handleCommand(createEvent('/agent'), 'en', 'agent', []);
-  assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'default');
-  assert.equal(rig.sentMessages[2], 'Mode set to: Agent\nApplies on the next turn.');
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'plan');
+  assert.match(rig.sentHtmlMessages[1]!, /Focus: Mode/);
 });
 
 test('startTurnWithRecovery passes native Codex collaboration mode', async (t) => {
@@ -343,6 +385,126 @@ test('startTurnWithRecovery passes native Codex collaboration mode', async (t) =
       developer_instructions: null,
     },
   });
+});
+
+test('startTurnWithRecovery passes supported service tier and clears unsupported one', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const calls: any[] = [];
+  (rig.controller as any).app.startTurn = async (options: any) => {
+    calls.push(options);
+    return { id: `turn-${calls.length}`, status: 'running' };
+  };
+
+  rig.store.setChatSettings('telegram:99::root', 'gpt-5', 'high');
+  rig.store.setChatServiceTier('telegram:99::root', 'priority');
+  await (rig.controller as any).startTurnWithRecovery(
+    'telegram:99::root',
+    { threadId: 'thread-1', cwd: rig.tempDir },
+    [{ type: 'text', text: 'hi', text_elements: [] }],
+  );
+  assert.equal(calls[0]?.serviceTier, 'priority');
+
+  rig.store.setChatSettings('telegram:99::root', 'gpt-5-codex', 'high');
+  rig.store.setChatServiceTier('telegram:99::root', 'priority');
+  await (rig.controller as any).startTurnWithRecovery(
+    'telegram:99::root',
+    { threadId: 'thread-1', cwd: rig.tempDir },
+    [{ type: 'text', text: 'hi again', text_elements: [] }],
+  );
+  assert.equal(calls[1]?.serviceTier, null);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.serviceTier, null);
+  assert.ok(rig.sentMessages.includes('Fast was turned off because the selected model does not support it.'));
+});
+
+test('/setup and legacy aliases open the unified setup panel', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/setup'), 'en', 'setup', []);
+  assert.match(rig.sentHtmlMessages[0]!, /<b>Session preferences<\/b>/);
+  assert.match(rig.sentHtmlMessages[0]!, /Current: <b>server default · server default · fast=off · default · default<\/b>/);
+  assert.ok(rig.sentHtmlKeyboards[0].some((row: any[]) => row.some((button: any) => button.callback_data === 'setup:fast:on')));
+
+  await (rig.controller as any).handleCommand(createEvent('/models'), 'en', 'models', []);
+  assert.match(rig.sentHtmlMessages[1]!, /Focus: Model/);
+
+  await (rig.controller as any).handleCommand(createEvent('/permissions'), 'en', 'permissions', []);
+  assert.match(rig.sentHtmlMessages[2]!, /Focus: Access/);
+});
+
+test('/fast persists priority when supported and rejects unsupported models', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/fast on'), 'en', 'fast', ['on']);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.serviceTier, 'priority');
+  assert.match(rig.sentHtmlMessages[0]!, /Focus: Fast/);
+  assert.match(rig.sentHtmlMessages[0]!, /fast=on/);
+
+  (rig.controller as any).app.listModels = async () => [
+    {
+      id: 'model-no-fast',
+      model: 'no-fast',
+      displayName: 'No Fast',
+      description: '',
+      isDefault: true,
+      supportedReasoningEfforts: ['medium'],
+      defaultReasoningEffort: 'medium',
+      serviceTiers: [],
+    },
+  ];
+  rig.store.setChatServiceTier('telegram:99::root', null);
+  await (rig.controller as any).handleCommand(createEvent('/fast on'), 'en', 'fast', ['on']);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.serviceTier, null);
+  assert.equal(rig.sentMessages.at(-1), 'Current model does not support Fast.');
+});
+
+test('setup callbacks update settings and preserve settings:* back-compat', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCallback(createCallback('setup:fast:on', 10));
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.serviceTier, 'priority');
+  assert.equal(rig.callbackAnswers[0], 'Fast: on (fast)');
+  assert.match(rig.editedHtmlMessages[0]!, /Focus: Fast/);
+
+  await (rig.controller as any).handleCallback(createCallback('settings:access:read-only', 11));
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.accessPreset, 'read-only');
+  assert.equal(rig.callbackAnswers[1], 'Access: Read-only');
+  assert.match(rig.editedHtmlMessages[1]!, /Focus: Access/);
+});
+
+test('setup model callbacks are blocked while a turn is active but access still applies', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleCallback(createCallback('setup:model:gpt-5-codex', 10));
+  assert.equal(rig.callbackAnswers[0], 'Wait for the current turn to finish');
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.model ?? null, null);
+
+  await (rig.controller as any).handleCallback(createCallback('setup:access:full-access', 10));
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.accessPreset, 'full-access');
+  assert.equal(rig.callbackAnswers[1], 'Access: Full access');
 });
 
 test('/status includes Codex account usage without exposing email', async (t) => {

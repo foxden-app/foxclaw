@@ -76,6 +76,7 @@ interface StartTurnOptions {
   cwd: string | null;
   model: string | null;
   effort: ReasoningEffortValue | null;
+  serviceTier?: string | null | undefined;
   collaborationMode: CodexCollaborationMode | null;
 }
 
@@ -205,6 +206,9 @@ export class CodexAppClient extends EventEmitter {
       personality: null,
       outputSchema: null,
     };
+    if (options.serviceTier !== undefined) {
+      params.serviceTier = options.serviceTier;
+    }
     if (options.collaborationMode) {
       params.collaborationMode = options.collaborationMode;
     }
@@ -550,6 +554,20 @@ function mapModel(raw: any): ModelInfo {
         .map((entry: any) => entry?.reasoningEffort)
         .filter((value: unknown): value is ReasoningEffortValue => typeof value === 'string')
     : [];
+  const rawServiceTiers = Array.isArray(raw.serviceTiers)
+    ? raw.serviceTiers
+    : Array.isArray(raw.service_tiers)
+      ? raw.service_tiers
+      : [];
+  const serviceTiers = rawServiceTiers.length > 0
+    ? rawServiceTiers
+        .map((entry: any) => ({
+          id: typeof entry?.id === 'string' ? entry.id : '',
+          name: typeof entry?.name === 'string' ? entry.name : '',
+          description: typeof entry?.description === 'string' ? entry.description : '',
+        }))
+        .filter((entry: { id: string }) => entry.id.length > 0)
+    : [];
   return {
     id: String(raw.id),
     model: String(raw.model),
@@ -558,6 +576,7 @@ function mapModel(raw: any): ModelInfo {
     isDefault: Boolean(raw.isDefault),
     supportedReasoningEfforts: efforts,
     defaultReasoningEffort: String(raw.defaultReasoningEffort) as ReasoningEffortValue,
+    serviceTiers,
   };
 }
 

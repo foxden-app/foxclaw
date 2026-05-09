@@ -7,8 +7,8 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Telegram private chat or topic-aware group control for a single allowed user
 - Local `codex app-server` transport over loopback WebSocket
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
-- Chat-scoped model and reasoning-effort control with `/models` and optional `/model`/`/effort` aliases
-- Chat-scoped access presets with `/permissions` and optional `/access` alias
+- Chat-scoped preference control with `/setup`: model, reasoning effort, Fast service tier, access preset, and Agent/Plan mode
+- Quick Fast service-tier control with `/fast on`, `/fast off`, and `/fast toggle`
 - Deep-link sync from Telegram into `Codex.app` with `/open` and `/reveal`
 - Inline approval buttons for command and file-change approvals
 - SQLite persistence for bindings, offsets, approvals, and audit logs
@@ -107,14 +107,14 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 ## Commands
 
 - `/help`
+- `/setup` opens the unified preference panel
+- `/fast <on|off|toggle>` toggles the current chat's Fast service tier when the selected model supports it
 - `/status`
 - `/threads [query]`
 - `/open <n>`
 - `/new [cwd]`
-- `/models` opens the model and reasoning picker
-- `/permissions` opens the access preset picker (`read-only`, `default`, `full-access`)
-- `/model` and `/effort` are compatibility aliases for the same picker
-- `/access` is a compatibility alias for `/permissions`
+- `/models`, `/model`, `/effort`, `/permissions`, `/access`, `/mode`, `/plan`, and `/agent` open the same panel with the relevant section focused when no value is provided
+- `/model <model>`, `/effort <effort>`, `/permissions <read-only|default|full-access>`, `/access <read-only|default|full-access>`, and `/mode <default|plan>` still apply values directly
 - `/reveal`
 - `/where`
 - `/interrupt`
@@ -147,6 +147,12 @@ Recommended group behavior:
 
 - In the bot's default topic, send natural-language messages directly
 - In `General` or other topics, explicitly address the bot with `@botname` or `/command@botname`
+
+Recommended mobile preference flow:
+
+- Send `/setup` to review the current model, effort, Fast, access, and Agent/Plan mode in one message
+- Use `/fast on` or `/fast off` when you only need to switch the service tier
+- Use direct commands such as `/model gpt-5`, `/effort high`, `/permissions full-access`, and `/mode plan` when copy-paste is faster than tapping buttons
 
 ## Behavior Boundaries
 

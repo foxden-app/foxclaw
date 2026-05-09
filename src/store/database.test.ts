@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { BridgeStore } from './database.js';
 
 const S1 = 'telegram:chat-1';
@@ -134,6 +135,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: null,
       accessPreset: null,
       collaborationMode: null,
+      serviceTier: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -145,6 +147,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: null,
       accessPreset: null,
       collaborationMode: null,
+      serviceTier: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -156,6 +159,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: null,
       collaborationMode: null,
+      serviceTier: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -167,6 +171,7 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: null,
+      serviceTier: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -178,6 +183,19 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      serviceTier: null,
+      updatedAt: store.getChatSettings(S3)!.updatedAt,
+    });
+
+    store.setChatServiceTier(S3, 'priority');
+    assert.deepEqual(store.getChatSettings(S3), {
+      chatId: S3,
+      model: null,
+      reasoningEffort: 'medium',
+      locale: 'zh',
+      accessPreset: 'full-access',
+      collaborationMode: 'plan',
+      serviceTier: 'priority',
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -189,9 +207,42 @@ test('BridgeStore persists chat session settings', () => {
       locale: 'zh',
       accessPreset: 'full-access',
       collaborationMode: 'plan',
+      serviceTier: 'priority',
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
   });
+});
+
+test('BridgeStore migrates old chat settings rows without service tier', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-old-settings-'));
+  const dbPath = path.join(tmpDir, 'bridge.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE chat_settings (
+      chat_id TEXT PRIMARY KEY,
+      model TEXT,
+      reasoning_effort TEXT,
+      locale TEXT,
+      access_preset TEXT,
+      collaboration_mode TEXT,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  db.prepare(`
+    INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(S4, 'gpt-5', 'high', 'zh', 'default', 'plan', 123);
+  db.close();
+
+  const store = new BridgeStore(dbPath);
+  try {
+    assert.equal(store.getChatSettings(S4)?.serviceTier, null);
+    store.setChatServiceTier(S4, 'priority');
+    assert.equal(store.getChatSettings(S4)?.serviceTier, 'priority');
+  } finally {
+    store.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('BridgeStore persists active turn preview cleanup state', () => {

@@ -106,3 +106,19 @@ Acceptance criteria:
 
 - [x] The behavior boundaries are documented
 - [x] The documented guarantees match the current implementation and test scope
+
+## Phase 9: Unified Preference Panel
+
+- [x] Add `/setup` as the single Telegram preference panel for model, effort, Fast, access, and Agent/Plan mode
+- [x] Keep legacy entrypoints (`/models`, `/permissions`, `/model`, `/effort`, `/access`, `/mode`, `/plan`, `/agent`) as focused panel aliases unless a direct value is provided
+- [x] Add `/fast on|off|toggle` backed by Codex `serviceTier`, with model capability checks and automatic downgrade when the selected model does not support the stored tier
+- [x] Persist `service_tier` per chat scope in SQLite without changing desktop Codex App preferences
+- [x] Route `settings:*` callbacks through the new `setup:*` path for temporary backwards compatibility
+- [x] Keep implementation anchors in `src/controller/presentation.ts` (`formatSetupPanelMessage`, `buildSetupPanelKeyboard`) and `src/controller/service_tier.ts`
+
+Acceptance criteria:
+
+- [x] `/setup` shows one summary line and one keyboard covering all five preference groups
+- [x] Active turns block model, effort, Fast, and mode buttons while allowing access changes
+- [x] `/status`, `/where`, and Weixin copy-paste helpers surface Fast state
+- [x] Regression tests cover service-tier resolution, storage migration, panel presentation, callbacks, command aliases, and turn/start propagation

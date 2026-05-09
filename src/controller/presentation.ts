@@ -12,8 +12,18 @@ import type {
   SandboxModeValue,
 } from '../types.js';
 import type { ResolvedAccessMode } from './access.js';
+import { resolveFastTierForModel } from './service_tier.js';
 
 type InlineButton = { text: string; callback_data: string };
+
+export type SetupFocusSection = 'overview' | 'model' | 'effort' | 'fast' | 'access' | 'mode';
+
+export interface SetupPanelContext {
+  focus: SetupFocusSection;
+  models: ModelInfo[];
+  settings: ChatSessionSettings | null;
+  access: ResolvedAccessMode;
+}
 
 interface ThreadLike {
   /** 1-based global ordinal for this row (pagination); keyboard and /open must match. */
@@ -117,6 +127,7 @@ export function formatWhereMessage(
   settings: ChatSessionSettings | null,
   defaultCwd: string,
   access: ResolvedAccessMode,
+  fastLabel = t(locale, 'unknown'),
 ): string {
   return [
     t(locale, 'where_thread', { value: thread.threadId }),
@@ -124,6 +135,7 @@ export function formatWhereMessage(
     t(locale, 'where_preview', { value: thread.preview || t(locale, 'empty') }),
     t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
     t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+    t(locale, 'where_fast', { value: fastLabel }),
     t(locale, 'where_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
     t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
     t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
@@ -222,6 +234,9 @@ export function formatWeixinModelCopyPaste(
     t(locale, 'weixin_copy_efforts_title'),
     '/effort default',
     ...efforts.map((e) => `/effort ${e}`),
+    '',
+    '/fast on',
+    '/fast off',
   ];
   return lines.join('\n');
 }
@@ -240,6 +255,7 @@ export function formatWeixinWhereNavCopyPaste(locale: AppLocale, hasBinding: boo
   const lines = [
     t(locale, 'weixin_copy_paste_divider'),
     t(locale, 'weixin_copy_where_nav_title'),
+    '/setup',
     '/permissions',
     '/models',
     '/threads',
@@ -248,6 +264,177 @@ export function formatWeixinWhereNavCopyPaste(locale: AppLocale, hasBinding: boo
     lines.push('/reveal');
   }
   return lines.join('\n');
+}
+
+export function formatSetupPanelMessage(locale: AppLocale, ctx: SetupPanelContext): string {
+  const currentModel = resolveCurrentModel(ctx.models, ctx.settings?.model ?? null);
+  const fastTier = resolveFastTierForModel(currentModel);
+  const fastSupported = fastTier !== null;
+  const fastLabel = formatFastSetupLabel(
+    locale,
+    fastSupported,
+    fastTier !== null && ctx.settings?.serviceTier === fastTier.id,
+    fastTier?.name ?? null,
+  );
+  const mode = resolveCollaborationMode(ctx.settings?.collaborationMode ?? null);
+  return [
+    t(locale, 'setup_title'),
+    t(locale, 'setup_summary', { value: escapeTelegramHtml(resolveSetupSummaryLine(ctx, locale)) }),
+    setupFocusLabel(locale, ctx.focus),
+    '',
+    t(locale, 'setup_row_model', { value: escapeTelegramHtml(ctx.settings?.model ?? t(locale, 'server_default')) }),
+    t(locale, 'setup_row_effort', { value: escapeTelegramHtml(ctx.settings?.reasoningEffort ?? t(locale, 'server_default')) }),
+    t(locale, 'setup_row_fast', { value: escapeTelegramHtml(fastLabel) }),
+    t(locale, 'setup_row_access', {
+      value: escapeTelegramHtml(`${formatAccessPresetLabel(locale, ctx.access.preset)} (${ctx.access.approvalPolicy} / ${ctx.access.sandboxMode})`),
+    }),
+    t(locale, 'setup_row_mode', { value: escapeTelegramHtml(formatCollaborationModeLabel(locale, mode)) }),
+  ].join('\n');
+}
+
+export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContext): InlineButton[][] {
+  const currentModel = ctx.settings?.model ?? null;
+  const effectiveModel = resolveCurrentModel(ctx.models, currentModel);
+  const efforts = effectiveModel?.supportedReasoningEfforts.length
+    ? effectiveModel.supportedReasoningEfforts
+    : effectiveModel
+      ? [effectiveModel.defaultReasoningEffort]
+      : ['medium'];
+  const fastTier = resolveFastTierForModel(effectiveModel);
+  const serviceTier = ctx.settings?.serviceTier ?? null;
+  const currentMode = resolveCollaborationMode(ctx.settings?.collaborationMode ?? null);
+
+  const rows: InlineButton[][] = [];
+  rows.push(...chunkButtons([
+    {
+      text: currentModel === null ? `• ${t(locale, 'button_auto')}` : t(locale, 'button_auto'),
+      callback_data: 'setup:model:default',
+    },
+    ...ctx.models.map((model) => ({
+      text: `${currentModel === model.model ? '• ' : ''}${truncate(model.model, 14)}`,
+      callback_data: `setup:model:${encodeURIComponent(model.model)}`,
+    })),
+  ], 2));
+
+  rows.push(...chunkButtons([
+    {
+      text: (ctx.settings?.reasoningEffort ?? null) === null ? `• ${t(locale, 'button_auto')}` : t(locale, 'button_auto'),
+      callback_data: 'setup:effort:default',
+    },
+    ...efforts.map((effort) => ({
+      text: `${ctx.settings?.reasoningEffort === effort ? '• ' : ''}${effort}`,
+      callback_data: `setup:effort:${effort}`,
+    })),
+  ], 3));
+
+  if (fastTier) {
+    rows.push([
+      {
+        text: `${serviceTier === fastTier.id ? '• ' : ''}${t(locale, 'button_fast_on')}`,
+        callback_data: 'setup:fast:on',
+      },
+      {
+        text: `${serviceTier === null ? '• ' : ''}${t(locale, 'button_fast_off')}`,
+        callback_data: 'setup:fast:off',
+      },
+    ]);
+  } else {
+    rows.push([{ text: t(locale, 'button_fast_unsupported'), callback_data: 'setup:fast:unsupported' }]);
+  }
+
+  rows.push([
+    {
+      text: `${ctx.access.preset === 'read-only' ? '• ' : ''}${t(locale, 'access_preset_read_only')}`,
+      callback_data: 'setup:access:read-only',
+    },
+    {
+      text: `${ctx.access.preset === 'default' ? '• ' : ''}${t(locale, 'access_preset_default')}`,
+      callback_data: 'setup:access:default',
+    },
+    {
+      text: `${ctx.access.preset === 'full-access' ? '• ' : ''}${t(locale, 'access_preset_full_access')}`,
+      callback_data: 'setup:access:full-access',
+    },
+  ]);
+
+  rows.push([
+    {
+      text: `${currentMode === 'default' ? '• ' : ''}${t(locale, 'collaboration_mode_default')}`,
+      callback_data: 'setup:mode:default',
+    },
+    {
+      text: `${currentMode === 'plan' ? '• ' : ''}${t(locale, 'collaboration_mode_plan')}`,
+      callback_data: 'setup:mode:plan',
+    },
+  ]);
+
+  return rows;
+}
+
+export function resolveSetupSummaryLine(ctx: SetupPanelContext, locale: AppLocale = 'en'): string {
+  const currentModel = ctx.settings?.model ?? t(locale, 'server_default');
+  const currentEffort = ctx.settings?.reasoningEffort ?? t(locale, 'server_default');
+  const model = resolveCurrentModel(ctx.models, ctx.settings?.model ?? null);
+  const fastTier = resolveFastTierForModel(model);
+  const fast = fastTier ? (ctx.settings?.serviceTier === fastTier.id ? 'fast=on' : 'fast=off') : 'fast=unsupported';
+  return [
+    currentModel,
+    currentEffort,
+    fast,
+    ctx.access.preset,
+    resolveCollaborationMode(ctx.settings?.collaborationMode ?? null),
+  ].join(' · ');
+}
+
+export function formatServiceTierStatusLabel(
+  locale: AppLocale,
+  model: ModelInfo | null,
+  serviceTier: string | null | undefined,
+): string {
+  const fastTier = resolveFastTierForModel(model);
+  if (!fastTier) {
+    return t(locale, 'fast_unsupported');
+  }
+  if (serviceTier === fastTier.id) {
+    return t(locale, 'fast_enabled', { tier: fastTier.name || fastTier.id });
+  }
+  return t(locale, 'fast_disabled');
+}
+
+function setupFocusLabel(locale: AppLocale, focus: SetupFocusSection): string {
+  switch (focus) {
+    case 'model':
+      return t(locale, 'setup_focus_model');
+    case 'effort':
+      return t(locale, 'setup_focus_effort');
+    case 'fast':
+      return t(locale, 'setup_focus_fast');
+    case 'access':
+      return t(locale, 'setup_focus_access');
+    case 'mode':
+      return t(locale, 'setup_focus_mode');
+    default:
+      return t(locale, 'setup_focus_overview');
+  }
+}
+
+function formatFastSetupLabel(
+  locale: AppLocale,
+  supported: boolean,
+  enabled: boolean,
+  tierName: string | null,
+): string {
+  if (!supported) {
+    return t(locale, 'fast_unsupported');
+  }
+  if (enabled) {
+    return t(locale, 'fast_enabled', { tier: tierName ?? 'fast' });
+  }
+  return t(locale, 'fast_disabled');
+}
+
+function resolveCollaborationMode(mode: CollaborationModeValue | null | undefined): CollaborationModeValue {
+  return mode === 'plan' ? 'plan' : 'default';
 }
 
 export function formatModelSettingsMessage(

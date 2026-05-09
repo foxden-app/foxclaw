@@ -22,6 +22,7 @@ export interface ChatSessionSettings {
   locale: AppLocale | null;
   accessPreset: AccessPresetValue | null;
   collaborationMode: CollaborationModeValue | null;
+  serviceTier: string | null;
   updatedAt: number;
 }
 
@@ -143,6 +144,13 @@ export interface ModelInfo {
   isDefault: boolean;
   supportedReasoningEfforts: ReasoningEffortValue[];
   defaultReasoningEffort: ReasoningEffortValue;
+  serviceTiers: ModelServiceTier[];
+}
+
+export interface ModelServiceTier {
+  id: string;
+  name: string;
+  description: string;
 }
 
 export type ApprovalKind = 'command' | 'fileChange';

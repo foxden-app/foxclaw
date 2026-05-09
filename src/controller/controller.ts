@@ -26,6 +26,7 @@ import { parseCommand } from './commands.js';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
+  buildSetupPanelKeyboard,
   buildThreadListKeyboard,
   buildThreadsKeyboard,
   clampEffortToModel,
@@ -35,6 +36,8 @@ import {
   formatCollaborationModeLabel,
   formatModelSettingsMessage,
   formatSandboxModeLabel,
+  formatServiceTierStatusLabel,
+  formatSetupPanelMessage,
   formatThreadsMessage,
   formatWeixinAccessCopyPaste,
   formatWeixinModelCopyPaste,
@@ -44,8 +47,10 @@ import {
   normalizeRequestedEffort,
   resolveCurrentModel,
   resolveRequestedModel,
+  type SetupFocusSection,
   type ThreadListPresentationState,
 } from './presentation.js';
+import { clampServiceTierToModel, resolveFastTierForModel } from './service_tier.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import {
   TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES,
@@ -454,6 +459,8 @@ export class BridgeSessionCore {
         const lines = [
           t(locale, 'help_commands_title'),
           '/help',
+          '/setup',
+          '/fast <on|off|toggle>',
           '/status',
           '/threads [query]',
           '/open <n>',
@@ -486,12 +493,14 @@ export class BridgeSessionCore {
         const binding = this.store.getBinding(scopeId);
         const settings = this.store.getChatSettings(scopeId);
         const access = this.resolveEffectiveAccess(scopeId, settings);
+        const fastStatus = await this.resolveFastStatusLabel(locale, settings);
         const lines = [
           t(locale, 'status_connected', { value: t(locale, this.app.isConnected() ? 'yes' : 'no') }),
           t(locale, 'status_user_agent', { value: this.app.getUserAgent() ?? t(locale, 'unknown') }),
           t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+          t(locale, 'status_fast', { value: fastStatus }),
           t(locale, 'status_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
           t(locale, 'status_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
           t(locale, 'status_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
@@ -513,6 +522,14 @@ export class BridgeSessionCore {
       }
       case 'auth': {
         await this.handleAuthCommand(scopeId, locale, args);
+        return;
+      }
+      case 'setup': {
+        await this.showSetupPanel(scopeId, 'overview', undefined, locale);
+        return;
+      }
+      case 'fast': {
+        await this.handleFastCommand(scopeId, locale, args);
         return;
       }
       case 'where': {
@@ -614,15 +631,19 @@ export class BridgeSessionCore {
         return;
       }
       case 'mode': {
+        if (args.length === 0) {
+          await this.showSetupPanel(scopeId, 'mode', undefined, locale);
+          return;
+        }
         await this.handleModeCommand(scopeId, locale, args);
         return;
       }
       case 'plan': {
-        await this.setCollaborationMode(scopeId, locale, 'plan');
+        await this.showSetupPanel(scopeId, 'mode', undefined, locale);
         return;
       }
       case 'agent': {
-        await this.setCollaborationMode(scopeId, locale, 'default');
+        await this.showSetupPanel(scopeId, 'mode', undefined, locale);
         return;
       }
       case 'model': {
@@ -630,7 +651,7 @@ export class BridgeSessionCore {
         return;
       }
       case 'models': {
-        await this.showModelSettingsPanel(scopeId, undefined, locale);
+        await this.showSetupPanel(scopeId, 'model', undefined, locale);
         return;
       }
       case 'permissions':
@@ -652,7 +673,7 @@ export class BridgeSessionCore {
           );
           return;
         }
-        await this.showAccessSettingsPanel(scopeId, undefined, locale);
+        await this.showSetupPanel(scopeId, 'access', undefined, locale);
         return;
       }
       case 'effort': {
@@ -712,6 +733,16 @@ export class BridgeSessionCore {
     const navMatch = /^nav:(models|threads|reveal|permissions)$/.exec(event.data);
     if (navMatch) {
       await this.handleNavigationCallback(event, navMatch[1]! as 'models' | 'threads' | 'reveal' | 'permissions', locale);
+      return;
+    }
+    const setupMatch = /^setup:(model|effort|fast|access|mode):(.+)$/.exec(event.data);
+    if (setupMatch) {
+      await this.handleSetupCallback(
+        event,
+        setupMatch[1]! as 'model' | 'effort' | 'fast' | 'access' | 'mode',
+        setupMatch[2]!,
+        locale,
+      );
       return;
     }
     const settingsMatch = /^settings:(model|effort|access):(.+)$/.exec(event.data);
@@ -1026,6 +1057,7 @@ export class BridgeSessionCore {
     const access = this.resolveEffectiveAccess(scopeId, settings);
     const cwd = binding.cwd ?? this.config.defaultCwd;
     const collaborationMode = await this.buildNativeCollaborationMode(settings, cwd);
+    const serviceTier = await this.resolveServiceTierForTurn(scopeId, settings);
     try {
       const turn = await this.app.startTurn({
         threadId: binding.threadId,
@@ -1035,6 +1067,7 @@ export class BridgeSessionCore {
         cwd,
         model: settings?.model ?? null,
         effort: settings?.reasoningEffort ?? null,
+        serviceTier,
         collaborationMode,
       });
       return { threadId: binding.threadId, turnId: turn.id };
@@ -1049,6 +1082,7 @@ export class BridgeSessionCore {
       const nextAccess = this.resolveEffectiveAccess(scopeId, nextSettings);
       const replacementCwd = replacement.cwd ?? this.config.defaultCwd;
       const replacementCollaborationMode = await this.buildNativeCollaborationMode(nextSettings, replacementCwd);
+      const replacementServiceTier = await this.resolveServiceTierForTurn(scopeId, nextSettings);
       const turn = await this.app.startTurn({
         threadId: replacement.threadId,
         input,
@@ -1057,6 +1091,7 @@ export class BridgeSessionCore {
         cwd: replacementCwd,
         model: nextSettings?.model ?? null,
         effort: nextSettings?.reasoningEffort ?? null,
+        serviceTier: replacementServiceTier,
         collaborationMode: replacementCollaborationMode,
       });
       return { threadId: replacement.threadId, turnId: turn.id };
@@ -1092,6 +1127,29 @@ export class BridgeSessionCore {
       });
     }
     return input;
+  }
+
+  private async resolveServiceTierForTurn(
+    scopeId: string,
+    settings: ChatSessionSettings | null,
+  ): Promise<string | null | undefined> {
+    if (!settings) {
+      return undefined;
+    }
+    if (!settings.serviceTier) {
+      return null;
+    }
+    const models = await this.app.listModels();
+    const currentModel = resolveCurrentModel(models, settings.model);
+    const nextTier = clampServiceTierToModel(currentModel, settings.serviceTier);
+    if (nextTier.adjusted) {
+      this.store.setChatServiceTier(scopeId, null);
+      await this.sendMessage(
+        scopeId,
+        t(this.localeForChat(scopeId), 'service_tier_cleared_due_to_model_switch'),
+      );
+    }
+    return nextTier.tier;
   }
 
   private async stageAttachments(
@@ -2090,6 +2148,41 @@ export class BridgeSessionCore {
     await this.setCollaborationMode(scopeId, locale, mode);
   }
 
+  private async handleFastCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const raw = args.join(' ').trim().toLowerCase();
+    if (!raw) {
+      await this.showSetupPanel(scopeId, 'fast', undefined, locale);
+      return;
+    }
+    if (this.findActiveTurn(scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    if (raw !== 'on' && raw !== 'off' && raw !== 'toggle') {
+      await this.sendMessage(scopeId, t(locale, 'usage_fast'));
+      return;
+    }
+
+    const models = await this.app.listModels();
+    const settings = this.store.getChatSettings(scopeId);
+    const currentModel = resolveCurrentModel(models, settings?.model ?? null);
+    const fastTier = resolveFastTierForModel(currentModel);
+    if (!fastTier) {
+      await this.sendMessage(scopeId, t(locale, 'fast_not_supported_by_model'));
+      await this.showSetupPanel(scopeId, 'fast', undefined, locale);
+      return;
+    }
+
+    const currentlyOn = settings?.serviceTier === fastTier.id;
+    const nextTier = raw === 'toggle'
+      ? currentlyOn ? null : fastTier.id
+      : raw === 'on'
+        ? fastTier.id
+        : null;
+    this.store.setChatServiceTier(scopeId, nextTier);
+    await this.showSetupPanel(scopeId, 'fast', undefined, locale);
+  }
+
   private async setCollaborationMode(scopeId: string, locale: AppLocale, mode: CollaborationModeValue): Promise<void> {
     this.store.setChatCollaborationMode(scopeId, mode);
     await this.sendMessage(scopeId, [
@@ -2409,6 +2502,17 @@ export class BridgeSessionCore {
     }
   }
 
+  private async resolveFastStatusLabel(locale: AppLocale, settings: ChatSessionSettings | null): Promise<string> {
+    try {
+      const models = await this.app.listModels();
+      const model = resolveCurrentModel(models, settings?.model ?? null);
+      return formatServiceTierStatusLabel(locale, model, settings?.serviceTier ?? null);
+    } catch (error) {
+      this.logger.warn('codex.models_for_fast_status_failed', { error: formatUserError(error) });
+      return t(locale, 'unknown');
+    }
+  }
+
   private async readCachedCodexLocalUsageStats(): Promise<CodexLocalUsageStats> {
     const now = Date.now();
     if (this.localUsageCache && this.localUsageCache.expiresAt > now) {
@@ -2422,7 +2526,7 @@ export class BridgeSessionCore {
   private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
     const scopeId = event.scopeId;
     if (args.length === 0) {
-      await this.showModelSettingsPanel(scopeId, undefined, locale);
+      await this.showSetupPanel(scopeId, 'model', undefined, locale);
       return;
     }
 
@@ -2436,7 +2540,11 @@ export class BridgeSessionCore {
     if (raw === '' || raw.toLowerCase() === 'default' || raw.toLowerCase() === 'reset') {
       const defaultModel = resolveCurrentModel(models, null);
       const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
+      const nextTier = clampServiceTierToModel(defaultModel, settings?.serviceTier ?? null);
       this.store.setChatSettings(scopeId, null, nextEffort.effort);
+      if (nextTier.adjusted) {
+        this.store.setChatServiceTier(scopeId, null);
+      }
       const lines = [
         t(locale, 'model_reset'),
         t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
@@ -2446,7 +2554,11 @@ export class BridgeSessionCore {
       if (nextEffort.adjustedFrom) {
         lines.splice(1, 0, t(locale, 'effort_adjusted_default_model', { effort: nextEffort.adjustedFrom }));
       }
+      if (nextTier.adjusted) {
+        lines.splice(1, 0, t(locale, 'fast_cleared_due_to_model_switch'));
+      }
       await this.sendMessage(scopeId, lines.join('\n'));
+      await this.showSetupPanel(scopeId, 'model', undefined, locale);
       return;
     }
 
@@ -2457,7 +2569,11 @@ export class BridgeSessionCore {
     }
 
     const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
+    const nextTier = clampServiceTierToModel(selected, settings?.serviceTier ?? null);
     this.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
+    if (nextTier.adjusted) {
+      this.store.setChatServiceTier(scopeId, null);
+    }
     const lines = [
       t(locale, 'model_configured', { model: selected.model }),
       t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
@@ -2467,13 +2583,17 @@ export class BridgeSessionCore {
     if (nextEffort.adjustedFrom) {
       lines.splice(1, 0, t(locale, 'effort_adjusted_model', { effort: nextEffort.adjustedFrom, model: selected.model }));
     }
+    if (nextTier.adjusted) {
+      lines.splice(1, 0, t(locale, 'fast_cleared_due_to_model_switch'));
+    }
     await this.sendMessage(scopeId, lines.join('\n'));
+    await this.showSetupPanel(scopeId, 'model', undefined, locale);
   }
 
   private async handleEffortCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
     const scopeId = event.scopeId;
     if (args.length === 0) {
-      await this.showModelSettingsPanel(scopeId, undefined, locale);
+      await this.showSetupPanel(scopeId, 'effort', undefined, locale);
       return;
     }
 
@@ -2492,6 +2612,7 @@ export class BridgeSessionCore {
         t(locale, 'applies_next_turn'),
         t(locale, 'tip_use_models'),
       ].join('\n'));
+      await this.showSetupPanel(scopeId, 'effort', undefined, locale);
       return;
     }
 
@@ -2517,6 +2638,7 @@ export class BridgeSessionCore {
       t(locale, 'applies_next_turn'),
       t(locale, 'tip_use_models'),
     ].join('\n'));
+    await this.showSetupPanel(scopeId, 'effort', undefined, locale);
   }
 
   private async handleThreadOpenCallback(event: TelegramCallbackEvent, threadId: string, locale: AppLocale): Promise<void> {
@@ -2596,13 +2718,13 @@ export class BridgeSessionCore {
   ): Promise<void> {
     const scopeId = event.scopeId;
     if (target === 'models') {
-      await this.showModelSettingsPanel(scopeId, event.messageId, locale);
-      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'opened_model_settings'));
+      await this.showSetupPanel(scopeId, 'model', event.messageId, locale);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'opened_setup_panel'));
       return;
     }
     if (target === 'permissions') {
-      await this.showAccessSettingsPanel(scopeId, event.messageId, locale);
-      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'opened_access_settings'));
+      await this.showSetupPanel(scopeId, 'access', event.messageId, locale);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'opened_setup_panel'));
       return;
     }
     if (target === 'threads') {
@@ -2625,11 +2747,13 @@ export class BridgeSessionCore {
     const binding = this.store.getBinding(scopeId);
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
+    const fastStatus = await this.resolveFastStatusLabel(locale, settings);
     if (!binding) {
       let text = [
         t(locale, 'where_no_thread_bound'),
         t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
         t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+        t(locale, 'where_fast', { value: fastStatus }),
         t(locale, 'where_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
         t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
         t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
@@ -2662,7 +2786,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    let text = formatWhereMessage(locale, thread, settings, this.config.defaultCwd, access);
+    let text = formatWhereMessage(locale, thread, settings, this.config.defaultCwd, access, fastStatus);
     if (parseWeixinBridgeScope(scopeId)) {
       text += `\n\n${formatWeixinWhereNavCopyPaste(locale, true)}`;
     }
@@ -2778,6 +2902,28 @@ export class BridgeSessionCore {
     await this.sendHtmlMessage(scopeId, text, keyboard);
   }
 
+  private async showSetupPanel(
+    scopeId: string,
+    focus: SetupFocusSection,
+    messageId?: number,
+    locale = this.localeForChat(scopeId),
+  ): Promise<void> {
+    const models = await this.app.listModels();
+    const settings = this.store.getChatSettings(scopeId);
+    const access = this.resolveEffectiveAccess(scopeId, settings);
+    let text = formatSetupPanelMessage(locale, { focus, models, settings, access });
+    if (parseWeixinBridgeScope(scopeId)) {
+      text += `\n\n${formatWeixinModelCopyPaste(locale, models, settings)}`;
+      text += `\n\n${formatWeixinAccessCopyPaste(locale)}`;
+    }
+    const keyboard = buildSetupPanelKeyboard(locale, { focus, models, settings, access });
+    if (messageId !== undefined) {
+      await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      return;
+    }
+    await this.sendHtmlMessage(scopeId, text, keyboard);
+  }
+
   private async showAccessSettingsPanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
     const access = this.resolveEffectiveAccess(scopeId);
     let text = formatAccessSettingsMessage(locale, access);
@@ -2798,6 +2944,15 @@ export class BridgeSessionCore {
     rawValue: string,
     locale: AppLocale,
   ): Promise<void> {
+    await this.handleSetupCallback(event, kind, rawValue, locale);
+  }
+
+  private async handleSetupCallback(
+    event: TelegramCallbackEvent,
+    kind: 'model' | 'effort' | 'fast' | 'access' | 'mode',
+    rawValue: string,
+    locale: AppLocale,
+  ): Promise<void> {
     const scopeId = event.scopeId;
     if (kind !== 'access' && this.findActiveTurn(scopeId)) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
@@ -2805,7 +2960,30 @@ export class BridgeSessionCore {
     }
 
     if (kind === 'access') {
-      await this.handleAccessSettingsCallback(event, rawValue, locale);
+      const nextPreset = normalizeAccessPreset(rawValue);
+      if (!nextPreset) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      this.store.setChatAccessPreset(scopeId, nextPreset);
+      await this.refreshSetupPanel(scopeId, event.messageId, 'access', locale);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_access', {
+        value: formatAccessPresetLabel(locale, nextPreset),
+      }));
+      return;
+    }
+
+    if (kind === 'mode') {
+      const mode = normalizeRequestedCollaborationMode(rawValue);
+      if (!mode) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      this.store.setChatCollaborationMode(scopeId, mode);
+      await this.refreshSetupPanel(scopeId, event.messageId, 'mode', locale);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'mode_configured', {
+        value: formatCollaborationModeLabel(locale, mode),
+      }));
       return;
     }
 
@@ -2817,9 +2995,16 @@ export class BridgeSessionCore {
       if (value === 'default') {
         const defaultModel = resolveCurrentModel(models, null);
         const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
+        const nextTier = clampServiceTierToModel(defaultModel, settings?.serviceTier ?? null);
         this.store.setChatSettings(scopeId, null, nextEffort.effort);
-        await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
-        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'using_server_default_model'));
+        if (nextTier.adjusted) {
+          this.store.setChatServiceTier(scopeId, null);
+        }
+        await this.refreshSetupPanel(scopeId, event.messageId, 'model', locale, models);
+        await this.messaging.answerCallback(
+          event.callbackQueryId,
+          nextTier.adjusted ? t(locale, 'fast_cleared_due_to_model_switch') : t(locale, 'using_server_default_model'),
+        );
         return;
       }
       const selected = resolveRequestedModel(models, value);
@@ -2828,15 +3013,39 @@ export class BridgeSessionCore {
         return;
       }
       const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
+      const nextTier = clampServiceTierToModel(selected, settings?.serviceTier ?? null);
       this.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
-      await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
-      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_model', { model: selected.model }));
+      if (nextTier.adjusted) {
+        this.store.setChatServiceTier(scopeId, null);
+      }
+      await this.refreshSetupPanel(scopeId, event.messageId, 'model', locale, models);
+      await this.messaging.answerCallback(
+        event.callbackQueryId,
+        nextTier.adjusted ? t(locale, 'fast_cleared_due_to_model_switch') : t(locale, 'callback_model', { model: selected.model }),
+      );
+      return;
+    }
+
+    if (kind === 'fast') {
+      const currentModel = resolveCurrentModel(models, settings?.model ?? null);
+      const fastTier = resolveFastTierForModel(currentModel);
+      if (!fastTier || value === 'unsupported') {
+        await this.refreshSetupPanel(scopeId, event.messageId, 'fast', locale, models);
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'fast_not_supported_by_model'));
+        return;
+      }
+      const nextTier = value === 'on' ? fastTier.id : null;
+      this.store.setChatServiceTier(scopeId, nextTier);
+      await this.refreshSetupPanel(scopeId, event.messageId, 'fast', locale, models);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_fast', {
+        value: nextTier ? t(locale, 'fast_enabled', { tier: fastTier.name || fastTier.id }) : t(locale, 'fast_disabled'),
+      }));
       return;
     }
 
     if (value === 'default') {
       this.store.setChatSettings(scopeId, settings?.model ?? null, null);
-      await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
+      await this.refreshSetupPanel(scopeId, event.messageId, 'effort', locale, models);
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'using_default_effort'));
       return;
     }
@@ -2852,7 +3061,7 @@ export class BridgeSessionCore {
       return;
     }
     this.store.setChatSettings(scopeId, settings?.model ?? null, effort);
-    await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
+    await this.refreshSetupPanel(scopeId, event.messageId, 'effort', locale, models);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_effort', { effort }));
   }
 
@@ -2878,6 +3087,24 @@ export class BridgeSessionCore {
       messageId,
       formatModelSettingsMessage(locale, resolvedModels, settings),
       buildModelSettingsKeyboard(locale, resolvedModels, settings),
+    );
+  }
+
+  private async refreshSetupPanel(
+    scopeId: string,
+    messageId: number,
+    focus: SetupFocusSection,
+    locale: AppLocale,
+    models?: ModelInfo[],
+  ): Promise<void> {
+    const resolvedModels = models ?? await this.app.listModels();
+    const settings = this.store.getChatSettings(scopeId);
+    const access = this.resolveEffectiveAccess(scopeId, settings);
+    await this.editHtmlMessage(
+      scopeId,
+      messageId,
+      formatSetupPanelMessage(locale, { focus, models: resolvedModels, settings, access }),
+      buildSetupPanelKeyboard(locale, { focus, models: resolvedModels, settings, access }),
     );
   }
 
