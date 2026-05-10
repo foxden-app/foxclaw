@@ -6,6 +6,7 @@ It runs on your own computer and lets a trusted Telegram or Weixin chat control 
 
 ## Start Here
 
+- Already have a shell-capable agent such as Codex, OpenClaw, QwenPaw, Hermes, OpenCode, or Kimi CLI? Use the [Agent-Assisted Install](./docs/agent-assisted-install.md) first. This is the recommended path.
 - New to Node, Telegram bots, or Codex CLI? Use the [Beginner Install Guide](./docs/install-for-beginners.md).
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
@@ -17,6 +18,8 @@ FoxClaw is a good fit if you want to:
 - use one trusted Telegram user as the remote operator
 
 The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24, and a logged-in `codex` CLI. A first install usually takes 10-20 minutes.
+
+30-second product example: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
 
 ## Requirements
 
