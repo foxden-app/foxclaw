@@ -138,6 +138,7 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: null,
       collaborationMode: null,
       serviceTier: null,
+      activeTurnMessageMode: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -150,6 +151,7 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: null,
       collaborationMode: null,
       serviceTier: null,
+      activeTurnMessageMode: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -162,6 +164,7 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: null,
       collaborationMode: null,
       serviceTier: null,
+      activeTurnMessageMode: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -174,6 +177,7 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: 'full-access',
       collaborationMode: null,
       serviceTier: null,
+      activeTurnMessageMode: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -186,6 +190,7 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: 'full-access',
       collaborationMode: 'plan',
       serviceTier: null,
+      activeTurnMessageMode: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -198,6 +203,20 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: 'full-access',
       collaborationMode: 'plan',
       serviceTier: 'priority',
+      activeTurnMessageMode: null,
+      updatedAt: store.getChatSettings(S3)!.updatedAt,
+    });
+
+    store.setChatActiveTurnMessageMode(S3, 'queue');
+    assert.deepEqual(store.getChatSettings(S3), {
+      chatId: S3,
+      model: null,
+      reasoningEffort: 'medium',
+      locale: 'zh',
+      accessPreset: 'full-access',
+      collaborationMode: 'plan',
+      serviceTier: 'priority',
+      activeTurnMessageMode: 'queue',
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -210,6 +229,7 @@ test('BridgeStore persists chat session settings', () => {
       accessPreset: 'full-access',
       collaborationMode: 'plan',
       serviceTier: 'priority',
+      activeTurnMessageMode: 'queue',
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
   });
@@ -239,8 +259,11 @@ test('BridgeStore migrates old chat settings rows without service tier', () => {
   const store = new BridgeStore(dbPath);
   try {
     assert.equal(store.getChatSettings(S4)?.serviceTier, null);
+    assert.equal(store.getChatSettings(S4)?.activeTurnMessageMode, null);
     store.setChatServiceTier(S4, 'priority');
     assert.equal(store.getChatSettings(S4)?.serviceTier, 'priority');
+    store.setChatActiveTurnMessageMode(S4, 'steer');
+    assert.equal(store.getChatSettings(S4)?.activeTurnMessageMode, 'steer');
   } finally {
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

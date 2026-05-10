@@ -2,6 +2,7 @@ import path from 'node:path';
 import { t } from '../i18n.js';
 import type {
   AccessPresetValue,
+  ActiveTurnMessageMode,
   AppLocale,
   AppThread,
   ApprovalPolicyValue,
@@ -16,7 +17,7 @@ import { resolveFastTierForModel } from './service_tier.js';
 
 type InlineButton = { text: string; callback_data: string };
 
-export type SetupFocusSection = 'overview' | 'model' | 'effort' | 'fast' | 'access' | 'mode';
+export type SetupFocusSection = 'overview' | 'model' | 'effort' | 'fast' | 'access' | 'mode' | 'active';
 
 export interface SetupPanelContext {
   focus: SetupFocusSection;
@@ -138,6 +139,7 @@ export function formatWhereMessage(
     t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
     t(locale, 'where_fast', { value: fastLabel }),
     t(locale, 'where_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
+    t(locale, 'active_current', { value: formatActiveTurnMessageModeLabel(locale, settings?.activeTurnMessageMode ?? null) }),
     t(locale, 'where_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
     t(locale, 'where_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
     t(locale, 'where_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
@@ -257,6 +259,8 @@ export function formatWeixinWhereNavCopyPaste(locale: AppLocale, hasBinding: boo
     t(locale, 'weixin_copy_paste_divider'),
     t(locale, 'weixin_copy_where_nav_title'),
     '/setup',
+    '/active steer',
+    '/active queue',
     '/permissions',
     '/models',
     '/threads',
@@ -278,6 +282,7 @@ export function formatSetupPanelMessage(locale: AppLocale, ctx: SetupPanelContex
     fastTier?.name ?? null,
   );
   const mode = resolveCollaborationMode(ctx.settings?.collaborationMode ?? null);
+  const activeTurnMessageMode = resolveActiveTurnMessageMode(ctx.settings?.activeTurnMessageMode ?? null);
   return [
     t(locale, 'setup_title'),
     t(locale, 'setup_summary', { value: escapeTelegramHtml(resolveSetupSummaryLine(ctx, locale)) }),
@@ -290,6 +295,7 @@ export function formatSetupPanelMessage(locale: AppLocale, ctx: SetupPanelContex
       value: escapeTelegramHtml(`${formatAccessPresetLabel(locale, ctx.access.preset)} (${ctx.access.approvalPolicy} / ${ctx.access.sandboxMode})`),
     }),
     t(locale, 'setup_row_mode', { value: escapeTelegramHtml(formatCollaborationModeLabel(locale, mode)) }),
+    t(locale, 'setup_row_active', { value: escapeTelegramHtml(formatActiveTurnMessageModeLabel(locale, activeTurnMessageMode)) }),
   ].join('\n');
 }
 
@@ -304,6 +310,7 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
   const fastTier = resolveFastTierForModel(effectiveModel);
   const serviceTier = ctx.settings?.serviceTier ?? null;
   const currentMode = resolveCollaborationMode(ctx.settings?.collaborationMode ?? null);
+  const activeTurnMessageMode = resolveActiveTurnMessageMode(ctx.settings?.activeTurnMessageMode ?? null);
 
   const rows: InlineButton[][] = [];
   rows.push(...chunkButtons([
@@ -369,6 +376,17 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
     },
   ]);
 
+  rows.push([
+    {
+      text: `${activeTurnMessageMode === 'steer' ? '• ' : ''}${t(locale, 'active_turn_message_mode_steer')}`,
+      callback_data: 'setup:active:steer',
+    },
+    {
+      text: `${activeTurnMessageMode === 'queue' ? '• ' : ''}${t(locale, 'active_turn_message_mode_queue')}`,
+      callback_data: 'setup:active:queue',
+    },
+  ]);
+
   return rows;
 }
 
@@ -384,6 +402,7 @@ export function resolveSetupSummaryLine(ctx: SetupPanelContext, locale: AppLocal
     fast,
     ctx.access.preset,
     resolveCollaborationMode(ctx.settings?.collaborationMode ?? null),
+    resolveActiveTurnMessageMode(ctx.settings?.activeTurnMessageMode ?? null),
   ].join(' · ');
 }
 
@@ -402,6 +421,10 @@ export function formatServiceTierStatusLabel(
   return t(locale, 'fast_disabled');
 }
 
+export function formatActiveTurnMessageModeLabel(locale: AppLocale, mode: ActiveTurnMessageMode | null | undefined): string {
+  return t(locale, resolveActiveTurnMessageMode(mode) === 'queue' ? 'active_turn_message_mode_queue' : 'active_turn_message_mode_steer');
+}
+
 function setupFocusLabel(locale: AppLocale, focus: SetupFocusSection): string {
   switch (focus) {
     case 'model':
@@ -414,9 +437,15 @@ function setupFocusLabel(locale: AppLocale, focus: SetupFocusSection): string {
       return t(locale, 'setup_focus_access');
     case 'mode':
       return t(locale, 'setup_focus_mode');
+    case 'active':
+      return t(locale, 'setup_focus_active');
     default:
       return t(locale, 'setup_focus_overview');
   }
+}
+
+export function resolveActiveTurnMessageMode(mode: ActiveTurnMessageMode | null | undefined): ActiveTurnMessageMode {
+  return mode === 'queue' ? 'queue' : 'steer';
 }
 
 function formatFastSetupLabel(
