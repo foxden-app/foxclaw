@@ -1,16 +1,31 @@
 {
-  "name": "telegram-codex-app-bridge",
+  "name": "@foxden-app/foxclaw",
   "version": "0.2.0",
-  "description": "Bridge a Telegram bot to a local Codex Desktop instance via codex app-server.",
+  "description": "Foxden local execution claw for controlling Codex from trusted chat interfaces.",
   "type": "module",
+  "main": "dist/main.js",
+  "bin": {
+    "foxclaw": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "skills",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
   "private": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Gan-Xing/telegram-codex-app-bridge.git"
+    "url": "git+https://github.com/foxden-app/foxclaw.git"
   },
-  "homepage": "https://github.com/Gan-Xing/telegram-codex-app-bridge#readme",
+  "homepage": "https://github.com/foxden-app/foxclaw#readme",
   "bugs": {
-    "url": "https://github.com/Gan-Xing/telegram-codex-app-bridge/issues"
+    "url": "https://github.com/foxden-app/foxclaw/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=24"

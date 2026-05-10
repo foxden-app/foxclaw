@@ -770,8 +770,8 @@ export class CodexAppClient extends EventEmitter {
   private async initialize(): Promise<void> {
     const result = await this.request('initialize', {
       clientInfo: {
-        name: 'telegram-codex-app-bridge',
-        title: 'Telegram Codex App Bridge',
+        name: 'foxclaw',
+        title: 'FoxClaw',
         version: '0.2.0',
       },
       capabilities: {

@@ -40,7 +40,7 @@ If multiple bots share one group, keep the same `TG_ALLOWED_CHAT_ID` and give ea
 
 Best practice:
 
-- keep the bridge repo in a stable path such as `~/telegram-codex-app-bridge`
+- keep the FoxClaw repo in a stable path such as `~/foxclaw`
 - point `DEFAULT_CWD` at a directory the user actually wants Codex to work inside, such as `~/workspace`, `~/Documents`, or `~/Dev`
 - do not use an ambiguous or disposable path unless the user explicitly wants that
 

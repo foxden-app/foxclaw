@@ -1,11 +1,11 @@
 ---
-name: chat-to-codex
-description: Deploy, configure, and validate the Gan-Xing Telegram-to-Codex bridge on macOS, locally or over SSH. Use when Codex needs to clone or update the bridge repo, collect Telegram bot and chat/topic values, write the bridge `.env`, enable a launchd service, and guide the user through the first Telegram message test. Trigger on requests about Telegram bots controlling Codex, copying the bridge to another Mac, remote bridge deployment, or turning this repo into an installable Codex skill.
+name: foxclaw
+description: Deploy, configure, and validate FoxClaw on macOS, locally or over SSH. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram bot and chat/topic values, write `.env`, enable a launchd service, and guide the user through the first Telegram message test. Trigger on requests about trusted chat interfaces controlling local Codex, copying FoxClaw to another Mac, remote FoxClaw deployment, or turning this repo into an installable Codex skill.
 ---
 
-# Chat To Codex
+# FoxClaw
 
-Deploy the Telegram Codex bridge to a Mac with as little manual setup as possible. The bundled scripts install user-scoped Node.js and Codex CLI when missing, clone or update the bridge repo, write `.env`, build the project, run doctor checks, and optionally install the launchd service.
+Deploy FoxClaw to a Mac with as little manual setup as possible. The bundled scripts install user-scoped Node.js and Codex CLI when missing, clone or update the FoxClaw repo, write `.env`, build the project, run doctor checks, and optionally install the launchd service.
 
 This skill is not finished when the repo is merely installed. Treat a bridge setup as complete only after:
 
@@ -53,9 +53,9 @@ Collect these deployment values on every run:
 
 Defaults:
 
-- repo URL: `https://github.com/Gan-Xing/telegram-codex-app-bridge.git`
+- repo URL: `https://github.com/foxden-app/foxclaw.git`
 - repo ref: `main`
-- install directory: `~/telegram-codex-app-bridge`
+- install directory: `~/foxclaw`
 - `DEFAULT_APPROVAL_POLICY`: `on-request`
 - `DEFAULT_SANDBOX_MODE`: `workspace-write`
 
@@ -94,7 +94,7 @@ If the user does not know the Telegram ids, point them to the exact `getUpdates`
 Run:
 
 ```bash
-python3 "$CODEX_HOME/skills/chat-to-codex/scripts/bootstrap_host.py" \
+python3 "$CODEX_HOME/skills/foxclaw/scripts/bootstrap_host.py" \
   --tg-bot-token "<BOT_TOKEN>" \
   --tg-allowed-user-id "<USER_ID>" \
   --default-cwd "<ABSOLUTE_CWD>" \
@@ -114,7 +114,7 @@ When the repo is not already present on disk, this bootstrap path counts as the 
 Run:
 
 ```bash
-python3 "$CODEX_HOME/skills/chat-to-codex/scripts/bootstrap_remote.py" \
+python3 "$CODEX_HOME/skills/foxclaw/scripts/bootstrap_remote.py" \
   --ssh-host "<USER@HOST>" \
   --install-dir "<REMOTE_INSTALL_DIR>" \
   --tg-bot-token "<BOT_TOKEN>" \

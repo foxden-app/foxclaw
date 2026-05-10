@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 import type { LogLevel } from './logger.js';
 import type { ApprovalPolicyValue, SandboxModeValue } from './types.js';
 
-export const APP_HOME = path.join(os.homedir(), '.telegram-codex-app-bridge');
+export const APP_HOME = path.join(os.homedir(), '.foxclaw');
 export const DEFAULT_STORE_PATH = path.join(APP_HOME, 'data', 'bridge.sqlite');
 export const DEFAULT_STATUS_PATH = path.join(APP_HOME, 'runtime', 'status.json');
 export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
