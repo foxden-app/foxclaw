@@ -51,7 +51,7 @@ Tasks:
    - foxclaw.service is active/enabled on Linux
    - old telegram-codex-app-bridge.service is inactive/disabled if present
    - npm run status works
-10. Report the commands used, the final status, and the log command I should use if something stops working.
+10. Report the commands used, the final status, and the log command I should use if something stops working. Redact TG_BOT_TOKEN and never print the full token or full .env content.
 ```
 
 ## Migration Prompt For Old Installs
@@ -72,12 +72,13 @@ Please:
 5. Run npm install, npm run build, npm run doctor.
 6. Install and start foxclaw.service with npm run install-systemd.
 7. Verify foxclaw.service is active and telegram-codex-app-bridge.service is inactive/disabled.
-8. Report final status and any blockers.
+8. Report final status and any blockers. Redact TG_BOT_TOKEN and never print the full token or full .env content.
 ```
 
 ## Safety Notes
 
 - Do not paste bot tokens into public issue trackers or public chat logs.
 - Do not commit `.env`.
+- When reporting results, redact `TG_BOT_TOKEN`.
 - Do not use `/` or your whole home directory as `DEFAULT_CWD` for a first install.
 - Do not install the background service before the foreground Telegram test works.

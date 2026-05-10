@@ -145,6 +145,8 @@ DEFAULT_APPROVAL_POLICY=on-request
 DEFAULT_SANDBOX_MODE=workspace-write
 ```
 
+Keep `TG_ALLOWED_CHAT_ID=` and `TG_ALLOWED_TOPIC_ID=` empty for the first install. Do not delete those lines; leaving them empty means private-chat mode.
+
 `DEFAULT_CWD` must be a real folder. Examples:
 
 ```dotenv
