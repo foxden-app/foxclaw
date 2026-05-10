@@ -12,14 +12,14 @@ import tempfile
 import urllib.request
 
 
-REPO_URL_DEFAULT = "https://github.com/Gan-Xing/telegram-codex-app-bridge.git"
+REPO_URL_DEFAULT = "https://github.com/foxden-app/foxclaw.git"
 REPO_REF_DEFAULT = "main"
 NODE_INDEX_URL = "https://nodejs.org/dist/index.json"
 NODE_MAJOR_DEFAULT = 24
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Bootstrap telegram-codex-app-bridge on macOS.")
+    parser = argparse.ArgumentParser(description="Bootstrap FoxClaw on macOS.")
     parser.add_argument("--config-b64")
     parser.add_argument("--repo-url")
     parser.add_argument("--repo-ref")
@@ -40,8 +40,8 @@ def merged_config(args: argparse.Namespace) -> dict:
     defaults = {
         "repo_url": REPO_URL_DEFAULT,
         "repo_ref": REPO_REF_DEFAULT,
-        "install_dir": os.path.expanduser("~/telegram-codex-app-bridge"),
-        "default_cwd": os.path.expanduser("~/telegram-codex-app-bridge"),
+        "install_dir": os.path.expanduser("~/foxclaw"),
+        "default_cwd": os.path.expanduser("~/foxclaw"),
         "tg_bot_token": None,
         "tg_allowed_user_id": None,
         "tg_allowed_chat_id": None,
@@ -85,7 +85,7 @@ def require(value: str, name: str) -> str:
 
 
 def log(message: str) -> None:
-    print(f"[chat-to-codex] {message}", flush=True)
+    print(f"[foxclaw] {message}", flush=True)
 
 
 def run(cmd, env=None, cwd=None, check=True, capture_output=False) -> subprocess.CompletedProcess:
@@ -246,7 +246,7 @@ def ensure_repo(config: dict) -> None:
     log(f"Updating bridge repo in {install_dir}")
     run(["git", "-C", install_dir, "remote", "set-url", "origin", config["repo_url"]])
     run(["git", "-C", install_dir, "fetch", "origin", config["repo_ref"], "--depth", "1"])
-    run(["git", "-C", install_dir, "checkout", "-B", "chat-to-codex-deploy", "FETCH_HEAD"])
+    run(["git", "-C", install_dir, "checkout", "-B", "foxclaw-deploy", "FETCH_HEAD"])
 
 
 def write_env_file(config: dict, codex_bin: str) -> str:
@@ -315,7 +315,7 @@ def main() -> None:
     config["tg_allowed_user_id"] = require(config["tg_allowed_user_id"], "TG_ALLOWED_USER_ID")
     os.makedirs(config["default_cwd"], exist_ok=True)
 
-    tools_root = os.path.expanduser("~/.local/chat-to-codex")
+    tools_root = os.path.expanduser("~/.local/foxclaw")
     node_bin, node_bin_dir = ensure_node(config, tools_root)
     env = os.environ.copy()
     env["PATH"] = node_bin_dir + os.pathsep + env.get("PATH", "")

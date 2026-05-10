@@ -8,11 +8,11 @@ import sys
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run chat-to-codex bootstrap on a remote Mac over SSH.")
+    parser = argparse.ArgumentParser(description="Run FoxClaw bootstrap on a remote Mac over SSH.")
     parser.add_argument("--ssh-host", required=True)
-    parser.add_argument("--repo-url", default="https://github.com/Gan-Xing/telegram-codex-app-bridge.git")
+    parser.add_argument("--repo-url", default="https://github.com/foxden-app/foxclaw.git")
     parser.add_argument("--repo-ref", default="main")
-    parser.add_argument("--install-dir", default="~/telegram-codex-app-bridge")
+    parser.add_argument("--install-dir", default="~/foxclaw")
     parser.add_argument("--default-cwd", required=True)
     parser.add_argument("--tg-bot-token", required=True)
     parser.add_argument("--tg-allowed-user-id", required=True)

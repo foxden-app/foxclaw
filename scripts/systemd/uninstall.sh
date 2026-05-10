@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-UNIT_NAME="telegram-codex-app-bridge.service"
+UNIT_NAME="foxclaw.service"
 USER_SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT_PATH="$USER_SYSTEMD_DIR/$UNIT_NAME"
 

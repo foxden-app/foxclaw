@@ -1,4 +1,0 @@
-interface:
-  display_name: "Telegram to Codex"
-  short_description: "Install, configure, and validate Telegram Codex bridges"
-  default_prompt: "Use $chat-to-codex to clone the bridge repo, collect Telegram values, write .env, start the service, and verify it with a first Telegram message."
