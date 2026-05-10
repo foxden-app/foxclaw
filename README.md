@@ -36,12 +36,13 @@ git clone https://github.com/foxden-app/foxclaw.git
 cd foxclaw
 npm install
 cp .env.example .env
+$EDITOR .env
 npm run build
 npm run doctor
 npm run serve
 ```
 
-The `.env` file lives in the project root. Minimum private-chat config:
+Edit `.env` before running `doctor` or `serve`. Minimum private-chat config:
 
 ```dotenv
 TG_BOT_TOKEN=123456:telegram-token
