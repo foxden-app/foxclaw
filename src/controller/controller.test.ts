@@ -1043,9 +1043,14 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   const authDir = installTempAuthFiles(t, rig.tempDir);
 
   let restarts = 0;
+  const retryReadies: any[] = [];
   const retryStarts: any[] = [];
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
+  };
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any, options: any) => {
+    retryReadies.push({ binding, options });
+    return binding;
   };
   (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[], overrides: any) => {
     retryStarts.push({ binding, input, overrides });
@@ -1085,8 +1090,15 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   });
 
   assert.equal(restarts, 1);
-  assert.deepEqual(retryStarts, [{
-    binding: { threadId: 'thread-1', cwd: rig.tempDir },
+  assert.equal(retryReadies.length, 1);
+  assert.equal(retryReadies[0].binding.chatId, 'telegram:99::root');
+  assert.equal(retryReadies[0].binding.threadId, 'thread-1');
+  assert.equal(retryReadies[0].binding.cwd, rig.tempDir);
+  assert.equal(typeof retryReadies[0].binding.updatedAt, 'number');
+  assert.deepEqual(retryReadies[0].options, { recoverMissingThread: false });
+  assert.equal(retryStarts.length, 1);
+  assert.equal(retryStarts[0].binding, retryReadies[0].binding);
+  assert.deepEqual(retryStarts.map(({ input, overrides }) => ({ input, overrides })), [{
     input: [{ type: 'text', text: 'try this', text_elements: [] }],
     overrides: { collaborationMode: undefined, recoverMissingThread: false },
   }]);
@@ -1124,11 +1136,18 @@ test('auth retry stops instead of creating a replacement thread when original th
   installTempAuthFiles(t, rig.tempDir);
 
   let restarts = 0;
+  let retryStartCalls = 0;
+  const retryReadies: any[] = [];
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
-  (rig.controller as any).startTurnWithRecovery = async () => {
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any, options: any) => {
+    retryReadies.push({ binding, options });
     throw new Error('thread not found');
+  };
+  (rig.controller as any).startTurnWithRecovery = async () => {
+    retryStartCalls += 1;
+    return { threadId: 'thread-1', turnId: 'turn-2' };
   };
   (rig.controller as any).queueTurnRender = async () => {};
   (rig.controller as any).completeTurn = async () => {};
@@ -1162,6 +1181,10 @@ test('auth retry stops instead of creating a replacement thread when original th
   });
 
   assert.equal(restarts, 1);
+  assert.equal(retryReadies.length, 1);
+  assert.equal(retryReadies[0].binding.threadId, 'thread-1');
+  assert.deepEqual(retryReadies[0].options, { recoverMissingThread: false });
+  assert.equal(retryStartCalls, 0);
   assert.ok(rig.sentMessages.some(message => /original thread is no longer available/.test(message)));
 });
 
