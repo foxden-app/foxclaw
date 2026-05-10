@@ -2,23 +2,21 @@
 
 FoxClaw is the local execution claw for Foxden agents.
 
-It runs on your own machine, connects trusted chat interfaces to local Codex through `codex app-server`, and keeps mobile workflows usable with approvals, thread management, auth controls, and stable live rendering.
+It runs on your own computer and lets a trusted Telegram or Weixin chat control your local Codex environment. You do not need a public server: FoxClaw talks to Codex over local `codex app-server`, keeps approvals on your machine, and sends the working conversation back to your phone.
 
-## Features
+## Start Here
 
-- Telegram private chat, group, and topic control for one allowed Telegram user
-- Optional Weixin/iLink channel for the same bridge core
-- Local `codex app-server` transport over loopback WebSocket
-- Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, and `/interrupt`
-- Thread lifecycle controls from mobile: rename, archive, unarchive, fork, rollback, compact, review, and diff
-- Chat-scoped setup panel for model, reasoning effort, Fast service tier, access preset, Agent/Plan mode, and active-turn behavior
-- Codex account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, `/auth add <name>`, and guarded `/logout confirm`
-- Automatic local Codex auth rotation across `auth.json_*` candidates when a usage-limit auth fails
-- Inline approval buttons for command, file-change, and granular permission approvals
-- MCP elicitation cards for structured questions raised by tools during a turn
-- Skills, MCP, hooks, plugins, apps, feature flags, config, requirements, and provider diagnostics
-- SQLite persistence for bindings, offsets, approvals, pending input prompts, and audit logs
-- Single-instance process lock to prevent duplicate Telegram polling on the same bot token
+- New to Node, Telegram bots, or Codex CLI? Use the [Beginner Install Guide](./docs/install-for-beginners.md).
+- Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
+- Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
+
+FoxClaw is a good fit if you want to:
+
+- use Codex from your phone without exposing your computer to the public internet
+- keep code, shell access, auth, approvals, and runtime data on your own machine
+- use one trusted Telegram user as the remote operator
+
+The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24, and a logged-in `codex` CLI. A first install usually takes 10-20 minutes.
 
 ## Requirements
 
@@ -28,7 +26,7 @@ It runs on your own machine, connects trusted chat interfaces to local Codex thr
 - A Telegram bot token from `@BotFather`
 - Your Telegram numeric user id
 
-## Setup
+## Quick Setup
 
 ```bash
 git clone https://github.com/foxden-app/foxclaw.git
@@ -51,6 +49,24 @@ DEFAULT_SANDBOX_MODE=workspace-write
 ```
 
 FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
+
+<details>
+<summary>What FoxClaw can do after it is running</summary>
+
+- Telegram private chat, group, and topic control for one allowed Telegram user
+- Optional Weixin/iLink channel for the same bridge core
+- Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, and `/interrupt`
+- Thread lifecycle controls from mobile: rename, archive, unarchive, fork, rollback, compact, review, and diff
+- Chat-scoped setup panel for model, reasoning effort, Fast service tier, access preset, Agent/Plan mode, and active-turn behavior
+- Codex account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, `/auth add <name>`, and guarded `/logout confirm`
+- Automatic local Codex auth rotation across `auth.json_*` candidates when a usage-limit auth fails
+- Inline approval buttons for command, file-change, and granular permission approvals
+- MCP elicitation cards for structured questions raised by tools during a turn
+- Skills, MCP, hooks, plugins, apps, feature flags, config, requirements, and provider diagnostics
+- SQLite persistence for bindings, offsets, approvals, pending input prompts, and audit logs
+- Single-instance process lock to prevent duplicate Telegram polling on the same bot token
+
+</details>
 
 ## Installing As A Service
 
@@ -76,7 +92,7 @@ Default runtime files are stored under `~/.foxclaw`:
 - app-server state: `~/.foxclaw/runtime/codex-app-server.json`
 - app-server log: `~/.foxclaw/logs/codex-app-server.log`
 
-Override specific paths with `STORE_PATH`, `LOG_PATH`, `STATUS_PATH`, `LOCK_PATH`, `CODEX_APP_SERVER_STATE_PATH`, and `CODEX_APP_SERVER_LOG_PATH`.
+Override the store, lock, and app-server paths with `STORE_PATH`, `LOCK_PATH`, `CODEX_APP_SERVER_STATE_PATH`, and `CODEX_APP_SERVER_LOG_PATH`.
 
 ## Migrating From telegram-codex-app-bridge
 
@@ -205,11 +221,7 @@ This repo ships a Codex skill at [`skills/foxclaw`](./skills/foxclaw). Use it wh
 
 ## Troubleshooting
 
-- Group command works, but natural language does not: privacy mode is still on, the bot is not admin, or the bot needs to be re-added.
-- `getUpdates` shows no recent message: stop FoxClaw first, then send a fresh message and check again.
-- Multiple bots answer in the same group: give each bot a different `TG_ALLOWED_TOPIC_ID`, or keep bots in separate groups.
-- The same bot starts replying twice or Telegram shows polling conflicts: make sure only one FoxClaw process is running for that bot token.
-- A message seemed to get no reply: check the latest activity card and streamed body below it; FoxClaw keeps partial output visible instead of replacing it with generic loading text.
+See [Troubleshooting](./docs/troubleshooting.md) for `doctor` failures, Telegram no-reply cases, service logs, reboot behavior, and migration issues.
 
 ## Operations
 
