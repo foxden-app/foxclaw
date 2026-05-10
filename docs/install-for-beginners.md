@@ -4,6 +4,15 @@ This guide is for a first FoxClaw install. It assumes you can open a terminal an
 
 FoxClaw runs on your own computer. Your phone talks to a Telegram bot, the bot talks to FoxClaw, and FoxClaw talks to local Codex. You do not need a public server.
 
+If you already have a shell-capable agent such as Codex, OpenClaw, QwenPaw, Hermes, OpenCode, or Kimi CLI on this computer, use [Agent-Assisted Install](./agent-assisted-install.md) first. It is the recommended path.
+
+Before you start:
+
+- Do not configure a Telegram group first. Use private chat first.
+- Do not send your bot token to anyone you do not trust.
+- Do not use `/`, `/Users`, `/home`, or your whole home directory as `DEFAULT_CWD` for the first install.
+- Do not install the background service until foreground mode replies to `/help` and `/status`.
+
 ## 1. Prepare
 
 You need:
@@ -54,18 +63,33 @@ Install the Codex CLI if you do not already have it:
 npm install -g @openai/codex
 ```
 
-Log in and confirm the CLI works:
+If this fails with `EACCES` or `permission denied`, stop and check [Troubleshooting](./troubleshooting.md). Do not keep retrying with random `sudo` commands.
+
+Log in:
 
 ```bash
 codex login
-codex login status
 ```
 
-The important check is that this command exists and reports a logged-in account:
+Check the CLI exists:
 
 ```bash
 codex --version
 ```
+
+`codex --version` only proves the command exists. To verify Codex auth actually works, start Codex and run one tiny request:
+
+```bash
+codex
+```
+
+Ask it:
+
+```text
+Say ready and exit.
+```
+
+If your Codex CLI supports `codex login status`, you can also use it, but the real test is that Codex can answer a normal prompt without asking you to log in again.
 
 ## 4. Create A Telegram Bot
 
@@ -177,6 +201,24 @@ Then try a normal request, for example:
 
 ```text
 List the files in the current working directory.
+```
+
+Good first messages to try:
+
+```text
+/setup
+```
+
+```text
+List files in DEFAULT_CWD.
+```
+
+```text
+Create a short README-style summary of this folder.
+```
+
+```text
+/interrupt
 ```
 
 Stop the foreground process with `Ctrl+C` after the bot works.

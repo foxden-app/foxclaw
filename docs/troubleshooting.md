@@ -24,6 +24,52 @@ journalctl --user -u foxclaw.service -f
 | `[FAIL] telegram allowed user configured` | `TG_ALLOWED_USER_ID` is missing from `.env`. | Get your numeric id from `@userinfobot` and add it to `.env`. |
 | `[FAIL] default cwd exists` | `DEFAULT_CWD` points to a folder that does not exist. | Create the folder or change `DEFAULT_CWD` to an existing absolute path. |
 
+## Node Or npm Is Missing
+
+If you see `node: command not found` or `npm: command not found`, install Node.js 24 with `nvm`:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm install 24
+nvm use 24
+node -v
+npm -v
+```
+
+If it still fails, close the terminal, open a new one, and run:
+
+```bash
+nvm use 24
+```
+
+## npm Permission Errors
+
+If `npm install -g @openai/codex` fails with `EACCES`, `EPERM`, or `permission denied`, your global npm directory is not writable by your user.
+
+Recommended fix: use Node through `nvm`, then install again:
+
+```bash
+nvm install 24
+nvm use 24
+npm install -g @openai/codex
+```
+
+Avoid `sudo npm install -g ...` unless you already understand how your Node installation is managed. Mixing `sudo`, system Node, and `nvm` is a common source of broken PATHs.
+
+If `codex` installs but FoxClaw still cannot find it, locate the binary:
+
+```bash
+command -v codex
+```
+
+Then put the absolute path in `.env`:
+
+```dotenv
+CODEX_CLI_BIN=/absolute/path/to/codex
+```
+
 ## Bot Does Not Reply
 
 Check these in order:
@@ -107,7 +153,6 @@ systemctl --user restart foxclaw.service
 FoxClaw requires local Codex auth. Check:
 
 ```bash
-codex login status
 codex --version
 ```
 
@@ -116,6 +161,20 @@ If Codex is not logged in:
 ```bash
 codex login
 ```
+
+`codex --version` only verifies the command exists. To verify auth, run:
+
+```bash
+codex
+```
+
+Then ask:
+
+```text
+Say ready and exit.
+```
+
+If your CLI supports `codex login status`, that is also useful, but a normal successful prompt is the most reliable check.
 
 FoxClaw app-server logs are stored here by default:
 
