@@ -16,6 +16,7 @@ import type {
   CodexCollaborationMode,
   CodexConfigRequirements,
   CodexExperimentalFeature,
+  CodexFuzzyFileResult,
   CodexHooksListEntry,
   CodexMcpResourceContent,
   CodexMcpServerStatus,
@@ -26,13 +27,16 @@ import type {
   CodexRateLimitWindow,
   CodexSkillMetadata,
   CodexSkillsListEntry,
+  CodexThreadGoal,
   CollaborationModeValue,
+  AppTurnSnapshot,
   ModelInfo,
   PendingApprovalRecord,
   ReasoningEffortValue,
   ReviewTarget,
   RuntimeStatus,
   ThreadBinding,
+  ThreadGoalStatusValue,
   ThreadSessionState,
 } from '../types.js';
 import { parseCommand } from './commands.js';
@@ -300,6 +304,12 @@ interface PendingAuthRotation {
   retry: AuthRetryContext | null;
 }
 
+interface RemoteControlStatusState {
+  status: string;
+  installationId: string | null;
+  environmentId: string | null;
+}
+
 type ApprovalAction = 'accept' | 'session' | 'deny';
 type McpElicitationAction = 'accept' | 'decline' | 'cancel';
 class UserFacingError extends Error {}
@@ -327,6 +337,7 @@ export class BridgeSessionCore {
   private authRotationInProgress = false;
   private authRotationFailedTargets = new Set<string>();
   private localUsageCache: { expiresAt: number; stats: CodexLocalUsageStats } | null = null;
+  private lastRemoteControlStatus: RemoteControlStatusState | null = null;
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
@@ -543,6 +554,10 @@ export class BridgeSessionCore {
           '/threads [query]',
           '/threads archived [query]',
           '/open <n>',
+          '/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]',
+          '/history [limit]',
+          '/files <query>',
+          '/remote',
           '/watch',
           '/unwatch',
           '/steer <message>',
@@ -666,6 +681,39 @@ export class BridgeSessionCore {
       }
       case 'where': {
         await this.showWherePanel(scopeId, undefined, locale);
+        return;
+      }
+      case 'goal': {
+        await this.handleGoalCommand(scopeId, locale, args);
+        return;
+      }
+      case 'goal_pause': {
+        await this.handleGoalCommand(scopeId, locale, ['pause', ...args]);
+        return;
+      }
+      case 'goal_resume': {
+        await this.handleGoalCommand(scopeId, locale, ['resume', ...args]);
+        return;
+      }
+      case 'goal_done': {
+        await this.handleGoalCommand(scopeId, locale, ['done', ...args]);
+        return;
+      }
+      case 'goal_clear': {
+        await this.handleGoalCommand(scopeId, locale, ['clear', ...args]);
+        return;
+      }
+      case 'history': {
+        await this.handleHistoryCommand(scopeId, locale, args);
+        return;
+      }
+      case 'files':
+      case 'file': {
+        await this.handleFilesCommand(scopeId, locale, args);
+        return;
+      }
+      case 'remote': {
+        await this.handleRemoteCommand(scopeId, locale);
         return;
       }
       case 'threads': {
@@ -1124,6 +1172,24 @@ export class BridgeSessionCore {
         await this.handleThreadTokenUsageUpdated(notification.params);
         return;
       }
+      case 'thread/goal/updated':
+      case 'thread/goal/cleared': {
+        await this.handleThreadGoalNotification(notification.method, notification.params);
+        return;
+      }
+      case 'item/mcpToolCall/progress': {
+        await this.handleMcpToolCallProgress(notification.params);
+        return;
+      }
+      case 'model/rerouted':
+      case 'model/verification': {
+        await this.handleModelNotification(notification.method, notification.params);
+        return;
+      }
+      case 'remoteControl/status/changed': {
+        await this.handleRemoteControlStatusChanged(notification.params);
+        return;
+      }
       case 'thread/name/updated':
       case 'thread/archived':
       case 'thread/unarchived':
@@ -1325,6 +1391,102 @@ export class BridgeSessionCore {
       total: usage.total,
       limit: usage.limit,
     }));
+  }
+
+  private async handleThreadGoalNotification(method: string, params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    if (!threadId) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      return;
+    }
+    const locale = this.localeForChat(scopeId);
+    if (method === 'thread/goal/cleared') {
+      await this.sendMessage(scopeId, t(locale, 'goal_cleared_notification', { threadId }));
+      return;
+    }
+    const goal = mapGoalNotification(params?.goal);
+    if (!goal) {
+      return;
+    }
+    await this.sendMessage(scopeId, t(locale, 'goal_updated_notification', {
+      status: goal.status,
+      objective: truncateInline(goal.objective, 180),
+    }));
+  }
+
+  private async handleMcpToolCallProgress(params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    const message = stringOrNull(params?.message);
+    if (!threadId || !message) {
+      return;
+    }
+    const active = this.findActiveTurnByThreadId(threadId);
+    if (!active) {
+      const scopeId = this.findChatByThread(threadId);
+      if (scopeId) {
+        await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'mcp_tool_progress', {
+          message: truncateInline(message, 220),
+        }));
+      }
+      return;
+    }
+    active.pendingArchivedStatus = {
+      text: t(this.localeForChat(active.scopeId), 'mcp_tool_progress', {
+        message: truncateInline(message, 220),
+      }),
+      html: null,
+    };
+    await this.queueTurnRender(active, { forceStatus: true });
+  }
+
+  private async handleModelNotification(method: string, params: any): Promise<void> {
+    const threadId = stringOrNull(params?.threadId);
+    if (!threadId) {
+      return;
+    }
+    const scopeId = this.findChatByThread(threadId);
+    if (!scopeId) {
+      return;
+    }
+    const locale = this.localeForChat(scopeId);
+    if (method === 'model/rerouted') {
+      await this.sendMessage(scopeId, t(locale, 'model_rerouted_notification', {
+        from: String(params?.fromModel ?? t(locale, 'unknown')),
+        to: String(params?.toModel ?? t(locale, 'unknown')),
+        reason: formatRawLabel(params?.reason),
+      }));
+      return;
+    }
+    const verifications = Array.isArray(params?.verifications)
+      ? params.verifications.map((entry: unknown) => formatRawLabel(entry)).join(', ')
+      : t(locale, 'unknown');
+    await this.sendMessage(scopeId, t(locale, 'model_verification_notification', { value: verifications }));
+  }
+
+  private async handleRemoteControlStatusChanged(params: any): Promise<void> {
+    const next: RemoteControlStatusState = {
+      status: formatRawLabel(params?.status),
+      installationId: stringOrNull(params?.installationId),
+      environmentId: stringOrNull(params?.environmentId),
+    };
+    const previous = this.lastRemoteControlStatus;
+    this.lastRemoteControlStatus = next;
+    const changed = !previous
+      || previous.status !== next.status
+      || previous.environmentId !== next.environmentId
+      || previous.installationId !== next.installationId;
+    if (!changed || (!previous && next.status === 'disabled' && !next.environmentId)) {
+      return;
+    }
+    const seen = new Set<string>();
+    for (const turn of this.activeTurns.values()) {
+      if (seen.has(turn.scopeId)) continue;
+      seen.add(turn.scopeId);
+      await this.sendMessage(turn.scopeId, formatRemoteStatusMessage(this.localeForChat(turn.scopeId), next));
+    }
   }
 
   private shouldNotifyThreadTokenUsage(
@@ -3075,6 +3237,104 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, t(locale, 'active_configured', {
       value: formatActiveTurnMessageModeLabel(locale, mode),
     }));
+  }
+
+  private async handleGoalCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    if (!binding) {
+      await this.sendMessage(scopeId, t(locale, 'goal_no_thread_bound'));
+      return;
+    }
+    const command = args[0]?.toLowerCase();
+    if (!command) {
+      const goal = await this.app.getThreadGoal(binding.threadId);
+      await this.sendMessage(scopeId, formatGoalMessage(locale, goal));
+      return;
+    }
+    if (command === 'clear') {
+      if (args[1]?.toLowerCase() !== 'confirm') {
+        await this.sendMessage(scopeId, t(locale, 'goal_clear_requires_confirm'));
+        return;
+      }
+      const cleared = await this.app.clearThreadGoal(binding.threadId);
+      await this.sendMessage(scopeId, t(locale, cleared ? 'goal_cleared' : 'goal_empty'));
+      return;
+    }
+    if (command === 'pause' || command === 'resume' || command === 'done' || command === 'complete') {
+      const existing = await this.app.getThreadGoal(binding.threadId);
+      if (!existing) {
+        await this.sendMessage(scopeId, t(locale, 'goal_empty'));
+        return;
+      }
+      const status: ThreadGoalStatusValue = command === 'pause'
+        ? 'paused'
+        : command === 'resume'
+          ? 'active'
+          : 'complete';
+      const goal = await this.app.setThreadGoal({ threadId: binding.threadId, status });
+      await this.sendMessage(scopeId, formatGoalMessage(locale, goal, t(locale, 'goal_updated')));
+      return;
+    }
+    if (command === 'budget') {
+      const existing = await this.app.getThreadGoal(binding.threadId);
+      if (!existing) {
+        await this.sendMessage(scopeId, t(locale, 'goal_empty'));
+        return;
+      }
+      const rawBudget = args[1]?.trim().toLowerCase() ?? '';
+      if (!rawBudget) {
+        await this.sendMessage(scopeId, t(locale, 'usage_goal'));
+        return;
+      }
+      const tokenBudget = rawBudget === 'off' || rawBudget === 'clear' || rawBudget === 'none'
+        ? null
+        : Number.parseInt(rawBudget.replaceAll(',', ''), 10);
+      if (tokenBudget !== null && (!Number.isFinite(tokenBudget) || tokenBudget <= 0)) {
+        await this.sendMessage(scopeId, t(locale, 'usage_goal'));
+        return;
+      }
+      const goal = await this.app.setThreadGoal({ threadId: binding.threadId, tokenBudget });
+      await this.sendMessage(scopeId, formatGoalMessage(locale, goal, t(locale, 'goal_updated')));
+      return;
+    }
+    const objective = command === 'set' ? args.slice(1).join(' ').trim() : args.join(' ').trim();
+    if (!objective) {
+      await this.sendMessage(scopeId, t(locale, 'usage_goal'));
+      return;
+    }
+    const goal = await this.app.setThreadGoal({ threadId: binding.threadId, objective });
+    await this.sendMessage(scopeId, formatGoalMessage(locale, goal, t(locale, 'goal_updated')));
+  }
+
+  private async handleHistoryCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    if (!binding) {
+      await this.sendMessage(scopeId, t(locale, 'history_no_thread_bound'));
+      return;
+    }
+    const limit = parsePositiveInt(args[0], 10, 1, 30);
+    if (limit === null) {
+      await this.sendMessage(scopeId, t(locale, 'usage_history'));
+      return;
+    }
+    const turns = await this.app.listThreadTurns(binding.threadId, limit);
+    await this.sendMessage(scopeId, formatHistoryMessage(locale, binding.threadId, turns));
+  }
+
+  private async handleFilesCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const query = args.join(' ').trim();
+    if (!query) {
+      await this.sendMessage(scopeId, t(locale, 'usage_files'));
+      return;
+    }
+    const binding = this.store.getBinding(scopeId);
+    const root = binding?.cwd ?? this.config.defaultCwd;
+    const files = await this.app.fuzzyFileSearch(query, [root]);
+    await this.sendMessage(scopeId, formatFuzzyFilesMessage(locale, query, root, files));
+  }
+
+  private async handleRemoteCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    await this.sendMessage(scopeId, formatRemoteStatusMessage(locale, this.lastRemoteControlStatus));
   }
 
   private async handleFastCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -5615,6 +5875,125 @@ function formatProviderMessage(locale: AppLocale, capabilities: CodexModelProvid
   ].join('\n');
 }
 
+function formatGoalMessage(locale: AppLocale, goal: CodexThreadGoal | null, prefix?: string): string {
+  const lines = [t(locale, 'goal_title')];
+  if (prefix) {
+    lines.push(prefix);
+  }
+  if (!goal) {
+    lines.push(t(locale, 'goal_empty'));
+    return lines.join('\n');
+  }
+  lines.push(t(locale, 'goal_status', { value: formatGoalStatus(locale, goal.status) }));
+  lines.push(t(locale, 'goal_objective', { value: goal.objective || t(locale, 'empty') }));
+  lines.push(t(locale, 'goal_budget', {
+    value: goal.tokenBudget === null ? t(locale, 'none') : t(locale, 'goal_tokens', { value: formatTokenCount(goal.tokenBudget) }),
+  }));
+  lines.push(t(locale, 'goal_usage', {
+    tokens: formatTokenCount(goal.tokensUsed),
+    seconds: formatCompactNumber(goal.timeUsedSeconds),
+  }));
+  if (goal.updatedAt > 0) {
+    lines.push(t(locale, 'goal_updated_at', { value: formatLocalTimestamp(goal.updatedAt) }));
+  }
+  return lines.join('\n');
+}
+
+function formatHistoryMessage(locale: AppLocale, threadId: string, turns: AppTurnSnapshot[]): string {
+  const lines = [t(locale, 'history_title', { threadId })];
+  if (turns.length === 0) {
+    lines.push(t(locale, 'history_empty'));
+    return lines.join('\n');
+  }
+  for (const turn of turns.slice(0, 30)) {
+    const time = turn.startedAt ? formatLocalTimestamp(turn.startedAt) : t(locale, 'unknown');
+    const itemSummary = summarizeTurnItems(turn.items);
+    const error = turn.error ? ` · ${truncateInline(turn.error, 80)}` : '';
+    lines.push(`- ${turn.turnId} · ${turn.status} · ${time}${error}`);
+    if (itemSummary) {
+      lines.push(`  ${itemSummary}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatFuzzyFilesMessage(
+  locale: AppLocale,
+  query: string,
+  root: string,
+  files: CodexFuzzyFileResult[],
+): string {
+  const lines = [t(locale, 'files_title', { query, root })];
+  if (files.length === 0) {
+    lines.push(t(locale, 'files_empty'));
+    return lines.join('\n');
+  }
+  for (const file of files.slice(0, 25)) {
+    const displayPath = file.path || file.fileName || '(unknown)';
+    lines.push(`- ${displayPath}${file.matchType ? ` (${file.matchType})` : ''}`);
+  }
+  if (files.length > 25) {
+    lines.push(t(locale, 'list_truncated', { count: files.length - 25 }));
+  }
+  return lines.join('\n');
+}
+
+function formatRemoteStatusMessage(locale: AppLocale, status: RemoteControlStatusState | null): string {
+  const lines = [t(locale, 'remote_title')];
+  if (!status) {
+    lines.push(t(locale, 'remote_unknown'));
+    return lines.join('\n');
+  }
+  lines.push(t(locale, 'remote_status', { value: status.status }));
+  lines.push(t(locale, 'remote_environment', { value: status.environmentId ?? t(locale, 'none') }));
+  lines.push(t(locale, 'remote_installation', { value: status.installationId ?? t(locale, 'none') }));
+  return lines.join('\n');
+}
+
+function formatGoalStatus(locale: AppLocale, status: ThreadGoalStatusValue): string {
+  switch (status) {
+    case 'paused':
+      return t(locale, 'goal_status_paused');
+    case 'budgetLimited':
+      return t(locale, 'goal_status_budget_limited');
+    case 'complete':
+      return t(locale, 'goal_status_complete');
+    default:
+      return t(locale, 'goal_status_active');
+  }
+}
+
+function summarizeTurnItems(items: AppTurnSnapshot['items']): string {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const type = item.type || 'item';
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .slice(0, 8)
+    .map(([type, count]) => `${type}=${count}`)
+    .join(', ');
+}
+
+function mapGoalNotification(raw: any): CodexThreadGoal | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const status = raw.status === 'paused' || raw.status === 'budgetLimited' || raw.status === 'complete'
+    ? raw.status
+    : 'active';
+  return {
+    threadId: String(raw.threadId ?? ''),
+    objective: String(raw.objective ?? ''),
+    status,
+    tokenBudget: numberOrNull(raw.tokenBudget),
+    tokensUsed: numberOrNull(raw.tokensUsed) ?? 0,
+    timeUsedSeconds: numberOrNull(raw.timeUsedSeconds) ?? 0,
+    createdAt: numberOrNull(raw.createdAt) ?? 0,
+    updatedAt: numberOrNull(raw.updatedAt) ?? 0,
+  };
+}
+
 function formatWarningNotification(locale: AppLocale, method: string, params: any): string {
   if (method === 'configWarning') {
     return [
@@ -5669,6 +6048,22 @@ function numberOrNull(value: unknown): number | null {
   return null;
 }
 
+function parsePositiveInt(
+  value: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number | null {
+  if (value === undefined || value.trim() === '') {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    return null;
+  }
+  return parsed;
+}
+
 function formatConfigValue(value: unknown): string {
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
@@ -5677,6 +6072,22 @@ function formatConfigValue(value: unknown): string {
     return value.map(formatConfigValue).join(', ');
   }
   if (value && typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 1) {
+      return keys[0]!;
+    }
+  }
+  return truncateInline(JSON.stringify(value), 160);
+}
+
+function formatRawLabel(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'unknown';
+  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (typeof value === 'object') {
     const keys = Object.keys(value);
     if (keys.length === 1) {
       return keys[0]!;

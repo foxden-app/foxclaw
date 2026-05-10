@@ -6,6 +6,7 @@ import type { Logger } from '../logger.js';
 import type {
   AppThread,
   AppThreadSnapshot,
+  AppTurnSnapshot,
   CodexAccountInfo,
   CodexAccountRateLimits,
   CodexAppInfo,
@@ -15,6 +16,7 @@ import type {
   CodexCreditsSnapshot,
   CodexEffectiveConfig,
   CodexExperimentalFeature,
+  CodexFuzzyFileResult,
   CodexHookMetadata,
   CodexHooksListEntry,
   CodexLoginDeviceCode,
@@ -28,11 +30,13 @@ import type {
   CodexRateLimitSnapshot,
   CodexRateLimitWindow,
   CodexSkillsListEntry,
+  CodexThreadGoal,
   ModelInfo,
   ReasoningEffortValue,
   ReviewTarget,
   SandboxModeValue,
   ThreadSessionState,
+  ThreadGoalStatusValue,
   ThreadStatusKind,
 } from '../types.js';
 import { buildThreadDeepLink, openUrl } from './deeplink.js';
@@ -288,6 +292,52 @@ export class CodexAppClient extends EventEmitter {
     await this.request('thread/compact/start', { threadId });
   }
 
+  async getThreadGoal(threadId: string): Promise<CodexThreadGoal | null> {
+    const result = await this.request('thread/goal/get', { threadId });
+    return mapThreadGoal((result as any)?.goal);
+  }
+
+  async setThreadGoal(options: {
+    threadId: string;
+    objective?: string | null;
+    status?: ThreadGoalStatusValue | null;
+    tokenBudget?: number | null | undefined;
+  }): Promise<CodexThreadGoal> {
+    const params: Record<string, unknown> = { threadId: options.threadId };
+    if (options.objective !== undefined) {
+      params.objective = options.objective;
+    }
+    if (options.status !== undefined) {
+      params.status = options.status;
+    }
+    if (options.tokenBudget !== undefined) {
+      params.tokenBudget = options.tokenBudget;
+    }
+    const result = await this.request('thread/goal/set', params);
+    const goal = mapThreadGoal((result as any)?.goal);
+    if (!goal) {
+      throw new Error('thread/goal/set returned no goal');
+    }
+    return goal;
+  }
+
+  async clearThreadGoal(threadId: string): Promise<boolean> {
+    const result = await this.request('thread/goal/clear', { threadId });
+    return Boolean((result as any)?.cleared);
+  }
+
+  async listThreadTurns(threadId: string, limit = 10): Promise<AppTurnSnapshot[]> {
+    const result = await this.request('thread/turns/list', {
+      threadId,
+      cursor: null,
+      limit,
+      sortDirection: 'desc',
+      itemsView: 'summary',
+    });
+    const turns = Array.isArray((result as any)?.data) ? (result as any).data : [];
+    return turns.map(mapTurnSnapshot);
+  }
+
   async archiveThread(threadId: string): Promise<void> {
     await this.request('thread/archive', { threadId });
   }
@@ -479,6 +529,16 @@ export class CodexAppClient extends EventEmitter {
       imageGeneration: Boolean((result as any)?.imageGeneration),
       namespaceTools: Boolean((result as any)?.namespaceTools),
     };
+  }
+
+  async fuzzyFileSearch(query: string, roots: string[]): Promise<CodexFuzzyFileResult[]> {
+    const result = await this.request('fuzzyFileSearch', {
+      query,
+      roots,
+      cancellationToken: null,
+    });
+    const files = Array.isArray((result as any)?.files) ? (result as any).files : [];
+    return files.map(mapFuzzyFileResult);
   }
 
   async listMcpServerStatus(detail: 'full' | 'toolsAndAuthOnly' = 'full'): Promise<CodexMcpServerStatus[]> {
@@ -770,6 +830,10 @@ function mapTurnSnapshot(raw: any) {
     status: String(raw?.status || 'unknown'),
     error: raw?.error ? String(raw.error) : null,
     items: Array.isArray(raw?.items) ? raw.items.map(mapTurnItemSnapshot) : [],
+    itemsView: typeof raw?.itemsView === 'string' ? raw.itemsView : null,
+    startedAt: numberOrNull(raw?.startedAt),
+    completedAt: numberOrNull(raw?.completedAt),
+    durationMs: numberOrNull(raw?.durationMs),
   };
 }
 
@@ -814,6 +878,33 @@ function mapModel(raw: any): ModelInfo {
     supportedReasoningEfforts: efforts,
     defaultReasoningEffort: String(raw.defaultReasoningEffort) as ReasoningEffortValue,
     serviceTiers,
+  };
+}
+
+function mapThreadGoal(raw: any): CodexThreadGoal | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const status = normalizeThreadGoalStatus(raw.status);
+  return {
+    threadId: String(raw.threadId ?? raw.thread_id ?? ''),
+    objective: String(raw.objective ?? ''),
+    status,
+    tokenBudget: numberOrNull(raw.tokenBudget ?? raw.token_budget),
+    tokensUsed: numberOrNull(raw.tokensUsed ?? raw.tokens_used) ?? 0,
+    timeUsedSeconds: numberOrNull(raw.timeUsedSeconds ?? raw.time_used_seconds) ?? 0,
+    createdAt: numberOrNull(raw.createdAt ?? raw.created_at) ?? 0,
+    updatedAt: numberOrNull(raw.updatedAt ?? raw.updated_at) ?? 0,
+  };
+}
+
+function mapFuzzyFileResult(raw: any): CodexFuzzyFileResult {
+  return {
+    root: String(raw?.root ?? ''),
+    path: String(raw?.path ?? ''),
+    matchType: formatRawLabel(raw?.match_type ?? raw?.matchType),
+    fileName: String(raw?.file_name ?? raw?.fileName ?? ''),
+    score: numberOrNull(raw?.score) ?? 0,
   };
 }
 
@@ -1075,6 +1166,12 @@ function normalizeReasoningEffort(value: unknown): ReasoningEffortValue | null {
   return typeof value === 'string' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)
     ? value as ReasoningEffortValue
     : null;
+}
+
+function normalizeThreadGoalStatus(value: unknown): ThreadGoalStatusValue {
+  return value === 'paused' || value === 'budgetLimited' || value === 'complete'
+    ? value
+    : 'active';
 }
 
 function mapRateLimitSnapshot(raw: any): CodexRateLimitSnapshot | null {

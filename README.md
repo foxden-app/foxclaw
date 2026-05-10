@@ -123,6 +123,10 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/threads [query]`
 - `/threads archived`
 - `/open <n>`
+- `/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]`
+- `/history [limit]`
+- `/files <query>`
+- `/remote`
 - `/new [cwd]`
 - `/steer <message>`
 - `/takeover <message>`, `/queue <message>`
