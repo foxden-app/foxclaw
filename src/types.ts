@@ -67,6 +67,10 @@ export interface AppTurnSnapshot {
   status: string;
   error: string | null;
   items: AppTurnItemSnapshot[];
+  itemsView?: string | null;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  durationMs?: number | null;
 }
 
 export interface AppThreadSnapshot extends AppThread {
@@ -245,6 +249,27 @@ export interface CodexModelProviderCapabilities {
   webSearch: boolean;
   imageGeneration: boolean;
   namespaceTools: boolean;
+}
+
+export type ThreadGoalStatusValue = 'active' | 'paused' | 'budgetLimited' | 'complete';
+
+export interface CodexThreadGoal {
+  threadId: string;
+  objective: string;
+  status: ThreadGoalStatusValue;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CodexFuzzyFileResult {
+  root: string;
+  path: string;
+  matchType: string;
+  fileName: string;
+  score: number;
 }
 
 export type ReviewTarget =

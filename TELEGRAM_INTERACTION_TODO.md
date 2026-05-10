@@ -157,3 +157,17 @@ Acceptance criteria:
 - [x] Config output is summarized and avoids dumping full developer instructions or arbitrary config blobs into Telegram
 - [x] Notification routing targets the bound thread scope when thread ids are available
 - [x] Regression tests cover the new diagnostic commands and notification routing
+
+## Phase 12: Experimental Thread Utilities
+
+- [x] Add `/goal` for app-server thread goals: read, set, pause, resume, complete, budget update, and confirmed clear
+- [x] Add `/history [limit]` backed by `thread/turns/list` for recent turn summaries without resuming another thread
+- [x] Add `/files <query>` backed by `fuzzyFileSearch` for read-only path lookup in the bound cwd
+- [x] Add `/remote` plus `remoteControl/status/changed` caching for remote-control diagnostics
+- [x] Add lightweight notifications for `thread/goal/*`, `model/rerouted`, `model/verification`, and `item/mcpToolCall/progress`
+
+Acceptance criteria:
+
+- [x] New commands stay read-only or require explicit confirmation for destructive state (`/goal clear confirm`)
+- [x] Commands operate on the current bound thread/cwd and fail clearly when no binding exists
+- [x] Regression tests cover the new commands and notification routes

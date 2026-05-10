@@ -39,7 +39,7 @@
 
 | 勾选 | 候选功能 | 上游 API | 建议 Telegram 入口 | 价值 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| [x] | 运行中补充指令 | `turn/steer` | `/steer <message>`，也可以考虑 active turn 期间普通消息自动 steer | 可以在 Codex 还在跑时追加约束或纠正，不用 interrupt 或 queue | 已实现显式 `/steer`；普通文本仍保留当前 queue/takeover 语义 |
+| [x] | 运行中补充指令 | `turn/steer` | `/steer <message>`，也可以考虑 active turn 期间普通消息自动 steer | 可以在 Codex 还在跑时追加约束或纠正，不用 interrupt 或 queue | 已实现显式 `/steer`；普通文本可用 `/active steer\|queue` 选择引导或排队 |
 | [x] | 原生登录管理 | `account/login/start`、`account/login/cancel`、`account/logout`、`account/login/completed`、`account/updated` | `/login`、`/login_device`、`/logout`、`/account` | 用 app-server 官方登录流替代或补充当前 `auth.json_*` 文件切换 | 已实现 device-code 登录；API key 登录仍不开放 |
 | [x] | 账号额度操作 | `account/rateLimits/read`、`account/rateLimits/updated`、`account/sendAddCreditsNudgeEmail` | `/quota`、`/quota_nudge` | 不打开桌面也能看 quota 和触发额度提醒 | 发送邮件提醒要求 `confirm` |
 | [x] | Skills 浏览器 | `skills/list`、`skills/changed`、`skills/config/write` | `/skills`、`/skill <name>`、`/skill_enable`、`/skill_disable` | 远程查看和管理 Codex skills | 已支持列表、详情、启用/禁用 |
@@ -78,10 +78,10 @@
 
 | 勾选 | API | Telegram 想法 | 优先级 | 备注 |
 | --- | --- | --- | --- | --- |
-| [ ] | `thread/goal/set` | `/goal <objective>`、`/goal_pause`、`/goal_done` | 中 | 实验能力，但对长任务有用 |
-| [ ] | `thread/goal/get` | `/goal` | 中 | 展示目标、状态、预算、用量 |
-| [ ] | `thread/goal/clear` | `/goal_clear` | 中 | 建议确认 |
-| [ ] | `thread/goal/updated`、`thread/goal/cleared` | 被动状态更新 | 中 | 只有做 goal 命令后才有意义 |
+| [x] | `thread/goal/set` | `/goal <objective>`、`/goal_pause`、`/goal_done` | 中 | 已实现 `/goal ...`、`/goal_pause`、`/goal_resume`、`/goal_done`、`/goal budget ...` |
+| [x] | `thread/goal/get` | `/goal` | 中 | 已实现目标、状态、预算、用量展示 |
+| [x] | `thread/goal/clear` | `/goal_clear` | 中 | 已实现 `/goal clear confirm` 和 `/goal_clear confirm` |
+| [x] | `thread/goal/updated`、`thread/goal/cleared` | 被动状态更新 | 中 | 已实现轻量通知 |
 | [ ] | `thread/memoryMode/set` | `/memory on`、`/memory off` | 低/中 | 实验能力；只有目标 Codex 开启 memories 时有价值 |
 | [ ] | `memory/reset` | `/memory_reset` | 低/高风险 | 破坏性操作，必须强确认 |
 
@@ -131,7 +131,7 @@
 | [x] | `mcpServer/resource/read` | `/mcp_resource <server> <uri>` | 中 | 已实现文本/JSON 摘要 |
 | [ ] | `mcpServer/tool/call` | `/mcp_call <server> <tool> <json>` | 低/高风险 | 直接调用工具会绕开 agent 判断，建议只做 admin/debug |
 | [x] | `mcpServer/elicitation/request` server request | 内联问题卡片/按钮 | 高 | 已实现 |
-| [ ] | `item/mcpToolCall/progress` | 活动卡展示 MCP 进度 | 中 | 更接近 Codex App 的状态展示 |
+| [x] | `item/mcpToolCall/progress` | 活动卡展示 MCP 进度 | 中 | 已实现轻量进度状态 |
 
 ## Review 和代码检查
 
@@ -140,8 +140,8 @@
 | [x] | `review/start` | `/review`、`/review base <branch>`、`/review commit <sha>` | 高 | 已实现 |
 | [ ] | `enteredReviewMode`、`exitedReviewMode` item types | review 专用渲染 | 中 | 最终 review 文本作为持久消息 |
 | [x] | `turn/diff/updated` | `/diff` 或 live “变更”卡片 | 中 | 已实现 `/diff` 读取最近 diff，输出裁剪 |
-| [ ] | `thread/turns/list` | `/history`、`/history <thread>` | 中 | 不 resume 线程也能读历史 |
-| [ ] | `fuzzyFileSearch` | `/files <query>` | 低/中 | 从 Telegram 选择路径时有用 |
+| [x] | `thread/turns/list` | `/history`、`/history <thread>` | 中 | 已实现当前绑定线程 `/history [limit]` |
+| [x] | `fuzzyFileSearch` | `/files <query>` | 低/中 | 已实现当前 cwd 下只读搜索 |
 | [ ] | `fuzzyFileSearch/sessionStart/update/stop` 及通知 | 交互式文件选择器 | 低 | UI 工作量比一次性搜索大 |
 
 ## 配置和功能开关
@@ -155,7 +155,7 @@
 | [x] | `experimentalFeature/list` | `/features` | 中 | 已实现只读列表 |
 | [ ] | `experimentalFeature/enablement/set` | `/feature_enable <name>` | 低/高风险 | 进程级运行时修改，建议 admin-only |
 | [x] | `modelProvider/capabilities/read` | 合并进 `/models` 或 `/status` | 中 | 已实现 `/provider` |
-| [ ] | `model/rerouted`、`model/verification` | reroute/验证通知 | 中 | 解释为什么模型被切换或需要额外验证 |
+| [x] | `model/rerouted`、`model/verification` | reroute/验证通知 | 中 | 已实现轻量通知 |
 
 ## 文件、命令、进程
 
@@ -184,7 +184,7 @@
 | [ ] | `thread/realtime/stop` | `/voice_stop` | 低 | 只有做 realtime 时需要 |
 | [ ] | `thread/realtime/listVoices` | `/voices` | 低 | 只有做音频输出时需要 |
 | [ ] | `thread/realtime/*` notifications | transcript/audio 渲染 | 低 | 音频 chunk 不太适合 Telegram bot |
-| [ ] | `remoteControl/status/changed` | `/remote` 状态 | 中 | 如果启用 remote control，会有诊断价值 |
+| [x] | `remoteControl/status/changed` | `/remote` 状态 | 中 | 已实现最近状态缓存和变化通知 |
 | [ ] | `environment/add` | `/environment_add ...` | 低 | 实验性远程环境注册 |
 
 ## 外部 Agent 迁移
@@ -233,13 +233,13 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 | [ ] | `item/reasoning/summaryTextDelta`、`summaryPartAdded` | 更好的 reasoning summary 渲染 | 低/中 |
 | [ ] | `item/commandExecution/outputDelta` | 命令输出片段实时显示 | 中 |
 | [ ] | `item/fileChange/patchUpdated` | 更好的 live edit 摘要 | 中 |
-| [ ] | `item/mcpToolCall/progress` | MCP progress 状态 | 中 |
+| [x] | `item/mcpToolCall/progress` | MCP progress 状态 | 中 |
 | [ ] | `serverRequest/resolved` | 更可靠地清理审批/问题卡片 | 中 |
 | [x] | `account/updated`、`account/login/completed`、`account/rateLimits/updated` | 账号面板和额度提醒 | 已完成 |
 | [x] | `skills/changed` | skills 列表缓存失效 | 已完成 |
 | [x] | `mcpServer/startupStatus/updated`、`mcpServer/oauthLogin/completed` | MCP 诊断和 OAuth 结果 | 已完成 |
 | [x] | `app/list/updated` | connector 列表刷新 | 已完成 |
-| [ ] | `remoteControl/status/changed` | remote control 状态 | 中 |
+| [x] | `remoteControl/status/changed` | remote control 状态 | 中 |
 | [x] | `warning`、`configWarning`、`guardianWarning`、`deprecationNotice` | 管理/状态 warning | 已完成轻量通知 |
 
 ## 建议实现顺序

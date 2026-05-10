@@ -243,6 +243,19 @@ function createControllerRig() {
     rollbackThread: async () => null,
     setThreadName: async () => {},
     compactThread: async () => {},
+    getThreadGoal: async () => null,
+    setThreadGoal: async (options: any) => ({
+      threadId: options.threadId,
+      objective: options.objective ?? 'ship it',
+      status: options.status ?? 'active',
+      tokenBudget: options.tokenBudget ?? null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    }),
+    clearThreadGoal: async () => true,
+    listThreadTurns: async () => [],
     archiveThread: async () => {},
     unarchiveThread: async () => null,
     startReview: async () => ({ turnId: 'turn-review', reviewThreadId: 'thread-1' }),
@@ -258,6 +271,7 @@ function createControllerRig() {
     readConfigRequirements: async () => null,
     listExperimentalFeatures: async () => [],
     readModelProviderCapabilities: async () => ({ webSearch: false, imageGeneration: false, namespaceTools: false }),
+    fuzzyFileSearch: async () => [],
     listMcpServerStatus: async () => [],
     reloadMcpServers: async () => {},
     loginMcpServer: async () => 'https://mcp.example/auth',
@@ -433,6 +447,109 @@ test('/active configures active-turn message behavior and opens setup focus', as
   await (rig.controller as any).handleCallback(createCallback('setup:active:steer', 10));
   assert.equal(rig.store.getChatSettings('telegram:99::root')?.activeTurnMessageMode, 'steer');
   assert.equal(rig.callbackAnswers[0], 'Active-turn messages set to: Steer current turn');
+});
+
+test('goal, history, and files commands bridge experimental read/manage APIs', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const goalCalls: any[] = [];
+  (rig.controller as any).app.getThreadGoal = async () => ({
+    threadId: 'thread-1',
+    objective: 'Reduce latency',
+    status: 'active',
+    tokenBudget: 200000,
+    tokensUsed: 1200,
+    timeUsedSeconds: 60,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  (rig.controller as any).app.setThreadGoal = async (options: any) => {
+    goalCalls.push(options);
+    return {
+      threadId: options.threadId,
+      objective: options.objective ?? 'Reduce latency',
+      status: options.status ?? 'active',
+      tokenBudget: options.tokenBudget ?? 200000,
+      tokensUsed: 1200,
+      timeUsedSeconds: 60,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+  };
+  (rig.controller as any).app.listThreadTurns = async () => [
+    {
+      turnId: 'turn-2',
+      status: 'completed',
+      error: null,
+      items: [{ itemId: 'item-1', type: 'agentMessage', phase: null, text: 'Done', command: null, status: null, aggregatedOutput: null }],
+      startedAt: 1,
+      completedAt: 2,
+      durationMs: 1000,
+    },
+  ];
+  (rig.controller as any).app.fuzzyFileSearch = async (_query: string, roots: string[]) => [
+    { root: roots[0], path: 'src/controller/controller.ts', matchType: 'file', fileName: 'controller.ts', score: 99 },
+  ];
+
+  await (rig.controller as any).handleCommand(createEvent('/goal'), 'en', 'goal', []);
+  assert.match(rig.sentMessages.at(-1)!, /Objective: Reduce latency/);
+
+  await (rig.controller as any).handleCommand(createEvent('/goal pause'), 'en', 'goal', ['pause']);
+  assert.equal(goalCalls.at(-1)?.status, 'paused');
+  assert.match(rig.sentMessages.at(-1)!, /Goal updated\./);
+
+  await (rig.controller as any).handleCommand(createEvent('/history 5'), 'en', 'history', ['5']);
+  assert.match(rig.sentMessages.at(-1)!, /Recent turns for thread-1/);
+  assert.match(rig.sentMessages.at(-1)!, /turn-2/);
+
+  await (rig.controller as any).handleCommand(createEvent('/files controller'), 'en', 'files', ['controller']);
+  assert.match(rig.sentMessages.at(-1)!, /src\/controller\/controller\.ts/);
+});
+
+test('diagnostic notifications route goal, model, remote, and MCP progress updates', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+  (rig.controller as any).queueTurnRender = async () => {};
+
+  await (rig.controller as any).handleNotification({
+    method: 'thread/goal/updated',
+    params: {
+      threadId: 'thread-1',
+      goal: { threadId: 'thread-1', objective: 'Finish rollout', status: 'active', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1 },
+    },
+  });
+  assert.match(rig.sentMessages.at(-1)!, /Goal updated: active · Finish rollout/);
+
+  await (rig.controller as any).handleNotification({
+    method: 'model/rerouted',
+    params: { threadId: 'thread-1', turnId: 'turn-1', fromModel: 'gpt-5', toModel: 'gpt-5.5', reason: 'policy' },
+  });
+  assert.match(rig.sentMessages.at(-1)!, /Model rerouted: gpt-5 -> gpt-5.5/);
+
+  await (rig.controller as any).handleNotification({
+    method: 'remoteControl/status/changed',
+    params: { status: 'connected', installationId: 'install-1', environmentId: 'env-1' },
+  });
+  assert.match(rig.sentMessages.at(-1)!, /Remote control/);
+  assert.match(rig.sentMessages.at(-1)!, /Environment: env-1/);
+
+  await (rig.controller as any).handleNotification({
+    method: 'item/mcpToolCall/progress',
+    params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1', message: 'Indexing workspace' },
+  });
+  assert.match(active.pendingArchivedStatus?.text ?? '', /MCP progress: Indexing workspace/);
 });
 
 test('/mode opens setup panel, while /mode <value> updates collaboration mode settings', async (t) => {
