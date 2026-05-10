@@ -2983,7 +2983,11 @@ export class BridgeSessionCore {
     ));
   }
 
-  private async ensureThreadReady(scopeId: string, binding: ThreadBinding): Promise<ThreadBinding> {
+  private async ensureThreadReady(
+    scopeId: string,
+    binding: ThreadBinding,
+    options: { recoverMissingThread?: boolean | undefined } = {},
+  ): Promise<ThreadBinding> {
     const attachmentKey = attachedThreadKey(scopeId, binding.threadId);
     if (this.attachedThreads.has(attachmentKey)) {
       return binding;
@@ -2995,6 +2999,9 @@ export class BridgeSessionCore {
       return this.storeThreadSession(scopeId, session, 'seed');
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
+        throw error;
+      }
+      if (options.recoverMissingThread === false) {
         throw error;
       }
       this.logger.warn('codex.thread_binding_stale', { scopeId, threadId: binding.threadId });
@@ -4360,13 +4367,18 @@ export class BridgeSessionCore {
     retry: AuthRetryContext,
   ): Promise<void> {
     await this.sendMessage(scopeId, t(locale, 'auth_auto_retrying'));
-    const binding = {
+    const binding: ThreadBinding = {
+      chatId: scopeId,
       threadId: retry.threadId,
       cwd: retry.cwd,
+      updatedAt: Date.now(),
     };
     let turn: { threadId: string; turnId: string };
     try {
-      turn = await this.startTurnWithRecovery(scopeId, binding, retry.input, {
+      const readyBinding = await this.ensureThreadReady(scopeId, binding, {
+        recoverMissingThread: false,
+      });
+      turn = await this.startTurnWithRecovery(scopeId, readyBinding, retry.input, {
         collaborationMode: retry.collaborationMode,
         recoverMissingThread: false,
       });
