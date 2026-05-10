@@ -97,6 +97,8 @@ async function main(): Promise<void> {
       config.codexCliBin,
       config.codexAppLaunchCmd,
       config.codexAppAutolaunch,
+      config.codexAppServerStatePath,
+      config.codexAppServerLogPath,
       logger,
     );
     const telegramMessaging = new TelegramMessagingPort(bot);
@@ -132,9 +134,11 @@ async function main(): Promise<void> {
         running: false,
         connected: false,
         userAgent: app.getUserAgent(),
+        codexAppServer: app.getServerStatus(),
         botUsername: bot.username,
         currentBindings: 0,
         pendingApprovals: 0,
+        pendingUserInputs: 0,
         activeTurns: 0,
         lastError: null,
         updatedAt: new Date().toISOString(),

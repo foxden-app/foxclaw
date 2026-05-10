@@ -23,6 +23,24 @@ export interface ActiveTurnPreviewRecord {
   updatedAt: number;
 }
 
+export interface PendingUserInputStoredRecord {
+  localId: string;
+  serverRequestId: string;
+  chatId: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string;
+  messageId: number | null;
+  questionsJson: string;
+  answersJson: string;
+  currentQuestionIndex: number;
+  awaitingFreeText: boolean;
+  status: string;
+  createdAt: number;
+  submittedAt: number | null;
+  resolvedAt: number | null;
+}
+
 export class BridgeStore {
   private db: DatabaseSync;
 
@@ -89,6 +107,31 @@ export class BridgeStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS pending_user_inputs (
+        local_id TEXT PRIMARY KEY,
+        server_request_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT,
+        item_id TEXT NOT NULL,
+        message_id INTEGER,
+        questions_json TEXT NOT NULL,
+        answers_json TEXT NOT NULL,
+        current_question_index INTEGER NOT NULL,
+        awaiting_free_text INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        submitted_at INTEGER,
+        resolved_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS pending_user_input_messages (
+        input_local_id TEXT NOT NULL,
+        question_index INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        message_kind TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (input_local_id, question_index, message_kind)
+      );
       CREATE TABLE IF NOT EXISTS audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         direction TEXT NOT NULL,
@@ -113,6 +156,8 @@ export class BridgeStore {
     this.ensureColumn('chat_settings', 'service_tier', 'TEXT');
     this.ensureColumn('chat_settings', 'active_turn_message_mode', 'TEXT');
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
+    this.ensureColumn('pending_user_inputs', 'status', "TEXT NOT NULL DEFAULT 'pending'");
+    this.ensureColumn('pending_user_inputs', 'submitted_at', 'INTEGER');
     migrateLegacyBridgeScopeIds(this.db);
   }
 
@@ -361,6 +406,17 @@ export class BridgeStore {
     return this.mapApproval(row);
   }
 
+  getPendingApprovalByServerRequestId(serverRequestId: string): PendingApprovalRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM pending_approvals
+      WHERE server_request_id = ? AND resolved_at IS NULL
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(serverRequestId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return this.mapApproval(row);
+  }
+
   markApprovalResolved(localId: string): void {
     this.db.prepare('UPDATE pending_approvals SET resolved_at = ? WHERE local_id = ?').run(Date.now(), localId);
   }
@@ -403,6 +459,98 @@ export class BridgeStore {
     this.db.prepare('DELETE FROM active_turn_previews WHERE scope_id = ? AND message_id = ?').run(scopeId, messageId);
   }
 
+  savePendingUserInput(record: PendingUserInputStoredRecord): void {
+    this.db.prepare(`
+      INSERT INTO pending_user_inputs (
+        local_id, server_request_id, chat_id, thread_id, turn_id, item_id, message_id,
+        questions_json, answers_json, current_question_index, awaiting_free_text, status, created_at, submitted_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(local_id) DO UPDATE SET
+        server_request_id = excluded.server_request_id,
+        chat_id = excluded.chat_id,
+        thread_id = excluded.thread_id,
+        turn_id = excluded.turn_id,
+        item_id = excluded.item_id,
+        message_id = excluded.message_id,
+        questions_json = excluded.questions_json,
+        answers_json = excluded.answers_json,
+        current_question_index = excluded.current_question_index,
+        awaiting_free_text = excluded.awaiting_free_text,
+        status = excluded.status,
+        created_at = excluded.created_at,
+        submitted_at = excluded.submitted_at,
+        resolved_at = excluded.resolved_at
+    `).run(
+      record.localId,
+      record.serverRequestId,
+      record.chatId,
+      record.threadId,
+      record.turnId ?? '',
+      record.itemId,
+      record.messageId,
+      record.questionsJson,
+      record.answersJson,
+      record.currentQuestionIndex,
+      record.awaitingFreeText ? 1 : 0,
+      record.status,
+      record.createdAt,
+      record.submittedAt,
+      record.resolvedAt,
+    );
+  }
+
+  updatePendingUserInputMessage(localId: string, messageId: number): void {
+    this.db.prepare('UPDATE pending_user_inputs SET message_id = ? WHERE local_id = ?').run(messageId, localId);
+  }
+
+  updatePendingUserInputAnswers(localId: string, answersJson: string, currentQuestionIndex: number, awaitingFreeText = false): void {
+    this.db.prepare(`
+      UPDATE pending_user_inputs
+      SET answers_json = ?, current_question_index = ?, awaiting_free_text = ?
+      WHERE local_id = ?
+    `).run(answersJson, currentQuestionIndex, awaitingFreeText ? 1 : 0, localId);
+  }
+
+  markPendingUserInputSubmitted(localId: string): void {
+    this.db.prepare(`
+      UPDATE pending_user_inputs
+      SET status = 'submitted', submitted_at = ?
+      WHERE local_id = ? AND resolved_at IS NULL
+    `).run(Date.now(), localId);
+  }
+
+  markPendingUserInputResolved(localId: string): void {
+    this.db.prepare(`
+      UPDATE pending_user_inputs
+      SET status = 'resolved', resolved_at = ?
+      WHERE local_id = ?
+    `).run(Date.now(), localId);
+  }
+
+  markPendingUserInputInterrupted(localId: string): void {
+    this.db.prepare(`
+      UPDATE pending_user_inputs
+      SET status = 'interrupted', resolved_at = ?
+      WHERE local_id = ?
+    `).run(Date.now(), localId);
+  }
+
+  listPendingUserInputs(): PendingUserInputStoredRecord[] {
+    const rows = this.db.prepare(`
+      SELECT local_id, server_request_id, chat_id, thread_id, turn_id, item_id, message_id,
+        questions_json, answers_json, current_question_index, awaiting_free_text, status, created_at, submitted_at, resolved_at
+      FROM pending_user_inputs
+      WHERE resolved_at IS NULL
+      ORDER BY created_at ASC
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapPendingUserInput(row));
+  }
+
+  countPendingUserInputs(): number {
+    const row = this.db.prepare('SELECT COUNT(*) AS count FROM pending_user_inputs WHERE resolved_at IS NULL').get() as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
   insertAudit(direction: 'inbound' | 'outbound', chatId: string, eventType: string, summary: string): void {
     this.db.prepare('INSERT INTO audit_logs (direction, chat_id, event_type, summary, created_at) VALUES (?, ?, ?, ?, ?)').run(direction, chatId, eventType, summary, Date.now());
   }
@@ -428,6 +576,26 @@ export class BridgeStore {
       messageId: row.message_id === null ? null : Number(row.message_id),
       createdAt: Number(row.created_at),
       resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at)
+    };
+  }
+
+  private mapPendingUserInput(row: Record<string, unknown>): PendingUserInputStoredRecord {
+    return {
+      localId: String(row.local_id),
+      serverRequestId: String(row.server_request_id),
+      chatId: String(row.chat_id),
+      threadId: String(row.thread_id),
+      turnId: row.turn_id === null || String(row.turn_id) === '' ? null : String(row.turn_id),
+      itemId: String(row.item_id),
+      messageId: row.message_id === null ? null : Number(row.message_id),
+      questionsJson: String(row.questions_json),
+      answersJson: String(row.answers_json),
+      currentQuestionIndex: Number(row.current_question_index),
+      awaitingFreeText: Boolean(row.awaiting_free_text),
+      status: row.status === null ? 'pending' : String(row.status),
+      createdAt: Number(row.created_at),
+      submittedAt: row.submitted_at === null ? null : Number(row.submitted_at),
+      resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at),
     };
   }
 

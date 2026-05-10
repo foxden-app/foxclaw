@@ -9,7 +9,7 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
 - Chat-scoped preference control with `/setup`: model, reasoning effort, Fast service tier, access preset, Agent/Plan mode, and active-turn message behavior
 - Quick Fast service-tier control with `/fast on`, `/fast off`, and `/fast toggle`
-- App-server account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, and guarded `/logout confirm`
+- App-server account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, `/auth add <name>`, and guarded `/logout confirm`
 - Active-turn steering, review, diff, and thread lifecycle controls: `/steer`, `/review`, `/diff`, `/fork`, `/undo`, `/rename`, `/compact`, `/archive`, and `/unarchive`
 - Skills and MCP panels with `/skills`, `/skill`, `/skill_enable`, `/skill_disable`, `/mcp`, `/mcp_reload`, `/mcp_login`, and `/mcp_resource`
 - Read-only diagnostics for loaded threads, hooks, plugins, apps, feature flags, config requirements, and provider capabilities
@@ -88,6 +88,8 @@ TG_ALLOWED_CHAT_ID=
 TG_ALLOWED_TOPIC_ID=
 CODEX_APP_AUTOLAUNCH=true
 CODEX_APP_LAUNCH_CMD=codex app
+CODEX_APP_SERVER_STATE_PATH=
+CODEX_APP_SERVER_LOG_PATH=
 CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
 DEFAULT_CWD=/Users/ganxing/Downloads
@@ -109,6 +111,15 @@ If multiple bots share one group, each bot should use:
 
 Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole group as its default scope.
 
+Codex app-server lifecycle:
+
+- The bridge starts `codex app-server` as a detached, bridge-managed process and records its pid and port.
+- On bridge restart, it first reconnects to the recorded app-server if that process is still alive.
+- If the recorded process is gone, the bridge starts a new app-server and updates the state file.
+- `/auth_reload` and other explicit app-server restarts still terminate the managed app-server before starting a fresh one.
+
+By default the state file is stored under `~/.telegram-codex-app-bridge/runtime/codex-app-server.json`, and app-server stdout/stderr goes to `~/.telegram-codex-app-bridge/logs/codex-app-server.log`. Override them with `CODEX_APP_SERVER_STATE_PATH` and `CODEX_APP_SERVER_LOG_PATH` when needed.
+
 ## Commands
 
 - `/help`
@@ -120,6 +131,7 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/quota`
 - `/quota_nudge <credits|usage_limit> confirm`
 - `/login_device`, `/login_cancel [id]`, `/logout confirm`
+- `/auth [list|reload|add <name>]`
 - `/threads [query]`
 - `/threads archived`
 - `/open <n>`
@@ -193,6 +205,7 @@ Recommended mobile app-server controls:
 
 - Use `/steer <message>` while a turn is active to add constraints without interrupting the turn
 - Use `/account`, `/quota`, and `/login_device` to inspect or repair Codex auth from Telegram
+- Use `/auth add <name>` when adding another account that should become a switchable local auth candidate
 - Use `/skills` and `/mcp` when a remote run behaves differently from Codex App and you need to inspect enabled skills or MCP server health
 - Use `/hooks`, `/plugins`, `/apps`, `/features`, `/config`, `/requirements`, and `/provider` for read-only remote diagnostics before changing config on the host
 
@@ -209,7 +222,8 @@ What still remains an approximation of Codex App:
 
 - Telegram does not give this bridge the same native multi-panel surface as Codex App, so activity and body still share one linear chat timeline
 - If Telegram or the network briefly fails, the bridge retries rendering, but the UI can still be less fluid than Codex App
-- A bridge restart can retire stale live cards and preserve thread context, but it cannot reconstruct every in-flight delta exactly
+- A bridge restart reconnects to a still-live app-server turn when possible, restores pending input prompts, and retires or interrupts only stale unrecoverable cards
+- Even after recovery, Telegram cannot reconstruct every in-flight delta exactly if messages were missed during downtime
 
 ## Finding Chat And Topic IDs
 
@@ -233,6 +247,8 @@ TG_ALLOWED_CHAT_ID=-1001234567890
 TG_ALLOWED_TOPIC_ID=42
 CODEX_APP_AUTOLAUNCH=true
 CODEX_APP_LAUNCH_CMD=codex app
+CODEX_APP_SERVER_STATE_PATH=
+CODEX_APP_SERVER_LOG_PATH=
 CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
 DEFAULT_CWD=/Users/ganxing/Downloads

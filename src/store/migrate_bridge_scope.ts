@@ -52,6 +52,19 @@ export function migrateLegacyBridgeScopeIds(db: DatabaseSync): void {
       }
     }
 
+    const userInputRows = db.prepare('SELECT local_id, chat_id FROM pending_user_inputs').all() as Array<{
+      local_id: string;
+      chat_id: string;
+    }>;
+    for (const row of userInputRows) {
+      if (needsMigrate(row.chat_id)) {
+        db.prepare('UPDATE pending_user_inputs SET chat_id = ? WHERE local_id = ?').run(
+          `${BRIDGE_SCOPE_TELEGRAM_PREFIX}${row.chat_id}`,
+          row.local_id,
+        );
+      }
+    }
+
     const auditRows = db.prepare('SELECT id, chat_id FROM audit_logs').all() as Array<{ id: number; chat_id: string }>;
     for (const row of auditRows) {
       if (needsMigrate(row.chat_id)) {

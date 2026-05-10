@@ -40,7 +40,7 @@
 | 勾选 | 候选功能 | 上游 API | 建议 Telegram 入口 | 价值 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | [x] | 运行中补充指令 | `turn/steer` | `/steer <message>`，也可以考虑 active turn 期间普通消息自动 steer | 可以在 Codex 还在跑时追加约束或纠正，不用 interrupt 或 queue | 已实现显式 `/steer`；普通文本可用 `/active steer\|queue` 选择引导或排队 |
-| [x] | 原生登录管理 | `account/login/start`、`account/login/cancel`、`account/logout`、`account/login/completed`、`account/updated` | `/login`、`/login_device`、`/logout`、`/account` | 用 app-server 官方登录流替代或补充当前 `auth.json_*` 文件切换 | 已实现 device-code 登录；API key 登录仍不开放 |
+| [x] | 原生登录管理 | `account/login/start`、`account/login/cancel`、`account/logout`、`account/login/completed`、`account/updated` | `/login`、`/login_device`、`/auth add <name>`、`/logout`、`/account` | 用 app-server 官方登录流替代或补充当前 `auth.json_*` 文件切换 | 已实现 device-code 登录；新增账号可落到 switchable auth 候选；API key 登录仍不开放 |
 | [x] | 账号额度操作 | `account/rateLimits/read`、`account/rateLimits/updated`、`account/sendAddCreditsNudgeEmail` | `/quota`、`/quota_nudge` | 不打开桌面也能看 quota 和触发额度提醒 | 发送邮件提醒要求 `confirm` |
 | [x] | Skills 浏览器 | `skills/list`、`skills/changed`、`skills/config/write` | `/skills`、`/skill <name>`、`/skill_enable`、`/skill_disable` | 远程查看和管理 Codex skills | 已支持列表、详情、启用/禁用 |
 | [x] | MCP 状态面板 | `mcpServerStatus/list`、`mcpServer/startupStatus/updated`、`config/mcpServer/reload` | `/mcp`、`/mcp_reload` | 远程排查工具不可用、MCP 启动失败、认证失败 | 已支持状态和 reload |
@@ -234,7 +234,7 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 | [ ] | `item/commandExecution/outputDelta` | 命令输出片段实时显示 | 中 |
 | [ ] | `item/fileChange/patchUpdated` | 更好的 live edit 摘要 | 中 |
 | [x] | `item/mcpToolCall/progress` | MCP progress 状态 | 中 |
-| [ ] | `serverRequest/resolved` | 更可靠地清理审批/问题卡片 | 中 |
+| [x] | `serverRequest/resolved` | 更可靠地清理审批/问题卡片 | 已完成 |
 | [x] | `account/updated`、`account/login/completed`、`account/rateLimits/updated` | 账号面板和额度提醒 | 已完成 |
 | [x] | `skills/changed` | skills 列表缓存失效 | 已完成 |
 | [x] | `mcpServer/startupStatus/updated`、`mcpServer/oauthLogin/completed` | MCP 诊断和 OAuth 结果 | 已完成 |
@@ -251,6 +251,7 @@ Server request 很重要，因为如果 bridge 不支持，Codex 可能在 turn 
 
 2. 登录和账号面板（已完成）
    - 已增加原生 `/account`、`/login_device`、`/login_cancel`、`/logout confirm`、`/quota`、`/quota_nudge`。
+   - `/auth add <name>` 会先把 `auth.json` 指向新的候选文件，再启动 device-code 登录，登录完成后可继续用 `/auth` 切换。
    - 保留当前 `/auth` auth 文件轮换，作为高级/本地 fallback。
 
 3. Skills 和 MCP 面板（已完成）

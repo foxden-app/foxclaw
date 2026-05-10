@@ -26,6 +26,8 @@ function createConfig(tempDir: string): AppConfig {
     codexCliBin: 'codex',
     codexAppAutolaunch: false,
     codexAppLaunchCmd: 'codex app',
+    codexAppServerStatePath: path.join(tempDir, 'codex-app-server.json'),
+    codexAppServerLogPath: path.join(tempDir, 'codex-app-server.log'),
     codexAppSyncOnOpen: false,
     codexAppSyncOnTurnComplete: false,
     storePath: path.join(tempDir, 'bridge.sqlite'),
@@ -135,6 +137,7 @@ function createControllerRig() {
   const callbackAnswers: string[] = [];
   const deletedMessageIds: number[] = [];
   const bot = {
+    stop: () => {},
     sendMessage: async (_chatId: string, text: string) => {
       sentMessages.push(text);
       return sentMessages.length;
@@ -178,9 +181,23 @@ function createControllerRig() {
   const app = {
     isConnected: () => true,
     getUserAgent: () => 'test-agent',
+    getServerStatus: () => ({ pid: null, port: null, running: false, managed: false }),
+    stop: async () => {},
     restart: async () => {},
     readAccount: async () => null,
     readAccountRateLimits: async () => null,
+    readThread: async (threadId: string) => ({
+      threadId,
+      name: null,
+      preview: 'thread',
+      cwd: tempDir,
+      modelProvider: 'openai',
+      source: 'app',
+      path: null,
+      status: 'idle',
+      updatedAt: 1,
+    }),
+    readThreadSnapshot: async () => null,
     listModels: async () => [
       {
         id: 'model-gpt-5',
@@ -276,6 +293,9 @@ function createControllerRig() {
     reloadMcpServers: async () => {},
     loginMcpServer: async () => 'https://mcp.example/auth',
     readMcpResource: async () => [],
+    respond: async () => {},
+    respondError: async () => {},
+    interruptTurn: async () => {},
   };
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
   const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound);
@@ -926,6 +946,94 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.match(rig.sentMessages.at(-1)!, /Codex auth switched to auth\.json_b/);
 });
 
+test('/auth add prepares a new auth candidate and completes device login', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  const targetPath = path.join(authDir, 'auth.json_work');
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.startDeviceLogin = async () => ({
+    type: 'chatgptDeviceCode',
+    loginId: 'login-add',
+    verificationUrl: 'https://auth.example/device',
+    userCode: 'NEW-CODE',
+  });
+  (rig.controller as any).app.readAccount = async () => ({
+    type: 'chatgpt',
+    email: 'new@example.com',
+    planType: 'team',
+    requiresOpenaiAuth: false,
+  });
+  (rig.controller as any).app.readAccountRateLimits = async () => null;
+
+  await (rig.controller as any).handleCommand(createEvent('/auth add work'), 'en', 'auth', ['add', 'work']);
+
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), targetPath);
+  assert.equal(fs.existsSync(targetPath), false);
+  assert.match(rig.sentMessages[0]!, /Preparing new Codex auth candidate auth\.json_work/);
+  assert.match(rig.sentMessages[1]!, /NEW-CODE/);
+  assert.equal((rig.controller as any).pendingAuthAddsByLoginId.has('login-add'), true);
+
+  fs.writeFileSync(targetPath, '{"account":"work"}');
+  await (rig.controller as any).handleNotification({
+    method: 'account/login/completed',
+    params: { loginId: 'login-add', success: true, error: null },
+  });
+
+  assert.equal((rig.controller as any).pendingAuthAddsByLoginId.has('login-add'), false);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), targetPath);
+  assert.match(rig.sentMessages.at(-1)!, /New Codex auth candidate added: auth\.json_work/);
+  assert.match(rig.sentMessages.at(-1)!, /Codex account: ChatGPT/);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages.at(-1)!, /auth\.json_work \*/);
+});
+
+test('/auth add cancel restores previous auth', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+
+  let restarts = 0;
+  const calls: string[] = [];
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.startDeviceLogin = async () => ({
+    type: 'chatgptDeviceCode',
+    loginId: 'login-add',
+    verificationUrl: 'https://auth.example/device',
+    userCode: 'NEW-CODE',
+  });
+  (rig.controller as any).app.cancelLogin = async (loginId: string) => {
+    calls.push(`cancel:${loginId}`);
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth add temp'), 'en', 'auth', ['add', 'temp']);
+
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_temp'));
+
+  await (rig.controller as any).handleCommand(createEvent('/login_cancel'), 'en', 'login_cancel', []);
+
+  assert.deepEqual(calls, ['cancel:login-add']);
+  assert.equal(restarts, 2);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.equal(fs.existsSync(path.join(authDir, 'auth.json_temp')), false);
+  assert.match(rig.sentMessages.at(-1)!, /New auth login cancelled\. Restored previous auth\./);
+});
+
 test('usage limit errors auto-rotate auth after the active turn finishes', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -939,8 +1047,8 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
-  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[]) => {
-    retryStarts.push({ binding, input });
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[], overrides: any) => {
+    retryStarts.push({ binding, input, overrides });
     return { threadId: binding.threadId, turnId: 'turn-2' };
   };
   (rig.controller as any).queueTurnRender = async () => {};
@@ -980,6 +1088,7 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   assert.deepEqual(retryStarts, [{
     binding: { threadId: 'thread-1', cwd: rig.tempDir },
     input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    overrides: { collaborationMode: undefined, recoverMissingThread: false },
   }]);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_b/.test(message)));
@@ -1004,6 +1113,56 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /no unused auth candidate is available/.test(message)));
+});
+
+test('auth retry stops instead of creating a replacement thread when original thread is missing', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).startTurnWithRecovery = async () => {
+    throw new Error('thread not found');
+  };
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Usage limit exceeded', codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.equal(restarts, 1);
+  assert.ok(rig.sentMessages.some(message => /original thread is no longer available/.test(message)));
 });
 
 test('Codex error notifications are shown on the active Telegram turn', async (t) => {
@@ -1038,9 +1197,97 @@ test('requestUserInput is bridged through Telegram callbacks', async (t) => {
 
   rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
   const responses: any[] = [];
-  (rig.controller as any).app.respond = async (requestId: string, result: unknown) => {
+  (rig.controller as any).app.respond = async (requestId: string | number, result: unknown) => {
     responses.push({ requestId, result });
   };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 7,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [
+          { label: 'Yes', description: 'Implement now' },
+          { label: 'No', description: 'Stop here' },
+        ],
+      }],
+    },
+  });
+
+  const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
+  assert.ok(pending);
+  assert.match(rig.sentMessages[0]!, /Codex needs input:/);
+  assert.equal(rig.store.listPendingUserInputs().length, 1);
+  assert.equal(rig.store.listPendingUserInputs()[0]!.messageId, 1);
+
+  await (rig.controller as any).handleCallback(createCallback(`ui:${pending.localId}:0:0`, 1));
+
+  assert.deepEqual(responses, [{
+    requestId: 7,
+    result: { answers: { confirm: { answers: ['Yes'] } } },
+  }]);
+  assert.equal(rig.callbackAnswers[0], 'Answer recorded');
+  assert.match(rig.editedMessages[0]!, /Waiting for Codex to continue/);
+  assert.equal((rig.controller as any).pendingUserInputs.size, 1);
+  assert.equal(rig.store.listPendingUserInputs().length, 1);
+  assert.equal(rig.store.listPendingUserInputs()[0]!.status, 'submitted');
+});
+
+test('serverRequest/resolved clears pending requestUserInput card', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'request-1',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [
+          { label: 'Yes', description: 'Implement now' },
+          { label: 'No', description: 'Stop here' },
+        ],
+      }],
+    },
+  });
+
+  assert.equal((rig.controller as any).pendingUserInputs.size, 1);
+  assert.equal(rig.store.listPendingUserInputs().length, 1);
+
+  await (rig.controller as any).handleNotification({
+    method: 'serverRequest/resolved',
+    params: { threadId: 'thread-1', requestId: 'request-1' },
+  });
+
+  assert.equal((rig.controller as any).pendingUserInputs.size, 0);
+  assert.equal(rig.store.listPendingUserInputs().length, 0);
+  assert.match(rig.editedMessages[0]!, /Submitted to Codex\./);
+});
+
+test('submitted requestUserInput is retired when the active turn is interrupted', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
 
   await (rig.controller as any).handleServerRequest({
     id: 'request-1',
@@ -1061,16 +1308,223 @@ test('requestUserInput is bridged through Telegram callbacks', async (t) => {
   });
 
   const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
-  assert.ok(pending);
-  assert.match(rig.sentMessages[0]!, /Codex needs input:/);
-
   await (rig.controller as any).handleCallback(createCallback(`ui:${pending.localId}:0:0`, 1));
 
+  assert.equal(rig.store.listPendingUserInputs()[0]!.status, 'submitted');
+
+  await (rig.controller as any).requestInterrupt(active);
+
+  assert.equal((rig.controller as any).pendingUserInputs.size, 0);
+  assert.equal(rig.store.listPendingUserInputs().length, 0);
+  assert.match(rig.editedMessages.at(-1)!, /interrupted/);
+});
+
+test('submitted requestUserInput sends a waiting notice without resolving the request', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  await (rig.controller as any).handleServerRequest({
+    id: 'request-1',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [{ label: 'Yes', description: 'Implement now' }],
+      }],
+    },
+  });
+
+  const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
+  await (rig.controller as any).handleCallback(createCallback(`ui:${pending.localId}:0:0`, 1));
+
+  await (rig.controller as any).notifySubmittedUserInputStillWaiting(pending.localId);
+
+  assert.match(rig.sentMessages.at(-1)!, /still waiting to continue/);
+  assert.equal((rig.controller as any).pendingUserInputs.size, 1);
+  assert.equal(rig.store.listPendingUserInputs()[0]!.status, 'submitted');
+});
+
+test('pending requestUserInput is restored from store after bridge restart', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'waiting',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: ['waitingOnUserInput'],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-1',
+      status: 'inProgress',
+      error: null,
+      items: [],
+    }],
+  });
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'request-1',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [
+          { label: 'Yes', description: 'Implement now' },
+          { label: 'No', description: 'Stop here' },
+        ],
+      }],
+    },
+  });
+
+  (rig.controller as any).pendingUserInputs.clear();
+  rig.editedMessages.length = 0;
+
+  await (rig.controller as any).restorePendingUserInputs();
+
+  const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
+  assert.ok(pending);
+  assert.equal(pending.itemId, 'item-1');
+  assert.match(rig.editedMessages[0]!, /Codex needs input:/);
+});
+
+test('submitted requestUserInput is resent with numeric request id after restore', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'waiting',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: ['waitingOnUserInput'],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-1',
+      status: 'inProgress',
+      error: null,
+      items: [],
+    }],
+  });
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string | number, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 9,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [{ label: 'Yes', description: 'Implement now' }],
+      }],
+    },
+  });
+  const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
+  await (rig.controller as any).handleCallback(createCallback(`ui:${pending.localId}:0:0`, 1));
+  responses.length = 0;
+  (rig.controller as any).pendingUserInputs.clear();
+
+  await (rig.controller as any).restorePendingUserInputs();
+
   assert.deepEqual(responses, [{
-    requestId: 'request-1',
+    requestId: 9,
     result: { answers: { confirm: { answers: ['Yes'] } } },
   }]);
-  assert.equal(rig.callbackAnswers[0], 'Answer recorded');
+});
+
+test('submitted requestUserInput is resolved on restore when app-server no longer waits', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'running',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-1',
+      status: 'inProgress',
+      error: null,
+      items: [],
+    }],
+  });
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string | number, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 10,
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      questions: [{
+        id: 'confirm',
+        header: 'Continue?',
+        question: 'Apply the plan?',
+        options: [{ label: 'Yes', description: 'Implement now' }],
+      }],
+    },
+  });
+  const pending = [...(rig.controller as any).pendingUserInputs.values()][0];
+  await (rig.controller as any).handleCallback(createCallback(`ui:${pending.localId}:0:0`, 1));
+  responses.length = 0;
+  rig.editedMessages.length = 0;
+  (rig.controller as any).pendingUserInputs.clear();
+
+  await (rig.controller as any).restorePendingUserInputs();
+
+  assert.deepEqual(responses, []);
+  assert.equal((rig.controller as any).pendingUserInputs.size, 0);
+  assert.equal(rig.store.listPendingUserInputs().length, 0);
   assert.match(rig.editedMessages[0]!, /Submitted to Codex\./);
 });
 
@@ -1120,6 +1574,79 @@ test('plan mode completion offers implementation prompt and starts default-mode 
   assert.equal(starts[0]?.input[0]?.text, 'Implement the plan.');
   assert.equal(starts[0]?.overrides?.collaborationMode, 'default');
   assert.match(rig.editedMessages[0]!, /Started executing the plan/);
+});
+
+test('plan mode prompts for implementation after clarification answer and plan update', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.setChatCollaborationMode('telegram:99::root', 'plan');
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'request-1',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      questions: [{
+        id: 'scope',
+        header: 'Scope',
+        question: 'Which path should the plan cover?',
+        options: [
+          { label: 'Auth flow', description: 'Focus on login and switching' },
+          { label: 'Everything', description: 'Cover the full bridge' },
+        ],
+      }],
+    },
+  });
+
+  const pendingInput = [...(rig.controller as any).pendingUserInputs.values()][0];
+  assert.ok(pendingInput);
+  await (rig.controller as any).handleCallback(createCallback(`ui:${pendingInput.localId}:0:0`, 1));
+
+  assert.deepEqual(responses, [{
+    requestId: 'request-1',
+    result: { answers: { scope: { answers: ['Auth flow'] } } },
+  }]);
+  assert.equal((rig.controller as any).pendingUserInputs.size, 1);
+
+  await (rig.controller as any).handleNotification({
+    method: 'serverRequest/resolved',
+    params: { threadId: 'thread-1', requestId: 'request-1' },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'turn/plan/updated',
+    params: {
+      turnId: 'turn-1',
+      explanation: 'Plan:',
+      plan: [
+        { step: 'Inspect auth add handoff', status: 'completed' },
+        { step: 'Patch plan implementation prompt', status: 'pending' },
+      ],
+    },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'turn/completed',
+    params: { turnId: 'turn-1' },
+  });
+
+  assert.ok(rig.sentMessages.some(message => /Plan mode produced a plan/.test(message)));
+  const pendingPlan = [...(rig.controller as any).pendingPlanImplementations.values()][0];
+  assert.ok(pendingPlan);
+  assert.match(pendingPlan.planMarkdown, /Patch plan implementation prompt/);
 });
 
 test('/steer sends same-turn input to the active Codex turn', async (t) => {
@@ -1555,6 +2082,115 @@ test('thread management commands call fork, rename, rollback, compact, archive, 
   assert.equal(rig.store.getBinding('telegram:99::root'), null);
 });
 
+test('/threads panel supports rename and archive callbacks', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const thread = {
+    threadId: 'thread-panel',
+    name: 'Panel thread',
+    preview: 'preview',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'cli',
+    path: null,
+    status: 'idle' as const,
+    updatedAt: 1,
+  };
+  const calls: string[] = [];
+  (rig.controller as any).app.listThreads = async () => [thread];
+  (rig.controller as any).app.setThreadName = async (threadId: string, name: string) => {
+    calls.push(`rename:${threadId}:${name}`);
+  };
+  (rig.controller as any).app.archiveThread = async (threadId: string) => {
+    calls.push(`archive:${threadId}`);
+  };
+  rig.store.setBinding('telegram:99::root', 'thread-panel', rig.tempDir);
+
+  await (rig.controller as any).handleText(createEvent('/threads'));
+
+  assert.equal(rig.sentHtmlMessages.length, 1);
+  assert.deepEqual(rig.sentHtmlKeyboards[0], [
+    [{ text: '1. Panel thread', callback_data: 'thread:open:thread-panel' }],
+    [
+      { text: 'Rename', callback_data: 'thread:rename:thread-panel' },
+      { text: 'Archive/Delete', callback_data: 'thread:archive:thread-panel' },
+    ],
+    [{ text: 'Archived', callback_data: 'thread:list:archived' }],
+  ]);
+
+  await (rig.controller as any).handleCallback(createCallback('thread:rename:thread-panel', 1001));
+  assert.equal(rig.callbackAnswers.at(-1), 'Send the new name');
+  assert.match(rig.sentMessages.at(-1)!, /Send the new name for: Panel thread/);
+
+  await (rig.controller as any).handleText(createEvent('Renamed from panel'));
+  assert.deepEqual(calls, ['rename:thread-panel:Renamed from panel']);
+  assert.match(rig.sentMessages.at(-1)!, /Renamed thread to: Renamed from panel/);
+
+  await (rig.controller as any).handleCallback(createCallback('thread:archive:thread-panel', 1001));
+  assert.deepEqual(calls, [
+    'rename:thread-panel:Renamed from panel',
+    'archive:thread-panel',
+  ]);
+  assert.equal(rig.store.getBinding('telegram:99::root'), null);
+  assert.equal(rig.callbackAnswers.at(-1), 'Thread archived');
+});
+
+test('/threads archived panel supports unarchive callback', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const archivedThread = {
+    threadId: 'thread-archived',
+    name: 'Archived work',
+    preview: 'old',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'cli',
+    path: null,
+    status: 'idle' as const,
+    updatedAt: 1,
+  };
+  const calls: string[] = [];
+  const listArchived: boolean[] = [];
+  (rig.controller as any).app.listThreads = async (options: { archived?: boolean }) => {
+    listArchived.push(Boolean(options.archived));
+    return options.archived ? [archivedThread] : [];
+  };
+  (rig.controller as any).app.unarchiveThread = async (threadId: string) => {
+    calls.push(`unarchive:${threadId}`);
+  };
+  (rig.controller as any).app.resumeThread = async ({ threadId }: { threadId: string }) => ({
+    thread: { ...archivedThread, threadId },
+    model: 'gpt-5',
+    modelProvider: 'openai',
+    reasoningEffort: 'medium',
+    cwd: rig.tempDir,
+  });
+
+  await (rig.controller as any).handleText(createEvent('/threads archived'));
+
+  assert.equal(rig.sentHtmlMessages.length, 1);
+  assert.deepEqual(rig.sentHtmlKeyboards[0], [
+    [{ text: '1. Archived work', callback_data: 'thread:open:thread-archived' }],
+    [{ text: 'Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
+    [{ text: 'Recent', callback_data: 'thread:list:recent' }],
+  ]);
+
+  await (rig.controller as any).handleCallback(createCallback('thread:unarchive:thread-archived', 1001));
+
+  assert.deepEqual(calls, ['unarchive:thread-archived']);
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-archived');
+  assert.equal(rig.callbackAnswers.at(-1), 'Thread unarchived');
+  assert.deepEqual(listArchived, [true, false]);
+});
+
 test('completed turns automatically start a queued prompt', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -1585,6 +2221,128 @@ test('completed turns automatically start a queued prompt', async (t) => {
   assert.deepEqual(started, [{ locale: 'en', text: 'continue' }]);
   assert.equal((rig.controller as any).queuedPrompts.size, 0);
   assert.equal((rig.controller as any).activeTurns.size, 0);
+});
+
+test('startup preview cleanup recovers still-live app-server turns', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-live',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'live',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-live',
+      status: 'inProgress',
+      error: null,
+      items: [{
+        itemId: 'item-1',
+        type: 'agentMessage',
+        phase: 'commentary',
+        text: 'already relayed',
+        command: null,
+        status: null,
+        aggregatedOutput: null,
+      }],
+    }],
+  });
+  let renders = 0;
+  (rig.controller as any).queueTurnRender = async () => {
+    renders += 1;
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.ok((rig.controller as any).activeTurns.has('turn-live'));
+  assert.equal((rig.controller as any).observedThreadWatchers.get('telegram:99::root')?.activeTurnId, 'turn-live');
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal(renders, 1);
+});
+
+test('startup preview cleanup interrupts orphan waiting user-input turns', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-waiting',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'waiting',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: ['waitingOnUserInput'],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-waiting',
+      status: 'inProgress',
+      error: null,
+      items: [],
+    }],
+  });
+  const interrupted: Array<{ threadId: string; turnId: string }> = [];
+  (rig.controller as any).app.interruptTurn = async (threadId: string, turnId: string) => {
+    interrupted.push({ threadId, turnId });
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.deepEqual(interrupted, [{ threadId: 'thread-1', turnId: 'turn-waiting' }]);
+  assert.equal((rig.controller as any).activeTurns.size, 0);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 0);
+  assert.match(rig.editedMessages[0]!, /stale Codex input request/);
+});
+
+test('controller stop preserves live preview records for restart recovery', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 123);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-1',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+
+  await rig.controller.stop();
+
+  assert.equal((rig.controller as any).activeTurns.size, 0);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+  assert.equal(rig.editedMessages.length, 0);
 });
 
 test('watch relay sends codex cli user messages as prefixed telegram messages', async (t) => {
@@ -1683,6 +2441,40 @@ test('unwatch stops the current watcher and reports when nothing is being watche
 
   await (rig.controller as any).handleCommand(createEvent('/unwatch'), 'en', 'unwatch', []);
   assert.equal(rig.sentMessages[1], 'This chat is not watching any thread.');
+});
+
+test('/watch tails local vscode session files when a bound thread has a path', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const sessionPath = path.join(rig.tempDir, 'vscode-session.jsonl');
+  fs.writeFileSync(sessionPath, '');
+  rig.store.setBinding('telegram:99::root', 'thread-vscode', rig.tempDir);
+  (rig.controller as any).app.readThread = async () => ({
+    threadId: 'thread-vscode',
+    name: null,
+    preview: 'vscode',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'vscode',
+    path: sessionPath,
+    status: 'idle',
+    updatedAt: 1,
+  });
+  (rig.controller as any).ensureThreadReady = async () => {
+    throw new Error('watch should use the local session file');
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/watch'), 'en', 'watch', []);
+
+  const watcher = (rig.controller as any).observedThreadWatchers.get('telegram:99::root');
+  assert.equal(watcher?.mode, 'session_file');
+  assert.equal(watcher?.sessionPath, sessionPath);
+  assert.equal(rig.sentMessages[0], 'Watching thread thread-vscode. I will mirror the next live turn from Codex CLI here.');
 });
 
 test('weixin queue works like Telegram when a turn is active', async (t) => {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
-import type { BridgeStore } from '../store/database.js';
+import type { BridgeStore, PendingUserInputStoredRecord } from '../store/database.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -222,21 +222,27 @@ interface PendingUserInputQuestion {
   options: PendingUserInputOption[];
 }
 
+type PendingUserInputStatus = 'pending' | 'submitted' | 'resolved' | 'interrupted';
+type ServerRequestId = string | number;
+
 interface PendingUserInputRequest {
   localId: string;
-  serverRequestId: string;
+  serverRequestId: ServerRequestId;
   chatId: string;
   threadId: string;
   turnId: string | null;
+  itemId: string;
   questions: PendingUserInputQuestion[];
   answers: Map<string, string>;
   messageId: number | null;
+  status: PendingUserInputStatus;
   createdAt: number;
+  submittedAt: number | null;
 }
 
 interface PendingMcpElicitation {
   localId: string;
-  serverRequestId: string;
+  serverRequestId: ServerRequestId;
   chatId: string;
   threadId: string;
   turnId: string | null;
@@ -287,6 +293,22 @@ interface PendingAuthChoiceList {
   createdAt: number;
 }
 
+interface PendingThreadRename {
+  scopeId: string;
+  threadId: string;
+  messageId: number | null;
+  createdAt: number;
+}
+
+interface PendingAuthAdd {
+  loginId: string;
+  scopeId: string;
+  name: string;
+  path: string;
+  previousTargetPath: string | null;
+  createdAt: number;
+}
+
 interface AuthRetryContext {
   input: TurnInput[];
   threadId: string;
@@ -317,6 +339,7 @@ const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
 const CODEX_LOCAL_USAGE_CACHE_MS = 30_000;
+const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
 const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
 
@@ -330,6 +353,7 @@ export class BridgeSessionCore {
   private pendingPlanImplementations = new Map<string, PendingPlanImplementation>();
   private pendingLoginsByScope = new Map<string, string>();
   private pendingLoginScopesById = new Map<string, string>();
+  private pendingAuthAddsByLoginId = new Map<string, PendingAuthAdd>();
   private latestTurnDiffs = new Map<string, { scopeId: string; threadId: string; turnId: string; diff: string; updatedAt: number }>();
   private threadTokenUsageAlerts = new Map<string, { turnId: string | null; bucket: number; limit: number }>();
   private pendingAuthChoiceLists = new Map<string, PendingAuthChoiceList>();
@@ -338,8 +362,10 @@ export class BridgeSessionCore {
   private authRotationFailedTargets = new Set<string>();
   private localUsageCache: { expiresAt: number; stats: CodexLocalUsageStats } | null = null;
   private lastRemoteControlStatus: RemoteControlStatusState | null = null;
+  private pendingThreadRenames = new Map<string, PendingThreadRename>();
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
+  private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -411,6 +437,7 @@ export class BridgeSessionCore {
     });
 
     await this.app.start();
+    await this.restorePendingUserInputs();
     await this.cleanupStaleTurnPreviews();
     this.updateStatus();
   }
@@ -437,18 +464,24 @@ export class BridgeSessionCore {
     this.pendingPlanImplementations.clear();
     this.pendingLoginsByScope.clear();
     this.pendingLoginScopesById.clear();
+    this.pendingAuthAddsByLoginId.clear();
     this.latestTurnDiffs.clear();
     this.threadTokenUsageAlerts.clear();
     this.pendingAuthChoiceLists.clear();
+    this.pendingThreadRenames.clear();
     this.pendingAuthRotation = null;
     this.clearObservedThreadWatchers();
-    await this.abandonActiveTurns();
+    this.releaseActiveTurnsForBridgeShutdown();
     this.bot.stop();
     for (const timer of this.approvalTimers.values()) {
       clearTimeout(timer);
     }
     this.approvalTimers.clear();
-    await this.app.stop();
+    for (const timer of this.submittedUserInputTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.submittedUserInputTimers.clear();
+    await this.app.stop({ terminateServer: false });
     this.updateStatus();
   }
 
@@ -457,9 +490,11 @@ export class BridgeSessionCore {
       running: true,
       connected: this.app.isConnected(),
       userAgent: this.app.getUserAgent(),
+      codexAppServer: this.app.getServerStatus(),
       botUsername: this.botUsername,
       currentBindings: this.store.countBindings(),
       pendingApprovals: this.store.countPendingApprovals(),
+      pendingUserInputs: this.store.countPendingUserInputs(),
       activeTurns: this.activeTurns.size,
       lastError: this.lastError,
       updatedAt: new Date().toISOString(),
@@ -488,6 +523,10 @@ export class BridgeSessionCore {
         await this.handleUserInputTextReply(event, locale);
         return;
       }
+      if (!command && event.attachments.length === 0 && this.pendingThreadRenames.has(scopeId)) {
+        await this.handleThreadRenameTextReply(event, locale);
+        return;
+      }
       if (this.findActiveTurn(scopeId)) {
         await this.handleActiveTurnInboundMessage(event, locale, event.text.trim());
         return;
@@ -503,6 +542,10 @@ export class BridgeSessionCore {
     }
     if (!command && event.attachments.length === 0 && this.hasPendingMcpElicitation(scopeId)) {
       await this.handleMcpElicitationTextReply(event, locale);
+      return;
+    }
+    if (!command && event.attachments.length === 0 && this.pendingThreadRenames.has(scopeId)) {
+      await this.handleThreadRenameTextReply(event, locale);
       return;
     }
     const decision = resolveTelegramAddressing({
@@ -608,8 +651,13 @@ export class BridgeSessionCore {
         const settings = this.store.getChatSettings(scopeId);
         const access = this.resolveEffectiveAccess(scopeId, settings);
         const fastStatus = await this.resolveFastStatusLabel(locale, settings);
+        const appServer = this.app.getServerStatus();
+        const appServerLabel = appServer.pid && appServer.port
+          ? `${appServer.running ? t(locale, 'status_app_server_running') : t(locale, 'status_app_server_stale')} pid=${appServer.pid} port=${appServer.port}`
+          : t(locale, 'none');
         const lines = [
           t(locale, 'status_connected', { value: t(locale, this.app.isConnected() ? 'yes' : 'no') }),
+          t(locale, 'status_app_server', { value: appServerLabel }),
           t(locale, 'status_user_agent', { value: this.app.getUserAgent() ?? t(locale, 'unknown') }),
           t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
@@ -625,6 +673,7 @@ export class BridgeSessionCore {
           t(locale, 'status_sync_on_open', { value: t(locale, this.config.codexAppSyncOnOpen ? 'yes' : 'no') }),
           t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
           t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
+          t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
         lines.push(...await this.buildCodexUsageStatusLines(locale));
@@ -1014,9 +1063,19 @@ export class BridgeSessionCore {
       await this.handleTurnInterruptCallback(event, interruptMatch[1]!, locale);
       return;
     }
-    const listNavMatch = /^thread:list:(prev|next|clear)$/.exec(event.data);
+    const listNavMatch = /^thread:list:(prev|next|clear|archived|recent)$/.exec(event.data);
     if (listNavMatch) {
-      await this.handleThreadListNavigationCallback(event, listNavMatch[1]! as 'prev' | 'next' | 'clear', locale);
+      await this.handleThreadListNavigationCallback(event, listNavMatch[1]! as 'prev' | 'next' | 'clear' | 'archived' | 'recent', locale);
+      return;
+    }
+    const threadActionMatch = /^thread:(rename|archive|unarchive):(.+)$/.exec(event.data);
+    if (threadActionMatch) {
+      await this.handleThreadActionCallback(
+        event,
+        threadActionMatch[1]! as 'rename' | 'archive' | 'unarchive',
+        threadActionMatch[2]!,
+        locale,
+      );
       return;
     }
     const threadMatch = /^thread:open:(.+)$/.exec(event.data);
@@ -1103,7 +1162,7 @@ export class BridgeSessionCore {
     }
 
     const result = mapApprovalDecision(approval, action);
-    await this.app.respond(approval.serverRequestId, result);
+    await this.app.respond(parseStoredServerRequestId(approval.serverRequestId), result);
     this.store.markApprovalResolved(localId);
     this.clearApprovalTimer(localId);
     await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
@@ -1195,6 +1254,10 @@ export class BridgeSessionCore {
       case 'thread/unarchived':
       case 'thread/closed': {
         await this.handleThreadLifecycleNotification(notification.method, notification.params);
+        return;
+      }
+      case 'serverRequest/resolved': {
+        await this.handleServerRequestResolved(notification.params);
         return;
       }
       case 'account/login/completed': {
@@ -1536,21 +1599,118 @@ export class BridgeSessionCore {
     }
   }
 
+  private async handleServerRequestResolved(params: any): Promise<void> {
+    const requestId = parseServerRequestId(params?.requestId);
+    if (requestId === null) {
+      return;
+    }
+    const storedRequestId = stringifyServerRequestId(requestId);
+
+    const approval = this.store.getPendingApprovalByServerRequestId(storedRequestId);
+    if (approval) {
+      this.store.markApprovalResolved(approval.localId);
+      this.clearApprovalTimer(approval.localId);
+      await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
+    }
+
+    const userInput = [...this.pendingUserInputs.values()].find(record => sameServerRequestId(record.serverRequestId, requestId)) ?? null;
+    if (userInput) {
+      this.logger.info('codex.user_input_resolved', {
+        localId: userInput.localId,
+        serverRequestId: stringifyServerRequestId(userInput.serverRequestId),
+        threadId: userInput.threadId,
+        turnId: userInput.turnId,
+        itemId: userInput.itemId,
+      });
+      this.clearSubmittedUserInputTimer(userInput.localId);
+      this.pendingUserInputs.delete(userInput.localId);
+      userInput.status = 'resolved';
+      this.store.markPendingUserInputResolved(userInput.localId);
+      if (userInput.messageId !== null) {
+        const locale = this.localeForChat(userInput.chatId);
+        await this.editMessage(
+          userInput.chatId,
+          userInput.messageId,
+          renderUserInputMessage(locale, userInput),
+          [],
+        ).catch((error) => {
+          if (!isTelegramMessageGone(error)) {
+            this.logger.warn('telegram.user_input_resolved_edit_failed', {
+              localId: userInput.localId,
+              chatId: userInput.chatId,
+              messageId: userInput.messageId,
+              error: toErrorMeta(error),
+            });
+          }
+        });
+      }
+    }
+
+    this.updateStatus();
+  }
+
   private async handleAccountLoginCompleted(params: any): Promise<void> {
     const loginId = params?.loginId === null ? null : stringOrNull(params?.loginId);
     const scopeId = loginId ? this.pendingLoginScopesById.get(loginId) ?? null : null;
     if (!scopeId) {
       return;
     }
+    const pendingAuthAdd = loginId ? this.pendingAuthAddsByLoginId.get(loginId) ?? null : null;
     this.pendingLoginScopesById.delete(loginId!);
     if (this.pendingLoginsByScope.get(scopeId) === loginId) {
       this.pendingLoginsByScope.delete(scopeId);
     }
+    if (loginId) {
+      this.pendingAuthAddsByLoginId.delete(loginId);
+    }
     const locale = this.localeForChat(scopeId);
     const success = Boolean(params?.success);
+    if (pendingAuthAdd) {
+      if (!success) {
+        await this.restorePendingAuthAdd(pendingAuthAdd);
+        await this.sendMessage(scopeId, [
+          t(locale, 'auth_add_failed', { value: pendingAuthAdd.name, error: params?.error ?? t(locale, 'unknown') }),
+          t(locale, 'auth_add_reverted'),
+        ].join('\n'));
+        return;
+      }
+      const stat = await fs.stat(pendingAuthAdd.path).catch(() => null);
+      if (!stat?.isFile()) {
+        await this.restorePendingAuthAdd(pendingAuthAdd);
+        await this.sendMessage(scopeId, [
+          t(locale, 'auth_add_missing_file', { value: pendingAuthAdd.name }),
+          t(locale, 'auth_add_reverted'),
+        ].join('\n'));
+        return;
+      }
+      const lines = [t(locale, 'auth_add_done', { value: pendingAuthAdd.name })];
+      lines.push(...await this.buildCodexUsageStatusLines(locale));
+      await this.sendMessage(scopeId, lines.join('\n'));
+      return;
+    }
     await this.sendMessage(scopeId, success
       ? t(locale, 'login_completed')
       : t(locale, 'login_failed', { error: params?.error ?? t(locale, 'unknown') }));
+  }
+
+  private async restorePendingAuthAdd(record: PendingAuthAdd): Promise<void> {
+    const state = await listCodexAuthState();
+    await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, record.previousTargetPath);
+  }
+
+  private async restoreAuthAfterAddFailure(authDir: string, authPath: string, previousTargetPath: string | null): Promise<void> {
+    if (previousTargetPath) {
+      await pointCodexAuthAtTarget(authDir, authPath, previousTargetPath);
+    } else {
+      await fs.unlink(authPath).catch((error) => {
+        if (!isFileMissingError(error)) {
+          throw error;
+        }
+      });
+    }
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    await this.app.restart();
   }
 
   private async handleAccountUpdated(params: any): Promise<void> {
@@ -1649,16 +1809,28 @@ export class BridgeSessionCore {
 
     const record: PendingUserInputRequest = {
       localId: crypto.randomBytes(8).toString('hex'),
-      serverRequestId: String(serverRequestId),
+      serverRequestId,
       chatId: scopeId,
       threadId,
       turnId: stringOrNull(params?.turnId),
+      itemId: stringOrNull(params?.itemId) ?? stringOrNull(params?.item?.id) ?? '',
       questions,
       answers: new Map(),
       messageId: null,
+      status: 'pending',
       createdAt: Date.now(),
+      submittedAt: null,
     };
+    this.logger.info('codex.user_input_requested', {
+      localId: record.localId,
+      serverRequestId: stringifyServerRequestId(record.serverRequestId),
+      threadId: record.threadId,
+      turnId: record.turnId,
+      itemId: record.itemId,
+      questions: questions.length,
+    });
     this.pendingUserInputs.set(record.localId, record);
+    this.store.savePendingUserInput(serializePendingUserInput(record));
     const locale = this.localeForChat(scopeId);
     const messageId = await this.sendMessage(
       scopeId,
@@ -1666,6 +1838,7 @@ export class BridgeSessionCore {
       userInputKeyboard(record),
     );
     record.messageId = messageId;
+    this.store.updatePendingUserInputMessage(record.localId, messageId);
   }
 
   private hasPendingUserInput(scopeId: string): boolean {
@@ -1674,7 +1847,7 @@ export class BridgeSessionCore {
 
   private findPendingUserInputForScope(scopeId: string): PendingUserInputRequest | null {
     for (const record of this.pendingUserInputs.values()) {
-      if (record.chatId === scopeId) {
+      if (record.chatId === scopeId && record.status === 'pending') {
         return record;
       }
     }
@@ -1693,6 +1866,10 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_expired'));
       return;
     }
+    if (record.status !== 'pending') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_already_submitted'));
+      return;
+    }
     if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_mismatch'));
       return;
@@ -1704,6 +1881,7 @@ export class BridgeSessionCore {
       return;
     }
     record.answers.set(question.id, option.label);
+    this.persistPendingUserInputAnswers(record);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'user_input_recorded'));
     await this.refreshOrFinishUserInput(record, locale);
   }
@@ -1724,17 +1902,24 @@ export class BridgeSessionCore {
       return;
     }
     record.answers.set(unanswered[0]!.id, answer);
+    this.persistPendingUserInputAnswers(record);
     await this.refreshOrFinishUserInput(record, locale);
   }
 
   private async refreshOrFinishUserInput(record: PendingUserInputRequest, locale: AppLocale): Promise<void> {
     const completed = record.questions.every(question => record.answers.has(question.id));
     if (completed) {
-      this.pendingUserInputs.delete(record.localId);
-      await this.app.respond(record.serverRequestId, {
-        answers: Object.fromEntries(
-          [...record.answers.entries()].map(([id, answer]) => [id, { answers: [answer] }]),
-        ),
+      await this.submitPendingUserInput(record);
+      record.status = 'submitted';
+      record.submittedAt = Date.now();
+      this.store.markPendingUserInputSubmitted(record.localId);
+      this.armSubmittedUserInputTimer(record.localId);
+      this.logger.info('codex.user_input_submitted', {
+        localId: record.localId,
+        serverRequestId: stringifyServerRequestId(record.serverRequestId),
+        threadId: record.threadId,
+        turnId: record.turnId,
+        itemId: record.itemId,
       });
     }
 
@@ -1744,9 +1929,149 @@ export class BridgeSessionCore {
     await this.editMessage(
       record.chatId,
       record.messageId,
-      renderUserInputMessage(locale, record, completed),
-      completed ? [] : userInputKeyboard(record),
+      renderUserInputMessage(locale, record),
+      record.status === 'pending' ? userInputKeyboard(record) : [],
     );
+  }
+
+  private async submitPendingUserInput(record: PendingUserInputRequest): Promise<void> {
+    await this.app.respond(record.serverRequestId, {
+      answers: Object.fromEntries(
+        [...record.answers.entries()].map(([id, answer]) => [id, { answers: [answer] }]),
+      ),
+    });
+  }
+
+  private persistPendingUserInputAnswers(record: PendingUserInputRequest): void {
+    this.store.updatePendingUserInputAnswers(
+      record.localId,
+      stringifyPendingUserInputAnswers(record.answers),
+      pendingUserInputCurrentQuestionIndex(record),
+    );
+  }
+
+  private async restorePendingUserInputs(): Promise<void> {
+    for (const stored of this.store.listPendingUserInputs()) {
+      const record = parseStoredPendingUserInput(stored);
+      if (!record) {
+        this.store.markPendingUserInputResolved(stored.localId);
+        continue;
+      }
+      let live = false;
+      try {
+        live = await this.isPendingUserInputTurnLive(record);
+      } catch (error) {
+        this.logger.warn('codex.user_input_restore_status_failed', {
+          localId: record.localId,
+          threadId: record.threadId,
+          turnId: record.turnId,
+          error: toErrorMeta(error),
+        });
+        continue;
+      }
+      if (!live) {
+        await this.retireStalePendingUserInput(record);
+        continue;
+      }
+      this.pendingUserInputs.set(record.localId, record);
+      if (record.status === 'submitted') {
+        await this.submitPendingUserInput(record).catch((error) => {
+          this.logger.warn('codex.user_input_restore_resubmit_failed', {
+            localId: record.localId,
+            serverRequestId: stringifyServerRequestId(record.serverRequestId),
+            threadId: record.threadId,
+            turnId: record.turnId,
+            error: toErrorMeta(error),
+          });
+        });
+        this.armSubmittedUserInputTimer(record.localId);
+      }
+      try {
+        await this.restorePendingUserInputMessage(record);
+      } catch (error) {
+        this.pendingUserInputs.delete(record.localId);
+        this.logger.warn('telegram.user_input_restore_failed', {
+          localId: record.localId,
+          chatId: record.chatId,
+          threadId: record.threadId,
+          turnId: record.turnId,
+          error: toErrorMeta(error),
+        });
+      }
+    }
+  }
+
+  private async restorePendingUserInputMessage(record: PendingUserInputRequest): Promise<void> {
+    const locale = this.localeForChat(record.chatId);
+    if (record.messageId !== null) {
+      try {
+        await this.editMessage(
+          record.chatId,
+          record.messageId,
+          renderUserInputMessage(locale, record),
+          record.status === 'pending' ? userInputKeyboard(record) : [],
+        );
+        return;
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.user_input_restore_edit_failed', {
+            localId: record.localId,
+            chatId: record.chatId,
+            messageId: record.messageId,
+            error: toErrorMeta(error),
+          });
+        }
+      }
+    }
+    const messageId = await this.sendMessage(
+      record.chatId,
+      renderUserInputMessage(locale, record),
+      record.status === 'pending' ? userInputKeyboard(record) : [],
+    );
+    record.messageId = messageId;
+    this.store.updatePendingUserInputMessage(record.localId, messageId);
+  }
+
+  private async retireStalePendingUserInput(record: PendingUserInputRequest): Promise<void> {
+    record.status = record.status === 'submitted' ? 'resolved' : 'interrupted';
+    if (record.status === 'resolved') {
+      this.store.markPendingUserInputResolved(record.localId);
+    } else {
+      this.store.markPendingUserInputInterrupted(record.localId);
+    }
+    if (record.messageId === null) {
+      return;
+    }
+    const locale = this.localeForChat(record.chatId);
+    await this.editMessage(record.chatId, record.messageId, renderUserInputMessage(locale, record), []).catch((error) => {
+      if (!isTelegramMessageGone(error)) {
+        this.logger.warn('telegram.user_input_stale_edit_failed', {
+          localId: record.localId,
+          chatId: record.chatId,
+          messageId: record.messageId,
+          error: toErrorMeta(error),
+        });
+      }
+    });
+  }
+
+  private async isPendingUserInputTurnLive(record: PendingUserInputRequest): Promise<boolean> {
+    const snapshot = await this.app.readThreadSnapshot(record.threadId);
+    if (!snapshot || snapshot.status !== 'active') {
+      return false;
+    }
+    if (record.status === 'submitted') {
+      if (!record.turnId) {
+        return snapshot.activeFlags.includes('waitingOnUserInput');
+      }
+      const turn = snapshot.turns.find((entry) => entry.turnId === record.turnId);
+      return turn?.status === 'inProgress' && snapshot.activeFlags.includes('waitingOnUserInput');
+    }
+    if (!record.turnId) {
+      return snapshot.activeFlags.includes('waitingOnUserInput');
+    }
+    const turn = snapshot.turns.find((entry) => entry.turnId === record.turnId);
+    return turn?.status === 'inProgress' && snapshot.activeFlags.includes('waitingOnUserInput');
   }
 
   private async maybeSendPlanImplementationPrompt(active: ActiveTurn): Promise<boolean> {
@@ -1821,6 +2146,49 @@ export class BridgeSessionCore {
       }
     }
     return false;
+  }
+
+  private async finalizeUserInputsForTurn(active: ActiveTurn, terminalStatus: 'resolved' | 'interrupted'): Promise<void> {
+    const records = [...this.pendingUserInputs.values()].filter((record) => (
+      record.chatId === active.scopeId && (record.turnId === null || record.turnId === active.turnId)
+    ));
+    for (const record of records) {
+      const finalStatus: PendingUserInputStatus = terminalStatus === 'interrupted'
+        ? 'interrupted'
+        : record.status === 'submitted'
+          ? 'resolved'
+          : 'interrupted';
+      this.clearSubmittedUserInputTimer(record.localId);
+      this.pendingUserInputs.delete(record.localId);
+      record.status = finalStatus;
+      if (finalStatus === 'resolved') {
+        this.store.markPendingUserInputResolved(record.localId);
+      } else {
+        this.store.markPendingUserInputInterrupted(record.localId);
+      }
+      this.logger.info('codex.user_input_turn_terminal', {
+        localId: record.localId,
+        serverRequestId: stringifyServerRequestId(record.serverRequestId),
+        threadId: record.threadId,
+        turnId: record.turnId,
+        itemId: record.itemId,
+        status: finalStatus,
+      });
+      if (record.messageId === null) {
+        continue;
+      }
+      const locale = this.localeForChat(record.chatId);
+      await this.editMessage(record.chatId, record.messageId, renderUserInputMessage(locale, record), []).catch((error) => {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.user_input_terminal_edit_failed', {
+            localId: record.localId,
+            chatId: record.chatId,
+            messageId: record.messageId,
+            error: toErrorMeta(error),
+          });
+        }
+      });
+    }
   }
 
   private async handlePlanImplementationCallback(
@@ -1927,7 +2295,7 @@ export class BridgeSessionCore {
     const mode = params?.mode === 'url' ? 'url' : 'form';
     const record: PendingMcpElicitation = {
       localId: crypto.randomBytes(8).toString('hex'),
-      serverRequestId: String(serverRequestId),
+      serverRequestId,
       chatId: scopeId,
       threadId,
       turnId: stringOrNull(params?.turnId),
@@ -2043,7 +2411,7 @@ export class BridgeSessionCore {
     scopeId: string,
     binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
     input: TurnInput[],
-    overrides: { collaborationMode?: CollaborationModeValue | null | undefined } = {},
+    overrides: { collaborationMode?: CollaborationModeValue | null | undefined; recoverMissingThread?: boolean | undefined } = {},
   ): Promise<{ threadId: string; turnId: string }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
@@ -2065,6 +2433,9 @@ export class BridgeSessionCore {
       return { threadId: binding.threadId, turnId: turn.id };
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
+        throw error;
+      }
+      if (overrides.recoverMissingThread === false) {
         throw error;
       }
       this.logger.warn('codex.turn_thread_not_found', { scopeId, threadId: binding.threadId });
@@ -2402,10 +2773,14 @@ export class BridgeSessionCore {
       }
       case 'turn_completed': {
         const scopeId = active.scopeId;
+        if (activity.state === 'interrupted') {
+          active.interruptRequested = true;
+        }
         try {
           this.promoteReadyToolBatch(active);
           await this.completeTurn(active);
           await this.cleanupObservedTransientMessages(active);
+          await this.finalizeUserInputsForTurn(active, active.interruptRequested ? 'interrupted' : 'resolved');
           await this.maybeSendPlanImplementationPrompt(active);
           if (this.config.codexAppSyncOnTurnComplete) {
             const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
@@ -2661,6 +3036,39 @@ export class BridgeSessionCore {
     this.approvalTimers.delete(localId);
   }
 
+  private armSubmittedUserInputTimer(localId: string): void {
+    this.clearSubmittedUserInputTimer(localId);
+    const timer = setTimeout(() => {
+      void this.notifySubmittedUserInputStillWaiting(localId).catch((error) => {
+        this.logger.warn('telegram.user_input_waiting_notice_failed', {
+          localId,
+          error: toErrorMeta(error),
+        });
+      });
+    }, USER_INPUT_SUBMITTED_NOTICE_MS);
+    timer.unref?.();
+    this.submittedUserInputTimers.set(localId, timer);
+  }
+
+  private clearSubmittedUserInputTimer(localId: string): void {
+    const timer = this.submittedUserInputTimers.get(localId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.submittedUserInputTimers.delete(localId);
+  }
+
+  private async notifySubmittedUserInputStillWaiting(localId: string): Promise<void> {
+    this.submittedUserInputTimers.delete(localId);
+    const record = this.pendingUserInputs.get(localId);
+    if (!record || record.status !== 'submitted') {
+      return;
+    }
+    await this.sendMessage(record.chatId, t(this.localeForChat(record.chatId), 'user_input_waiting_notice', {
+      threadId: record.threadId,
+      turnId: record.turnId ?? t(this.localeForChat(record.chatId), 'unknown'),
+    }));
+  }
+
   private async expireApproval(localId: string): Promise<void> {
     const approval = this.store.getPendingApproval(localId);
     if (!approval || approval.resolvedAt) {
@@ -2668,7 +3076,7 @@ export class BridgeSessionCore {
       return;
     }
     try {
-      await this.app.respond(approval.serverRequestId, mapApprovalDecision(approval, 'deny'));
+      await this.app.respond(parseStoredServerRequestId(approval.serverRequestId), mapApprovalDecision(approval, 'deny'));
       this.store.markApprovalResolved(localId);
       await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
       const locale = this.localeForChat(approval.chatId);
@@ -2828,7 +3236,7 @@ export class BridgeSessionCore {
     let watchMode: ObservedThreadWatcher['mode'] = 'session_file';
     let sessionPath: string | null = null;
 
-    if (thread?.source === 'cli' && thread.path) {
+    if (thread?.source !== 'app' && thread?.path && await isReadableSessionPath(thread.path)) {
       sessionPath = thread.path;
     } else {
       const readyBinding = await this.ensureThreadReady(scopeId, binding);
@@ -3402,6 +3810,10 @@ export class BridgeSessionCore {
       await this.handleAuthReloadCommand(scopeId, locale);
       return;
     }
+    if (action === 'add') {
+      await this.handleAuthAddCommand(scopeId, locale, args.slice(1));
+      return;
+    }
     if (action !== 'list') {
       await this.sendMessage(scopeId, t(locale, 'usage_auth'));
       return;
@@ -3427,6 +3839,62 @@ export class BridgeSessionCore {
       authChoiceKeyboard(record),
     );
     record.messageId = messageId;
+  }
+
+  private async handleAuthAddCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+      await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
+      return;
+    }
+
+    const requestedName = args.join(' ').trim();
+    const candidateName = codexAuthCandidateNameFromAddName(requestedName);
+    if (!candidateName) {
+      await this.sendMessage(scopeId, t(locale, 'usage_auth_add'));
+      return;
+    }
+
+    const state = await listCodexAuthState();
+    const targetPath = path.join(state.authDir, candidateName);
+    const existing = await fs.stat(targetPath).catch(() => null);
+    if (existing) {
+      await this.sendMessage(scopeId, t(locale, 'auth_add_exists', { value: candidateName }));
+      return;
+    }
+
+    await this.sendMessage(scopeId, t(locale, 'auth_add_preparing', { value: candidateName }));
+    await pointCodexAuthAtTarget(state.authDir, state.authPath, targetPath);
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    try {
+      await this.app.restart();
+      const login = await this.app.startDeviceLogin();
+      const oldLoginId = this.pendingLoginsByScope.get(scopeId);
+      if (oldLoginId) {
+        this.pendingLoginScopesById.delete(oldLoginId);
+        this.pendingAuthAddsByLoginId.delete(oldLoginId);
+      }
+      this.pendingLoginsByScope.set(scopeId, login.loginId);
+      this.pendingLoginScopesById.set(login.loginId, scopeId);
+      this.pendingAuthAddsByLoginId.set(login.loginId, {
+        loginId: login.loginId,
+        scopeId,
+        name: candidateName,
+        path: targetPath,
+        previousTargetPath: state.currentTargetPath,
+        createdAt: Date.now(),
+      });
+      await this.sendMessage(scopeId, [
+        t(locale, 'auth_add_started', { value: candidateName }),
+        t(locale, 'login_url', { value: login.verificationUrl }),
+        t(locale, 'login_code', { value: login.userCode }),
+        t(locale, 'login_id', { value: login.loginId }),
+        t(locale, 'login_cancel_hint', { value: login.loginId }),
+      ].join('\n'));
+    } catch (error) {
+      await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, state.currentTargetPath);
+      throw error;
+    }
   }
 
   private async handleAccountCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -3486,9 +3954,16 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'login_cancel_no_pending'));
       return;
     }
+    const pendingAuthAdd = this.pendingAuthAddsByLoginId.get(loginId) ?? null;
     await this.app.cancelLogin(loginId);
     this.pendingLoginsByScope.delete(scopeId);
     this.pendingLoginScopesById.delete(loginId);
+    this.pendingAuthAddsByLoginId.delete(loginId);
+    if (pendingAuthAdd) {
+      await this.restorePendingAuthAdd(pendingAuthAdd);
+      await this.sendMessage(scopeId, t(locale, 'auth_add_cancelled'));
+      return;
+    }
     await this.sendMessage(scopeId, t(locale, 'login_cancelled'));
   }
 
@@ -3889,9 +4364,19 @@ export class BridgeSessionCore {
       threadId: retry.threadId,
       cwd: retry.cwd,
     };
-    const turn = await this.startTurnWithRecovery(scopeId, binding, retry.input, {
-      collaborationMode: retry.collaborationMode,
-    });
+    let turn: { threadId: string; turnId: string };
+    try {
+      turn = await this.startTurnWithRecovery(scopeId, binding, retry.input, {
+        collaborationMode: retry.collaborationMode,
+        recoverMissingThread: false,
+      });
+    } catch (error) {
+      if (isThreadNotFoundError(error)) {
+        await this.sendMessage(scopeId, t(locale, 'auth_auto_retry_thread_missing', { threadId: retry.threadId }));
+        return;
+      }
+      throw error;
+    }
     await this.registerActiveTurn(
       scopeId,
       retry.chatId,
@@ -4242,6 +4727,7 @@ export class BridgeSessionCore {
         cwd: row.cwd,
         modelProvider: row.modelProvider,
         status: row.status,
+        archived: row.archived,
         updatedAt: row.updatedAt,
       }));
       const state = this.threadListPresentationState.get(scopeId) ?? null;
@@ -4266,6 +4752,99 @@ export class BridgeSessionCore {
       callbackText = revealError ? t(locale, 'opened_sync_failed_short') : t(locale, 'opened_in_codex_short');
     }
     await this.messaging.answerCallback(event.callbackQueryId, callbackText);
+  }
+
+  private async handleThreadActionCallback(
+    event: TelegramCallbackEvent,
+    action: 'rename' | 'archive' | 'unarchive',
+    threadId: string,
+    locale: AppLocale,
+  ): Promise<void> {
+    const scopeId = event.scopeId;
+    const cached = this.store.listCachedThreads(scopeId).find(thread => thread.threadId === threadId);
+    if (!cached) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'cached_thread_unavailable'));
+      return;
+    }
+
+    if (action === 'rename') {
+      this.pendingThreadRenames.set(scopeId, {
+        scopeId,
+        threadId,
+        messageId: event.messageId,
+        createdAt: Date.now(),
+      });
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_rename_prompt_short'));
+      await this.sendMessage(scopeId, t(locale, 'thread_rename_prompt', {
+        title: cached.name || cached.preview || t(locale, 'empty'),
+      }));
+      return;
+    }
+
+    if (action === 'archive') {
+      if (cached.archived) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_is_archived_use_unarchive'));
+        return;
+      }
+      await this.archiveThreadFromPanel(scopeId, threadId);
+      await this.showThreadsPanelFromStoredState(scopeId, event.messageId, locale, false);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_archived_short'));
+      return;
+    }
+
+    if (!cached.archived) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_not_archived'));
+      return;
+    }
+    await this.app.unarchiveThread(threadId);
+    await this.bindCachedThread(scopeId, threadId);
+    await this.showThreadsPanelFromStoredState(scopeId, event.messageId, locale, false);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_unarchived_short'));
+  }
+
+  private async handleThreadRenameTextReply(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
+    const pending = this.pendingThreadRenames.get(event.scopeId);
+    if (!pending) {
+      return;
+    }
+    const name = event.text.trim();
+    if (!name) {
+      await this.sendMessage(event.scopeId, t(locale, 'usage_rename'));
+      return;
+    }
+    this.pendingThreadRenames.delete(event.scopeId);
+    await this.app.setThreadName(pending.threadId, name);
+    await this.sendMessage(event.scopeId, t(locale, 'rename_done', { name }));
+    if (pending.messageId !== null) {
+      await this.showThreadsPanelFromStoredState(event.scopeId, pending.messageId, locale);
+    }
+  }
+
+  private async archiveThreadFromPanel(scopeId: string, threadId: string): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    if (binding?.threadId === threadId) {
+      await this.stopWatchingScopeThread(scopeId);
+      this.store.clearBinding(scopeId);
+    }
+    await this.app.archiveThread(threadId);
+    this.attachedThreads.delete(attachedThreadKey(scopeId, threadId));
+  }
+
+  private async showThreadsPanelFromStoredState(
+    scopeId: string,
+    messageId: number,
+    locale: AppLocale,
+    archivedOverride?: boolean,
+  ): Promise<void> {
+    const state = this.threadListPresentationState.get(scopeId);
+    await this.showThreadsPanel(
+      scopeId,
+      messageId,
+      state?.searchTerm ?? null,
+      locale,
+      { offset: state?.offset ?? 0 },
+      archivedOverride ?? Boolean(state?.archived),
+    );
   }
 
   private async handleTurnInterruptCallback(event: TelegramCallbackEvent, turnId: string, locale: AppLocale): Promise<void> {
@@ -4377,7 +4956,7 @@ export class BridgeSessionCore {
 
   private async handleThreadListNavigationCallback(
     event: TelegramCallbackEvent,
-    action: 'prev' | 'next' | 'clear',
+    action: 'prev' | 'next' | 'clear' | 'archived' | 'recent',
     locale: AppLocale,
   ): Promise<void> {
     const state = this.threadListPresentationState.get(event.scopeId) ?? {
@@ -4388,16 +4967,28 @@ export class BridgeSessionCore {
       searchTerm: null,
       archived: false,
     };
-    const nextOffset = action === 'prev'
+    const switchingArchiveView = action === 'archived' || action === 'recent';
+    const nextOffset = switchingArchiveView
+      ? 0
+      : action === 'prev'
       ? Math.max(0, state.offset - state.pageSize)
       : action === 'next'
         ? state.offset + state.pageSize
         : 0;
     const nextSearchTerm = action === 'clear' ? null : state.searchTerm;
-    await this.showThreadsPanel(event.scopeId, event.messageId, nextSearchTerm, locale, { offset: nextOffset }, Boolean(state.archived));
+    const archived = action === 'archived'
+      ? true
+      : action === 'recent'
+        ? false
+        : Boolean(state.archived);
+    await this.showThreadsPanel(event.scopeId, event.messageId, nextSearchTerm, locale, { offset: nextOffset }, archived);
     await this.messaging.answerCallback(
       event.callbackQueryId,
-      t(locale, action === 'clear' ? 'threads_filter_cleared_short' : 'decision_recorded'),
+      t(locale, action === 'clear'
+        ? 'threads_filter_cleared_short'
+        : switchingArchiveView
+          ? 'opened_thread_list'
+          : 'decision_recorded'),
     );
   }
 
@@ -4448,6 +5039,7 @@ export class BridgeSessionCore {
       cwd: thread.cwd,
       modelProvider: thread.modelProvider,
       status: thread.status,
+      archived,
       updatedAt: thread.updatedAt,
     }));
     this.store.cacheThreadList(scopeId, cached);
@@ -4763,6 +5355,7 @@ export class BridgeSessionCore {
     active.interruptRequested = true;
     try {
       await this.app.interruptTurn(active.threadId, active.turnId);
+      await this.finalizeUserInputsForTurn(active, 'interrupted');
       await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
     } catch (error) {
       active.interruptRequested = false;
@@ -4837,12 +5430,124 @@ export class BridgeSessionCore {
 
   private async cleanupStaleTurnPreviews(): Promise<void> {
     for (const preview of this.store.listActiveTurnPreviews()) {
+      try {
+        if (await this.recoverLiveTurnPreview(preview)) {
+          continue;
+        }
+      } catch (error) {
+        this.logger.warn('telegram.preview_recovery_failed', {
+          scopeId: preview.scopeId,
+          threadId: preview.threadId,
+          turnId: preview.turnId,
+          error: toErrorMeta(error),
+        });
+      }
       await this.retirePreviewMessage(
         preview.scopeId,
         preview.messageId,
         t(this.localeForChat(preview.scopeId), 'stale_preview_restarted', { threadId: preview.threadId }),
         preview.turnId,
       );
+    }
+  }
+
+  private async recoverLiveTurnPreview(preview: {
+    scopeId: string;
+    threadId: string;
+    turnId: string;
+    messageId: number;
+  }): Promise<boolean> {
+    if (this.activeTurns.has(preview.turnId)) {
+      return true;
+    }
+    const target = resolveScopeMessageTarget(preview.scopeId);
+    if (!target) {
+      return false;
+    }
+    const snapshot = await this.app.readThreadSnapshot(preview.threadId);
+    if (!snapshot) {
+      return false;
+    }
+    const liveTurn = findLiveTurn(snapshot);
+    if (!liveTurn || liveTurn.turnId !== preview.turnId) {
+      return false;
+    }
+    if (
+      snapshot.activeFlags.includes('waitingOnUserInput')
+      && !this.hasPendingUserInputForTurn(preview.scopeId, preview.turnId)
+    ) {
+      return this.interruptOrphanWaitingUserInput(preview);
+    }
+
+    await this.stopWatchingScopeThread(preview.scopeId, preview.threadId);
+    const active = this.createActiveTurnState(
+      preview.scopeId,
+      target.chatId,
+      target.chatType,
+      target.topicId,
+      preview.threadId,
+      preview.turnId,
+      preview.messageId,
+      true,
+    );
+    this.activeTurns.set(preview.turnId, active);
+    const watcher: ObservedThreadWatcher = {
+      scopeId: preview.scopeId,
+      chatId: target.chatId,
+      chatType: target.chatType,
+      topicId: target.topicId,
+      threadId: preview.threadId,
+      mode: 'app_snapshot',
+      timer: null,
+      cursor: seedObservedTurnCursor(liveTurn),
+      activeTurnId: preview.turnId,
+      waitingOnApproval: snapshot.activeFlags.includes('waitingOnApproval'),
+      sessionPath: null,
+      sessionOffset: -1,
+      sessionRemainder: '',
+      sessionCursor: { activeTurnId: null, nextMessageIndex: 0 },
+      stopped: false,
+    };
+    this.observedThreadWatchers.set(preview.scopeId, watcher);
+    this.scheduleObservedThreadPoll(watcher);
+    this.updateStatus();
+    await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
+    this.logger.info('telegram.preview_recovered', {
+      scopeId: preview.scopeId,
+      threadId: preview.threadId,
+      turnId: preview.turnId,
+    });
+    return true;
+  }
+
+  private async interruptOrphanWaitingUserInput(preview: {
+    scopeId: string;
+    threadId: string;
+    turnId: string;
+    messageId: number;
+  }): Promise<boolean> {
+    try {
+      await this.app.interruptTurn(preview.threadId, preview.turnId);
+      await this.retirePreviewMessage(
+        preview.scopeId,
+        preview.messageId,
+        t(this.localeForChat(preview.scopeId), 'stale_user_input_interrupted', { threadId: preview.threadId }),
+        preview.turnId,
+      );
+      this.logger.warn('codex.user_input_orphan_interrupted', {
+        scopeId: preview.scopeId,
+        threadId: preview.threadId,
+        turnId: preview.turnId,
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn('codex.user_input_orphan_interrupt_failed', {
+        scopeId: preview.scopeId,
+        threadId: preview.threadId,
+        turnId: preview.turnId,
+        error: toErrorMeta(error),
+      });
+      return false;
     }
   }
 
@@ -4911,6 +5616,19 @@ export class BridgeSessionCore {
           active.turnId,
         );
       }
+      active.resolver();
+      this.activeTurns.delete(active.turnId);
+    }
+    if (activeTurns.length > 0) {
+      this.updateStatus();
+    }
+  }
+
+  private releaseActiveTurnsForBridgeShutdown(): void {
+    const activeTurns = [...this.activeTurns.values()];
+    for (const active of activeTurns) {
+      this.clearToolBatchTimer(active.toolBatch);
+      this.clearRenderRetry(active);
       active.resolver();
       this.activeTurns.delete(active.turnId);
     }
@@ -6162,6 +6880,22 @@ function resolveScopeMessageTarget(scopeId: string): { chatId: string; chatType:
   }
 }
 
+function seedObservedTurnCursor(turn: AppTurnSnapshot): ObservedTurnCursor {
+  const agentItems = turn.items.filter((item) => {
+    const type = item.type.toLowerCase();
+    return type === 'agentmessage' || type === 'assistantmessage' || type === 'plan';
+  });
+  const itemTexts: Record<string, string> = {};
+  for (const item of agentItems) {
+    itemTexts[item.itemId] = item.text ?? '';
+  }
+  return {
+    turnId: turn.turnId,
+    itemTexts,
+    completedItemIds: agentItems.map((item) => item.itemId),
+  };
+}
+
 function approvalKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
   return [[
     { text: t(locale, 'button_allow'), callback_data: `approval:${localId}:accept` },
@@ -6357,6 +7091,19 @@ function isCodexAuthCandidateName(name: string): boolean {
   return name.startsWith('auth.json_') || name.startsWith('auth.json.') || name.startsWith('auth.json-');
 }
 
+function codexAuthCandidateNameFromAddName(raw: string): string | null {
+  const normalized = raw.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(normalized)) {
+    return null;
+  }
+  const name = normalized.startsWith('auth.json_')
+    || normalized.startsWith('auth.json.')
+    || normalized.startsWith('auth.json-')
+    ? normalized
+    : `auth.json_${normalized}`;
+  return isCodexAuthCandidateName(name) ? name : null;
+}
+
 async function resolveCurrentAuthTarget(authDir: string, authPath: string): Promise<string | null> {
   const stat = await fs.lstat(authPath).catch(() => null);
   if (!stat) {
@@ -6369,20 +7116,25 @@ async function resolveCurrentAuthTarget(authDir: string, authPath: string): Prom
   return authPath;
 }
 
+async function pointCodexAuthAtTarget(authDir: string, authPath: string, targetPath: string): Promise<void> {
+  await fs.mkdir(authDir, { recursive: true });
+  const tempLink = path.join(authDir, `.auth.json.${process.pid}.${Date.now()}.tmp`);
+  try {
+    await fs.symlink(targetPath, tempLink);
+    await fs.rename(tempLink, authPath);
+  } catch (error) {
+    await fs.unlink(tempLink).catch(() => {});
+    throw error;
+  }
+}
+
 async function switchCodexAuth(targetPath: string): Promise<void> {
   const state = await listCodexAuthState();
   const candidate = state.candidates.find(entry => entry.path === targetPath);
   if (!candidate) {
     throw new Error(`Auth candidate is no longer available: ${path.basename(targetPath)}`);
   }
-  const tempLink = path.join(state.authDir, `.auth.json.${process.pid}.${Date.now()}.tmp`);
-  try {
-    await fs.symlink(candidate.path, tempLink);
-    await fs.rename(tempLink, state.authPath);
-  } catch (error) {
-    await fs.unlink(tempLink).catch(() => {});
-    throw error;
-  }
+  await pointCodexAuthAtTarget(state.authDir, state.authPath, candidate.path);
 }
 
 function renderAuthListMessage(locale: AppLocale, state: CodexAuthState): string {
@@ -6483,10 +7235,166 @@ function parseUserInputQuestions(params: any): PendingUserInputQuestion[] {
     .filter((question: PendingUserInputQuestion | null): question is PendingUserInputQuestion => question !== null);
 }
 
+function parseServerRequestId(raw: unknown): ServerRequestId | null {
+  if (typeof raw === 'string' || typeof raw === 'number') {
+    return raw;
+  }
+  return null;
+}
+
+function stringifyServerRequestId(id: ServerRequestId): string {
+  return String(id);
+}
+
+function sameServerRequestId(left: ServerRequestId, right: ServerRequestId): boolean {
+  return stringifyServerRequestId(left) === stringifyServerRequestId(right);
+}
+
+function parseStoredServerRequestId(raw: string): ServerRequestId {
+  if (/^(0|[1-9]\d*)$/.test(raw)) {
+    const value = Number(raw);
+    if (Number.isSafeInteger(value)) {
+      return value;
+    }
+  }
+  return raw;
+}
+
+function serializePendingUserInput(record: PendingUserInputRequest): PendingUserInputStoredRecord {
+  return {
+    localId: record.localId,
+    serverRequestId: stringifyServerRequestId(record.serverRequestId),
+    chatId: record.chatId,
+    threadId: record.threadId,
+    turnId: record.turnId,
+    itemId: record.itemId,
+    messageId: record.messageId,
+    questionsJson: JSON.stringify(record.questions),
+    answersJson: stringifyPendingUserInputAnswers(record.answers),
+    currentQuestionIndex: pendingUserInputCurrentQuestionIndex(record),
+    awaitingFreeText: false,
+    status: record.status,
+    createdAt: record.createdAt,
+    submittedAt: record.submittedAt,
+    resolvedAt: null,
+  };
+}
+
+function parseStoredPendingUserInput(record: PendingUserInputStoredRecord): PendingUserInputRequest | null {
+  const questions = parseStoredUserInputQuestions(record.questionsJson);
+  if (questions.length === 0) {
+    return null;
+  }
+  return {
+    localId: record.localId,
+    serverRequestId: parseStoredServerRequestId(record.serverRequestId),
+    chatId: record.chatId,
+    threadId: record.threadId,
+    turnId: record.turnId,
+    itemId: record.itemId,
+    questions,
+    answers: parseStoredUserInputAnswers(record.answersJson),
+    messageId: record.messageId,
+    status: normalizePendingUserInputStatus(record.status),
+    createdAt: record.createdAt,
+    submittedAt: record.submittedAt,
+  };
+}
+
+function normalizePendingUserInputStatus(raw: string | null | undefined): PendingUserInputStatus {
+  if (raw === 'submitted' || raw === 'resolved' || raw === 'interrupted') {
+    return raw;
+  }
+  return 'pending';
+}
+
+function parseStoredUserInputQuestions(rawJson: string): PendingUserInputQuestion[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed
+    .map((raw: any, index): PendingUserInputQuestion | null => {
+      const id = stringOrNull(raw?.id) ?? `q${index + 1}`;
+      const question = stringOrNull(raw?.question) ?? '';
+      const options = Array.isArray(raw?.options)
+        ? raw.options
+            .map((option: any): PendingUserInputOption | null => {
+              const label = stringOrNull(option?.label);
+              if (!label) {
+                return null;
+              }
+              return {
+                label,
+                description: stringOrNull(option?.description),
+              };
+            })
+            .filter((option: PendingUserInputOption | null): option is PendingUserInputOption => option !== null)
+        : [];
+      return {
+        id,
+        header: stringOrNull(raw?.header),
+        question,
+        isOther: raw?.isOther === true,
+        isSecret: raw?.isSecret === true,
+        options,
+      };
+    })
+    .filter((question: PendingUserInputQuestion | null): question is PendingUserInputQuestion => question !== null);
+}
+
+function stringifyPendingUserInputAnswers(answers: Map<string, string>): string {
+  return JSON.stringify(Object.fromEntries(answers.entries()));
+}
+
+function parseStoredUserInputAnswers(rawJson: string): Map<string, string> {
+  const answers = new Map<string, string>();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawJson);
+  } catch {
+    return answers;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return answers;
+  }
+  for (const [id, rawAnswer] of Object.entries(parsed)) {
+    const answer = normalizeStoredUserInputAnswer(rawAnswer);
+    if (answer !== null) {
+      answers.set(id, answer);
+    }
+  }
+  return answers;
+}
+
+function normalizeStoredUserInputAnswer(rawAnswer: unknown): string | null {
+  if (typeof rawAnswer === 'string') {
+    return rawAnswer;
+  }
+  if (Array.isArray(rawAnswer)) {
+    const first = rawAnswer.find((entry): entry is string => typeof entry === 'string');
+    return first ?? null;
+  }
+  if (rawAnswer && typeof rawAnswer === 'object') {
+    const nested = (rawAnswer as { answers?: unknown }).answers;
+    return normalizeStoredUserInputAnswer(nested);
+  }
+  return null;
+}
+
+function pendingUserInputCurrentQuestionIndex(record: PendingUserInputRequest): number {
+  const index = record.questions.findIndex(question => !record.answers.has(question.id));
+  return index === -1 ? record.questions.length : index;
+}
+
 function renderUserInputMessage(
   locale: AppLocale,
   record: PendingUserInputRequest,
-  completed = false,
 ): string {
   const lines = [
     t(locale, 'user_input_requested'),
@@ -6520,7 +7428,14 @@ function renderUserInputMessage(
   });
 
   lines.push('');
-  lines.push(t(locale, completed ? 'user_input_submitted' : 'user_input_reply_hint'));
+  const statusKey = record.status === 'submitted'
+    ? 'user_input_submitted_waiting'
+    : record.status === 'interrupted'
+      ? 'user_input_interrupted'
+      : record.status === 'resolved'
+        ? 'user_input_submitted'
+        : 'user_input_reply_hint';
+  lines.push(t(locale, statusKey));
   return lines.join('\n');
 }
 
@@ -6698,6 +7613,15 @@ function isTelegramMessageGone(error: unknown): boolean {
 
 function isFileMissingError(error: unknown): boolean {
   return error instanceof Error && /enoent|no such file or directory/i.test(error.message);
+}
+
+async function isReadableSessionPath(sessionPath: string): Promise<boolean> {
+  try {
+    const stats = await fs.stat(sessionPath);
+    return stats.isFile();
+  } catch {
+    return false;
+  }
 }
 
 export { BridgeSessionCore as BridgeController };

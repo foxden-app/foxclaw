@@ -15,7 +15,8 @@ export type TurnActivityState =
   | 'editing'
   | 'running_command'
   | 'approval_waiting'
-  | 'completed';
+  | 'completed'
+  | 'interrupted';
 
 export type TurnOutputKind = 'commentary' | 'final_answer' | 'tool_summary' | 'error';
 
@@ -75,7 +76,7 @@ export type TurnActivityEvent =
   | {
       kind: 'turn_completed';
       turnId: string;
-      state: 'completed';
+      state: 'completed' | 'interrupted';
     };
 
 export function normalizeTurnActivityEvent(notification: JsonRpcNotification): TurnActivityEvent | null {
@@ -101,6 +102,16 @@ export function normalizeTurnActivityEvent(notification: JsonRpcNotification): T
         kind: 'turn_completed',
         turnId,
         state: 'completed',
+      };
+    }
+    case 'turn/interrupted':
+    case 'turn/aborted': {
+      const turnId = extractTurnId(notification.params);
+      if (!turnId) return null;
+      return {
+        kind: 'turn_completed',
+        turnId,
+        state: 'interrupted',
       };
     }
     default:
@@ -215,6 +226,7 @@ function normalizePlanUpdatedEvent(params: any): TurnActivityEvent | null {
     phase: 'commentary',
     text,
     outputKind: 'commentary',
+    isPlan: true,
   };
 }
 

@@ -343,9 +343,16 @@ export interface RuntimeStatus {
   running: boolean;
   connected: boolean;
   userAgent: string | null;
+  codexAppServer?: {
+    pid: number | null;
+    port: number | null;
+    running: boolean;
+    managed: boolean;
+  };
   botUsername: string | null;
   currentBindings: number;
   pendingApprovals: number;
+  pendingUserInputs: number;
   activeTurns: number;
   lastError: string | null;
   updatedAt: string;

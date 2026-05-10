@@ -105,6 +105,7 @@ test('normalizes plan notifications as commentary', () => {
     phase: 'commentary',
     text: 'Plan:\n- Check logs [completed]\n- Restart service [pending]',
     outputKind: 'commentary',
+    isPlan: true,
   });
 });
 
@@ -146,4 +147,15 @@ test('utility classifiers keep renderer-facing categories stable', () => {
     cwd: null,
     parsedCmd: [{ type: 'read', path: 'file.txt' }],
   }), 'reading');
+});
+
+test('turn interrupted notifications complete the active turn as interrupted', () => {
+  assert.deepEqual(normalizeTurnActivityEvent({
+    method: 'turn/interrupted',
+    params: { turnId: 'turn-1' },
+  }), {
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'interrupted',
+  });
 });

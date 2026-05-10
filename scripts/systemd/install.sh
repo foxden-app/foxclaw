@@ -61,6 +61,7 @@ ExecStart=$NODE_BIN dist/main.js serve
 Restart=always
 RestartSec=10
 TimeoutStopSec=45
+KillMode=process
 
 [Install]
 WantedBy=default.target

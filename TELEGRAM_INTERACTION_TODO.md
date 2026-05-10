@@ -128,7 +128,7 @@ Acceptance criteria:
 ## Phase 10: App-Server Priority Bridge
 
 - [x] Add active-turn steering with `/steer <message>` backed by `turn/steer`
-- [x] Add native account and quota controls: `/account`, `/quota`, `/quota_nudge`, `/login_device`, `/login_cancel`, and guarded `/logout confirm`
+- [x] Add native account and quota controls: `/account`, `/quota`, `/quota_nudge`, `/login_device`, `/login_cancel`, `/auth add <name>`, and guarded `/logout confirm`
 - [x] Add Skills management: `/skills`, `/skill <name>`, `/skill_enable <name>`, `/skill_disable <name>`, plus `skills/changed` notifications
 - [x] Add MCP management: `/mcp`, `/mcp_reload`, `/mcp_login <server>`, `/mcp_resource <server> <uri>`, startup/OAuth notifications, and MCP elicitation replies
 - [x] Add granular permission approvals for `item/permissions/requestApproval`

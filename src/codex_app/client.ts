@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import net from 'node:net';
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import path from 'node:path';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { Logger } from '../logger.js';
 import type {
   AppThread,
@@ -100,13 +101,34 @@ interface StartTurnOptions {
   collaborationMode: CodexCollaborationMode | null;
 }
 
+interface CodexAppServerState {
+  pid: number;
+  port: number;
+  command: string;
+  logPath: string;
+  bridgePid: number;
+  startedAt: string;
+}
+
+interface CodexAppServerRuntimeStatus {
+  pid: number | null;
+  port: number | null;
+  running: boolean;
+  managed: boolean;
+}
+
+interface StopOptions {
+  terminateServer?: boolean;
+}
+
 export class CodexAppClient extends EventEmitter {
-  private child: ChildProcessByStdio<null, Readable, Readable> | null = null;
+  private child: ChildProcess | null = null;
   private socket: WebSocket | null = null;
   private requestId = 0;
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>();
   private desiredRunning = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private starting: Promise<void> | null = null;
   private port: number | null = null;
   private connected = false;
   private userAgent: string | null = null;
@@ -115,6 +137,8 @@ export class CodexAppClient extends EventEmitter {
     private readonly codexCliBin: string,
     private readonly launchCommand: string,
     private readonly autolaunch: boolean,
+    private readonly serverStatePath: string,
+    private readonly serverLogPath: string,
     private readonly logger: Logger,
   ) {
     super();
@@ -128,28 +152,49 @@ export class CodexAppClient extends EventEmitter {
     return this.userAgent;
   }
 
+  getServerStatus(): CodexAppServerRuntimeStatus {
+    const state = this.readServerState();
+    const pid = this.child?.pid ?? state?.pid ?? null;
+    const port = this.port ?? state?.port ?? null;
+    return {
+      pid,
+      port,
+      running: pid !== null && isProcessAlive(pid),
+      managed: state !== null,
+    };
+  }
+
   async start(): Promise<void> {
     this.desiredRunning = true;
     if (this.connected) return;
-    await this.startServer();
+    if (!this.starting) {
+      this.starting = this.startServer().finally(() => {
+        this.starting = null;
+      });
+    }
+    await this.starting;
   }
 
-  async stop(): Promise<void> {
+  async stop(options: StopOptions = {}): Promise<void> {
     this.desiredRunning = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.socket?.close();
-    this.child?.kill('SIGTERM');
-    this.rejectPending(new Error('Codex app bridge stopped'));
+    const socket = this.socket;
     this.socket = null;
-    this.child = null;
     this.connected = false;
+    socket?.close();
+    if (options.terminateServer ?? true) {
+      await this.terminateServer();
+    } else {
+      this.child = null;
+    }
+    this.rejectPending(new Error('Codex app bridge stopped'));
   }
 
   async restart(): Promise<void> {
-    await this.stop();
+    await this.stop({ terminateServer: true });
     await this.start();
   }
 
@@ -590,30 +635,98 @@ export class CodexAppClient extends EventEmitter {
   }
 
   private async startServer(): Promise<void> {
+    if (await this.attachPersistedServer()) {
+      return;
+    }
+
     if (this.autolaunch) {
       const launcher = spawn(this.launchCommand, { shell: true, detached: true, stdio: 'ignore' });
       launcher.unref();
     }
     this.port = await reservePort();
-    const child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const [stdoutFd, stderrFd] = this.openServerLogFiles();
+    let child: ChildProcess;
+    try {
+      child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
+        detached: true,
+        stdio: ['ignore', stdoutFd, stderrFd],
+      });
+    } finally {
+      fs.closeSync(stdoutFd);
+      fs.closeSync(stderrFd);
+    }
+    child.unref();
     this.child = child;
-    child.stderr?.on('data', chunk => {
-      this.logger.debug('codex.app-server.stderr', chunk.toString().trim());
-    });
-    child.stdout?.on('data', chunk => {
-      this.logger.debug('codex.app-server.stdout', chunk.toString().trim());
+    if (!child.pid) {
+      this.child = null;
+      throw new Error('Failed to start codex app-server: child pid is unavailable');
+    }
+    this.writeServerState({
+      pid: child.pid,
+      port: this.port,
+      command: `${this.codexCliBin} app-server --listen ws://127.0.0.1:${this.port}`,
+      logPath: this.serverLogPath,
+      bridgePid: process.pid,
+      startedAt: new Date().toISOString(),
     });
     child.on('exit', (code, signal) => {
       if (this.child !== child) {
         return;
       }
       this.child = null;
+      if (child.pid) {
+        this.clearServerStateForPid(child.pid);
+      }
       this.handleDisconnect({ code, signal, source: 'process-exit' });
     });
-    await this.connectWebSocket();
+    child.on('error', (error) => {
+      if (this.child !== child) {
+        return;
+      }
+      this.child = null;
+      if (child.pid) {
+        this.clearServerStateForPid(child.pid);
+      }
+      this.handleDisconnect({ error: error.message, source: 'process-error' });
+    });
+    const spawnFailed = new Promise<never>((_, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => {
+        reject(new Error(`codex app-server exited before WebSocket connection: code=${code ?? 'null'} signal=${signal ?? 'null'}`));
+      });
+    });
+    await Promise.race([this.connectWebSocket(), spawnFailed]);
     await this.initialize();
+  }
+
+  private async attachPersistedServer(): Promise<boolean> {
+    const state = this.readServerState();
+    if (!state) {
+      return false;
+    }
+    if (!isProcessAlive(state.pid)) {
+      this.clearServerState();
+      return false;
+    }
+    this.port = state.port;
+    try {
+      await this.connectWebSocket();
+      await this.initialize();
+      this.logger.info('codex.app-server.attached', { pid: state.pid, port: state.port });
+      return true;
+    } catch (error) {
+      const socket = this.socket;
+      this.socket = null;
+      this.connected = false;
+      socket?.close();
+      this.logger.warn('codex.app-server.attach_failed', {
+        pid: state.pid,
+        port: state.port,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.clearServerStateForPid(state.pid);
+      return false;
+    }
   }
 
   private async connectWebSocket(): Promise<void> {
@@ -754,6 +867,95 @@ export class CodexAppClient extends EventEmitter {
       }
     }, 1500);
   }
+
+  private async terminateServer(): Promise<void> {
+    const child = this.child;
+    const state = this.readServerState();
+    const pid = child?.pid ?? state?.pid ?? null;
+    this.child = null;
+    this.clearServerState();
+    if (pid === null || !isProcessAlive(pid)) {
+      return;
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (error) {
+      this.logger.warn('codex.app-server.kill_failed', {
+        pid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const exited = await waitForProcessExit(pid, 3000);
+    if (!exited) {
+      this.logger.warn('codex.app-server.kill_timeout', { pid });
+    }
+  }
+
+  private openServerLogFiles(): [number, number] {
+    fs.mkdirSync(path.dirname(this.serverLogPath), { recursive: true });
+    const stdoutFd = fs.openSync(this.serverLogPath, 'a');
+    try {
+      return [stdoutFd, fs.openSync(this.serverLogPath, 'a')];
+    } catch (error) {
+      fs.closeSync(stdoutFd);
+      throw error;
+    }
+  }
+
+  private readServerState(): CodexAppServerState | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.serverStatePath, 'utf8')) as Partial<CodexAppServerState>;
+      if (
+        typeof parsed.pid === 'number'
+        && Number.isInteger(parsed.pid)
+        && parsed.pid > 0
+        && typeof parsed.port === 'number'
+        && Number.isInteger(parsed.port)
+        && parsed.port > 0
+        && parsed.port <= 65535
+      ) {
+        return {
+          pid: parsed.pid,
+          port: parsed.port,
+          command: typeof parsed.command === 'string' ? parsed.command : '',
+          logPath: typeof parsed.logPath === 'string' ? parsed.logPath : this.serverLogPath,
+          bridgePid: typeof parsed.bridgePid === 'number' ? parsed.bridgePid : 0,
+          startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : '',
+        };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  private writeServerState(state: CodexAppServerState): void {
+    fs.mkdirSync(path.dirname(this.serverStatePath), { recursive: true });
+    const tmp = `${this.serverStatePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    fs.renameSync(tmp, this.serverStatePath);
+  }
+
+  private clearServerState(): void {
+    try {
+      fs.unlinkSync(this.serverStatePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn('codex.app-server.state_clear_failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  private clearServerStateForPid(pid: number): void {
+    const state = this.readServerState();
+    if (!state || state.pid !== pid) {
+      return;
+    }
+    this.clearServerState();
+  }
 }
 
 async function reservePort(): Promise<number> {
@@ -774,6 +976,29 @@ async function reservePort(): Promise<number> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (!isProcessAlive(pid)) {
+      return true;
+    }
+    await sleep(100);
+  }
+  return !isProcessAlive(pid);
 }
 
 function mapThread(raw: any): AppThread {

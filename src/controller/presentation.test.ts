@@ -41,7 +41,7 @@ test('formatThreadsMessage highlights current thread and metadata', () => {
 
   const rendered = formatThreadsMessage('en', threads, 'thread-1');
   assert.match(rendered, /<b>Recent threads<\/b>/);
-  assert.match(rendered, /Tap a button below to open a thread/);
+  assert.match(rendered, /Tap a button below to open or manage a thread/);
   assert.match(rendered, /Current: <b>Fix Telegram bridge<\/b>/);
   assert.match(rendered, /project \| 2m ago/);
 });
@@ -81,10 +81,16 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
     },
   ];
 
-  assert.deepEqual(buildThreadsKeyboard('en', threads), [[{
-    text: '1. Review auth flow',
-    callback_data: 'thread:open:thread-2',
-  }]]);
+  assert.deepEqual(buildThreadsKeyboard('en', threads), [
+    [{
+      text: '1. Review auth flow',
+      callback_data: 'thread:open:thread-2',
+    }],
+    [
+      { text: 'Rename', callback_data: 'thread:rename:thread-2' },
+      { text: 'Archive/Delete', callback_data: 'thread:archive:thread-2' },
+    ],
+  ]);
 });
 
 test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
@@ -101,10 +107,39 @@ test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
       updatedAt: 1,
     },
   ];
-  assert.deepEqual(buildThreadsKeyboard('en', [{ ...threads[0]!, index: 11 } as AppThread & { index: number }]), [[{
-    text: '11. Later page',
-    callback_data: 'thread:open:thread-x',
-  }]]);
+  assert.deepEqual(buildThreadsKeyboard('en', [{ ...threads[0]!, index: 11 } as AppThread & { index: number }]), [
+    [{
+      text: '11. Later page',
+      callback_data: 'thread:open:thread-x',
+    }],
+    [
+      { text: 'Rename', callback_data: 'thread:rename:thread-x' },
+      { text: 'Archive/Delete', callback_data: 'thread:archive:thread-x' },
+    ],
+  ]);
+});
+
+test('buildThreadsKeyboard shows unarchive for archived threads', () => {
+  const thread: AppThread & { archived: boolean } = {
+    threadId: 'thread-archived',
+    name: 'Old work',
+    preview: 'Old work',
+    cwd: '/tmp',
+    modelProvider: 'openai',
+    source: 'cli',
+    path: '/tmp/old.jsonl',
+    status: 'idle',
+    updatedAt: 1,
+    archived: true,
+  };
+
+  assert.deepEqual(buildThreadsKeyboard('en', [thread]), [
+    [{
+      text: '1. Old work',
+      callback_data: 'thread:open:thread-archived',
+    }],
+    [{ text: 'Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
+  ]);
 });
 
 test('formatThreadsMessage shows range when listState is set', () => {
@@ -155,10 +190,15 @@ test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
     [
       [{ text: '11. Review auth flow', callback_data: 'thread:open:thread-2' }],
       [
+        { text: 'Rename', callback_data: 'thread:rename:thread-2' },
+        { text: 'Archive/Delete', callback_data: 'thread:archive:thread-2' },
+      ],
+      [
         { text: 'Prev', callback_data: 'thread:list:prev' },
         { text: 'Next', callback_data: 'thread:list:next' },
       ],
       [{ text: 'Clear filter', callback_data: 'thread:list:clear' }],
+      [{ text: 'Archived', callback_data: 'thread:list:archived' }],
     ],
   );
 });
@@ -407,7 +447,7 @@ test('presentation renders chinese locale strings', () => {
   ];
   const renderedThreads = formatThreadsMessage('zh', threads, 'thread-zh');
   assert.match(renderedThreads, /<b>最近线程<\/b>/);
-  assert.match(renderedThreads, /点击下方按钮即可切换线程/);
+  assert.match(renderedThreads, /点击下方按钮即可切换或管理线程/);
   assert.match(renderedThreads, /当前：<b>修复桥接<\/b>/);
 
   const models: ModelInfo[] = [

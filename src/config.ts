@@ -11,6 +11,8 @@ export const DEFAULT_STORE_PATH = path.join(APP_HOME, 'data', 'bridge.sqlite');
 export const DEFAULT_STATUS_PATH = path.join(APP_HOME, 'runtime', 'status.json');
 export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
 export const DEFAULT_LOCK_PATH = path.join(APP_HOME, 'runtime', 'bridge.lock');
+export const DEFAULT_CODEX_APP_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'codex-app-server.json');
+export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'codex-app-server.log');
 
 export interface AppConfig {
   tgBotToken: string;
@@ -20,6 +22,8 @@ export interface AppConfig {
   codexCliBin: string;
   codexAppAutolaunch: boolean;
   codexAppLaunchCmd: string;
+  codexAppServerStatePath: string;
+  codexAppServerLogPath: string;
   codexAppSyncOnOpen: boolean;
   codexAppSyncOnTurnComplete: boolean;
   storePath: string;
@@ -54,6 +58,8 @@ export function loadConfig(): AppConfig {
     codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
     codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', true),
     codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || 'codex app',
+    codexAppServerStatePath: process.env.CODEX_APP_SERVER_STATE_PATH || DEFAULT_CODEX_APP_SERVER_STATE_PATH,
+    codexAppServerLogPath: process.env.CODEX_APP_SERVER_LOG_PATH || DEFAULT_CODEX_APP_SERVER_LOG_PATH,
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
     codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
@@ -84,6 +90,8 @@ export function ensureAppDirs(config: AppConfig): void {
     path.dirname(config.statusPath),
     path.dirname(config.logPath),
     path.dirname(config.lockPath),
+    path.dirname(config.codexAppServerStatePath),
+    path.dirname(config.codexAppServerLogPath),
   ];
   if (config.wxEnabled) {
     dirs.push(config.weixinAccountsDir, config.weixinSyncBufDir, config.weixinMediaDir);

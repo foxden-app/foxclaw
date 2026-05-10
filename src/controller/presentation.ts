@@ -36,6 +36,7 @@ interface ThreadLike {
   modelProvider: string | null;
   status: AppThread['status'];
   updatedAt: number;
+  archived?: boolean;
 }
 
 /** Pagination + filter context for the threads panel (Telegram inline keyboard). */
@@ -91,12 +92,19 @@ export function formatThreadsMessage(
 }
 
 export function buildThreadsKeyboard(locale: AppLocale, threads: ThreadLike[]): Array<Array<{ text: string; callback_data: string }>> {
-  return threads.map((thread, index) => {
+  return threads.flatMap((thread, index) => {
     const ordinal = typeof thread.index === 'number' ? thread.index : index + 1;
-    return [{
+    const openRow = [{
       text: `${ordinal}. ${truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 28)}`,
       callback_data: `thread:open:${thread.threadId}`,
     }];
+    const actionRow = thread.archived
+      ? [{ text: t(locale, 'button_thread_unarchive'), callback_data: `thread:unarchive:${thread.threadId}` }]
+      : [
+          { text: t(locale, 'button_thread_rename'), callback_data: `thread:rename:${thread.threadId}` },
+          { text: t(locale, 'button_thread_archive'), callback_data: `thread:archive:${thread.threadId}` },
+        ];
+    return [openRow, actionRow];
   });
 }
 
@@ -120,6 +128,10 @@ export function buildThreadListKeyboard(
   if (listState.searchTerm?.trim()) {
     rows.push([{ text: t(locale, 'button_clear_filter'), callback_data: 'thread:list:clear' }]);
   }
+  rows.push([{
+    text: t(locale, listState.archived ? 'button_recent_threads' : 'button_archived_threads'),
+    callback_data: listState.archived ? 'thread:list:recent' : 'thread:list:archived',
+  }]);
   return rows;
 }
 
