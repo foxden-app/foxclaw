@@ -31,6 +31,7 @@ export type TurnActivityEvent =
       itemId: string;
       phase: string | null;
       outputKind: TurnOutputKind;
+      isPlan?: boolean;
     }
   | {
       kind: 'agent_message_delta';
@@ -38,6 +39,7 @@ export type TurnActivityEvent =
       itemId: string;
       delta: string;
       outputKind: TurnOutputKind;
+      isPlan?: boolean;
     }
   | {
       kind: 'agent_message_completed';
@@ -46,6 +48,7 @@ export type TurnActivityEvent =
       phase: string | null;
       text: string | null;
       outputKind: TurnOutputKind;
+      isPlan?: boolean;
     }
   | {
       kind: 'reasoning_started';
@@ -129,6 +132,7 @@ function normalizeStartedEvent(params: any): TurnActivityEvent | null {
     itemId,
     phase,
     outputKind: outputKindForItemType(itemType, phase, false),
+    isPlan: itemType === 'plan',
   };
 }
 
@@ -162,6 +166,7 @@ function normalizePlanDeltaEvent(params: any): TurnActivityEvent | null {
     itemId,
     delta,
     outputKind: 'commentary',
+    isPlan: true,
   };
 }
 
@@ -190,6 +195,7 @@ function normalizeCompletedEvent(params: any): TurnActivityEvent | null {
     phase,
     text: extractCompletedAgentText(params),
     outputKind: outputKindForItemType(itemType, phase, true),
+    isPlan: itemType === 'plan',
   };
 }
 

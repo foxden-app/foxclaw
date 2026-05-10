@@ -156,7 +156,7 @@ function applySessionRecord(
   }
 
   if (type === 'response_item' && payload?.type === 'plan' && typeof payload.text === 'string') {
-    return createSessionTextEvents(activeTurnId, cursor, payload.text, 'commentary', true);
+    return createSessionTextEvents(activeTurnId, cursor, payload.text, 'commentary', true, true);
   }
 
   if (type === 'event_msg' && payload?.type === 'user_message' && typeof payload.message === 'string') {
@@ -243,6 +243,7 @@ function createSessionTextEvents(
   text: string,
   phase: string | null,
   forceCommentary: boolean,
+  isPlan = false,
 ): {
   cursor: SessionLogCursor;
   events: TurnActivityEvent[];
@@ -264,6 +265,7 @@ function createSessionTextEvents(
         itemId,
         phase,
         outputKind: streamOutputKind,
+        isPlan,
       },
       {
         kind: 'agent_message_delta',
@@ -271,6 +273,7 @@ function createSessionTextEvents(
         itemId,
         delta: text,
         outputKind: streamOutputKind,
+        isPlan,
       },
       {
         kind: 'agent_message_completed',
@@ -279,6 +282,7 @@ function createSessionTextEvents(
         phase,
         text,
         outputKind,
+        isPlan,
       },
     ],
     startedTurnId: null,

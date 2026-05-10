@@ -58,6 +58,7 @@ export function diffObservedTurn(
         itemId: item.itemId,
         phase: item.phase,
         outputKind: classifyObservedOutput(item, false),
+        isPlan: item.type.toLowerCase() === 'plan',
       });
       if (nextText) {
         events.push({
@@ -66,6 +67,7 @@ export function diffObservedTurn(
           itemId: item.itemId,
           delta: nextText,
           outputKind: classifyObservedOutput(item, false),
+          isPlan: item.type.toLowerCase() === 'plan',
         });
       }
     } else if (nextText.length > previousText.length) {
@@ -75,6 +77,7 @@ export function diffObservedTurn(
         itemId: item.itemId,
         delta: nextText.slice(previousText.length),
         outputKind: classifyObservedOutput(item, false),
+        isPlan: item.type.toLowerCase() === 'plan',
       });
     }
     baseCursor.itemTexts[item.itemId] = nextText;
@@ -94,6 +97,7 @@ export function diffObservedTurn(
       phase: item.phase,
       text: baseCursor.itemTexts[item.itemId] ?? item.text ?? null,
       outputKind: classifyObservedOutput(item, true),
+      isPlan: item.type.toLowerCase() === 'plan',
     });
   }
 

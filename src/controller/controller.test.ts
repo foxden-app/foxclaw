@@ -902,10 +902,58 @@ test('requestUserInput is bridged through Telegram callbacks', async (t) => {
 
   assert.deepEqual(responses, [{
     requestId: 'request-1',
-    result: { answers: { confirm: 'Yes' } },
+    result: { answers: { confirm: { answers: ['Yes'] } } },
   }]);
   assert.equal(rig.callbackAnswers[0], 'Answer recorded');
   assert.match(rig.editedMessages[0]!, /Submitted to Codex\./);
+});
+
+test('plan mode completion offers implementation prompt and starts default-mode run', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.setChatCollaborationMode('telegram:99::root', 'plan');
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  const starts: any[] = [];
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[], overrides: any) => {
+    starts.push({ binding, input, overrides });
+    return { threadId: binding.threadId, turnId: 'turn-2' };
+  };
+  (rig.controller as any).registerActiveTurn = async () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.segments = [{
+    itemId: 'plan-1',
+    phase: 'commentary',
+    outputKind: 'commentary',
+    isPlan: true,
+    text: '- Inspect\n- Patch',
+    completed: true,
+    messages: [],
+  }];
+  (rig.controller as any).activeTurns.set('turn-1', active);
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.match(rig.sentMessages[0]!, /Plan mode produced a plan/);
+  const pending = [...(rig.controller as any).pendingPlanImplementations.values()][0];
+  assert.ok(pending);
+
+  await (rig.controller as any).handleCallback(createCallback(`planimpl:${pending.localId}:run`, 1));
+
+  assert.equal(starts[0]?.input[0]?.text, 'Implement the plan.');
+  assert.equal(starts[0]?.overrides?.collaborationMode, 'default');
+  assert.match(rig.editedMessages[0]!, /Started executing the plan/);
 });
 
 test('/steer sends same-turn input to the active Codex turn', async (t) => {
@@ -1222,7 +1270,20 @@ test('diagnostic notifications are routed to bound Telegram scope', async (t) =>
       turnId: 'turn-1',
       tokenUsage: {
         modelContextWindow: 1000,
-        total: { totalTokens: 900 },
+        total: { totalTokens: 10_000 },
+        last: { totalTokens: 900 },
+      },
+    },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'thread/tokenUsage/updated',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      tokenUsage: {
+        modelContextWindow: 1000,
+        total: { totalTokens: 11_000 },
+        last: { totalTokens: 910 },
       },
     },
   });
@@ -1234,6 +1295,30 @@ test('diagnostic notifications are routed to bound Telegram scope', async (t) =>
   assert.match(rig.sentMessages[0]!, /systemError/);
   assert.match(rig.sentMessages[1]!, /90%/);
   assert.match(rig.sentMessages[2]!, /Heads up/);
+});
+
+test('token usage alerts use current context usage, not accumulated thread total', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  await (rig.controller as any).handleNotification({
+    method: 'thread/tokenUsage/updated',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      tokenUsage: {
+        modelContextWindow: 258_400,
+        total: { totalTokens: 58_665_546 },
+        last: { totalTokens: 12_000 },
+      },
+    },
+  });
+
+  assert.deepEqual(rig.sentMessages, []);
 });
 
 test('thread management commands call fork, rename, rollback, compact, archive, and review APIs', async (t) => {
@@ -1372,6 +1457,7 @@ test('observed turns delete commentary and archived status messages after a fina
       itemId: 'commentary-1',
       phase: 'commentary',
       outputKind: 'commentary',
+      isPlan: false,
       text: 'thinking',
       completed: true,
       messages: [{ messageId: 11, text: 'thinking' }],
@@ -1380,6 +1466,7 @@ test('observed turns delete commentary and archived status messages after a fina
       itemId: 'final-1',
       phase: 'final_answer',
       outputKind: 'final_answer',
+      isPlan: false,
       text: 'done',
       completed: true,
       messages: [{ messageId: 22, text: 'done' }],

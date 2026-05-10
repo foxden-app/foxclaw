@@ -33,6 +33,7 @@ test('normalizes agent message lifecycle notifications', () => {
     itemId: 'item-1',
     phase: 'commentary',
     outputKind: 'commentary',
+    isPlan: false,
   });
   assert.deepEqual(delta, {
     kind: 'agent_message_delta',
@@ -48,6 +49,7 @@ test('normalizes agent message lifecycle notifications', () => {
     phase: 'final',
     text: 'done',
     outputKind: 'final_answer',
+    isPlan: false,
   });
 });
 
@@ -85,6 +87,7 @@ test('normalizes plan notifications as commentary', () => {
     itemId: 'plan-1',
     delta: 'Inspecting current deployment.',
     outputKind: 'commentary',
+    isPlan: true,
   });
   assert.deepEqual(completed, {
     kind: 'agent_message_completed',
@@ -93,6 +96,7 @@ test('normalizes plan notifications as commentary', () => {
     phase: 'commentary',
     text: '1. Check logs\n2. Restart service',
     outputKind: 'commentary',
+    isPlan: true,
   });
   assert.deepEqual(updated, {
     kind: 'agent_message_completed',

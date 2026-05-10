@@ -111,6 +111,7 @@ interface ActiveTurnSegment {
   itemId: string;
   phase: string | null;
   outputKind: TurnOutputKind;
+  isPlan: boolean;
   text: string;
   completed: boolean;
   messages: RenderedTelegramMessage[];
@@ -145,6 +146,7 @@ interface ToolDescriptor {
 interface ActiveTurn {
   scopeId: string;
   chatId: string;
+  chatType: string;
   topicId: number | null;
   renderRoute: TelegramRenderRoute;
   isObserved: boolean;
@@ -208,6 +210,8 @@ interface PendingUserInputQuestion {
   id: string;
   header: string | null;
   question: string;
+  isOther: boolean;
+  isSecret: boolean;
   options: PendingUserInputOption[];
 }
 
@@ -235,6 +239,20 @@ interface PendingMcpElicitation {
   url: string | null;
   requestedSchema: unknown;
   content: unknown;
+  messageId: number | null;
+  createdAt: number;
+}
+
+interface PendingPlanImplementation {
+  localId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  turnId: string;
+  cwd: string | null;
+  planMarkdown: string;
   messageId: number | null;
   createdAt: number;
 }
@@ -269,6 +287,7 @@ interface AuthRetryContext {
   chatId: string;
   chatType: string;
   topicId: number | null;
+  collaborationMode: CollaborationModeValue | null | undefined;
   failedAuthTargets: Set<string>;
 }
 
@@ -285,6 +304,8 @@ const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
 const CODEX_LOCAL_USAGE_CACHE_MS = 30_000;
+const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
+const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
 
 export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
@@ -293,9 +314,11 @@ export class BridgeSessionCore {
   private pendingTurnErrors = new Map<string, string>();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
   private pendingMcpElicitations = new Map<string, PendingMcpElicitation>();
+  private pendingPlanImplementations = new Map<string, PendingPlanImplementation>();
   private pendingLoginsByScope = new Map<string, string>();
   private pendingLoginScopesById = new Map<string, string>();
   private latestTurnDiffs = new Map<string, { scopeId: string; threadId: string; turnId: string; diff: string; updatedAt: number }>();
+  private threadTokenUsageAlerts = new Map<string, { turnId: string | null; bucket: number; limit: number }>();
   private pendingAuthChoiceLists = new Map<string, PendingAuthChoiceList>();
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
@@ -365,6 +388,7 @@ export class BridgeSessionCore {
     this.app.on('disconnected', () => {
       this.attachedThreads.clear();
       this.queuedPrompts.clear();
+      this.threadTokenUsageAlerts.clear();
       this.clearObservedThreadWatchers();
       void this.abandonActiveTurns().catch((error) => {
         this.logger.error('codex.disconnect_cleanup_failed', { error: toErrorMeta(error) });
@@ -396,9 +420,11 @@ export class BridgeSessionCore {
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
     this.pendingMcpElicitations.clear();
+    this.pendingPlanImplementations.clear();
     this.pendingLoginsByScope.clear();
     this.pendingLoginScopesById.clear();
     this.latestTurnDiffs.clear();
+    this.threadTokenUsageAlerts.clear();
     this.pendingAuthChoiceLists.clear();
     this.pendingAuthRotation = null;
     this.clearObservedThreadWatchers();
@@ -979,6 +1005,16 @@ export class BridgeSessionCore {
       );
       return;
     }
+    const planImplMatch = /^planimpl:([a-f0-9]+):(run|fresh|stay)$/.exec(event.data);
+    if (planImplMatch) {
+      await this.handlePlanImplementationCallback(
+        event,
+        planImplMatch[1]!,
+        planImplMatch[2]! as 'run' | 'fresh' | 'stay',
+        locale,
+      );
+      return;
+    }
     const mcpElicitationMatch = /^mcpel:([a-f0-9]+):(accept|decline|cancel)$/.exec(event.data);
     if (mcpElicitationMatch) {
       await this.handleMcpElicitationCallback(
@@ -1266,6 +1302,10 @@ export class BridgeSessionCore {
     if (!usage) {
       return;
     }
+    const turnId = stringOrNull(params?.turnId);
+    if (!this.shouldNotifyThreadTokenUsage(threadId, turnId, usage)) {
+      return;
+    }
     const locale = this.localeForChat(scopeId);
     await this.sendMessage(scopeId, t(locale, 'thread_token_usage_high', {
       threadId,
@@ -1273,6 +1313,26 @@ export class BridgeSessionCore {
       total: usage.total,
       limit: usage.limit,
     }));
+  }
+
+  private shouldNotifyThreadTokenUsage(
+    threadId: string,
+    turnId: string | null,
+    usage: { percent: number; limit: number },
+  ): boolean {
+    const bucket = usage.percent >= 99
+      ? 99
+      : usage.percent >= 95
+        ? 95
+        : usage.percent >= 90
+          ? 90
+          : 85;
+    const previous = this.threadTokenUsageAlerts.get(threadId);
+    if (previous && previous.turnId === turnId && previous.bucket === bucket && previous.limit === usage.limit) {
+      return false;
+    }
+    this.threadTokenUsageAlerts.set(threadId, { turnId, bucket, limit: usage.limit });
+    return true;
   }
 
   private async handleThreadLifecycleNotification(method: string, params: any): Promise<void> {
@@ -1393,7 +1453,7 @@ export class BridgeSessionCore {
     const text = t(locale, 'codex_turn_error', { error: message });
     active.finalText = text;
     active.buffer = text;
-    const segment = ensureTurnSegment(active, `${active.turnId}:codex-error`, 'final_answer', 'final_answer');
+    const segment = ensureTurnSegment(active, `${active.turnId}:codex-error`, 'final_answer', 'final_answer', false);
     segment.text = text;
     segment.completed = true;
     await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
@@ -1498,7 +1558,9 @@ export class BridgeSessionCore {
     if (completed) {
       this.pendingUserInputs.delete(record.localId);
       await this.app.respond(record.serverRequestId, {
-        answers: Object.fromEntries(record.answers.entries()),
+        answers: Object.fromEntries(
+          [...record.answers.entries()].map(([id, answer]) => [id, { answers: [answer] }]),
+        ),
       });
     }
 
@@ -1511,6 +1573,174 @@ export class BridgeSessionCore {
       renderUserInputMessage(locale, record, completed),
       completed ? [] : userInputKeyboard(record),
     );
+  }
+
+  private async maybeSendPlanImplementationPrompt(active: ActiveTurn): Promise<boolean> {
+    if (active.interruptRequested || this.queuedPrompts.has(active.scopeId)) {
+      return false;
+    }
+    if (this.hasPendingUserInputForTurn(active.scopeId, active.turnId)) {
+      return false;
+    }
+    if (this.findPendingPlanImplementation(active.scopeId, active.turnId)) {
+      return false;
+    }
+    const settings = this.store.getChatSettings(active.scopeId);
+    if (resolveCollaborationMode(settings?.collaborationMode ?? null) !== 'plan') {
+      return false;
+    }
+    const planMarkdown = extractLatestPlanMarkdown(active);
+    if (!planMarkdown) {
+      return false;
+    }
+
+    const binding = this.store.getBinding(active.scopeId);
+    const record: PendingPlanImplementation = {
+      localId: crypto.randomBytes(8).toString('hex'),
+      scopeId: active.scopeId,
+      chatId: active.chatId,
+      chatType: active.chatType,
+      topicId: active.topicId,
+      threadId: active.threadId,
+      turnId: active.turnId,
+      cwd: binding?.cwd ?? null,
+      planMarkdown,
+      messageId: null,
+      createdAt: Date.now(),
+    };
+    this.pendingPlanImplementations.set(record.localId, record);
+    const locale = this.localeForChat(active.scopeId);
+    const messageId = await this.sendMessage(
+      active.scopeId,
+      renderPlanImplementationPrompt(locale, record),
+      planImplementationKeyboard(locale, record.localId),
+    );
+    record.messageId = messageId;
+    return true;
+  }
+
+  private findPendingPlanImplementation(scopeId: string, turnId?: string): PendingPlanImplementation | null {
+    for (const record of this.pendingPlanImplementations.values()) {
+      if (record.scopeId !== scopeId) {
+        continue;
+      }
+      if (turnId !== undefined && record.turnId !== turnId) {
+        continue;
+      }
+      return record;
+    }
+    return null;
+  }
+
+  private clearPlanImplementationPromptsForScope(scopeId: string): void {
+    for (const [localId, record] of this.pendingPlanImplementations.entries()) {
+      if (record.scopeId === scopeId) {
+        this.pendingPlanImplementations.delete(localId);
+      }
+    }
+  }
+
+  private hasPendingUserInputForTurn(scopeId: string, turnId: string): boolean {
+    for (const record of this.pendingUserInputs.values()) {
+      if (record.chatId === scopeId && (record.turnId === null || record.turnId === turnId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async handlePlanImplementationCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    action: 'run' | 'fresh' | 'stay',
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingPlanImplementations.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'plan_impl_expired'));
+      return;
+    }
+    if (record.scopeId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'plan_impl_mismatch'));
+      return;
+    }
+    if (action === 'stay') {
+      this.pendingPlanImplementations.delete(localId);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+      if (record.messageId !== null) {
+        await this.editMessage(record.scopeId, record.messageId, t(locale, 'plan_impl_staying'), []);
+      }
+      return;
+    }
+    if (this.findActiveTurn(record.scopeId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
+      return;
+    }
+
+    this.pendingPlanImplementations.delete(localId);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+    const turn = await this.startPlanImplementationTurn(record, action === 'fresh');
+    if (record.messageId !== null) {
+      await this.editMessage(
+        record.scopeId,
+        record.messageId,
+        t(locale, action === 'fresh' ? 'plan_impl_started_fresh' : 'plan_impl_started', {
+          threadId: turn.threadId,
+          turnId: turn.turnId,
+        }),
+        [],
+      );
+    }
+  }
+
+  private async startPlanImplementationTurn(
+    record: PendingPlanImplementation,
+    freshContext: boolean,
+  ): Promise<{ threadId: string; turnId: string }> {
+    await this.stopWatchingScopeThread(record.scopeId, freshContext ? undefined : record.threadId);
+    const binding = freshContext
+      ? await this.createBinding(record.scopeId, record.cwd ?? this.config.defaultCwd)
+      : await this.ensureThreadReady(record.scopeId, {
+          chatId: record.scopeId,
+          threadId: record.threadId,
+          cwd: record.cwd,
+          updatedAt: Date.now(),
+        });
+    if (!freshContext) {
+      this.store.setBinding(record.scopeId, binding.threadId, binding.cwd);
+    }
+    await this.sendTyping(record.scopeId);
+    const text = freshContext
+      ? `${PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n${record.planMarkdown}`
+      : PLAN_IMPLEMENTATION_CODING_MESSAGE;
+    const input: TurnInput[] = [{
+      type: 'text',
+      text,
+      text_elements: [],
+    }];
+    const turn = await this.startTurnWithRecovery(record.scopeId, binding, input, {
+      collaborationMode: DEFAULT_COLLABORATION_MODE,
+    });
+    await this.registerActiveTurn(
+      record.scopeId,
+      record.chatId,
+      record.chatType,
+      record.topicId,
+      turn.threadId,
+      turn.turnId,
+      0,
+      {
+        input,
+        threadId: turn.threadId,
+        cwd: this.store.getBinding(record.scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+        chatId: record.chatId,
+        chatType: record.chatType,
+        topicId: record.topicId,
+        collaborationMode: DEFAULT_COLLABORATION_MODE,
+        failedAuthTargets: new Set(),
+      },
+    );
+    return turn;
   }
 
   private async handleMcpElicitationRequest(serverRequestId: string | number, params: any): Promise<void> {
@@ -1635,11 +1865,16 @@ export class BridgeSessionCore {
     return this.storeThreadSession(scopeId, session, 'seed');
   }
 
-  private async startTurnWithRecovery(scopeId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, input: TurnInput[]): Promise<{ threadId: string; turnId: string }> {
+  private async startTurnWithRecovery(
+    scopeId: string,
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+    input: TurnInput[],
+    overrides: { collaborationMode?: CollaborationModeValue | null | undefined } = {},
+  ): Promise<{ threadId: string; turnId: string }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
     const cwd = binding.cwd ?? this.config.defaultCwd;
-    const collaborationMode = await this.buildNativeCollaborationMode(settings, cwd);
+    const collaborationMode = await this.buildNativeCollaborationMode(settings, cwd, overrides.collaborationMode);
     const serviceTier = await this.resolveServiceTierForTurn(scopeId, settings);
     try {
       const turn = await this.app.startTurn({
@@ -1664,7 +1899,11 @@ export class BridgeSessionCore {
       const nextSettings = this.store.getChatSettings(scopeId);
       const nextAccess = this.resolveEffectiveAccess(scopeId, nextSettings);
       const replacementCwd = replacement.cwd ?? this.config.defaultCwd;
-      const replacementCollaborationMode = await this.buildNativeCollaborationMode(nextSettings, replacementCwd);
+      const replacementCollaborationMode = await this.buildNativeCollaborationMode(
+        nextSettings,
+        replacementCwd,
+        overrides.collaborationMode,
+      );
       const replacementServiceTier = await this.resolveServiceTierForTurn(scopeId, nextSettings);
       const turn = await this.app.startTurn({
         threadId: replacement.threadId,
@@ -1873,6 +2112,7 @@ export class BridgeSessionCore {
     return {
       scopeId,
       chatId,
+      chatType,
       topicId,
       renderRoute: resolveTelegramRenderRoute(chatType, topicId),
       isObserved,
@@ -1942,19 +2182,19 @@ export class BridgeSessionCore {
       }
       case 'agent_message_started': {
         this.promoteReadyToolBatch(active);
-        ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind);
+        ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind, Boolean(activity.isPlan));
         await this.queueTurnRender(active, { forceStatus: true });
         return;
       }
       case 'agent_message_delta': {
-        const segment = ensureTurnSegment(active, activity.itemId, undefined, activity.outputKind);
+        const segment = ensureTurnSegment(active, activity.itemId, undefined, activity.outputKind, Boolean(activity.isPlan));
         segment.text += activity.delta;
         active.buffer += activity.delta;
         await this.queueTurnRender(active);
         return;
       }
       case 'agent_message_completed': {
-        const segment = ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind);
+        const segment = ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind, Boolean(activity.isPlan));
         if (activity.text !== null) {
           segment.text = activity.text || segment.text;
           if (activity.outputKind === 'final_answer') {
@@ -1992,6 +2232,7 @@ export class BridgeSessionCore {
           this.promoteReadyToolBatch(active);
           await this.completeTurn(active);
           await this.cleanupObservedTransientMessages(active);
+          await this.maybeSendPlanImplementationPrompt(active);
           if (this.config.codexAppSyncOnTurnComplete) {
             const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
             if (revealError) {
@@ -3314,7 +3555,9 @@ export class BridgeSessionCore {
       threadId: retry.threadId,
       cwd: retry.cwd,
     };
-    const turn = await this.startTurnWithRecovery(scopeId, binding, retry.input);
+    const turn = await this.startTurnWithRecovery(scopeId, binding, retry.input, {
+      collaborationMode: retry.collaborationMode,
+    });
     await this.registerActiveTurn(
       scopeId,
       retry.chatId,
@@ -3374,8 +3617,11 @@ export class BridgeSessionCore {
   private async buildNativeCollaborationMode(
     settings: ChatSessionSettings | null,
     cwd: string,
+    modeOverride?: CollaborationModeValue | null,
   ): Promise<CodexCollaborationMode | null> {
-    const mode = resolveCollaborationMode(settings?.collaborationMode ?? null);
+    const mode = resolveCollaborationMode(
+      modeOverride === undefined ? settings?.collaborationMode ?? null : modeOverride,
+    );
     try {
       const [config, presets] = await Promise.all([
         this.app.readEffectiveConfig(cwd),
@@ -4127,6 +4373,7 @@ export class BridgeSessionCore {
     text: string,
   ): Promise<void> {
     const scopeId = event.scopeId;
+    this.clearPlanImplementationPromptsForScope(scopeId);
     await this.stopWatchingScopeThread(scopeId);
     const existingBinding = this.store.getBinding(scopeId);
     const binding = existingBinding
@@ -4152,6 +4399,7 @@ export class BridgeSessionCore {
           chatId: event.chatId,
           chatType: event.chatType,
           topicId: event.topicId,
+          collaborationMode: undefined,
           failedAuthTargets: new Set(),
         },
       );
@@ -4749,6 +4997,7 @@ function ensureTurnSegment(
   itemId: string,
   phase?: string | null,
   outputKind?: TurnOutputKind,
+  isPlan?: boolean,
 ): ActiveTurnSegment {
   let segment = active.segments.find((entry) => entry.itemId === itemId);
   if (segment) {
@@ -4758,12 +5007,16 @@ function ensureTurnSegment(
     if (outputKind !== undefined) {
       segment.outputKind = outputKind;
     }
+    if (isPlan !== undefined) {
+      segment.isPlan = segment.isPlan || isPlan;
+    }
     return segment;
   }
   segment = {
     itemId,
     phase: phase ?? null,
     outputKind: outputKind ?? 'commentary',
+    isPlan: Boolean(isPlan),
     text: '',
     completed: false,
     messages: [],
@@ -5307,13 +5560,25 @@ function normalizeThreadStatusLabel(raw: any): string {
 }
 
 function formatThreadTokenUsage(raw: any): { percent: number; total: number; limit: number } | null {
-  const total = Number(raw?.total?.totalTokens ?? 0);
-  const limit = Number(raw?.modelContextWindow ?? 0);
-  if (!Number.isFinite(total) || !Number.isFinite(limit) || total <= 0 || limit <= 0) {
+  const total = numberOrNull(raw?.last?.totalTokens ?? raw?.last?.total_tokens);
+  const limit = numberOrNull(raw?.modelContextWindow ?? raw?.model_context_window);
+  if (total === null || limit === null || total <= 0 || limit <= 0) {
     return null;
   }
-  const percent = Math.round((total / limit) * 100);
-  return percent >= 85 ? { percent, total, limit } : null;
+  const rawPercent = Math.round((total / limit) * 100);
+  const percent = Math.min(100, rawPercent);
+  return rawPercent >= 85 ? { percent, total, limit } : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 function formatConfigValue(value: unknown): string {
@@ -5643,6 +5908,7 @@ function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {
     chatId: context.chatId,
     chatType: context.chatType,
     topicId: context.topicId,
+    collaborationMode: context.collaborationMode,
     failedAuthTargets: new Set(context.failedAuthTargets),
   };
 }
@@ -5683,6 +5949,8 @@ function parseUserInputQuestions(params: any): PendingUserInputQuestion[] {
       seenIds.add(id);
       const header = stringOrNull(raw?.header);
       const question = stringOrNull(raw?.question) ?? stringOrNull(raw?.prompt) ?? stringOrNull(raw?.text) ?? '';
+      const isOther = raw?.isOther === true || raw?.is_other === true;
+      const isSecret = raw?.isSecret === true || raw?.is_secret === true;
       const options = Array.isArray(raw?.options)
         ? raw.options
             .map((option: any): PendingUserInputOption | null => {
@@ -5700,7 +5968,7 @@ function parseUserInputQuestions(params: any): PendingUserInputQuestion[] {
       if (!header && !question && options.length === 0) {
         return null;
       }
-      return { id, header, question, options };
+      return { id, header, question, isOther, isSecret, options };
     })
     .filter((question: PendingUserInputQuestion | null): question is PendingUserInputQuestion => question !== null);
 }
@@ -5724,6 +5992,12 @@ function renderUserInputMessage(
     lines.push(`${index + 1}. ${title}`);
     if (question.header && question.question) {
       lines.push(question.question);
+    }
+    if (question.isOther) {
+      lines.push(t(locale, 'user_input_other_hint'));
+    }
+    if (question.isSecret) {
+      lines.push(t(locale, 'user_input_secret_warning'));
     }
     question.options.forEach((option, optionIndex) => {
       const description = option.description ? ` - ${option.description}` : '';
@@ -5752,6 +6026,55 @@ function userInputKeyboard(record: PendingUserInputRequest): Array<Array<{ text:
     })));
   });
   return rows;
+}
+
+function renderPlanImplementationPrompt(locale: AppLocale, record: PendingPlanImplementation): string {
+  return [
+    t(locale, 'plan_impl_title'),
+    t(locale, 'line_thread', { value: record.threadId }),
+    t(locale, 'line_turn', { value: record.turnId }),
+    '',
+    t(locale, 'plan_impl_prompt'),
+  ].join('\n');
+}
+
+function planImplementationKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: t(locale, 'plan_impl_button_run'), callback_data: `planimpl:${localId}:run` }],
+    [{ text: t(locale, 'plan_impl_button_fresh'), callback_data: `planimpl:${localId}:fresh` }],
+    [{ text: t(locale, 'plan_impl_button_stay'), callback_data: `planimpl:${localId}:stay` }],
+  ];
+}
+
+function extractLatestPlanMarkdown(active: ActiveTurn): string | null {
+  for (let index = active.segments.length - 1; index >= 0; index -= 1) {
+    const segment = active.segments[index]!;
+    if (!segment.isPlan) {
+      continue;
+    }
+    const text = segment.text.trim();
+    if (text) {
+      return text;
+    }
+  }
+  const tagged = extractLatestProposedPlanBlock([
+    active.finalText,
+    active.buffer,
+    ...active.segments.map(segment => segment.text),
+  ].filter((text): text is string => typeof text === 'string' && text.length > 0).join('\n'));
+  return tagged;
+}
+
+function extractLatestProposedPlanBlock(text: string): string | null {
+  const pattern = /<proposed_plan\b[^>]*>([\s\S]*?)<\/proposed_plan>/gi;
+  let latest: string | null = null;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+    const plan = match[1]?.trim();
+    if (plan) {
+      latest = plan;
+    }
+  }
+  return latest;
 }
 
 function clipButtonText(text: string): string {
