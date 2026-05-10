@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   AccessPresetValue,
+  ActiveTurnMessageMode,
   AppLocale,
   CachedThread,
   ChatSessionSettings,
@@ -47,6 +48,7 @@ export class BridgeStore {
         access_preset TEXT,
         collaboration_mode TEXT,
         service_tier TEXT,
+        active_turn_message_mode TEXT,
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS thread_cache (
@@ -109,6 +111,7 @@ export class BridgeStore {
     this.ensureColumn('chat_settings', 'access_preset', 'TEXT');
     this.ensureColumn('chat_settings', 'collaboration_mode', 'TEXT');
     this.ensureColumn('chat_settings', 'service_tier', 'TEXT');
+    this.ensureColumn('chat_settings', 'active_turn_message_mode', 'TEXT');
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     migrateLegacyBridgeScopeIds(this.db);
   }
@@ -150,7 +153,7 @@ export class BridgeStore {
   }
 
   getChatSettings(chatId: string): ChatSessionSettings | null {
-    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
+    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, active_turn_message_mode, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
     if (!row) return null;
     return {
       chatId: String(row.chat_id),
@@ -160,6 +163,7 @@ export class BridgeStore {
       accessPreset: row.access_preset === null ? null : String(row.access_preset) as AccessPresetValue,
       collaborationMode: normalizeCollaborationMode(row.collaboration_mode),
       serviceTier: row.service_tier === null ? null : String(row.service_tier),
+      activeTurnMessageMode: normalizeActiveTurnMessageMode(row.active_turn_message_mode),
       updatedAt: Number(row.updated_at),
     };
   }
@@ -175,6 +179,7 @@ export class BridgeStore {
       current?.accessPreset ?? null,
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
+      current?.activeTurnMessageMode ?? null,
     );
   }
 
@@ -188,6 +193,7 @@ export class BridgeStore {
       current?.accessPreset ?? null,
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
+      current?.activeTurnMessageMode ?? null,
     );
   }
 
@@ -201,6 +207,7 @@ export class BridgeStore {
       accessPreset,
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
+      current?.activeTurnMessageMode ?? null,
     );
   }
 
@@ -214,6 +221,7 @@ export class BridgeStore {
       current?.accessPreset ?? null,
       collaborationMode,
       current?.serviceTier ?? null,
+      current?.activeTurnMessageMode ?? null,
     );
   }
 
@@ -227,6 +235,21 @@ export class BridgeStore {
       current?.accessPreset ?? null,
       current?.collaborationMode ?? null,
       serviceTier,
+      current?.activeTurnMessageMode ?? null,
+    );
+  }
+
+  setChatActiveTurnMessageMode(chatId: string, activeTurnMessageMode: ActiveTurnMessageMode | null): void {
+    const current = this.getChatSettings(chatId);
+    this.writeChatSettings(
+      chatId,
+      current?.model ?? null,
+      current?.reasoningEffort ?? null,
+      current?.locale ?? null,
+      current?.accessPreset ?? null,
+      current?.collaborationMode ?? null,
+      current?.serviceTier ?? null,
+      activeTurnMessageMode,
     );
   }
 
@@ -416,10 +439,11 @@ export class BridgeStore {
     accessPreset: AccessPresetValue | null,
     collaborationMode: CollaborationModeValue | null,
     serviceTier: string | null,
+    activeTurnMessageMode: ActiveTurnMessageMode | null,
   ): void {
     this.db.prepare(`
-      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, active_turn_message_mode, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET
         model = excluded.model,
         reasoning_effort = excluded.reasoning_effort,
@@ -427,8 +451,9 @@ export class BridgeStore {
         access_preset = excluded.access_preset,
         collaboration_mode = excluded.collaboration_mode,
         service_tier = excluded.service_tier,
+        active_turn_message_mode = excluded.active_turn_message_mode,
         updated_at = excluded.updated_at
-    `).run(chatId, model, reasoningEffort, locale, accessPreset, collaborationMode, serviceTier, Date.now());
+    `).run(chatId, model, reasoningEffort, locale, accessPreset, collaborationMode, serviceTier, activeTurnMessageMode, Date.now());
   }
 
   getWeixinContextToken(scopeId: string): string | null {
@@ -457,4 +482,8 @@ export class BridgeStore {
 
 function normalizeCollaborationMode(value: unknown): CollaborationModeValue | null {
   return value === 'default' || value === 'plan' ? value : null;
+}
+
+function normalizeActiveTurnMessageMode(value: unknown): ActiveTurnMessageMode | null {
+  return value === 'steer' || value === 'queue' ? value : null;
 }

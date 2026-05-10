@@ -8,6 +8,7 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type {
   AppLocale,
+  ActiveTurnMessageMode,
   ChatSessionSettings,
   CodexAccountInfo,
   CodexAccountRateLimits,
@@ -43,6 +44,7 @@ import {
   buildThreadsKeyboard,
   clampEffortToModel,
   formatAccessPresetLabel,
+  formatActiveTurnMessageModeLabel,
   formatAccessSettingsMessage,
   formatApprovalPolicyLabel,
   formatCollaborationModeLabel,
@@ -58,6 +60,7 @@ import {
   formatWhereMessage,
   normalizeRequestedEffort,
   resolveCurrentModel,
+  resolveActiveTurnMessageMode,
   resolveRequestedModel,
   type SetupFocusSection,
   type ThreadListPresentationState,
@@ -475,7 +478,7 @@ export class BridgeSessionCore {
         return;
       }
       if (this.findActiveTurn(scopeId)) {
-        await this.sendMessage(scopeId, t(locale, 'another_turn_running'));
+        await this.handleActiveTurnInboundMessage(event, locale, event.text.trim());
         return;
       }
       await this.startBoundTurnFromEvent(event, locale, event.text.trim());
@@ -514,7 +517,7 @@ export class BridgeSessionCore {
     }
 
     if (this.findActiveTurn(scopeId)) {
-      await this.sendMessage(scopeId, t(locale, 'another_turn_running'));
+      await this.handleActiveTurnInboundMessage(event, locale, decision.text);
       return;
     }
 
@@ -532,6 +535,7 @@ export class BridgeSessionCore {
           '/help',
           '/setup',
           '/fast <on|off|toggle>',
+          '/active <steer|queue>',
           '/status',
           '/account',
           '/quota',
@@ -597,6 +601,9 @@ export class BridgeSessionCore {
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
           t(locale, 'status_fast', { value: fastStatus }),
           t(locale, 'status_collaboration_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
+          t(locale, 'active_current', {
+            value: formatActiveTurnMessageModeLabel(locale, settings?.activeTurnMessageMode ?? null),
+          }),
           t(locale, 'status_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
           t(locale, 'status_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
           t(locale, 'status_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
@@ -650,6 +657,11 @@ export class BridgeSessionCore {
       }
       case 'fast': {
         await this.handleFastCommand(scopeId, locale, args);
+        return;
+      }
+      case 'active':
+      case 'followup': {
+        await this.handleActiveTurnMessageModeCommand(scopeId, locale, args);
         return;
       }
       case 'where': {
@@ -969,11 +981,11 @@ export class BridgeSessionCore {
       await this.handleNavigationCallback(event, navMatch[1]! as 'models' | 'threads' | 'reveal' | 'permissions', locale);
       return;
     }
-    const setupMatch = /^setup:(model|effort|fast|access|mode):(.+)$/.exec(event.data);
+    const setupMatch = /^setup:(model|effort|fast|access|mode|active):(.+)$/.exec(event.data);
     if (setupMatch) {
       await this.handleSetupCallback(
         event,
-        setupMatch[1]! as 'model' | 'effort' | 'fast' | 'access' | 'mode',
+        setupMatch[1]! as 'model' | 'effort' | 'fast' | 'access' | 'mode' | 'active',
         setupMatch[2]!,
         locale,
       );
@@ -2969,6 +2981,51 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, t(locale, replaced ? 'queued_prompt_replaced' : 'queued_prompt_set'));
   }
 
+  private async handleActiveTurnInboundMessage(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<void> {
+    const active = this.findActiveTurn(event.scopeId);
+    if (!active) {
+      return;
+    }
+    const settings = this.store.getChatSettings(event.scopeId);
+    const mode = resolveActiveTurnMessageMode(settings?.activeTurnMessageMode ?? null);
+    if (mode === 'queue') {
+      await this.queuePromptAfterActiveTurn(event, locale, text);
+      return;
+    }
+    await this.steerActiveTurn(active, event, locale, text);
+  }
+
+  private async queuePromptAfterActiveTurn(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<void> {
+    const replaced = this.queuedPrompts.has(event.scopeId);
+    this.queuedPrompts.set(event.scopeId, { event, text });
+    await this.sendMessage(event.scopeId, t(locale, replaced ? 'queued_prompt_replaced' : 'queued_prompt_set'));
+  }
+
+  private async steerActiveTurn(
+    active: ActiveTurn,
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<void> {
+    const binding = {
+      threadId: active.threadId,
+      cwd: this.store.getBinding(event.scopeId)?.cwd ?? this.config.defaultCwd,
+    };
+    await this.sendTyping(event.scopeId);
+    const input = await this.buildTurnInput(binding, { ...event, text }, locale);
+    await this.app.steerTurn(active.threadId, active.turnId, input);
+    await this.queueTurnRender(active, { forceStatus: true });
+    await this.sendMessage(event.scopeId, t(locale, 'steer_sent', { turnId: active.turnId }));
+  }
+
   private async startQueuedPromptIfPresent(scopeId: string): Promise<void> {
     if (this.findActiveTurn(scopeId)) {
       return;
@@ -3001,6 +3058,23 @@ export class BridgeSessionCore {
       return;
     }
     await this.setCollaborationMode(scopeId, locale, mode);
+  }
+
+  private async handleActiveTurnMessageModeCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const raw = args.join(' ').trim();
+    if (!raw) {
+      await this.showSetupPanel(scopeId, 'active', undefined, locale);
+      return;
+    }
+    const mode = normalizeRequestedActiveTurnMessageMode(raw);
+    if (!mode) {
+      await this.sendMessage(scopeId, t(locale, 'usage_active'));
+      return;
+    }
+    this.store.setChatActiveTurnMessageMode(scopeId, mode);
+    await this.sendMessage(scopeId, t(locale, 'active_configured', {
+      value: formatActiveTurnMessageModeLabel(locale, mode),
+    }));
   }
 
   private async handleFastCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -4198,12 +4272,12 @@ export class BridgeSessionCore {
 
   private async handleSetupCallback(
     event: TelegramCallbackEvent,
-    kind: 'model' | 'effort' | 'fast' | 'access' | 'mode',
+    kind: 'model' | 'effort' | 'fast' | 'access' | 'mode' | 'active',
     rawValue: string,
     locale: AppLocale,
   ): Promise<void> {
     const scopeId = event.scopeId;
-    if (kind !== 'access' && this.findActiveTurn(scopeId)) {
+    if (kind !== 'access' && kind !== 'active' && this.findActiveTurn(scopeId)) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
       return;
     }
@@ -4218,6 +4292,20 @@ export class BridgeSessionCore {
       await this.refreshSetupPanel(scopeId, event.messageId, 'access', locale);
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_access', {
         value: formatAccessPresetLabel(locale, nextPreset),
+      }));
+      return;
+    }
+
+    if (kind === 'active') {
+      const mode = normalizeRequestedActiveTurnMessageMode(rawValue);
+      if (!mode) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      this.store.setChatActiveTurnMessageMode(scopeId, mode);
+      await this.refreshSetupPanel(scopeId, event.messageId, 'active', locale);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'active_configured', {
+        value: formatActiveTurnMessageModeLabel(locale, mode),
       }));
       return;
     }
@@ -5785,6 +5873,17 @@ function normalizeRequestedCollaborationMode(value: string): CollaborationModeVa
   }
   if (normalized === 'default' || normalized === 'agent') {
     return 'default';
+  }
+  return null;
+}
+
+function normalizeRequestedActiveTurnMessageMode(value: string): ActiveTurnMessageMode | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'steer' || normalized === 'guide' || normalized === '引导') {
+    return 'steer';
+  }
+  if (normalized === 'queue' || normalized === '排队') {
+    return 'queue';
   }
   return null;
 }

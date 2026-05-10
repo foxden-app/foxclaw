@@ -386,6 +386,55 @@ test('queue stores the next prompt while a turn is active', async (t) => {
   assert.equal(rig.sentMessages[1], 'Replaced the queued prompt. I will send the new one after the current turn finishes.');
 });
 
+test('plain messages during active turns steer by default or queue by chat setting', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  (rig.controller as any).queueTurnRender = async () => {};
+  const steers: any[] = [];
+  (rig.controller as any).app.steerTurn = async (threadId: string, turnId: string, input: any[]) => {
+    steers.push({ threadId, turnId, input });
+    return { turnId };
+  };
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+  await (rig.controller as any).handleText(createEvent('please adjust'));
+
+  assert.equal(steers.length, 1);
+  assert.equal(steers[0]?.input[0]?.text, 'please adjust');
+  assert.equal(rig.sentMessages.at(-1), 'Steered active turn turn-1.');
+
+  rig.store.setChatActiveTurnMessageMode('telegram:99::root', 'queue');
+  await (rig.controller as any).handleText(createEvent('next after this'));
+
+  assert.equal(steers.length, 1);
+  assert.equal((rig.controller as any).queuedPrompts.get('telegram:99::root')?.text, 'next after this');
+  assert.equal(rig.sentMessages.at(-1), 'Queued. I will send it after the current turn finishes.');
+});
+
+test('/active configures active-turn message behavior and opens setup focus', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/active queue'), 'en', 'active', ['queue']);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.activeTurnMessageMode, 'queue');
+  assert.equal(rig.sentMessages[0], 'Active-turn messages set to: Queue next turn');
+
+  await (rig.controller as any).handleCommand(createEvent('/active'), 'en', 'active', []);
+  assert.match(rig.sentHtmlMessages[0]!, /Focus: Active turn messages/);
+
+  await (rig.controller as any).handleCallback(createCallback('setup:active:steer', 10));
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.activeTurnMessageMode, 'steer');
+  assert.equal(rig.callbackAnswers[0], 'Active-turn messages set to: Steer current turn');
+});
+
 test('/mode opens setup panel, while /mode <value> updates collaboration mode settings', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -479,7 +528,7 @@ test('/setup and legacy aliases open the unified setup panel', async (t) => {
 
   await (rig.controller as any).handleCommand(createEvent('/setup'), 'en', 'setup', []);
   assert.match(rig.sentHtmlMessages[0]!, /<b>Session preferences<\/b>/);
-  assert.match(rig.sentHtmlMessages[0]!, /Current: <b>server default · server default · fast=off · default · default<\/b>/);
+  assert.match(rig.sentHtmlMessages[0]!, /Current: <b>server default · server default · fast=off · default · default · steer<\/b>/);
   assert.ok(rig.sentHtmlKeyboards[0].some((row: any[]) => row.some((button: any) => button.callback_data === 'setup:fast:on')));
 
   await (rig.controller as any).handleCommand(createEvent('/models'), 'en', 'models', []);

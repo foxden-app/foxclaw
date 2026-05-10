@@ -11,6 +11,7 @@ export type ApprovalPolicyValue = 'on-request' | 'on-failure' | 'never' | 'untru
 export type SandboxModeValue = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type AccessPresetValue = 'read-only' | 'default' | 'full-access';
 export type CollaborationModeValue = 'default' | 'plan';
+export type ActiveTurnMessageMode = 'steer' | 'queue';
 export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 export type ThreadStatusKind = 'active' | 'idle' | 'notLoaded' | 'systemError';
 
@@ -23,6 +24,7 @@ export interface ChatSessionSettings {
   accessPreset: AccessPresetValue | null;
   collaborationMode: CollaborationModeValue | null;
   serviceTier: string | null;
+  activeTurnMessageMode: ActiveTurnMessageMode | null;
   updatedAt: number;
 }
 

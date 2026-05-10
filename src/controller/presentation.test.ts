@@ -184,6 +184,7 @@ test('formatModelSettingsMessage renders current selections', () => {
     accessPreset: null,
     collaborationMode: null,
     serviceTier: null,
+    activeTurnMessageMode: null,
     updatedAt: Date.now(),
   };
 
@@ -225,6 +226,7 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
     accessPreset: null,
     collaborationMode: null,
     serviceTier: null,
+    activeTurnMessageMode: null,
     updatedAt: Date.now(),
   };
 
@@ -332,6 +334,7 @@ test('setup panel renders summary, focus, rows, and fast controls', () => {
     accessPreset: 'full-access',
     collaborationMode: 'plan',
     serviceTier: 'priority',
+    activeTurnMessageMode: 'steer',
     updatedAt: 0,
   };
   const access = {
@@ -341,12 +344,13 @@ test('setup panel renders summary, focus, rows, and fast controls', () => {
   };
 
   const ctx = { focus: 'model' as const, models, settings, access };
-  assert.equal(resolveSetupSummaryLine(ctx), 'gpt-5 · high · fast=on · full-access · plan');
+  assert.equal(resolveSetupSummaryLine(ctx), 'gpt-5 · high · fast=on · full-access · plan · steer');
   const message = formatSetupPanelMessage('en', ctx);
   assert.match(message, /<b>Session preferences<\/b>/);
-  assert.match(message, /Current: <b>gpt-5 · high · fast=on · full-access · plan<\/b>/);
+  assert.match(message, /Current: <b>gpt-5 · high · fast=on · full-access · plan · steer<\/b>/);
   assert.match(message, /Focus: Model/);
   assert.match(message, /• Fast: on \(fast\)/);
+  assert.match(message, /• Active turn messages: Steer current turn/);
 
   const keyboard = buildSetupPanelKeyboard('en', ctx);
   assert.ok(keyboard.some(row => row.some(button => button.callback_data === 'setup:model:gpt-5')));
@@ -354,6 +358,10 @@ test('setup panel renders summary, focus, rows, and fast controls', () => {
   assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
     { text: '• ⚡ Fast: on', callback_data: 'setup:fast:on' },
     { text: 'Fast: off', callback_data: 'setup:fast:off' },
+  ]);
+  assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:active:'))), [
+    { text: '• Steer current turn', callback_data: 'setup:active:steer' },
+    { text: 'Queue next turn', callback_data: 'setup:active:queue' },
   ]);
 });
 
@@ -376,9 +384,9 @@ test('setup panel shows unsupported fast as noop button', () => {
     sandboxMode: 'workspace-write' as const,
   };
   const ctx = { focus: 'fast' as const, models, settings: null, access };
-  assert.equal(resolveSetupSummaryLine(ctx), 'server default · server default · fast=unsupported · default · default');
+  assert.equal(resolveSetupSummaryLine(ctx), 'server default · server default · fast=unsupported · default · default · steer');
   assert.match(formatSetupPanelMessage('en', ctx), /Focus: Fast/);
-  assert.deepEqual(buildSetupPanelKeyboard('en', ctx).at(-3), [
+  assert.deepEqual(buildSetupPanelKeyboard('en', ctx).find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
     { text: 'Fast unsupported', callback_data: 'setup:fast:unsupported' },
   ]);
 });
@@ -422,6 +430,7 @@ test('presentation renders chinese locale strings', () => {
     accessPreset: null,
     collaborationMode: null,
     serviceTier: null,
+    activeTurnMessageMode: null,
     updatedAt: Date.now(),
   };
   const renderedModels = formatModelSettingsMessage('zh', models, settings);
@@ -490,6 +499,7 @@ test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
     accessPreset: null,
     collaborationMode: null,
     serviceTier: null,
+    activeTurnMessageMode: null,
     updatedAt: 0,
   });
   assert.match(out, /\/model default/);

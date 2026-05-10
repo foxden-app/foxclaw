@@ -7,7 +7,7 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Telegram private chat or topic-aware group control for a single allowed user
 - Local `codex app-server` transport over loopback WebSocket
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
-- Chat-scoped preference control with `/setup`: model, reasoning effort, Fast service tier, access preset, and Agent/Plan mode
+- Chat-scoped preference control with `/setup`: model, reasoning effort, Fast service tier, access preset, Agent/Plan mode, and active-turn message behavior
 - Quick Fast service-tier control with `/fast on`, `/fast off`, and `/fast toggle`
 - App-server account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, and guarded `/logout confirm`
 - Active-turn steering, review, diff, and thread lifecycle controls: `/steer`, `/review`, `/diff`, `/fork`, `/undo`, `/rename`, `/compact`, `/archive`, and `/unarchive`
@@ -114,6 +114,7 @@ Without `TG_ALLOWED_TOPIC_ID`, every bot in the same group treats the whole grou
 - `/help`
 - `/setup` opens the unified preference panel
 - `/fast <on|off|toggle>` toggles the current chat's Fast service tier when the selected model supports it
+- `/active <steer|queue>` chooses whether plain messages sent during an active turn steer that turn or queue the next turn
 - `/status`
 - `/account`
 - `/quota`
@@ -179,8 +180,9 @@ Recommended group behavior:
 
 Recommended mobile preference flow:
 
-- Send `/setup` to review the current model, effort, Fast, access, and Agent/Plan mode in one message
+- Send `/setup` to review the current model, effort, Fast, access, Agent/Plan mode, and active-turn message behavior in one message
 - Use `/fast on` or `/fast off` when you only need to switch the service tier
+- Use `/active queue` if you prefer normal messages during a running turn to wait; the default is `/active steer`
 - Use direct commands such as `/model gpt-5`, `/effort high`, `/permissions full-access`, and `/mode plan` when copy-paste is faster than tapping buttons
 
 Recommended mobile app-server controls:
