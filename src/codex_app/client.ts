@@ -74,6 +74,10 @@ interface StartThreadOptions {
 
 interface ResumeThreadOptions {
   threadId: string;
+  cwd?: string | null;
+  approvalPolicy?: string | null;
+  sandboxMode?: SandboxModeValue | null;
+  model?: string | null;
 }
 
 export interface TextTurnInput {
@@ -255,13 +259,13 @@ export class CodexAppClient extends EventEmitter {
   async resumeThread(options: ResumeThreadOptions): Promise<ThreadSessionState> {
     const result = await this.request('thread/resume', {
       threadId: options.threadId,
-      cwd: null,
-      approvalPolicy: null,
+      cwd: options.cwd ?? null,
+      approvalPolicy: options.approvalPolicy ?? null,
       baseInstructions: null,
       developerInstructions: null,
       config: null,
-      sandbox: null,
-      model: null,
+      sandbox: options.sandboxMode ?? null,
+      model: options.model ?? null,
       modelProvider: null,
       personality: null,
       experimentalRawEvents: true,

@@ -58,6 +58,26 @@ test('BridgeMessagingRouter sends plain text via Weixin port for weixin scope', 
   assert.equal(tgCalls.length, 1);
 });
 
+test('BridgeMessagingRouter does not fall back to Telegram for disabled Weixin scope', async () => {
+  const tgCalls: string[] = [];
+  const tg = {
+    ...stubTelegram(),
+    sendPlain: async (scopeId: string, text: string) => {
+      tgCalls.push(`${scopeId}:${text}`);
+      return 10;
+    },
+  } as unknown as TelegramMessagingPort;
+  const r = new BridgeMessagingRouter(tg, null);
+
+  assert.equal(r.canSendToScope('telegram:1::root'), true);
+  assert.equal(r.canSendToScope('weixin:acc1:user9'), false);
+  assert.throws(
+    () => r.sendPlain('weixin:acc1:user9', 'hello'),
+    /Weixin channel is disabled/,
+  );
+  assert.deepEqual(tgCalls, []);
+});
+
 test('saveWeixinAccount and loadWeixinAccount round-trip JSON shape', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wx-acc-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
