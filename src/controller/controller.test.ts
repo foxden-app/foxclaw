@@ -230,6 +230,23 @@ function createControllerRig() {
       { name: 'Plan', mode: 'plan', model: null, reasoningEffort: 'medium' },
       { name: 'Default', mode: 'default', model: null, reasoningEffort: null },
     ],
+    startThread: async (options: { cwd: string }) => ({
+      thread: {
+        threadId: 'thread-new',
+        name: null,
+        preview: 'new',
+        cwd: options.cwd,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: options.cwd,
+    }),
     steerTurn: async () => ({ turnId: 'turn-1' }),
     startDeviceLogin: async () => ({
       type: 'chatgptDeviceCode',
@@ -773,11 +790,29 @@ test('/status includes Codex account usage without exposing email', async (t) =>
 
   assert.equal(rig.sentMessages.length, 1);
   assert.match(rig.sentMessages[0]!, /Codex account: ChatGPT/);
+  assert.ok(rig.sentMessages[0]!.includes(`CWD: ${rig.tempDir}`));
   assert.match(rig.sentMessages[0]!, /Codex plan: Plus/);
   assert.match(rig.sentMessages[0]!, /Codex usage \(codex\):/);
   assert.match(rig.sentMessages[0]!, /5h window: 63% used/);
   assert.match(rig.sentMessages[0]!, /7d window: 56.5% used/);
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
+});
+
+test('/help pins important commands and sorts the rest by recent use', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/watch'), 'en', 'watch', []);
+  await (rig.controller as any).handleCommand(createEvent('/features'), 'en', 'features', []);
+  await (rig.controller as any).handleCommand(createEvent('/help'), 'en', 'help', []);
+
+  const lines = rig.sentMessages.at(-1)!.split('\n');
+  assert.deepEqual(lines.slice(1, 6), ['/help', '/setup', '/status', '/threads [query]', '/auth']);
+  assert.equal(lines[6], '/features');
+  assert.equal(lines[7], '/watch');
 });
 
 test('/status includes local Codex token history from session logs', async (t) => {
@@ -944,6 +979,36 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
   assert.match(rig.editedMessages[0]!, /Switching Codex auth to auth\.json_b/);
   assert.match(rig.sentMessages.at(-1)!, /Codex auth switched to auth\.json_b/);
+});
+
+test('/auth panel can start device login from an inline action', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+
+  const calls: string[] = [];
+  (rig.controller as any).app.startDeviceLogin = async () => {
+    calls.push('start');
+    return {
+      type: 'chatgptDeviceCode',
+      loginId: 'login-panel',
+      verificationUrl: 'https://auth.example/device',
+      userCode: 'PANEL-CODE',
+    };
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:login_device`, 1));
+
+  assert.deepEqual(calls, ['start']);
+  assert.equal(rig.callbackAnswers.at(-1), 'Device login started.');
+  assert.match(rig.sentMessages.at(-1)!, /PANEL-CODE/);
 });
 
 test('/auth add prepares a new auth candidate and completes device login', async (t) => {
@@ -2140,8 +2205,10 @@ test('/threads panel supports rename and archive callbacks', async (t) => {
     [{ text: '1. Panel thread', callback_data: 'thread:open:thread-panel' }],
     [
       { text: 'Rename', callback_data: 'thread:rename:thread-panel' },
+      { text: 'Watch', callback_data: 'thread:watch:thread-panel' },
       { text: 'Archive/Delete', callback_data: 'thread:archive:thread-panel' },
     ],
+    [{ text: 'New', callback_data: 'thread:new' }],
     [{ text: 'Archived', callback_data: 'thread:list:archived' }],
   ]);
 
@@ -2203,6 +2270,7 @@ test('/threads archived panel supports unarchive callback', async (t) => {
   assert.deepEqual(rig.sentHtmlKeyboards[0], [
     [{ text: '1. Archived work', callback_data: 'thread:open:thread-archived' }],
     [{ text: 'Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
+    [{ text: 'New', callback_data: 'thread:new' }],
     [{ text: 'Recent', callback_data: 'thread:list:recent' }],
   ]);
 
@@ -2212,6 +2280,59 @@ test('/threads archived panel supports unarchive callback', async (t) => {
   assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-archived');
   assert.equal(rig.callbackAnswers.at(-1), 'Thread unarchived');
   assert.deepEqual(listArchived, [true, false]);
+});
+
+test('/threads panel supports new-thread PWD prompt and watch callback', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const sessionPath = path.join(rig.tempDir, 'watched-session.jsonl');
+  fs.writeFileSync(sessionPath, '');
+  const thread = {
+    threadId: 'thread-panel',
+    name: 'Panel thread',
+    preview: 'work',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'cli',
+    path: sessionPath,
+    status: 'idle' as const,
+    updatedAt: 1,
+  };
+  (rig.controller as any).app.listThreads = async () => [thread];
+  (rig.controller as any).app.resumeThread = async ({ threadId }: { threadId: string }) => ({
+    thread: { ...thread, threadId },
+    model: 'gpt-5',
+    modelProvider: 'openai',
+    reasoningEffort: 'medium',
+    cwd: rig.tempDir,
+  });
+  (rig.controller as any).app.readThread = async () => thread;
+
+  await (rig.controller as any).handleText(createEvent('/threads'));
+  await (rig.controller as any).handleCallback(createCallback('thread:new', 1001));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Send PWD');
+  assert.match(rig.sentMessages.at(-1)!, /Send the PWD for the new thread/);
+
+  const newCwd = path.join(rig.tempDir, 'project-a');
+  await (rig.controller as any).handleText(createEvent(newCwd));
+
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-new');
+  assert.equal(rig.store.getBinding('telegram:99::root')?.cwd, newCwd);
+  assert.match(rig.sentMessages.at(-1)!, /Started new thread thread-new/);
+
+  await (rig.controller as any).handleCallback(createCallback('thread:watch:thread-panel', 1001));
+
+  const watcher = (rig.controller as any).observedThreadWatchers.get('telegram:99::root');
+  assert.equal(watcher?.threadId, 'thread-panel');
+  assert.equal(watcher?.mode, 'session_file');
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-panel');
+  assert.match(rig.callbackAnswers.at(-1)!, /Watching thread thread-panel/);
 });
 
 test('completed turns automatically start a queued prompt', async (t) => {

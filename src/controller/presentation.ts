@@ -102,6 +102,7 @@ export function buildThreadsKeyboard(locale: AppLocale, threads: ThreadLike[]): 
       ? [{ text: t(locale, 'button_thread_unarchive'), callback_data: `thread:unarchive:${thread.threadId}` }]
       : [
           { text: t(locale, 'button_thread_rename'), callback_data: `thread:rename:${thread.threadId}` },
+          { text: t(locale, 'button_thread_watch'), callback_data: `thread:watch:${thread.threadId}` },
           { text: t(locale, 'button_thread_archive'), callback_data: `thread:archive:${thread.threadId}` },
         ];
     return [openRow, actionRow];
@@ -115,6 +116,7 @@ export function buildThreadListKeyboard(
   listState: ThreadListPresentationState,
 ): Array<Array<{ text: string; callback_data: string }>> {
   const rows = buildThreadsKeyboard(locale, threads);
+  rows.push([{ text: t(locale, 'button_new_thread'), callback_data: 'thread:new' }]);
   const navigationRow: InlineButton[] = [];
   if (listState.hasPreviousPage) {
     navigationRow.push({ text: t(locale, 'button_prev_page'), callback_data: 'thread:list:prev' });
