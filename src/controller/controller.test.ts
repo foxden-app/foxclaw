@@ -589,7 +589,7 @@ test('diagnostic notifications route goal, model, remote, and MCP progress updat
   assert.match(active.pendingArchivedStatus?.text ?? '', /MCP progress: Indexing workspace/);
 });
 
-test('/mode opens setup panel, while /mode <value> updates collaboration mode settings', async (t) => {
+test('/mode opens setup panel, while /mode <value>, /plan, and /agent update collaboration mode settings', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     rig.store.close();
@@ -602,11 +602,21 @@ test('/mode opens setup panel, while /mode <value> updates collaboration mode se
 
   await (rig.controller as any).handleCommand(createEvent('/mode plan'), 'en', 'mode', ['plan']);
   assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'plan');
-  assert.equal(rig.sentMessages[0], 'Mode set to: Plan\nApplies on the next turn.');
+  assert.equal(
+    rig.sentMessages[0],
+    'Plan mode is armed for the next turn only. After that turn starts, this chat returns to Agent.',
+  );
 
   await (rig.controller as any).handleCommand(createEvent('/agent'), 'en', 'agent', []);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'default');
+  assert.equal(rig.sentMessages[1], 'Mode set to: Agent\nApplies on the next turn.');
+
+  await (rig.controller as any).handleCommand(createEvent('/plan'), 'en', 'plan', []);
   assert.equal(rig.store.getChatSettings('telegram:99::root')?.collaborationMode, 'plan');
-  assert.match(rig.sentHtmlMessages[1]!, /Focus: Mode/);
+  assert.equal(
+    rig.sentMessages[2],
+    'Plan mode is armed for the next turn only. After that turn starts, this chat returns to Agent.',
+  );
 });
 
 test('startTurnWithRecovery passes native Codex collaboration mode', async (t) => {
@@ -623,12 +633,13 @@ test('startTurnWithRecovery passes native Codex collaboration mode', async (t) =
     return { id: 'turn-1', status: 'running' };
   };
 
-  await (rig.controller as any).startTurnWithRecovery(
+  const result = await (rig.controller as any).startTurnWithRecovery(
     'telegram:99::root',
     { threadId: 'thread-1', cwd: rig.tempDir },
     [{ type: 'text', text: 'hi', text_elements: [] }],
   );
 
+  assert.equal(result.collaborationMode, 'plan');
   assert.deepEqual(calls[0]?.collaborationMode, {
     mode: 'plan',
     settings: {
@@ -637,6 +648,42 @@ test('startTurnWithRecovery passes native Codex collaboration mode', async (t) =
       developer_instructions: null,
     },
   });
+});
+
+test('plan mode is consumed after one started turn', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const scopeId = 'telegram:99::root';
+  rig.store.setBinding(scopeId, 'thread-1', rig.tempDir);
+  rig.store.setChatCollaborationMode(scopeId, 'plan');
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  const starts: any[] = [];
+  (rig.controller as any).app.startTurn = async (options: any) => {
+    starts.push(options);
+    return { id: `turn-${starts.length}`, status: 'running' };
+  };
+  const registrations: any[][] = [];
+  (rig.controller as any).registerActiveTurn = async (...args: any[]) => {
+    registrations.push(args);
+  };
+
+  await (rig.controller as any).startBoundTurnFromEvent(createEvent('make a plan'), 'en', 'make a plan');
+
+  assert.equal(starts[0]?.collaborationMode?.mode, 'plan');
+  assert.equal(rig.store.getChatSettings(scopeId)?.collaborationMode, 'default');
+  assert.equal(registrations[0]?.[7]?.collaborationMode, 'plan');
+  assert.equal(registrations[0]?.[8], 'plan');
+
+  await (rig.controller as any).startBoundTurnFromEvent(createEvent('continue'), 'en', 'continue');
+
+  assert.equal(starts[1]?.collaborationMode?.mode, 'default');
+  assert.equal(rig.store.getChatSettings(scopeId)?.collaborationMode, 'default');
+  assert.equal(registrations[1]?.[7]?.collaborationMode, 'default');
+  assert.equal(registrations[1]?.[8], 'default');
 });
 
 test('startTurnWithRecovery passes supported service tier and clears unsupported one', async (t) => {
@@ -1635,7 +1682,17 @@ test('plan mode completion offers implementation prompt and starts default-mode 
   };
   (rig.controller as any).registerActiveTurn = async () => {};
 
-  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  const active = (rig.controller as any).createActiveTurnState(
+    'telegram:99::root',
+    '99',
+    'private',
+    null,
+    'thread-1',
+    'turn-1',
+    0,
+    false,
+    'plan',
+  );
   active.segments = [{
     itemId: 'plan-1',
     phase: 'commentary',
@@ -1680,7 +1737,17 @@ test('plan mode prompts for implementation after clarification answer and plan u
     responses.push({ requestId, result });
   };
 
-  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  const active = (rig.controller as any).createActiveTurnState(
+    'telegram:99::root',
+    '99',
+    'private',
+    null,
+    'thread-1',
+    'turn-1',
+    0,
+    false,
+    'plan',
+  );
   (rig.controller as any).activeTurns.set('turn-1', active);
 
   await (rig.controller as any).handleServerRequest({
@@ -2720,11 +2787,13 @@ test('weixin /threads HTML message includes copy-paste /open lines', async (t) =
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
+  const scope = 'weixin:acc1:wx-user-1';
+  rig.store.setChatLocale(scope, 'zh');
 
   (rig.controller as any).app.listThreads = async () => [
     {
       threadId: 't-wx-1',
-      name: 'Wx thread',
+      name: '微信线程',
       preview: 'hello',
       cwd: rig.tempDir,
       modelProvider: 'openai',
@@ -2740,6 +2809,218 @@ test('weixin /threads HTML message includes copy-paste /open lines', async (t) =
   assert.equal(rig.sentHtmlMessages.length, 1);
   const html = rig.sentHtmlMessages[0];
   assert.ok(html);
+  assert.match(html, /可复制命令（微信）：/);
   assert.match(html, /\/open 1/);
-  assert.match(html, /Copy-paste \(WeChat\):/);
+  assert.match(html, /\/watch 1/);
+  assert.match(html, /\/thread_rename 1 <name>/);
+  assert.match(html, /\/thread_archive 1/);
+  assert.match(html, /\/threads archived \[query\]/);
+});
+
+test('weixin thread copy commands manage cached threads', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const scope = 'weixin:acc1:wx-user-1';
+  const sessionPath = path.join(rig.tempDir, 'wx-session.jsonl');
+  fs.writeFileSync(sessionPath, '');
+  const thread = {
+    threadId: 'thread-wx',
+    name: '微信线程',
+    preview: 'work',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'cli',
+    path: sessionPath,
+    status: 'idle' as const,
+    updatedAt: 1,
+  };
+  const calls: string[] = [];
+  rig.store.cacheThreadList(scope, [{ ...thread, listIndex: 1, archived: false }]);
+  (rig.controller as any).app.resumeThread = async ({ threadId }: { threadId: string }) => ({
+    thread: { ...thread, threadId },
+    model: 'gpt-5',
+    modelProvider: 'openai',
+    reasoningEffort: 'medium',
+    cwd: rig.tempDir,
+  });
+  (rig.controller as any).app.readThread = async () => thread;
+  (rig.controller as any).app.setThreadName = async (threadId: string, name: string) => {
+    calls.push(`rename:${threadId}:${name}`);
+  };
+  (rig.controller as any).app.archiveThread = async (threadId: string) => {
+    calls.push(`archive:${threadId}`);
+  };
+  (rig.controller as any).app.unarchiveThread = async (threadId: string) => {
+    calls.push(`unarchive:${threadId}`);
+  };
+
+  await (rig.controller as any).handleCommand(createWeixinEvent('/watch 1'), 'zh', 'watch', ['1']);
+  assert.equal(rig.store.getBinding(scope)?.threadId, 'thread-wx');
+  assert.equal((rig.controller as any).observedThreadWatchers.get(scope)?.threadId, 'thread-wx');
+
+  await (rig.controller as any).handleCommand(createWeixinEvent('/thread_rename 1 新名字'), 'zh', 'thread_rename', ['1', '新名字']);
+  await (rig.controller as any).handleCommand(createWeixinEvent('/thread_archive 1'), 'zh', 'thread_archive', ['1']);
+  rig.store.cacheThreadList(scope, [{ ...thread, listIndex: 1, archived: true }]);
+  await (rig.controller as any).handleCommand(createWeixinEvent('/thread_unarchive 1'), 'zh', 'thread_unarchive', ['1']);
+
+  assert.deepEqual(calls, [
+    'rename:thread-wx:新名字',
+    'archive:thread-wx',
+    'unarchive:thread-wx',
+  ]);
+});
+
+test('weixin /setup and /auth include Chinese copy-paste commands, and /auth use switches auth', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const scope = 'weixin:acc1:wx-user-1';
+  rig.store.setChatLocale(scope, 'zh');
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+
+  await (rig.controller as any).handleCommand(createWeixinEvent('/setup'), 'zh', 'setup', []);
+  assert.match(rig.sentHtmlMessages[0]!, /快捷命令：/);
+  assert.match(rig.sentHtmlMessages[0]!, /\/status/);
+  assert.match(rig.sentHtmlMessages[0]!, /\/threads/);
+  assert.match(rig.sentHtmlMessages[0]!, /\/auth/);
+  assert.match(rig.sentHtmlMessages[0]!, /\/mode default/);
+  assert.match(rig.sentHtmlMessages[0]!, /\/active queue/);
+  assert.match(rig.sentHtmlMessages[0]!, new RegExp(`/new ${rig.tempDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(rig.sentHtmlMessages[0]!, /\/interrupt/);
+
+  await (rig.controller as any).handleCommand(createWeixinEvent('/auth'), 'zh', 'auth', []);
+  assert.match(rig.sentMessages.at(-1)!, /认证命令：/);
+  assert.match(rig.sentMessages.at(-1)!, /\/auth use 1/);
+  assert.match(rig.sentMessages.at(-1)!, /\/login_device/);
+  assert.match(rig.sentMessages.at(-1)!, /\/auth reload/);
+  assert.match(rig.sentMessages.at(-1)!, /\/permissions/);
+
+  await (rig.controller as any).handleCommand(createWeixinEvent('/auth use 2'), 'zh', 'auth', ['use', '2']);
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+
+  const active = (rig.controller as any).createActiveTurnState(scope, 'wx-user-1', 'private', null, 'thread-1', 'turn-1', 0);
+  (rig.controller as any).activeTurns.set('turn-1', active);
+  await (rig.controller as any).handleCommand(createWeixinEvent('/auth use 1'), 'zh', 'auth', ['use', '1']);
+  assert.equal(restarts, 1);
+  assert.match(rig.sentMessages.at(-1)!, /当前有回复、审批或问题在进行中/);
+});
+
+test('weixin text fallback commands resolve approval, answers, plan implementation, and MCP elicitation', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const scope = 'weixin:acc1:wx-user-1';
+  rig.store.setChatLocale(scope, 'zh');
+  rig.store.setBinding(scope, 'thread-1', rig.tempDir);
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string | number, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'approval-1',
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-approval',
+      command: 'npm test',
+      cwd: rig.tempDir,
+    },
+  });
+  const localId = ((rig.store as any).db.prepare('SELECT local_id FROM pending_approvals WHERE server_request_id = ?').get('approval-1') as any).local_id;
+  assert.match(rig.sentMessages.at(-1)!, /审批命令：/);
+  assert.match(rig.sentMessages.at(-1)!, new RegExp(`/approve ${localId} allow`));
+  await (rig.controller as any).handleCommand(createWeixinEvent(`/approve ${localId} session`), 'zh', 'approve', [localId, 'session']);
+  assert.deepEqual(responses.at(-1), { requestId: 'approval-1', result: { decision: 'acceptForSession' } });
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'input-1',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-input',
+      questions: [{
+        id: 'choice',
+        header: '选择',
+        question: '下一步？',
+        options: [
+          { label: '继续', description: '执行' },
+          { label: '停止', description: '不执行' },
+        ],
+      }],
+    },
+  });
+  const input = [...(rig.controller as any).pendingUserInputs.values()][0];
+  assert.ok(input);
+  assert.match(rig.sentMessages.at(-1)!, /回答命令：/);
+  assert.match(rig.sentMessages.at(-1)!, new RegExp(`/answer ${input.localId} 1 2`));
+  await (rig.controller as any).handleCommand(createWeixinEvent(`/answer ${input.localId} 1 2`), 'zh', 'answer', [input.localId, '1', '2']);
+  assert.deepEqual(responses.at(-1), {
+    requestId: 'input-1',
+    result: { answers: { choice: { answers: ['停止'] } } },
+  });
+
+  const starts: any[] = [];
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[], overrides: any) => {
+    starts.push({ binding, input, overrides });
+    return { threadId: binding.threadId, turnId: 'turn-plan-run' };
+  };
+  (rig.controller as any).registerActiveTurn = async () => {};
+  const plan = {
+    localId: 'planabc1',
+    scopeId: scope,
+    chatId: 'wx-user-1',
+    chatType: 'private',
+    topicId: null,
+    threadId: 'thread-1',
+    turnId: 'turn-plan',
+    cwd: rig.tempDir,
+    planMarkdown: '- 做一件事',
+    messageId: null,
+    createdAt: Date.now(),
+  };
+  (rig.controller as any).pendingPlanImplementations.set(plan.localId, plan);
+  await (rig.controller as any).handleCommand(createWeixinEvent(`/planimpl ${plan.localId} run`), 'zh', 'planimpl', [plan.localId, 'run']);
+  assert.equal(starts.at(-1)?.input[0]?.text, 'Implement the plan.');
+  assert.equal(starts.at(-1)?.overrides?.collaborationMode, 'default');
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'mcp-1',
+    method: 'mcpServer/elicitation/request',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      serverName: 'linear',
+      mode: 'form',
+      message: '选择 issue',
+      requestedSchema: { type: 'object', properties: { issue: { type: 'string' } } },
+    },
+  });
+  const mcp = [...(rig.controller as any).pendingMcpElicitations.values()][0];
+  assert.ok(mcp);
+  assert.match(rig.sentMessages.at(-1)!, /MCP 命令：/);
+  assert.match(rig.sentMessages.at(-1)!, new RegExp(`/mcpel ${mcp.localId} accept`));
+  await (rig.controller as any).handleText(createWeixinEvent('{"issue":"ABC-1"}'));
+  await (rig.controller as any).handleCommand(createWeixinEvent(`/mcpel ${mcp.localId} accept`), 'zh', 'mcpel', [mcp.localId, 'accept']);
+  assert.deepEqual(responses.at(-1), {
+    requestId: 'mcp-1',
+    result: { action: 'accept', content: { issue: 'ABC-1' }, _meta: null },
+  });
 });

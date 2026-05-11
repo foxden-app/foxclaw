@@ -499,7 +499,12 @@ test('formatWeixinThreadsCopyPaste lists /open lines and filter hint', () => {
     'bug',
   );
   assert.match(withFilter, /Current filter: bug/);
-  assert.match(withFilter, /\/open 1\n\/open 2/);
+  assert.match(withFilter, /1\. One/);
+  assert.match(withFilter, /\/open 1/);
+  assert.match(withFilter, /\/watch 1/);
+  assert.match(withFilter, /\/thread_rename 1 <name>/);
+  assert.match(withFilter, /\/thread_archive 1/);
+  assert.match(withFilter, /\/threads archived \[query\]/);
 
   const paged = formatWeixinThreadsCopyPaste(
     'en',
@@ -510,6 +515,16 @@ test('formatWeixinThreadsCopyPaste lists /open lines and filter hint', () => {
     10,
   );
   assert.match(paged, /\/open 11/);
+});
+
+test('formatWeixinThreadsCopyPaste uses unarchive commands for archived rows', () => {
+  const out = formatWeixinThreadsCopyPaste('zh', [
+    { threadId: 'old', name: '旧工作', preview: 'old', archived: true },
+  ]);
+  assert.match(out, /可复制命令（微信）：/);
+  assert.match(out, /1\. 旧工作/);
+  assert.match(out, /\/thread_unarchive 1/);
+  assert.doesNotMatch(out, /\/thread_archive 1/);
 });
 
 test('formatWeixinModelCopyPaste mirrors model list and efforts', () => {
@@ -562,6 +577,17 @@ test('formatWeixinAccessCopyPaste lists preset commands', () => {
 });
 
 test('formatWeixinWhereNavCopyPaste adds /reveal when bound', () => {
-  assert.doesNotMatch(formatWeixinWhereNavCopyPaste('en', false), /\/reveal/);
+  const unbound = formatWeixinWhereNavCopyPaste('zh', false, '/tmp/project');
+  assert.doesNotMatch(unbound, /\/reveal/);
+  assert.match(unbound, /快捷命令：/);
+  assert.match(unbound, /\/status/);
+  assert.match(unbound, /\/threads/);
+  assert.match(unbound, /\/auth/);
+  assert.match(unbound, /\/mode default/);
+  assert.match(unbound, /\/mode plan/);
+  assert.match(unbound, /\/active steer/);
+  assert.match(unbound, /\/active queue/);
+  assert.match(unbound, /\/new \/tmp\/project/);
+  assert.match(unbound, /\/interrupt/);
   assert.match(formatWeixinWhereNavCopyPaste('en', true), /\/reveal/);
 });
