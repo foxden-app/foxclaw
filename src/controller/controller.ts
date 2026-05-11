@@ -300,6 +300,12 @@ interface PendingThreadRename {
   createdAt: number;
 }
 
+interface PendingThreadNewCwd {
+  scopeId: string;
+  messageId: number | null;
+  createdAt: number;
+}
+
 interface PendingAuthAdd {
   loginId: string;
   scopeId: string;
@@ -343,6 +349,68 @@ const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
 const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
 
+interface HelpCommandEntry {
+  key: string;
+  line: string;
+}
+
+const PINNED_HELP_COMMANDS: HelpCommandEntry[] = [
+  { key: 'help', line: '/help' },
+  { key: 'setup', line: '/setup' },
+  { key: 'status', line: '/status' },
+  { key: 'threads', line: '/threads [query]' },
+  { key: 'auth', line: '/auth' },
+];
+
+const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
+  { key: 'fast', line: '/fast <on|off|toggle>' },
+  { key: 'active', line: '/active <steer|queue>' },
+  { key: 'account', line: '/account' },
+  { key: 'quota', line: '/quota' },
+  { key: 'login_device', line: '/login_device' },
+  { key: 'threads_archived', line: '/threads archived [query]' },
+  { key: 'open', line: '/open <n>' },
+  { key: 'goal', line: '/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]' },
+  { key: 'history', line: '/history [limit]' },
+  { key: 'files', line: '/files <query>' },
+  { key: 'remote', line: '/remote' },
+  { key: 'watch', line: '/watch' },
+  { key: 'unwatch', line: '/unwatch' },
+  { key: 'steer', line: '/steer <message>' },
+  { key: 'takeover', line: '/takeover <message>' },
+  { key: 'queue', line: '/queue <message>' },
+  { key: 'new', line: '/new [cwd]' },
+  { key: 'mode', line: '/mode [default|plan]' },
+  { key: 'plan', line: '/plan' },
+  { key: 'agent', line: '/agent' },
+  { key: 'auth_reload', line: '/auth_reload' },
+  { key: 'logout', line: '/logout confirm' },
+  { key: 'loaded', line: '/loaded' },
+  { key: 'skills', line: '/skills [query]' },
+  { key: 'skill', line: '/skill <name>' },
+  { key: 'hooks', line: '/hooks' },
+  { key: 'plugins', line: '/plugins [query]' },
+  { key: 'plugin', line: '/plugin <name>' },
+  { key: 'apps', line: '/apps' },
+  { key: 'features', line: '/features' },
+  { key: 'config', line: '/config' },
+  { key: 'requirements', line: '/requirements' },
+  { key: 'provider', line: '/provider' },
+  { key: 'mcp', line: '/mcp' },
+  { key: 'review', line: '/review' },
+  { key: 'fork', line: '/fork [name]' },
+  { key: 'undo', line: '/undo [n]' },
+  { key: 'rename', line: '/rename <name>' },
+  { key: 'compact', line: '/compact' },
+  { key: 'archive', line: '/archive' },
+  { key: 'models', line: '/models' },
+  { key: 'permissions', line: '/permissions' },
+  { key: 'permissions_arg', line: '/permissions <read-only|default|full-access>' },
+  { key: 'reveal', line: '/reveal' },
+  { key: 'where', line: '/where' },
+  { key: 'interrupt', line: '/interrupt' },
+];
+
 export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
   private observedThreadWatchers = new Map<string, ObservedThreadWatcher>();
@@ -363,6 +431,9 @@ export class BridgeSessionCore {
   private localUsageCache: { expiresAt: number; stats: CodexLocalUsageStats } | null = null;
   private lastRemoteControlStatus: RemoteControlStatusState | null = null;
   private pendingThreadRenames = new Map<string, PendingThreadRename>();
+  private pendingThreadNewCwds = new Map<string, PendingThreadNewCwd>();
+  private recentCommandUsageByScope = new Map<string, Map<string, number>>();
+  private commandUsageSequence = 0;
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
@@ -469,6 +540,9 @@ export class BridgeSessionCore {
     this.threadTokenUsageAlerts.clear();
     this.pendingAuthChoiceLists.clear();
     this.pendingThreadRenames.clear();
+    this.pendingThreadNewCwds.clear();
+    this.recentCommandUsageByScope.clear();
+    this.commandUsageSequence = 0;
     this.pendingAuthRotation = null;
     this.clearObservedThreadWatchers();
     this.releaseActiveTurnsForBridgeShutdown();
@@ -511,6 +585,10 @@ export class BridgeSessionCore {
     if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
       this.store.insertAudit('inbound', scopeId, 'weixin.message', summarizeTelegramInput(event.text, event.attachments));
       const command = event.attachments.length === 0 ? parseCommand(event.text) : null;
+      if (event.attachments.length === 0 && this.pendingThreadNewCwds.has(scopeId)) {
+        await this.handleThreadNewCwdTextReply(event, locale);
+        return;
+      }
       if (command) {
         await this.handleCommand(event, locale, command.name, command.args);
         return;
@@ -542,6 +620,10 @@ export class BridgeSessionCore {
     }
     if (!command && event.attachments.length === 0 && this.hasPendingMcpElicitation(scopeId)) {
       await this.handleMcpElicitationTextReply(event, locale);
+      return;
+    }
+    if (event.attachments.length === 0 && this.pendingThreadNewCwds.has(scopeId)) {
+      await this.handleThreadNewCwdTextReply(event, locale);
       return;
     }
     if (!command && event.attachments.length === 0 && this.pendingThreadRenames.has(scopeId)) {
@@ -580,66 +662,12 @@ export class BridgeSessionCore {
 
   private async handleCommand(event: TelegramTextEvent, locale: AppLocale, name: string, args: string[]): Promise<void> {
     const scopeId = event.scopeId;
+    this.rememberCommandUsage(scopeId, name);
     switch (name) {
       case 'start':
       case 'help': {
         const weixinNote = scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX) ? t(locale, 'help_weixin_note') : '';
-        const lines = [
-          t(locale, 'help_commands_title'),
-          '/help',
-          '/setup',
-          '/fast <on|off|toggle>',
-          '/active <steer|queue>',
-          '/status',
-          '/account',
-          '/quota',
-          '/login_device',
-          '/threads [query]',
-          '/threads archived [query]',
-          '/open <n>',
-          '/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]',
-          '/history [limit]',
-          '/files <query>',
-          '/remote',
-          '/watch',
-          '/unwatch',
-          '/steer <message>',
-          '/takeover <message>',
-          '/queue <message>',
-          '/new [cwd]',
-          '/mode [default|plan]',
-          '/plan',
-          '/agent',
-          '/auth',
-          '/auth_reload',
-          '/logout confirm',
-          '/loaded',
-          '/skills [query]',
-          '/skill <name>',
-          '/hooks',
-          '/plugins [query]',
-          '/plugin <name>',
-          '/apps',
-          '/features',
-          '/config',
-          '/requirements',
-          '/provider',
-          '/mcp',
-          '/review',
-          '/fork [name]',
-          '/undo [n]',
-          '/rename <name>',
-          '/compact',
-          '/archive',
-          '/models',
-          '/permissions',
-          '/permissions <read-only|default|full-access>',
-          '/reveal',
-          '/where',
-          '/interrupt',
-          t(locale, 'help_advanced_aliases'),
-          t(locale, 'help_plain_text_hint'),
-        ];
+        const lines = this.buildHelpLines(scopeId, locale);
         if (weixinNote) {
           lines.push('', weixinNote);
         }
@@ -655,11 +683,13 @@ export class BridgeSessionCore {
         const appServerLabel = appServer.pid && appServer.port
           ? `${appServer.running ? t(locale, 'status_app_server_running') : t(locale, 'status_app_server_stale')} pid=${appServer.pid} port=${appServer.port}`
           : t(locale, 'none');
+        const cwd = binding?.cwd ?? this.config.defaultCwd;
         const lines = [
           t(locale, 'status_connected', { value: t(locale, this.app.isConnected() ? 'yes' : 'no') }),
           t(locale, 'status_app_server', { value: appServerLabel }),
           t(locale, 'status_user_agent', { value: this.app.getUserAgent() ?? t(locale, 'unknown') }),
           t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
+          t(locale, 'line_cwd', { value: cwd }),
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
           t(locale, 'status_fast', { value: fastStatus }),
@@ -859,13 +889,7 @@ export class BridgeSessionCore {
         this.queuedPrompts.delete(scopeId);
         await this.stopWatchingScopeThread(scopeId);
         const binding = await this.createBinding(scopeId, cwd);
-        const settings = this.store.getChatSettings(scopeId);
-        await this.sendMessage(scopeId, [
-          t(locale, 'started_new_thread', { threadId: binding.threadId }),
-          t(locale, 'line_cwd', { value: binding.cwd ?? cwd }),
-          t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
-          t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
-        ].join('\n'));
+        await this.sendNewThreadStartedMessage(scopeId, locale, binding, cwd);
         return;
       }
       case 'fork': {
@@ -1055,6 +1079,54 @@ export class BridgeSessionCore {
     }
   }
 
+  private buildHelpLines(scopeId: string, locale: AppLocale): string[] {
+    const recent = this.recentCommandUsageByScope.get(scopeId) ?? new Map<string, number>();
+    const dynamic = DYNAMIC_HELP_COMMANDS
+      .map((entry, index) => ({ entry, index, usedAt: recent.get(entry.key) ?? 0 }))
+      .sort((a, b) => {
+        if (a.usedAt !== b.usedAt) {
+          return b.usedAt - a.usedAt;
+        }
+        return a.index - b.index;
+      })
+      .map(({ entry }) => entry.line);
+    return [
+      t(locale, 'help_commands_title'),
+      ...PINNED_HELP_COMMANDS.map(entry => entry.line),
+      ...dynamic,
+      t(locale, 'help_advanced_aliases'),
+      t(locale, 'help_plain_text_hint'),
+    ];
+  }
+
+  private rememberCommandUsage(scopeId: string, name: string): void {
+    const key = normalizeHelpUsageKey(name);
+    if (!key) {
+      return;
+    }
+    let recent = this.recentCommandUsageByScope.get(scopeId);
+    if (!recent) {
+      recent = new Map<string, number>();
+      this.recentCommandUsageByScope.set(scopeId, recent);
+    }
+    recent.set(key, ++this.commandUsageSequence);
+  }
+
+  private async sendNewThreadStartedMessage(
+    scopeId: string,
+    locale: AppLocale,
+    binding: ThreadBinding,
+    requestedCwd: string,
+  ): Promise<void> {
+    const settings = this.store.getChatSettings(scopeId);
+    await this.sendMessage(scopeId, [
+      t(locale, 'started_new_thread', { threadId: binding.threadId }),
+      t(locale, 'line_cwd', { value: binding.cwd ?? requestedCwd }),
+      t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
+    ].join('\n'));
+  }
+
   private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
     const scopeId = event.scopeId;
     const locale = this.localeForChat(scopeId, event.languageCode);
@@ -1068,11 +1140,15 @@ export class BridgeSessionCore {
       await this.handleThreadListNavigationCallback(event, listNavMatch[1]! as 'prev' | 'next' | 'clear' | 'archived' | 'recent', locale);
       return;
     }
-    const threadActionMatch = /^thread:(rename|archive|unarchive):(.+)$/.exec(event.data);
+    if (event.data === 'thread:new') {
+      await this.handleThreadNewCallback(event, locale);
+      return;
+    }
+    const threadActionMatch = /^thread:(rename|watch|archive|unarchive):(.+)$/.exec(event.data);
     if (threadActionMatch) {
       await this.handleThreadActionCallback(
         event,
-        threadActionMatch[1]! as 'rename' | 'archive' | 'unarchive',
+        threadActionMatch[1]! as 'rename' | 'watch' | 'archive' | 'unarchive',
         threadActionMatch[2]!,
         locale,
       );
@@ -1101,6 +1177,16 @@ export class BridgeSessionCore {
     const settingsMatch = /^settings:(model|effort|access):(.+)$/.exec(event.data);
     if (settingsMatch) {
       await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort' | 'access', settingsMatch[2]!, locale);
+      return;
+    }
+    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload)$/.exec(event.data);
+    if (authActionMatch) {
+      await this.handleAuthPanelActionCallback(
+        event,
+        authActionMatch[1]!,
+        authActionMatch[2]! as 'login_device' | 'reload',
+        locale,
+      );
       return;
     }
     const authMatch = /^auth:([a-f0-9]+):(\d+)$/.exec(event.data);
@@ -3827,11 +3913,6 @@ export class BridgeSessionCore {
     }
 
     const state = await listCodexAuthState();
-    if (state.candidates.length === 0) {
-      await this.sendMessage(scopeId, renderAuthListMessage(locale, state));
-      return;
-    }
-
     const record: PendingAuthChoiceList = {
       localId: crypto.randomBytes(8).toString('hex'),
       chatId: scopeId,
@@ -3843,7 +3924,7 @@ export class BridgeSessionCore {
     const messageId = await this.sendMessage(
       scopeId,
       renderAuthListMessage(locale, state),
-      authChoiceKeyboard(record),
+      authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
   }
@@ -4287,6 +4368,30 @@ export class BridgeSessionCore {
       return null;
     }
     return this.ensureThreadReady(scopeId, binding);
+  }
+
+  private async handleAuthPanelActionCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    action: 'login_device' | 'reload',
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingAuthChoiceLists.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
+      return;
+    }
+    if (action === 'login_device') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'login_device_started'));
+      await this.handleLoginDeviceCommand(event.scopeId, locale);
+      return;
+    }
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_restarting'));
+    await this.handleAuthReloadCommand(event.scopeId, locale);
   }
 
   private async handleAuthSwitchCallback(
@@ -4768,7 +4873,7 @@ export class BridgeSessionCore {
 
   private async handleThreadActionCallback(
     event: TelegramCallbackEvent,
-    action: 'rename' | 'archive' | 'unarchive',
+    action: 'rename' | 'watch' | 'archive' | 'unarchive',
     threadId: string,
     locale: AppLocale,
   ): Promise<void> {
@@ -4780,6 +4885,7 @@ export class BridgeSessionCore {
     }
 
     if (action === 'rename') {
+      this.pendingThreadNewCwds.delete(scopeId);
       this.pendingThreadRenames.set(scopeId, {
         scopeId,
         threadId,
@@ -4790,6 +4896,32 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'thread_rename_prompt', {
         title: cached.name || cached.preview || t(locale, 'empty'),
       }));
+      return;
+    }
+
+    if (action === 'watch') {
+      if (cached.archived) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_is_archived_use_unarchive'));
+        return;
+      }
+      let binding: ThreadBinding;
+      try {
+        binding = await this.bindCachedThread(scopeId, threadId);
+      } catch (error) {
+        if (isThreadNotFoundError(error)) {
+          await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_no_longer_available'));
+          return;
+        }
+        throw error;
+      }
+      const target = resolveScopeMessageTarget(scopeId);
+      if (!target) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      const watch = await this.watchThread(scopeId, target.chatId, target.chatType, target.topicId, binding);
+      await this.showThreadsPanelFromStoredState(scopeId, event.messageId, locale, false);
+      await this.messaging.answerCallback(event.callbackQueryId, formatWatchCallbackText(locale, watch.mode, watch.threadId));
       return;
     }
 
@@ -4812,6 +4944,38 @@ export class BridgeSessionCore {
     await this.bindCachedThread(scopeId, threadId);
     await this.showThreadsPanelFromStoredState(scopeId, event.messageId, locale, false);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_unarchived_short'));
+  }
+
+  private async handleThreadNewCallback(event: TelegramCallbackEvent, locale: AppLocale): Promise<void> {
+    this.pendingThreadRenames.delete(event.scopeId);
+    this.pendingThreadNewCwds.set(event.scopeId, {
+      scopeId: event.scopeId,
+      messageId: event.messageId,
+      createdAt: Date.now(),
+    });
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_new_prompt_short'));
+    await this.sendMessage(event.scopeId, t(locale, 'thread_new_prompt', { cwd: this.config.defaultCwd }));
+  }
+
+  private async handleThreadNewCwdTextReply(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
+    const pending = this.pendingThreadNewCwds.get(event.scopeId);
+    if (!pending) {
+      return;
+    }
+    const rawCwd = event.text.trim();
+    if (!rawCwd) {
+      await this.sendMessage(event.scopeId, t(locale, 'thread_new_prompt', { cwd: this.config.defaultCwd }));
+      return;
+    }
+    const cwd = rawCwd === '.' ? this.config.defaultCwd : rawCwd;
+    this.pendingThreadNewCwds.delete(event.scopeId);
+    this.queuedPrompts.delete(event.scopeId);
+    await this.stopWatchingScopeThread(event.scopeId);
+    const binding = await this.createBinding(event.scopeId, cwd);
+    await this.sendNewThreadStartedMessage(event.scopeId, locale, binding, cwd);
+    if (pending.messageId !== null) {
+      await this.showThreadsPanelFromStoredState(event.scopeId, pending.messageId, locale, false);
+    }
   }
 
   private async handleThreadRenameTextReply(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
@@ -7167,11 +7331,59 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState): string
   return lines.join('\n');
 }
 
-function authChoiceKeyboard(record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
-  return record.candidates.map((candidate, index) => [{
+function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
+  const rows = record.candidates.map((candidate, index) => [{
     text: clipButtonText(`${candidate.isCurrent ? '* ' : ''}${candidate.name}`),
     callback_data: `auth:${record.localId}:${index}`,
   }]);
+  rows.push([
+    { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
+    { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
+  ]);
+  rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
+  return rows;
+}
+
+function normalizeHelpUsageKey(name: string): string | null {
+  const normalized = name.toLowerCase();
+  switch (normalized) {
+    case 'start':
+      return 'help';
+    case 'followup':
+      return 'active';
+    case 'login':
+      return 'login_device';
+    case 'codex_restart':
+      return 'auth_reload';
+    case 'file':
+      return 'files';
+    case 'rollback':
+      return 'undo';
+    case 'access':
+      return 'permissions';
+    case 'focus':
+      return 'reveal';
+    case 'model':
+      return 'models';
+    default:
+      if (PINNED_HELP_COMMANDS.some(entry => entry.key === normalized)) {
+        return normalized;
+      }
+      if (DYNAMIC_HELP_COMMANDS.some(entry => entry.key === normalized)) {
+        return normalized;
+      }
+      return null;
+  }
+}
+
+function formatWatchCallbackText(locale: AppLocale, mode: 'already' | 'active' | 'idle', threadId: string): string {
+  if (mode === 'already') {
+    return t(locale, 'watch_already_enabled', { threadId });
+  }
+  if (mode === 'active') {
+    return t(locale, 'watch_started_active', { threadId });
+  }
+  return t(locale, 'watch_started_idle', { threadId });
 }
 
 function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {

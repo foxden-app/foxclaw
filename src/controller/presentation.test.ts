@@ -88,6 +88,7 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
     }],
     [
       { text: 'Rename', callback_data: 'thread:rename:thread-2' },
+      { text: 'Watch', callback_data: 'thread:watch:thread-2' },
       { text: 'Archive/Delete', callback_data: 'thread:archive:thread-2' },
     ],
   ]);
@@ -114,6 +115,7 @@ test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
     }],
     [
       { text: 'Rename', callback_data: 'thread:rename:thread-x' },
+      { text: 'Watch', callback_data: 'thread:watch:thread-x' },
       { text: 'Archive/Delete', callback_data: 'thread:archive:thread-x' },
     ],
   ]);
@@ -191,8 +193,10 @@ test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
       [{ text: '11. Review auth flow', callback_data: 'thread:open:thread-2' }],
       [
         { text: 'Rename', callback_data: 'thread:rename:thread-2' },
+        { text: 'Watch', callback_data: 'thread:watch:thread-2' },
         { text: 'Archive/Delete', callback_data: 'thread:archive:thread-2' },
       ],
+      [{ text: 'New', callback_data: 'thread:new' }],
       [
         { text: 'Prev', callback_data: 'thread:list:prev' },
         { text: 'Next', callback_data: 'thread:list:next' },
