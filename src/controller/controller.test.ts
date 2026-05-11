@@ -92,6 +92,26 @@ function createCallback(data: string, messageId = 1): TelegramCallbackEvent {
   };
 }
 
+function setActiveTurnForTest(rig: ReturnType<typeof createControllerRig>, active: any): void {
+  (rig.controller as any).setActiveTurn(active.scopeId, active.turnId, active);
+}
+
+function getActiveTurnForTest(
+  rig: ReturnType<typeof createControllerRig>,
+  scopeId = 'telegram:99::root',
+  turnId = 'turn-1',
+): any {
+  return (rig.controller as any).getActiveTurn(scopeId, turnId);
+}
+
+function hasActiveTurnForTest(rig: ReturnType<typeof createControllerRig>, turnId: string): boolean {
+  return (rig.controller as any).hasAnyActiveTurnForTurn(turnId);
+}
+
+function deleteActiveTurnForTest(rig: ReturnType<typeof createControllerRig>, active: any): void {
+  (rig.controller as any).deleteActiveTurn(active.scopeId, active.turnId);
+}
+
 function installTempAuthFiles(t: TestContext, tempDir: string): string {
   const authDir = path.join(tempDir, '.codex');
   fs.mkdirSync(authDir, { recursive: true });
@@ -348,7 +368,7 @@ test('registerActiveTurn returns without waiting for turn completion', async (t)
   ]);
 
   assert.equal(result, 'resolved');
-  const active = (rig.controller as any).activeTurns.get('turn-1');
+  const active = getActiveTurnForTest(rig);
   assert.ok(active);
   active.resolver();
 });
@@ -362,7 +382,7 @@ test('takeover interrupts the active turn and starts a replacement turn after co
 
   rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   (rig.controller as any).queuedPrompts.set('telegram:99::root', { event: createEvent('/queue later'), text: 'later' });
 
   const calls: string[] = [];
@@ -371,7 +391,7 @@ test('takeover interrupts the active turn and starts a replacement turn after co
     turn.interruptRequested = true;
     setTimeout(() => {
       turn.resolver();
-      (rig.controller as any).activeTurns.delete(turn.turnId);
+      deleteActiveTurnForTest(rig, turn);
     }, 0);
   };
   (rig.controller as any).stopWatchingScopeThread = async (scopeId: string) => {
@@ -426,7 +446,7 @@ test('queue stores the next prompt while a turn is active', async (t) => {
   });
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCommand(createEvent('/queue first'), 'en', 'queue', ['first']);
   assert.equal((rig.controller as any).queuedPrompts.get('telegram:99::root')?.text, 'first');
@@ -452,7 +472,7 @@ test('plain messages during active turns steer by default or queue by chat setti
   };
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   await (rig.controller as any).handleText(createEvent('please adjust'));
 
   assert.equal(steers.length, 1);
@@ -557,7 +577,7 @@ test('diagnostic notifications route goal, model, remote, and MCP progress updat
 
   rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   (rig.controller as any).queueTurnRender = async () => {};
 
   await (rig.controller as any).handleNotification({
@@ -795,7 +815,7 @@ test('setup model callbacks are blocked while a turn is active but access still 
   });
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCallback(createCallback('setup:model:gpt-5-codex', 10));
   assert.equal(rig.callbackAnswers[0], 'Wait for the current turn to finish');
@@ -987,7 +1007,7 @@ test('/auth_reload is blocked while a turn is active', async (t) => {
     restarts += 1;
   };
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCommand(createEvent('/auth_reload'), 'en', 'auth_reload', []);
 
@@ -1182,7 +1202,7 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
     topicId: null,
     failedAuthTargets: new Set(),
   };
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleNotification({
     method: 'error',
@@ -1217,7 +1237,7 @@ test('usage limit errors auto-rotate auth after the active turn finishes', async
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_b/.test(message)));
   assert.ok(rig.sentMessages.includes('Retrying the same request with the new auth...'));
-  assert.ok((rig.controller as any).activeTurns.has('turn-2'));
+  assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
 
   await (rig.controller as any).handleNotification({
     method: 'error',
@@ -1275,7 +1295,7 @@ test('auth retry stops instead of creating a replacement thread when original th
     topicId: null,
     failedAuthTargets: new Set(),
   };
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleNotification({
     method: 'error',
@@ -1308,7 +1328,7 @@ test('Codex error notifications are shown on the active Telegram turn', async (t
   });
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleNotification({
     method: 'error',
@@ -1422,7 +1442,7 @@ test('submitted requestUserInput is retired when the active turn is interrupted'
 
   rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleServerRequest({
     id: 'request-1',
@@ -1702,7 +1722,7 @@ test('plan mode completion offers implementation prompt and starts default-mode 
     completed: true,
     messages: [],
   }];
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleTurnActivityEvent({
     kind: 'turn_completed',
@@ -1748,7 +1768,7 @@ test('plan mode prompts for implementation after clarification answer and plan u
     false,
     'plan',
   );
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleServerRequest({
     id: 'request-1',
@@ -1817,7 +1837,7 @@ test('/steer sends same-turn input to the active Codex turn', async (t) => {
     return { turnId };
   };
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCommand(createEvent('/steer focus tests'), 'en', 'steer', ['focus', 'tests']);
 
@@ -2402,6 +2422,167 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
   assert.match(rig.callbackAnswers.at(-1)!, /Watching thread thread-panel/);
 });
 
+test('turn notifications create independent active turns for every bound scope', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const wxScope = 'weixin:acc1:wx-user-1';
+  rig.store.setBinding('telegram:99::root', 'thread-shared', rig.tempDir);
+  rig.store.setBinding(wxScope, 'thread-shared', rig.tempDir);
+  (rig.controller as any).queueTurnRender = async () => {};
+
+  await (rig.controller as any).handleTurnStartedNotification({
+    threadId: 'thread-shared',
+    turn: { id: 'turn-shared' },
+  });
+
+  assert.ok(getActiveTurnForTest(rig, 'telegram:99::root', 'turn-shared'));
+  assert.ok(getActiveTurnForTest(rig, wxScope, 'turn-shared'));
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'agent_message_delta',
+    turnId: 'turn-shared',
+    itemId: 'item-1',
+    outputKind: 'final_answer',
+    delta: 'hello',
+  });
+
+  assert.equal(getActiveTurnForTest(rig, 'telegram:99::root', 'turn-shared')?.buffer, 'hello');
+  assert.equal(getActiveTurnForTest(rig, wxScope, 'turn-shared')?.buffer, 'hello');
+});
+
+test('observed watcher keeps a separate active turn for the same turn id', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const tgActive = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  const wxActive = (rig.controller as any).createActiveTurnState('weixin:acc1:wx-user-1', 'wx-user-1', 'private', null, 'thread-1', 'turn-1', 0, true);
+  setActiveTurnForTest(rig, tgActive);
+  setActiveTurnForTest(rig, wxActive);
+  (rig.controller as any).observedThreadWatchers.set('weixin:acc1:wx-user-1', {
+    scopeId: 'weixin:acc1:wx-user-1',
+    chatId: 'wx-user-1',
+    chatType: 'private',
+    topicId: null,
+    threadId: 'thread-1',
+    mode: 'app_snapshot',
+    timer: null,
+    cursor: null,
+    activeTurnId: 'turn-1',
+    waitingOnApproval: false,
+    sessionPath: null,
+    sessionOffset: -1,
+    sessionRemainder: '',
+    sessionCursor: { activeTurnId: null, nextMessageIndex: 0 },
+    stopped: false,
+  });
+  (rig.controller as any).queueTurnRender = async () => {};
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'agent_message_delta',
+    turnId: 'turn-1',
+    itemId: 'item-1',
+    outputKind: 'final_answer',
+    delta: 'op',
+  }, 'telegram:99::root');
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'agent_message_delta',
+    turnId: 'turn-1',
+    itemId: 'item-1',
+    outputKind: 'final_answer',
+    delta: 'wx',
+  }, 'weixin:acc1:wx-user-1');
+
+  assert.equal(getActiveTurnForTest(rig, 'telegram:99::root', 'turn-1')?.buffer, 'op');
+  assert.equal(getActiveTurnForTest(rig, 'weixin:acc1:wx-user-1', 'turn-1')?.buffer, 'wx');
+});
+
+test('approval requests are mirrored to watcher scopes and can be approved there', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const wxScope = 'weixin:acc1:wx-user-1';
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.setBinding(wxScope, 'thread-1', rig.tempDir);
+  rig.store.setChatLocale(wxScope, 'zh');
+  (rig.controller as any).observedThreadWatchers.set(wxScope, {
+    scopeId: wxScope,
+    chatId: 'wx-user-1',
+    chatType: 'private',
+    topicId: null,
+    threadId: 'thread-1',
+    mode: 'app_snapshot',
+    timer: null,
+    cursor: null,
+    activeTurnId: null,
+    waitingOnApproval: false,
+    sessionPath: null,
+    sessionOffset: -1,
+    sessionRemainder: '',
+    sessionCursor: { activeTurnId: null, nextMessageIndex: 0 },
+    stopped: false,
+  });
+  const responses: any[] = [];
+  (rig.controller as any).app.respond = async (requestId: string | number, result: unknown) => {
+    responses.push({ requestId, result });
+  };
+
+  await (rig.controller as any).handleServerRequest({
+    id: 'approval-shared',
+    method: 'item/commandExecution/requestApproval',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-approval',
+      command: 'npm test',
+      cwd: rig.tempDir,
+    },
+  });
+
+  const localId = ((rig.store as any).db.prepare('SELECT local_id FROM pending_approvals WHERE server_request_id = ?').get('approval-shared') as any).local_id;
+  assert.equal(rig.sentMessages.length, 2);
+  assert.match(rig.sentMessages[0]!, /Approval requested/);
+  assert.match(rig.sentMessages[1]!, /审批命令：|Approval commands:/);
+  assert.match(rig.sentMessages[1]!, new RegExp(`/approve ${localId} allow`));
+
+  await (rig.controller as any).handleCommand(createWeixinEvent(`/approve ${localId} allow`), 'zh', 'approve', [localId, 'allow']);
+
+  assert.deepEqual(responses.at(-1), { requestId: 'approval-shared', result: { decision: 'accept' } });
+  assert.equal(rig.store.getPendingApproval(localId)?.resolvedAt !== null, true);
+});
+
+test('watcher active turns are read-only except approval commands', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setChatLocale('weixin:acc1:wx-user-1', 'zh');
+  const active = (rig.controller as any).createActiveTurnState('weixin:acc1:wx-user-1', 'wx-user-1', 'private', null, 'thread-1', 'turn-1', 0, true);
+  setActiveTurnForTest(rig, active);
+  let steered = 0;
+  (rig.controller as any).app.steerTurn = async () => {
+    steered += 1;
+  };
+
+  await (rig.controller as any).handleText(createWeixinEvent('继续写'));
+
+  assert.equal(steered, 0);
+  assert.match(rig.sentMessages.at(-1)!, /只读观察/);
+});
+
 test('completed turns automatically start a queued prompt', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -2410,7 +2591,7 @@ test('completed turns automatically start a queued prompt', async (t) => {
   });
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   (rig.controller as any).queuedPrompts.set('telegram:99::root', {
     event: createEvent('/queue continue'),
     text: 'continue',
@@ -2481,7 +2662,7 @@ test('startup preview cleanup recovers still-live app-server turns', async (t) =
 
   await (rig.controller as any).cleanupStaleTurnPreviews();
 
-  assert.ok((rig.controller as any).activeTurns.has('turn-live'));
+  assert.ok(hasActiveTurnForTest(rig, 'turn-live'));
   assert.equal((rig.controller as any).observedThreadWatchers.get('telegram:99::root')?.activeTurnId, 'turn-live');
   assert.equal(rig.store.listActiveTurnPreviews().length, 1);
   assert.equal(rig.editedMessages.length, 0);
@@ -2541,7 +2722,7 @@ test('controller stop preserves live preview records for restart recovery', asyn
   });
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 123);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   rig.store.saveActiveTurnPreview({
     turnId: 'turn-1',
     scopeId: 'telegram:99::root',
@@ -2564,7 +2745,7 @@ test('watch relay sends codex cli user messages as prefixed telegram messages', 
   });
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0, true);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleTurnActivityEvent({
     kind: 'user_message',
@@ -2608,7 +2789,7 @@ test('observed turns delete commentary and archived status messages after a fina
     },
   ];
   active.archivedMessageIds = [33];
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   (rig.controller as any).completeTurn = async () => {};
   (rig.controller as any).clearObservedTurnWatcher = () => {};
 
@@ -2704,7 +2885,7 @@ test('weixin queue works like Telegram when a turn is active', async (t) => {
     'turn-1',
     0,
   );
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCommand(createWeixinEvent('/queue next'), 'en', 'queue', ['next']);
   assert.equal((rig.controller as any).queuedPrompts.get('weixin:acc1:wx-user-1')?.text, 'next');
@@ -2727,7 +2908,7 @@ test('weixin takeover runs the same path as Telegram', async (t) => {
     'turn-1',
     0,
   );
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
 
   const calls: string[] = [];
   (rig.controller as any).requestInterrupt = async (turn: any) => {
@@ -2735,7 +2916,7 @@ test('weixin takeover runs the same path as Telegram', async (t) => {
     turn.interruptRequested = true;
     setTimeout(() => {
       turn.resolver();
-      (rig.controller as any).activeTurns.delete(turn.turnId);
+      deleteActiveTurnForTest(rig, turn);
     }, 0);
   };
   (rig.controller as any).stopWatchingScopeThread = async (scopeId: string) => {
@@ -2911,7 +3092,7 @@ test('weixin /setup and /auth include Chinese copy-paste commands, and /auth use
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
 
   const active = (rig.controller as any).createActiveTurnState(scope, 'wx-user-1', 'private', null, 'thread-1', 'turn-1', 0);
-  (rig.controller as any).activeTurns.set('turn-1', active);
+  setActiveTurnForTest(rig, active);
   await (rig.controller as any).handleCommand(createWeixinEvent('/auth use 1'), 'zh', 'auth', ['use', '1']);
   assert.equal(restarts, 1);
   assert.match(rig.sentMessages.at(-1)!, /当前有回复、审批或问题在进行中/);

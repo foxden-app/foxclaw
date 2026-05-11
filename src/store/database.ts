@@ -303,6 +303,11 @@ export class BridgeStore {
     return row ? String(row.chat_id) : null;
   }
 
+  findAllChatIdsByThreadId(threadId: string): string[] {
+    const rows = this.db.prepare('SELECT chat_id FROM chat_bindings WHERE thread_id = ? ORDER BY updated_at ASC').all(threadId) as Array<{ chat_id: string }>;
+    return rows.map(row => String(row.chat_id));
+  }
+
   countBindings(): number {
     const row = this.db.prepare('SELECT COUNT(*) AS count FROM chat_bindings').get() as { count: number };
     return Number(row.count);
