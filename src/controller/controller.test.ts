@@ -1048,6 +1048,33 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.match(rig.sentMessages.at(-1)!, /Codex auth switched to auth\.json_b/);
 });
 
+test('/auth panel can disable and enable candidates for auto rotation', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /auth\.json_b \[enabled\]/);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:toggle:1`, 1));
+
+  assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], ['auth.json_b']);
+  assert.equal(rig.callbackAnswers.at(-1), 'Auth disabled');
+  assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[disabled\]/);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:toggle:1`, 1));
+
+  assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], []);
+  assert.equal(rig.callbackAnswers.at(-1), 'Auth enabled');
+  assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[enabled\]/);
+});
+
 test('/auth panel can start device login from an inline action', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -1245,6 +1272,56 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /no unused auth candidate is available/.test(message)));
+});
+
+test('auth auto-rotation skips disabled candidates', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  fs.writeFileSync(path.join(authDir, 'auth.json_c'), '{"account":"c"}');
+  rig.store.setCodexAuthCandidateDisabled('auth.json_b', true);
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any) => ({
+    threadId: binding.threadId,
+    turnId: 'turn-2',
+  });
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Usage limit exceeded', codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_c'));
+  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_c/.test(message)));
 });
 
 test('auth rotation retries on the scope that owns authRetry even with another bound scope active', async (t) => {
