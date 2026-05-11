@@ -203,6 +203,7 @@ export interface WeixinCopyPasteThreadRow {
   threadId: string;
   name: string | null;
   preview: string;
+  archived?: boolean;
 }
 
 export function formatWeixinThreadsCopyPaste(
@@ -223,10 +224,26 @@ export function formatWeixinThreadsCopyPaste(
     lines.push(t(locale, 'weixin_copy_threads_empty'));
   } else {
     for (let i = 0; i < threads.length; i += 1) {
-      lines.push(`/open ${pageOffset + i + 1}`);
+      const index = pageOffset + i + 1;
+      const thread = threads[i]!;
+      const title = truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 40);
+      lines.push(`${index}. ${title}`);
+      if (thread.archived) {
+        lines.push(`/thread_unarchive ${index}`);
+      } else {
+        lines.push(`/open ${index}`);
+        lines.push(`/watch ${index}`);
+        lines.push(`/thread_rename ${index} <name>`);
+        lines.push(`/thread_archive ${index}`);
+      }
     }
   }
-  lines.push(t(locale, 'weixin_copy_threads_filter_hint'));
+  lines.push(
+    '/new <PWD>',
+    '/threads archived [query]',
+    '/threads [query]',
+    t(locale, 'weixin_copy_threads_filter_hint'),
+  );
   return lines.join('\n');
 }
 
@@ -268,13 +285,21 @@ export function formatWeixinAccessCopyPaste(locale: AppLocale): string {
   ].join('\n');
 }
 
-export function formatWeixinWhereNavCopyPaste(locale: AppLocale, hasBinding: boolean): string {
+export function formatWeixinWhereNavCopyPaste(locale: AppLocale, hasBinding: boolean, defaultCwd?: string): string {
   const lines = [
     t(locale, 'weixin_copy_paste_divider'),
     t(locale, 'weixin_copy_where_nav_title'),
+    '/status',
     '/setup',
+    '/where',
+    '/threads',
+    '/auth',
+    '/mode default',
+    '/mode plan',
     '/active steer',
     '/active queue',
+    `/new ${defaultCwd || '<PWD>'}`,
+    '/interrupt',
     '/goal',
     '/history',
     '/files <query>',

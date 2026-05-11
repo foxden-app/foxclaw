@@ -167,6 +167,7 @@ interface ActiveTurn {
   finalText: string | null;
   interruptRequested: boolean;
   authRetry: AuthRetryContext | null;
+  collaborationMode: CollaborationModeValue;
   statusMessageText: string | null;
   statusNeedsRebase: boolean;
   segments: ActiveTurnSegment[];
@@ -844,23 +845,7 @@ export class BridgeSessionCore {
         return;
       }
       case 'watch': {
-        const binding = this.store.getBinding(scopeId);
-        if (!binding) {
-          await this.sendMessage(scopeId, t(locale, 'watch_no_thread_bound'));
-          return;
-        }
-        const watch = await this.watchThread(scopeId, event.chatId, event.chatType, event.topicId, binding);
-        const watchedThreadId = watch.threadId;
-        const mode = watch.mode;
-        if (mode === 'already') {
-          await this.sendMessage(scopeId, t(locale, 'watch_already_enabled', { threadId: watchedThreadId }));
-          return;
-        }
-        if (mode === 'active') {
-          await this.sendMessage(scopeId, t(locale, 'watch_started_active', { threadId: watchedThreadId }));
-          return;
-        }
-        await this.sendMessage(scopeId, t(locale, 'watch_started_idle', { threadId: watchedThreadId }));
+        await this.handleWatchCommand(event, locale, args);
         return;
       }
       case 'unwatch': {
@@ -915,6 +900,18 @@ export class BridgeSessionCore {
       }
       case 'unarchive': {
         await this.handleUnarchiveCommand(scopeId, locale, args);
+        return;
+      }
+      case 'thread_archive': {
+        await this.handleThreadArchiveIndexCommand(scopeId, locale, args);
+        return;
+      }
+      case 'thread_unarchive': {
+        await this.handleUnarchiveCommand(scopeId, locale, args);
+        return;
+      }
+      case 'thread_rename': {
+        await this.handleThreadRenameIndexCommand(scopeId, locale, args);
         return;
       }
       case 'review': {
@@ -1006,11 +1003,11 @@ export class BridgeSessionCore {
         return;
       }
       case 'plan': {
-        await this.showSetupPanel(scopeId, 'mode', undefined, locale);
+        await this.setCollaborationMode(scopeId, locale, 'plan');
         return;
       }
       case 'agent': {
-        await this.showSetupPanel(scopeId, 'mode', undefined, locale);
+        await this.setCollaborationMode(scopeId, locale, DEFAULT_COLLABORATION_MODE);
         return;
       }
       case 'model': {
@@ -1073,6 +1070,22 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'interrupt_requested_for', { turnId: active.turnId }));
         return;
       }
+      case 'approve': {
+        await this.handleApprovalTextCommand(scopeId, locale, args);
+        return;
+      }
+      case 'answer': {
+        await this.handleUserInputAnswerCommand(scopeId, locale, args);
+        return;
+      }
+      case 'planimpl': {
+        await this.handlePlanImplementationTextCommand(scopeId, locale, args);
+        return;
+      }
+      case 'mcpel': {
+        await this.handleMcpElicitationTextCommand(scopeId, locale, args);
+        return;
+      }
       default: {
         await this.sendMessage(scopeId, t(locale, 'unknown_command', { name }));
       }
@@ -1125,6 +1138,93 @@ export class BridgeSessionCore {
       t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
     ].join('\n'));
+  }
+
+  private async handleWatchCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const scopeId = event.scopeId;
+    let binding: ThreadBinding | null;
+    if (args.length > 0) {
+      const index = Number.parseInt(args[0] || '', 10);
+      if (!Number.isFinite(index)) {
+        await this.sendMessage(scopeId, t(locale, 'usage_watch'));
+        return;
+      }
+      const cached = this.store.getCachedThread(scopeId, index);
+      if (!cached) {
+        await this.sendMessage(scopeId, t(locale, 'unknown_cached_thread'));
+        return;
+      }
+      if (cached.archived) {
+        await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
+        return;
+      }
+      try {
+        binding = await this.bindCachedThread(scopeId, cached.threadId);
+      } catch (error) {
+        if (isThreadNotFoundError(error)) {
+          await this.sendMessage(scopeId, t(locale, 'cached_thread_unavailable'));
+          return;
+        }
+        throw error;
+      }
+    } else {
+      binding = this.store.getBinding(scopeId);
+    }
+    if (!binding) {
+      await this.sendMessage(scopeId, t(locale, 'watch_no_thread_bound'));
+      return;
+    }
+    const watch = await this.watchThread(scopeId, event.chatId, event.chatType, event.topicId, binding);
+    const watchedThreadId = watch.threadId;
+    const mode = watch.mode;
+    if (mode === 'already') {
+      await this.sendMessage(scopeId, t(locale, 'watch_already_enabled', { threadId: watchedThreadId }));
+      return;
+    }
+    if (mode === 'active') {
+      await this.sendMessage(scopeId, t(locale, 'watch_started_active', { threadId: watchedThreadId }));
+      return;
+    }
+    await this.sendMessage(scopeId, t(locale, 'watch_started_idle', { threadId: watchedThreadId }));
+  }
+
+  private async handleThreadArchiveIndexCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const index = Number.parseInt(args[0] || '', 10);
+    if (!Number.isFinite(index)) {
+      await this.sendMessage(scopeId, t(locale, 'usage_thread_archive'));
+      return;
+    }
+    const cached = this.store.getCachedThread(scopeId, index);
+    if (!cached) {
+      await this.sendMessage(scopeId, t(locale, 'unknown_cached_thread'));
+      return;
+    }
+    if (cached.archived) {
+      await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
+      return;
+    }
+    await this.archiveThreadFromPanel(scopeId, cached.threadId);
+    await this.sendMessage(scopeId, t(locale, 'archive_done', { threadId: cached.threadId }));
+  }
+
+  private async handleThreadRenameIndexCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const index = Number.parseInt(args[0] || '', 10);
+    const name = args.slice(1).join(' ').trim();
+    if (!Number.isFinite(index) || !name) {
+      await this.sendMessage(scopeId, t(locale, 'usage_thread_rename'));
+      return;
+    }
+    const cached = this.store.getCachedThread(scopeId, index);
+    if (!cached) {
+      await this.sendMessage(scopeId, t(locale, 'unknown_cached_thread'));
+      return;
+    }
+    if (cached.archived) {
+      await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
+      return;
+    }
+    await this.app.setThreadName(cached.threadId, name);
+    await this.sendMessage(scopeId, t(locale, 'rename_done', { name }));
   }
 
   private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
@@ -1255,6 +1355,36 @@ export class BridgeSessionCore {
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     if (approval.messageId !== null) {
       await this.editMessage(scopeId, approval.messageId, renderApprovalMessage(locale, approval, action));
+    }
+    this.updateStatus();
+  }
+
+  private async handleApprovalTextCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const localId = args[0]?.trim() ?? '';
+    const action = normalizeApprovalTextAction(args[1] ?? '');
+    if (!localId || !action) {
+      await this.sendMessage(scopeId, t(locale, 'usage_approve'));
+      return;
+    }
+    const approval = this.store.getPendingApproval(localId);
+    if (!approval || approval.resolvedAt) {
+      await this.sendMessage(scopeId, t(locale, 'approval_already_resolved'));
+      return;
+    }
+    if (approval.chatId !== scopeId) {
+      await this.sendMessage(scopeId, t(locale, 'approval_mismatch'));
+      return;
+    }
+
+    const result = mapApprovalDecision(approval, action);
+    await this.app.respond(parseStoredServerRequestId(approval.serverRequestId), result);
+    this.store.markApprovalResolved(localId);
+    this.clearApprovalTimer(localId);
+    await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
+    if (approval.messageId !== null) {
+      await this.editMessage(scopeId, approval.messageId, renderApprovalMessage(locale, approval, action), []);
+    } else {
+      await this.sendMessage(scopeId, t(locale, 'decision_recorded'));
     }
     this.updateStatus();
   }
@@ -1992,6 +2122,47 @@ export class BridgeSessionCore {
     await this.refreshOrFinishUserInput(record, locale);
   }
 
+  private async handleUserInputAnswerCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const localId = args[0]?.trim() ?? '';
+    const questionNumber = Number.parseInt(args[1] || '', 10);
+    const rawAnswer = args.slice(2).join(' ').trim();
+    if (!localId || !Number.isFinite(questionNumber) || questionNumber < 1 || !rawAnswer) {
+      await this.sendMessage(scopeId, t(locale, 'usage_answer'));
+      return;
+    }
+    const record = this.pendingUserInputs.get(localId);
+    if (!record) {
+      await this.sendMessage(scopeId, t(locale, 'user_input_expired'));
+      return;
+    }
+    if (record.status !== 'pending') {
+      await this.sendMessage(scopeId, t(locale, 'user_input_already_submitted'));
+      return;
+    }
+    if (record.chatId !== scopeId) {
+      await this.sendMessage(scopeId, t(locale, 'user_input_mismatch'));
+      return;
+    }
+    const question = record.questions[questionNumber - 1];
+    if (!question) {
+      await this.sendMessage(scopeId, t(locale, 'unsupported_action'));
+      return;
+    }
+    let answer = rawAnswer;
+    if (question.options.length > 0 && /^(0|[1-9]\d*)$/.test(rawAnswer)) {
+      const option = question.options[Number.parseInt(rawAnswer, 10) - 1];
+      if (!option) {
+        await this.sendMessage(scopeId, t(locale, 'unsupported_action'));
+        return;
+      }
+      answer = option.label;
+    }
+    record.answers.set(question.id, answer);
+    this.persistPendingUserInputAnswers(record);
+    await this.sendMessage(scopeId, t(locale, 'user_input_recorded'));
+    await this.refreshOrFinishUserInput(record, locale);
+  }
+
   private async refreshOrFinishUserInput(record: PendingUserInputRequest, locale: AppLocale): Promise<void> {
     const completed = record.questions.every(question => record.answers.has(question.id));
     if (completed) {
@@ -2170,8 +2341,7 @@ export class BridgeSessionCore {
     if (this.findPendingPlanImplementation(active.scopeId, active.turnId)) {
       return false;
     }
-    const settings = this.store.getChatSettings(active.scopeId);
-    if (resolveCollaborationMode(settings?.collaborationMode ?? null) !== 'plan') {
+    if (active.collaborationMode !== 'plan') {
       return false;
     }
     const planMarkdown = extractLatestPlanMarkdown(active);
@@ -2321,10 +2491,53 @@ export class BridgeSessionCore {
     }
   }
 
+  private async handlePlanImplementationTextCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const localId = args[0]?.trim() ?? '';
+    const action = normalizePlanImplementationTextAction(args[1] ?? '');
+    if (!localId || !action) {
+      await this.sendMessage(scopeId, t(locale, 'usage_planimpl'));
+      return;
+    }
+    const record = this.pendingPlanImplementations.get(localId);
+    if (!record) {
+      await this.sendMessage(scopeId, t(locale, 'plan_impl_expired'));
+      return;
+    }
+    if (record.scopeId !== scopeId) {
+      await this.sendMessage(scopeId, t(locale, 'plan_impl_mismatch'));
+      return;
+    }
+    if (action === 'stay') {
+      this.pendingPlanImplementations.delete(localId);
+      if (record.messageId !== null) {
+        await this.editMessage(record.scopeId, record.messageId, t(locale, 'plan_impl_staying'), []);
+      } else {
+        await this.sendMessage(scopeId, t(locale, 'plan_impl_staying'));
+      }
+      return;
+    }
+    if (this.findActiveTurn(record.scopeId)) {
+      await this.sendMessage(scopeId, t(locale, 'wait_current_turn'));
+      return;
+    }
+
+    this.pendingPlanImplementations.delete(localId);
+    const turn = await this.startPlanImplementationTurn(record, action === 'fresh');
+    const message = t(locale, action === 'fresh' ? 'plan_impl_started_fresh' : 'plan_impl_started', {
+      threadId: turn.threadId,
+      turnId: turn.turnId,
+    });
+    if (record.messageId !== null) {
+      await this.editMessage(record.scopeId, record.messageId, message, []);
+      return;
+    }
+    await this.sendMessage(scopeId, message);
+  }
+
   private async startPlanImplementationTurn(
     record: PendingPlanImplementation,
     freshContext: boolean,
-  ): Promise<{ threadId: string; turnId: string }> {
+  ): Promise<{ threadId: string; turnId: string; collaborationMode: CollaborationModeValue }> {
     await this.stopWatchingScopeThread(record.scopeId, freshContext ? undefined : record.threadId);
     const binding = freshContext
       ? await this.createBinding(record.scopeId, record.cwd ?? this.config.defaultCwd)
@@ -2367,6 +2580,7 @@ export class BridgeSessionCore {
         collaborationMode: DEFAULT_COLLABORATION_MODE,
         failedAuthTargets: new Set(),
       },
+      turn.collaborationMode,
     );
     return turn;
   }
@@ -2480,6 +2694,45 @@ export class BridgeSessionCore {
     }
   }
 
+  private async handleMcpElicitationTextCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const localId = args[0]?.trim() ?? '';
+    const action = normalizeMcpElicitationTextAction(args[1] ?? '');
+    if (!localId || !action) {
+      await this.sendMessage(scopeId, t(locale, 'usage_mcpel'));
+      return;
+    }
+    const record = this.pendingMcpElicitations.get(localId);
+    if (!record) {
+      await this.sendMessage(scopeId, t(locale, 'mcp_elicitation_expired'));
+      return;
+    }
+    if (record.chatId !== scopeId) {
+      await this.sendMessage(scopeId, t(locale, 'mcp_elicitation_mismatch'));
+      return;
+    }
+    if (action === 'accept' && record.mode === 'form' && record.content === null) {
+      await this.sendMessage(scopeId, t(locale, 'mcp_elicitation_json_required'));
+      return;
+    }
+    const response = {
+      action,
+      content: action === 'accept' ? record.content : null,
+      _meta: null,
+    };
+    await this.app.respond(record.serverRequestId, response);
+    this.pendingMcpElicitations.delete(localId);
+    if (record.messageId !== null) {
+      await this.editMessage(
+        record.chatId,
+        record.messageId,
+        renderMcpElicitationMessage(locale, record, action),
+        [],
+      );
+      return;
+    }
+    await this.sendMessage(scopeId, t(locale, 'decision_recorded'));
+  }
+
   private async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
     const cwd = requestedCwd || this.config.defaultCwd;
     const settings = this.store.getChatSettings(scopeId);
@@ -2498,11 +2751,14 @@ export class BridgeSessionCore {
     binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
     input: TurnInput[],
     overrides: { collaborationMode?: CollaborationModeValue | null | undefined; recoverMissingThread?: boolean | undefined } = {},
-  ): Promise<{ threadId: string; turnId: string }> {
+  ): Promise<{ threadId: string; turnId: string; collaborationMode: CollaborationModeValue }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
     const cwd = binding.cwd ?? this.config.defaultCwd;
-    const collaborationMode = await this.buildNativeCollaborationMode(settings, cwd, overrides.collaborationMode);
+    const requestedCollaborationMode = resolveCollaborationMode(
+      overrides.collaborationMode === undefined ? settings?.collaborationMode ?? null : overrides.collaborationMode,
+    );
+    const collaborationMode = await this.buildNativeCollaborationMode(settings, cwd, requestedCollaborationMode);
     const serviceTier = await this.resolveServiceTierForTurn(scopeId, settings);
     try {
       const turn = await this.app.startTurn({
@@ -2516,7 +2772,7 @@ export class BridgeSessionCore {
         serviceTier,
         collaborationMode,
       });
-      return { threadId: binding.threadId, turnId: turn.id };
+      return { threadId: binding.threadId, turnId: turn.id, collaborationMode: requestedCollaborationMode };
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
         throw error;
@@ -2533,7 +2789,7 @@ export class BridgeSessionCore {
       const replacementCollaborationMode = await this.buildNativeCollaborationMode(
         nextSettings,
         replacementCwd,
-        overrides.collaborationMode,
+        requestedCollaborationMode,
       );
       const replacementServiceTier = await this.resolveServiceTierForTurn(scopeId, nextSettings);
       const turn = await this.app.startTurn({
@@ -2547,7 +2803,7 @@ export class BridgeSessionCore {
         serviceTier: replacementServiceTier,
         collaborationMode: replacementCollaborationMode,
       });
-      return { threadId: replacement.threadId, turnId: turn.id };
+      return { threadId: replacement.threadId, turnId: turn.id, collaborationMode: requestedCollaborationMode };
     }
   }
 
@@ -2693,6 +2949,7 @@ export class BridgeSessionCore {
     turnId: string,
     previewMessageId: number,
     authRetry: AuthRetryContext | null = null,
+    collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
   ): Promise<void> {
     const active = this.createActiveTurnState(
       scopeId,
@@ -2702,6 +2959,8 @@ export class BridgeSessionCore {
       threadId,
       turnId,
       previewMessageId,
+      false,
+      collaborationMode,
     );
     active.authRetry = authRetry;
     this.activeTurns.set(turnId, active);
@@ -2735,6 +2994,7 @@ export class BridgeSessionCore {
     turnId: string,
     previewMessageId: number,
     isObserved = false,
+    collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
   ): ActiveTurn {
     let resolver: () => void = () => {};
     const completion = new Promise<void>((resolve) => {
@@ -2757,6 +3017,7 @@ export class BridgeSessionCore {
       finalText: null,
       interruptRequested: false,
       authRetry: null,
+      collaborationMode,
       statusMessageText: null,
       statusNeedsRebase: false,
       segments: [],
@@ -3875,6 +4136,10 @@ export class BridgeSessionCore {
 
   private async setCollaborationMode(scopeId: string, locale: AppLocale, mode: CollaborationModeValue): Promise<void> {
     this.store.setChatCollaborationMode(scopeId, mode);
+    if (mode === 'plan') {
+      await this.sendMessage(scopeId, t(locale, 'mode_plan_armed'));
+      return;
+    }
     await this.sendMessage(scopeId, [
       t(locale, 'mode_configured', { value: formatCollaborationModeLabel(locale, mode) }),
       t(locale, 'applies_next_turn'),
@@ -3903,6 +4168,10 @@ export class BridgeSessionCore {
       await this.handleAuthReloadCommand(scopeId, locale);
       return;
     }
+    if (action === 'use') {
+      await this.handleAuthUseCommand(scopeId, locale, args.slice(1));
+      return;
+    }
     if (action === 'add') {
       await this.handleAuthAddCommand(scopeId, locale, args.slice(1));
       return;
@@ -3923,10 +4192,49 @@ export class BridgeSessionCore {
     this.pendingAuthChoiceLists.set(record.localId, record);
     const messageId = await this.sendMessage(
       scopeId,
-      renderAuthListMessage(locale, state),
+      renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null),
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
+  }
+
+  private async handleAuthUseCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+      await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
+      return;
+    }
+    const index = Number.parseInt(args[0] || '', 10);
+    if (!Number.isFinite(index) || index < 1) {
+      await this.sendMessage(scopeId, t(locale, 'usage_auth'));
+      return;
+    }
+    let candidates = this.findLatestAuthChoiceList(scopeId)?.candidates ?? null;
+    if (!candidates) {
+      const state = await listCodexAuthState();
+      candidates = state.candidates;
+    }
+    const candidate = candidates[index - 1];
+    if (!candidate) {
+      await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
+      const state = await listCodexAuthState();
+      await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
+      return;
+    }
+    await this.sendMessage(scopeId, t(locale, 'auth_switching', { value: candidate.name }));
+    await this.switchCodexAuthAndRestart(scopeId, locale, candidate, false);
+  }
+
+  private findLatestAuthChoiceList(scopeId: string): PendingAuthChoiceList | null {
+    let latest: PendingAuthChoiceList | null = null;
+    for (const record of this.pendingAuthChoiceLists.values()) {
+      if (record.chatId !== scopeId) {
+        continue;
+      }
+      if (!latest || record.createdAt > latest.createdAt) {
+        latest = record;
+      }
+    }
+    return latest;
   }
 
   private async handleAuthAddCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -4478,7 +4786,7 @@ export class BridgeSessionCore {
       cwd: retry.cwd,
       updatedAt: Date.now(),
     };
-    let turn: { threadId: string; turnId: string };
+    let turn: { threadId: string; turnId: string; collaborationMode: CollaborationModeValue };
     try {
       const readyBinding = await this.ensureThreadReady(scopeId, binding, {
         recoverMissingThread: false,
@@ -4506,8 +4814,10 @@ export class BridgeSessionCore {
         ...retry,
         threadId: turn.threadId,
         cwd: this.store.getBinding(scopeId)?.cwd ?? retry.cwd,
+        collaborationMode: turn.collaborationMode,
         failedAuthTargets: new Set(retry.failedAuthTargets),
       },
+      turn.collaborationMode,
     );
   }
 
@@ -5094,7 +5404,7 @@ export class BridgeSessionCore {
         t(locale, 'where_send_message_or_new'),
       ].join('\n');
       if (parseWeixinBridgeScope(scopeId)) {
-        text += `\n\n${formatWeixinWhereNavCopyPaste(locale, false)}`;
+        text += `\n\n${formatWeixinWhereNavCopyPaste(locale, false, this.config.defaultCwd)}`;
       }
       if (messageId !== undefined) {
         await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
@@ -5109,7 +5419,7 @@ export class BridgeSessionCore {
     if (!thread) {
       let text = t(locale, 'where_thread_unavailable', { threadId: readyBinding.threadId });
       if (parseWeixinBridgeScope(scopeId)) {
-        text += `\n\n${formatWeixinWhereNavCopyPaste(locale, true)}`;
+        text += `\n\n${formatWeixinWhereNavCopyPaste(locale, true, this.config.defaultCwd)}`;
       }
       if (messageId !== undefined) {
         await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
@@ -5121,7 +5431,7 @@ export class BridgeSessionCore {
 
     let text = formatWhereMessage(locale, thread, settings, this.config.defaultCwd, access, fastStatus);
     if (parseWeixinBridgeScope(scopeId)) {
-      text += `\n\n${formatWeixinWhereNavCopyPaste(locale, true)}`;
+      text += `\n\n${formatWeixinWhereNavCopyPaste(locale, true, this.config.defaultCwd)}`;
     }
     if (messageId !== undefined) {
       await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, true));
@@ -5225,6 +5535,7 @@ export class BridgeSessionCore {
         threadId: row.threadId,
         name: row.name,
         preview: row.preview,
+        archived: row.archived,
       }));
       text += `\n\n${formatWeixinThreadsCopyPaste(locale, rows, searchTerm ?? null, offset)}`;
     }
@@ -5244,6 +5555,7 @@ export class BridgeSessionCore {
     let text = formatModelSettingsMessage(locale, models, settings);
     if (parseWeixinBridgeScope(scopeId)) {
       text += `\n\n${formatWeixinModelCopyPaste(locale, models, settings)}`;
+      text += `\n\n${formatWeixinWhereNavCopyPaste(locale, this.store.getBinding(scopeId) !== null, this.config.defaultCwd)}`;
     }
     const keyboard = buildModelSettingsKeyboard(locale, models, settings);
     if (messageId !== undefined) {
@@ -5266,6 +5578,7 @@ export class BridgeSessionCore {
     if (parseWeixinBridgeScope(scopeId)) {
       text += `\n\n${formatWeixinModelCopyPaste(locale, models, settings)}`;
       text += `\n\n${formatWeixinAccessCopyPaste(locale)}`;
+      text += `\n\n${formatWeixinWhereNavCopyPaste(locale, this.store.getBinding(scopeId) !== null, this.config.defaultCwd)}`;
     }
     const keyboard = buildSetupPanelKeyboard(locale, { focus, models, settings, access });
     if (messageId !== undefined) {
@@ -5280,6 +5593,7 @@ export class BridgeSessionCore {
     let text = formatAccessSettingsMessage(locale, access);
     if (parseWeixinBridgeScope(scopeId)) {
       text += `\n\n${formatWeixinAccessCopyPaste(locale)}`;
+      text += `\n\n${formatWeixinWhereNavCopyPaste(locale, this.store.getBinding(scopeId) !== null, this.config.defaultCwd)}`;
     }
     const keyboard = buildAccessSettingsKeyboard(locale, access);
     if (messageId !== undefined) {
@@ -5346,9 +5660,12 @@ export class BridgeSessionCore {
       }
       this.store.setChatCollaborationMode(scopeId, mode);
       await this.refreshSetupPanel(scopeId, event.messageId, 'mode', locale);
-      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'mode_configured', {
-        value: formatCollaborationModeLabel(locale, mode),
-      }));
+      await this.messaging.answerCallback(
+        event.callbackQueryId,
+        mode === 'plan'
+          ? t(locale, 'mode_plan_armed')
+          : t(locale, 'mode_configured', { value: formatCollaborationModeLabel(locale, mode) }),
+      );
       return;
     }
 
@@ -5500,6 +5817,9 @@ export class BridgeSessionCore {
     try {
       const input = await this.buildTurnInput(binding, { ...event, text }, locale);
       const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
+      if (turnState.collaborationMode === 'plan') {
+        this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+      }
       await this.registerActiveTurn(
         scopeId,
         event.chatId,
@@ -5515,9 +5835,10 @@ export class BridgeSessionCore {
           chatId: event.chatId,
           chatType: event.chatType,
           topicId: event.topicId,
-          collaborationMode: undefined,
+          collaborationMode: turnState.collaborationMode,
           failedAuthTargets: new Set(),
         },
+        turnState.collaborationMode,
       );
     } catch (error) {
       if (previewMessageId > 0) {
@@ -7014,6 +7335,21 @@ function renderMcpElicitationMessage(
   if (decision) {
     lines.push(t(locale, 'line_decision', { value: decision }));
   }
+  if (!decision && parseWeixinBridgeScope(record.chatId)) {
+    lines.push(
+      '',
+      t(locale, 'weixin_copy_paste_divider'),
+      t(locale, 'weixin_copy_mcp_title'),
+    );
+    if (record.mode === 'form') {
+      lines.push(t(locale, 'weixin_copy_mcp_json_hint'));
+    }
+    lines.push(
+      `/mcpel ${record.localId} accept`,
+      `/mcpel ${record.localId} decline`,
+      `/mcpel ${record.localId} cancel`,
+    );
+  }
   return lines.join('\n');
 }
 
@@ -7131,6 +7467,16 @@ function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord,
         : 'approval_decision_deny';
     lines.push(t(locale, 'line_decision', { value: t(locale, decisionKey) }));
   }
+  if (!decision && parseWeixinBridgeScope(record.chatId)) {
+    lines.push(
+      '',
+      t(locale, 'weixin_copy_paste_divider'),
+      t(locale, 'weixin_copy_approval_title'),
+      `/approve ${record.localId} allow`,
+      `/approve ${record.localId} session`,
+      `/approve ${record.localId} deny`,
+    );
+  }
   return lines.join('\n');
 }
 
@@ -7189,10 +7535,10 @@ function formatUserError(error: unknown): string {
 
 function normalizeRequestedCollaborationMode(value: string): CollaborationModeValue | null {
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'plan') {
+  if (normalized === 'plan' || normalized === '计划' || normalized === '规划') {
     return 'plan';
   }
-  if (normalized === 'default' || normalized === 'agent') {
+  if (normalized === 'default' || normalized === 'agent' || normalized === '默认') {
     return 'default';
   }
   return null;
@@ -7205,6 +7551,48 @@ function normalizeRequestedActiveTurnMessageMode(value: string): ActiveTurnMessa
   }
   if (normalized === 'queue' || normalized === '排队') {
     return 'queue';
+  }
+  return null;
+}
+
+function normalizeApprovalTextAction(value: string): ApprovalAction | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'allow' || normalized === 'accept' || normalized === 'yes' || normalized === '同意' || normalized === '允许') {
+    return 'accept';
+  }
+  if (normalized === 'session' || normalized === 'allow_session' || normalized === '本会话' || normalized === '本会话允许') {
+    return 'session';
+  }
+  if (normalized === 'deny' || normalized === 'decline' || normalized === 'no' || normalized === '拒绝') {
+    return 'deny';
+  }
+  return null;
+}
+
+function normalizePlanImplementationTextAction(value: string): 'run' | 'fresh' | 'stay' | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'run' || normalized === 'execute' || normalized === '执行') {
+    return 'run';
+  }
+  if (normalized === 'fresh' || normalized === 'clear' || normalized === '新上下文') {
+    return 'fresh';
+  }
+  if (normalized === 'stay' || normalized === 'plan' || normalized === '继续规划') {
+    return 'stay';
+  }
+  return null;
+}
+
+function normalizeMcpElicitationTextAction(value: string): McpElicitationAction | null {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'accept' || normalized === 'allow' || normalized === '同意' || normalized === '接受') {
+    return 'accept';
+  }
+  if (normalized === 'decline' || normalized === 'deny' || normalized === '拒绝') {
+    return 'decline';
+  }
+  if (normalized === 'cancel' || normalized === '取消') {
+    return 'cancel';
   }
   return null;
 }
@@ -7313,7 +7701,7 @@ async function switchCodexAuth(targetPath: string): Promise<void> {
   await pointCodexAuthAtTarget(state.authDir, state.authPath, candidate.path);
 }
 
-function renderAuthListMessage(locale: AppLocale, state: CodexAuthState): string {
+function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, includeWeixinCopyPaste = false): string {
   const lines = [
     t(locale, 'auth_list_title'),
     t(locale, 'auth_current', { value: state.currentLabel ?? t(locale, 'none') }),
@@ -7321,6 +7709,16 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState): string
   ];
   if (state.candidates.length === 0) {
     lines.push(t(locale, 'auth_no_candidates'));
+    if (includeWeixinCopyPaste) {
+      lines.push(
+        '',
+        t(locale, 'weixin_copy_paste_divider'),
+        t(locale, 'weixin_copy_auth_title'),
+        '/login_device',
+        '/auth reload',
+        '/permissions',
+      );
+    }
     return lines.join('\n');
   }
   lines.push(t(locale, 'auth_candidate_count', { value: state.candidates.length }));
@@ -7328,6 +7726,17 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState): string
     const marker = candidate.isCurrent ? ' *' : '';
     lines.push(`${index + 1}. ${candidate.name}${marker}`);
   });
+  if (includeWeixinCopyPaste) {
+    lines.push(
+      '',
+      t(locale, 'weixin_copy_paste_divider'),
+      t(locale, 'weixin_copy_auth_title'),
+      ...state.candidates.map((_candidate, index) => `/auth use ${index + 1}`),
+      '/login_device',
+      '/auth reload',
+      '/permissions',
+    );
+  }
   return lines.join('\n');
 }
 
@@ -7660,6 +8069,24 @@ function renderUserInputMessage(
         ? 'user_input_submitted'
         : 'user_input_reply_hint';
   lines.push(t(locale, statusKey));
+  if (record.status === 'pending' && parseWeixinBridgeScope(record.chatId)) {
+    lines.push(
+      '',
+      t(locale, 'weixin_copy_paste_divider'),
+      t(locale, 'weixin_copy_answer_title'),
+    );
+    record.questions.forEach((question, questionIndex) => {
+      if (record.answers.has(question.id)) {
+        return;
+      }
+      if (question.options.length > 0) {
+        question.options.forEach((_option, optionIndex) => {
+          lines.push(`/answer ${record.localId} ${questionIndex + 1} ${optionIndex + 1}`);
+        });
+      }
+      lines.push(`/answer ${record.localId} ${questionIndex + 1} <text>`);
+    });
+  }
   return lines.join('\n');
 }
 
@@ -7678,13 +8105,24 @@ function userInputKeyboard(record: PendingUserInputRequest): Array<Array<{ text:
 }
 
 function renderPlanImplementationPrompt(locale: AppLocale, record: PendingPlanImplementation): string {
-  return [
+  const lines = [
     t(locale, 'plan_impl_title'),
     t(locale, 'line_thread', { value: record.threadId }),
     t(locale, 'line_turn', { value: record.turnId }),
     '',
     t(locale, 'plan_impl_prompt'),
-  ].join('\n');
+  ];
+  if (parseWeixinBridgeScope(record.scopeId)) {
+    lines.push(
+      '',
+      t(locale, 'weixin_copy_paste_divider'),
+      t(locale, 'weixin_copy_plan_title'),
+      `/planimpl ${record.localId} run`,
+      `/planimpl ${record.localId} fresh`,
+      `/planimpl ${record.localId} stay`,
+    );
+  }
+  return lines.join('\n');
 }
 
 function planImplementationKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {

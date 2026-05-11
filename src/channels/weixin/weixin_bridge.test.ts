@@ -5,7 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BridgeMessagingRouter } from '../bridge_messaging_router.js';
 import type { TelegramMessagingPort } from '../telegram/telegram_messaging_port.js';
-import type { WeixinMessagingPort } from './weixin_messaging_port.js';
+import { BridgeStore } from '../../store/database.js';
+import { WeixinMessagingPort } from './weixin_messaging_port.js';
 import { accountFilePath, loadWeixinAccount, saveWeixinAccount, type WeixinSavedAccount } from './account_store.js';
 
 function stubTelegram(): TelegramMessagingPort {
@@ -72,4 +73,61 @@ test('saveWeixinAccount and loadWeixinAccount round-trip JSON shape', (t) => {
   assert.ok(fs.existsSync(fp));
   const loaded = loadWeixinAccount(dir, rec.accountId);
   assert.deepEqual(loaded, rec);
+});
+
+test('WeixinMessagingPort sends typing through iLink getconfig and sendtyping', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wx-typing-'));
+  const store = new BridgeStore(path.join(dir, 'bridge.sqlite'));
+  t.after(() => {
+    store.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const account: WeixinSavedAccount = {
+    accountId: 'acc1',
+    botToken: 'tok1',
+    baseUrl: 'https://ilink.example',
+    savedAt: 1,
+  };
+  const calls: Array<{ name: string; params: unknown }> = [];
+  store.setWeixinContextToken('weixin:acc1:user9', 'ctx-1');
+  const port = new WeixinMessagingPort(
+    store,
+    (accountId) => accountId === account.accountId ? account : null,
+    {
+      getConfig: async (params) => {
+        calls.push({ name: 'getConfig', params });
+        return { ret: 0, typing_ticket: 'ticket-1' };
+      },
+      sendTyping: async (params) => {
+        calls.push({ name: 'sendTyping', params });
+      },
+    },
+  );
+
+  await port.sendTypingInScope('weixin:acc1:user9');
+
+  assert.deepEqual(calls, [
+    {
+      name: 'getConfig',
+      params: {
+        baseUrl: 'https://ilink.example',
+        token: 'tok1',
+        ilinkUserId: 'user9',
+        contextToken: 'ctx-1',
+      },
+    },
+    {
+      name: 'sendTyping',
+      params: {
+        baseUrl: 'https://ilink.example',
+        token: 'tok1',
+        body: {
+          ilink_user_id: 'user9',
+          typing_ticket: 'ticket-1',
+          status: 1,
+        },
+      },
+    },
+  ]);
 });

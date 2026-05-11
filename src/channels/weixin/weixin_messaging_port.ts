@@ -1,8 +1,17 @@
 import { parseWeixinBridgeScope } from '../../core/bridge_scope.js';
 import type { BridgeStore } from '../../store/database.js';
+import { getConfig, sendTyping } from './ilink/api.js';
 import { sendMessageWeixin } from './ilink/send.js';
+import { TypingStatus } from './ilink/types.js';
 import type { WeixinSavedAccount } from './account_store.js';
 import type { ChannelInlineKeyboard } from '../../core/channel_port.js';
+
+type WeixinTypingApi = {
+  getConfig: typeof getConfig;
+  sendTyping: typeof sendTyping;
+};
+
+const DEFAULT_TYPING_API: WeixinTypingApi = { getConfig, sendTyping };
 
 function stripHtmlBasic(html: string): string {
   return html
@@ -26,6 +35,7 @@ export class WeixinMessagingPort {
   constructor(
     private readonly store: BridgeStore,
     private readonly loadAccount: (accountId: string) => WeixinSavedAccount | null,
+    private readonly typingApi: WeixinTypingApi = DEFAULT_TYPING_API,
   ) {}
 
   private allocMessageId(): number {
@@ -75,7 +85,38 @@ export class WeixinMessagingPort {
   }
 
   async sendTypingInScope(scopeId: string): Promise<void> {
-    void scopeId;
+    const parsed = parseWeixinBridgeScope(scopeId);
+    if (!parsed) {
+      return;
+    }
+    const account = this.loadAccount(parsed.accountId);
+    if (!account) {
+      return;
+    }
+    const contextToken = this.store.getWeixinContextToken(scopeId);
+    try {
+      const config = await this.typingApi.getConfig({
+        baseUrl: account.baseUrl,
+        token: account.botToken,
+        ilinkUserId: parsed.fromUserId,
+        ...(contextToken !== null && contextToken !== '' ? { contextToken } : {}),
+      });
+      const typingTicket = config.typing_ticket?.trim();
+      if (!typingTicket) {
+        return;
+      }
+      await this.typingApi.sendTyping({
+        baseUrl: account.baseUrl,
+        token: account.botToken,
+        body: {
+          ilink_user_id: parsed.fromUserId,
+          typing_ticket: typingTicket,
+          status: TypingStatus.TYPING,
+        },
+      });
+    } catch {
+      // Typing is a best-effort hint; never block the actual reply path.
+    }
   }
 
   async clearInlineKeyboard(scopeId: string, messageId: number): Promise<void> {
