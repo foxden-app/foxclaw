@@ -1622,7 +1622,11 @@ export class BridgeSessionCore {
       : threadId
         ? this.findActiveTurnsByThreadId(threadId)
         : [];
-    const active = activeTurns.find(turn => !turn.isObserved) ?? activeTurns[0] ?? null;
+    const isAuthRotationError = isCodexAuthRotationError(params);
+    const willRetry = params?.willRetry === true;
+    const active = isAuthRotationError
+      ? activeTurns.find(turn => turn.authRetry !== null) ?? activeTurns.find(turn => !turn.isObserved) ?? activeTurns[0] ?? null
+      : activeTurns.find(turn => !turn.isObserved) ?? activeTurns[0] ?? null;
 
     if (activeTurns.length > 0) {
       for (const turn of activeTurns) {
@@ -1631,14 +1635,19 @@ export class BridgeSessionCore {
     } else if (turnId) {
       this.pendingTurnErrors.set(turnId, message);
     }
-    if (isCodexAuthRotationError(params)) {
-      const scopeId = active?.scopeId ?? (threadId ? this.findChatByThread(threadId) : null);
+    if (isAuthRotationError && !willRetry && active?.authRetry) {
+      const scopeId = active.scopeId;
       if (scopeId) {
         this.pendingAuthRotation = {
           scopeId,
           reason: message,
-          retry: active?.authRetry ? cloneAuthRetryContext(active.authRetry) : null,
+          retry: cloneAuthRetryContext(active.authRetry),
         };
+      }
+    }
+    if (isAuthRotationError && !willRetry && activeTurns.length > 0) {
+      for (const turn of activeTurns) {
+        await this.finishTerminalErroredActiveTurn(turn);
       }
     }
     this.updateStatus();
@@ -2055,6 +2064,24 @@ export class BridgeSessionCore {
     segment.text = text;
     segment.completed = true;
     await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
+  }
+
+  private async finishTerminalErroredActiveTurn(active: ActiveTurn): Promise<void> {
+    if (!this.getActiveTurn(active.scopeId, active.turnId)) {
+      return;
+    }
+    try {
+      await this.completeTurn(active);
+      await this.cleanupObservedTransientMessages(active);
+      await this.finalizeUserInputsForTurn(active, 'resolved');
+    } finally {
+      if (active.isObserved) {
+        this.clearObservedTurnWatcher(active.turnId, active.scopeId);
+      }
+      active.resolver();
+      this.deleteActiveTurnRecord(active);
+      this.updateStatus();
+    }
   }
 
   private async handleUserInputRequest(serverRequestId: string | number, params: any): Promise<void> {
@@ -4957,11 +4984,16 @@ export class BridgeSessionCore {
       }
       throw error;
     }
+    const target = resolveScopeMessageTarget(scopeId) ?? {
+      chatId: retry.chatId,
+      chatType: retry.chatType,
+      topicId: retry.topicId,
+    };
     await this.registerActiveTurn(
       scopeId,
-      retry.chatId,
-      retry.chatType,
-      retry.topicId,
+      target.chatId,
+      target.chatType,
+      target.topicId,
       turn.threadId,
       turn.turnId,
       0,
@@ -4969,6 +5001,9 @@ export class BridgeSessionCore {
         ...retry,
         threadId: turn.threadId,
         cwd: this.store.getBinding(scopeId)?.cwd ?? retry.cwd,
+        chatId: target.chatId,
+        chatType: target.chatType,
+        topicId: target.topicId,
         collaborationMode: turn.collaborationMode,
         failedAuthTargets: new Set(retry.failedAuthTargets),
       },
