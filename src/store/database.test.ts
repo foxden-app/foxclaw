@@ -34,6 +34,17 @@ test('BridgeStore persists Weixin context tokens per scope', () => {
   });
 });
 
+test('BridgeStore persists disabled Codex auth candidates', () => {
+  withStore((store) => {
+    assert.deepEqual([...store.listDisabledCodexAuthCandidateNames()], []);
+    store.setCodexAuthCandidateDisabled('auth.json_a', true);
+    store.setCodexAuthCandidateDisabled('auth.json_b', false);
+    assert.deepEqual([...store.listDisabledCodexAuthCandidateNames()], ['auth.json_a']);
+    store.setCodexAuthCandidateDisabled('auth.json_a', false);
+    assert.deepEqual([...store.listDisabledCodexAuthCandidateNames()], []);
+  });
+});
+
 test('BridgeStore persists and resolves thread bindings', () => {
   withStore((store) => {
     store.setBinding(S1, 'thread-1', '/tmp/project');

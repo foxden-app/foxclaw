@@ -275,6 +275,7 @@ interface CodexAuthCandidate {
   name: string;
   path: string;
   isCurrent: boolean;
+  disabled: boolean;
   mtimeMs: number;
 }
 
@@ -1283,6 +1284,16 @@ export class BridgeSessionCore {
     const settingsMatch = /^settings:(model|effort|access):(.+)$/.exec(event.data);
     if (settingsMatch) {
       await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort' | 'access', settingsMatch[2]!, locale);
+      return;
+    }
+    const authToggleMatch = /^auth:([a-f0-9]+):toggle:(\d+)$/.exec(event.data);
+    if (authToggleMatch) {
+      await this.handleAuthToggleCallback(
+        event,
+        authToggleMatch[1]!,
+        Number.parseInt(authToggleMatch[2]!, 10),
+        locale,
+      );
       return;
     }
     const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload)$/.exec(event.data);
@@ -4358,12 +4369,16 @@ export class BridgeSessionCore {
       await this.handleAuthAddCommand(scopeId, locale, args.slice(1));
       return;
     }
+    if (action === 'enable' || action === 'disable') {
+      await this.handleAuthToggleCommand(scopeId, locale, args.slice(1), action === 'disable');
+      return;
+    }
     if (action !== 'list') {
       await this.sendMessage(scopeId, t(locale, 'usage_auth'));
       return;
     }
 
-    const state = await listCodexAuthState();
+    const state = await this.listCodexAuthState();
     const record: PendingAuthChoiceList = {
       localId: crypto.randomBytes(8).toString('hex'),
       chatId: scopeId,
@@ -4392,18 +4407,42 @@ export class BridgeSessionCore {
     }
     let candidates = this.findLatestAuthChoiceList(scopeId)?.candidates ?? null;
     if (!candidates) {
-      const state = await listCodexAuthState();
+      const state = await this.listCodexAuthState();
       candidates = state.candidates;
     }
     const candidate = candidates[index - 1];
     if (!candidate) {
       await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
-      const state = await listCodexAuthState();
+      const state = await this.listCodexAuthState();
       await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'auth_switching', { value: candidate.name }));
     await this.switchCodexAuthAndRestart(scopeId, locale, candidate, false);
+  }
+
+  private async handleAuthToggleCommand(
+    scopeId: string,
+    locale: AppLocale,
+    args: string[],
+    disabled: boolean,
+  ): Promise<void> {
+    const index = Number.parseInt(args[0] || '', 10);
+    if (!Number.isFinite(index) || index < 1) {
+      await this.sendMessage(scopeId, t(locale, 'usage_auth'));
+      return;
+    }
+    const state = await this.listCodexAuthState();
+    const candidate = state.candidates[index - 1];
+    if (!candidate) {
+      await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
+      await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
+      return;
+    }
+    this.store.setCodexAuthCandidateDisabled(candidate.name, disabled);
+    await this.sendMessage(scopeId, t(locale, disabled ? 'auth_candidate_disabled' : 'auth_candidate_enabled', {
+      value: candidate.name,
+    }));
   }
 
   private findLatestAuthChoiceList(scopeId: string): PendingAuthChoiceList | null {
@@ -4432,7 +4471,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    const state = await listCodexAuthState();
+    const state = await this.listCodexAuthState();
     const targetPath = path.join(state.authDir, candidateName);
     const existing = await fs.stat(targetPath).catch(() => null);
     if (existing) {
@@ -4884,6 +4923,41 @@ export class BridgeSessionCore {
     await this.handleAuthReloadCommand(event.scopeId, locale);
   }
 
+  private async handleAuthToggleCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    index: number,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingAuthChoiceLists.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
+      return;
+    }
+    const candidate = record.candidates[index];
+    if (!candidate) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    const disabled = !candidate.disabled;
+    this.store.setCodexAuthCandidateDisabled(candidate.name, disabled);
+    const state = await this.listCodexAuthState();
+    record.candidates = state.candidates;
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, disabled ? 'auth_candidate_disabled_short' : 'auth_candidate_enabled_short'));
+    if (record.messageId !== null) {
+      await this.editMessage(
+        event.scopeId,
+        record.messageId,
+        renderAuthListMessage(locale, state, parseWeixinBridgeScope(event.scopeId) !== null),
+        authChoiceKeyboard(locale, record),
+      );
+    }
+  }
+
   private async handleAuthSwitchCallback(
     event: TelegramCallbackEvent,
     localId: string,
@@ -5012,11 +5086,11 @@ export class BridgeSessionCore {
   }
 
   private async selectNextCodexAuthCandidate(failedTargets: Set<string>): Promise<CodexAuthCandidate | null> {
-    const state = await listCodexAuthState();
+    const state = await this.listCodexAuthState();
     if (state.currentTargetPath) {
       failedTargets.add(state.currentTargetPath);
     }
-    const candidates = state.candidates.filter(candidate => !failedTargets.has(candidate.path));
+    const candidates = state.candidates.filter(candidate => !candidate.disabled && !failedTargets.has(candidate.path));
     if (candidates.length === 0) {
       return null;
     }
@@ -5026,11 +5100,15 @@ export class BridgeSessionCore {
       : -1;
     for (let offset = 1; offset <= state.candidates.length; offset += 1) {
       const candidate = state.candidates[(currentIndex + offset + state.candidates.length) % state.candidates.length];
-      if (candidate && !failedTargets.has(candidate.path)) {
+      if (candidate && !candidate.disabled && !failedTargets.has(candidate.path)) {
         return candidate;
       }
     }
     return candidates[0] ?? null;
+  }
+
+  private async listCodexAuthState(): Promise<CodexAuthState> {
+    return listCodexAuthState(this.store.listDisabledCodexAuthCandidateNames());
   }
 
   private async switchCodexAuthAndRestart(
@@ -7819,7 +7897,7 @@ function codexAuthDir(): string {
   return process.env.CODEX_AUTH_DIR || path.join(os.homedir(), '.codex');
 }
 
-async function listCodexAuthState(): Promise<CodexAuthState> {
+async function listCodexAuthState(disabledNames = new Set<string>()): Promise<CodexAuthState> {
   const authDir = codexAuthDir();
   const authPath = path.join(authDir, 'auth.json');
   const currentTargetPath = await resolveCurrentAuthTarget(authDir, authPath);
@@ -7844,6 +7922,7 @@ async function listCodexAuthState(): Promise<CodexAuthState> {
       name: entry.name,
       path: candidatePath,
       isCurrent: currentTargetPath === candidatePath,
+      disabled: disabledNames.has(entry.name),
       mtimeMs: stat.mtimeMs,
     });
   }
@@ -7934,7 +8013,10 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, include
   lines.push(t(locale, 'auth_candidate_count', { value: state.candidates.length }));
   state.candidates.forEach((candidate, index) => {
     const marker = candidate.isCurrent ? ' *' : '';
-    lines.push(`${index + 1}. ${candidate.name}${marker}`);
+    const status = candidate.disabled
+      ? t(locale, 'auth_candidate_status_disabled')
+      : t(locale, 'auth_candidate_status_enabled');
+    lines.push(`${index + 1}. ${candidate.name}${marker} [${status}]`);
   });
   if (includeWeixinCopyPaste) {
     lines.push(
@@ -7942,6 +8024,9 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, include
       t(locale, 'weixin_copy_paste_divider'),
       t(locale, 'weixin_copy_auth_title'),
       ...state.candidates.map((_candidate, index) => `/auth use ${index + 1}`),
+      ...state.candidates.map((candidate, index) => candidate.disabled
+        ? `/auth enable ${index + 1}`
+        : `/auth disable ${index + 1}`),
       '/login_device',
       '/auth reload',
       '/permissions',
@@ -7951,10 +8036,16 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, include
 }
 
 function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
-  const rows = record.candidates.map((candidate, index) => [{
-    text: clipButtonText(`${candidate.isCurrent ? '* ' : ''}${candidate.name}`),
-    callback_data: `auth:${record.localId}:${index}`,
-  }]);
+  const rows = record.candidates.map((candidate, index) => [
+    {
+      text: clipButtonText(`${candidate.isCurrent ? '* ' : ''}${candidate.name}${candidate.disabled ? ' off' : ''}`),
+      callback_data: `auth:${record.localId}:${index}`,
+    },
+    {
+      text: t(locale, candidate.disabled ? 'button_auth_enable' : 'button_auth_disable'),
+      callback_data: `auth:${record.localId}:toggle:${index}`,
+    },
+  ]);
   rows.push([
     { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
     { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },

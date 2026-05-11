@@ -145,6 +145,11 @@ export class BridgeStore {
         context_token TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS codex_auth_candidates (
+        name TEXT PRIMARY KEY,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
     `);
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
@@ -642,6 +647,19 @@ export class BridgeStore {
       VALUES (?, ?, ?)
       ON CONFLICT(scope_id) DO UPDATE SET context_token = excluded.context_token, updated_at = excluded.updated_at
     `).run(scopeId, contextToken, Date.now());
+  }
+
+  listDisabledCodexAuthCandidateNames(): Set<string> {
+    const rows = this.db.prepare('SELECT name FROM codex_auth_candidates WHERE disabled = 1').all() as Array<{ name: string }>;
+    return new Set(rows.map(row => String(row.name)));
+  }
+
+  setCodexAuthCandidateDisabled(name: string, disabled: boolean): void {
+    this.db.prepare(`
+      INSERT INTO codex_auth_candidates (name, disabled, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
+    `).run(name, disabled ? 1 : 0, Date.now());
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
