@@ -32,7 +32,8 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "dev": "tsx src/main.ts serve",
     "serve": "node dist/main.js serve",
     "weixin-login": "node dist/main.js weixin-login",
@@ -42,7 +43,8 @@
     "uninstall-systemd": "bash scripts/systemd/uninstall.sh",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "node --test --import tsx \"src/**/*.test.ts\""
+    "test": "node --test --import tsx \"src/**/*.test.ts\"",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "dotenv": "^16.6.1",
