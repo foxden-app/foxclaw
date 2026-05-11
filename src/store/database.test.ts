@@ -51,6 +51,16 @@ test('BridgeStore persists and resolves thread bindings', () => {
   });
 });
 
+test('BridgeStore resolves all scopes bound to a thread', () => {
+  withStore((store) => {
+    store.setBinding(S1, 'thread-shared', '/tmp/a');
+    store.setBinding(S2, 'thread-shared', '/tmp/b');
+    store.setBinding(S3, 'thread-other', '/tmp/c');
+
+    assert.deepEqual(new Set(store.findAllChatIdsByThreadId('thread-shared')), new Set([S1, S2]));
+  });
+});
+
 test('BridgeStore caches thread lists and pending approvals', () => {
   withStore((store) => {
     store.cacheThreadList(S2, [

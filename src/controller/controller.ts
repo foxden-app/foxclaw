@@ -414,6 +414,7 @@ const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
 
 export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
+  private activeTurnsByTurnId = new Map<string, Set<string>>();
   private observedThreadWatchers = new Map<string, ObservedThreadWatcher>();
   private queuedPrompts = new Map<string, QueuedPromptRequest>();
   private pendingTurnErrors = new Map<string, string>();
@@ -426,6 +427,7 @@ export class BridgeSessionCore {
   private latestTurnDiffs = new Map<string, { scopeId: string; threadId: string; turnId: string; diff: string; updatedAt: number }>();
   private threadTokenUsageAlerts = new Map<string, { turnId: string | null; bucket: number; limit: number }>();
   private pendingAuthChoiceLists = new Map<string, PendingAuthChoiceList>();
+  private pendingApprovalMessages = new Map<string, Map<string, number>>();
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
   private authRotationFailedTargets = new Set<string>();
@@ -1066,6 +1068,10 @@ export class BridgeSessionCore {
           await this.sendMessage(scopeId, t(locale, 'no_active_turn'));
           return;
         }
+        if (active.isObserved) {
+          await this.sendMessage(scopeId, t(locale, 'watch_read_only_active'));
+          return;
+        }
         await this.requestInterrupt(active);
         await this.sendMessage(scopeId, t(locale, 'interrupt_requested_for', { turnId: active.turnId }));
         return;
@@ -1342,21 +1348,18 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'approval_already_resolved'));
       return;
     }
-    if (approval.chatId !== scopeId || (approval.messageId !== null && approval.messageId !== event.messageId)) {
+    const scopedMessageId = this.pendingApprovalMessages.get(localId)?.get(scopeId) ?? (
+      approval.chatId === scopeId ? approval.messageId : null
+    );
+    if (!this.scopeCanApproveThread(scopeId, approval.threadId) || (scopedMessageId !== null && scopedMessageId !== event.messageId)) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'approval_mismatch'));
       return;
     }
 
     const result = mapApprovalDecision(approval, action);
     await this.app.respond(parseStoredServerRequestId(approval.serverRequestId), result);
-    this.store.markApprovalResolved(localId);
-    this.clearApprovalTimer(localId);
-    await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
+    await this.markApprovalResolvedForAllScopes(approval, action, scopeId);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
-    if (approval.messageId !== null) {
-      await this.editMessage(scopeId, approval.messageId, renderApprovalMessage(locale, approval, action));
-    }
-    this.updateStatus();
   }
 
   private async handleApprovalTextCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -1371,22 +1374,14 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'approval_already_resolved'));
       return;
     }
-    if (approval.chatId !== scopeId) {
+    if (!this.scopeCanApproveThread(scopeId, approval.threadId)) {
       await this.sendMessage(scopeId, t(locale, 'approval_mismatch'));
       return;
     }
 
     const result = mapApprovalDecision(approval, action);
     await this.app.respond(parseStoredServerRequestId(approval.serverRequestId), result);
-    this.store.markApprovalResolved(localId);
-    this.clearApprovalTimer(localId);
-    await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
-    if (approval.messageId !== null) {
-      await this.editMessage(scopeId, approval.messageId, renderApprovalMessage(locale, approval, action), []);
-    } else {
-      await this.sendMessage(scopeId, t(locale, 'decision_recorded'));
-    }
-    this.updateStatus();
+    await this.markApprovalResolvedForAllScopes(approval, action, scopeId);
   }
 
   private async handleNotification(notification: JsonRpcNotification): Promise<void> {
@@ -1522,9 +1517,7 @@ export class BridgeSessionCore {
         const params = request.params as any;
         const approval = this.createApprovalRecord('command', request.id, params);
         await this.notePendingApprovalStatus(approval.threadId, approval.kind);
-        const locale = this.localeForChat(approval.chatId);
-        const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
-        this.store.updatePendingApprovalMessage(approval.localId, messageId);
+        await this.sendApprovalRequestToThreadScopes(approval);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
         return;
@@ -1533,9 +1526,7 @@ export class BridgeSessionCore {
         const params = request.params as any;
         const approval = this.createApprovalRecord('fileChange', request.id, params);
         await this.notePendingApprovalStatus(approval.threadId, approval.kind);
-        const locale = this.localeForChat(approval.chatId);
-        const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
-        this.store.updatePendingApprovalMessage(approval.localId, messageId);
+        await this.sendApprovalRequestToThreadScopes(approval);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
         return;
@@ -1544,9 +1535,7 @@ export class BridgeSessionCore {
         const params = request.params as any;
         const approval = this.createPermissionApprovalRecord(request.id, params);
         await this.notePendingApprovalStatus(approval.threadId, approval.kind);
-        const locale = this.localeForChat(approval.chatId);
-        const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
-        this.store.updatePendingApprovalMessage(approval.localId, messageId);
+        await this.sendApprovalRequestToThreadScopes(approval);
         this.armApprovalTimer(approval.localId);
         this.updateStatus();
         return;
@@ -1566,6 +1555,61 @@ export class BridgeSessionCore {
     }
   }
 
+  private async sendApprovalRequestToThreadScopes(approval: PendingApprovalRecord): Promise<void> {
+    const scopes = this.findAllChatsByThread(approval.threadId);
+    if (!scopes.includes(approval.chatId)) {
+      scopes.unshift(approval.chatId);
+    }
+    const messages = new Map<string, number>();
+    for (const scopeId of scopes) {
+      const locale = this.localeForChat(scopeId);
+      const messageId = await this.sendMessage(
+        scopeId,
+        renderApprovalMessage(locale, approval, undefined, scopeId),
+        approvalKeyboard(locale, approval.localId),
+      );
+      messages.set(scopeId, messageId);
+      if (scopeId === approval.chatId) {
+        this.store.updatePendingApprovalMessage(approval.localId, messageId);
+      }
+    }
+    this.pendingApprovalMessages.set(approval.localId, messages);
+  }
+
+  private async markApprovalResolvedForAllScopes(
+    approval: PendingApprovalRecord,
+    action: ApprovalAction,
+    resolvedByScopeId: string,
+  ): Promise<void> {
+    this.store.markApprovalResolved(approval.localId);
+    this.clearApprovalTimer(approval.localId);
+    await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
+    const messages = this.pendingApprovalMessages.get(approval.localId) ?? new Map<string, number>();
+    if (approval.messageId !== null && !messages.has(approval.chatId)) {
+      messages.set(approval.chatId, approval.messageId);
+    }
+    for (const [scopeId, messageId] of messages) {
+      const locale = this.localeForChat(scopeId);
+      try {
+        await this.editMessage(scopeId, messageId, renderApprovalMessage(locale, approval, action, scopeId), []);
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('approval.resolve_edit_failed', {
+            localId: approval.localId,
+            scopeId,
+            messageId,
+            error: toErrorMeta(error),
+          });
+        }
+      }
+    }
+    if (!messages.has(resolvedByScopeId)) {
+      await this.sendMessage(resolvedByScopeId, t(this.localeForChat(resolvedByScopeId), 'decision_recorded'));
+    }
+    this.pendingApprovalMessages.delete(approval.localId);
+    this.updateStatus();
+  }
+
   private async handleCodexErrorNotification(params: any): Promise<void> {
     const message = formatCodexNotificationError(params);
     this.lastError = message;
@@ -1573,14 +1617,17 @@ export class BridgeSessionCore {
 
     const turnId = stringOrNull(params?.turnId);
     const threadId = stringOrNull(params?.threadId);
-    const active = turnId
-      ? this.activeTurns.get(turnId) ?? null
+    const activeTurns = turnId
+      ? this.getActiveTurnsForTurn(turnId)
       : threadId
-        ? this.findActiveTurnByThreadId(threadId)
-        : null;
+        ? this.findActiveTurnsByThreadId(threadId)
+        : [];
+    const active = activeTurns.find(turn => !turn.isObserved) ?? activeTurns[0] ?? null;
 
-    if (active) {
-      await this.recordActiveTurnError(active, message);
+    if (activeTurns.length > 0) {
+      for (const turn of activeTurns) {
+        await this.recordActiveTurnError(turn, message);
+      }
     } else if (turnId) {
       this.pendingTurnErrors.set(turnId, message);
     }
@@ -1601,18 +1648,19 @@ export class BridgeSessionCore {
   private async handleTurnStartedNotification(params: any): Promise<void> {
     const turnId = stringOrNull(params?.turn?.id);
     const threadId = stringOrNull(params?.threadId);
-    if (!turnId || !threadId || this.activeTurns.has(turnId)) {
+    if (!turnId || !threadId) {
       return;
     }
-    const scopeId = this.findChatByThread(threadId);
-    if (!scopeId || this.findActiveTurn(scopeId)) {
-      return;
+    for (const scopeId of this.findAllChatsByThread(threadId)) {
+      if (this.getActiveTurn(scopeId, turnId) || this.findActiveTurn(scopeId)) {
+        continue;
+      }
+      const target = resolveScopeMessageTarget(scopeId);
+      if (!target) {
+        continue;
+      }
+      await this.registerActiveTurn(scopeId, target.chatId, target.chatType, target.topicId, threadId, turnId, 0);
     }
-    const target = resolveScopeMessageTarget(scopeId);
-    if (!target) {
-      return;
-    }
-    await this.registerActiveTurn(scopeId, target.chatId, target.chatType, target.topicId, threadId, turnId, 0);
   }
 
   private async handleTurnDiffUpdated(params: any): Promise<void> {
@@ -1622,11 +1670,9 @@ export class BridgeSessionCore {
     if (!threadId || !turnId) {
       return;
     }
-    const scopeId = this.findChatByThread(threadId);
-    if (!scopeId) {
-      return;
+    for (const scopeId of this.findAllChatsByThread(threadId)) {
+      this.latestTurnDiffs.set(scopeId, { scopeId, threadId, turnId, diff, updatedAt: Date.now() });
     }
-    this.latestTurnDiffs.set(scopeId, { scopeId, threadId, turnId, diff, updatedAt: Date.now() });
   }
 
   private async handleThreadStatusChanged(params: any): Promise<void> {
@@ -1702,23 +1748,24 @@ export class BridgeSessionCore {
     if (!threadId || !message) {
       return;
     }
-    const active = this.findActiveTurnByThreadId(threadId);
-    if (!active) {
-      const scopeId = this.findChatByThread(threadId);
-      if (scopeId) {
+    const activeTurns = this.findActiveTurnsByThreadId(threadId);
+    if (activeTurns.length === 0) {
+      for (const scopeId of this.findAllChatsByThread(threadId)) {
         await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'mcp_tool_progress', {
           message: truncateInline(message, 220),
         }));
       }
       return;
     }
-    active.pendingArchivedStatus = {
-      text: t(this.localeForChat(active.scopeId), 'mcp_tool_progress', {
-        message: truncateInline(message, 220),
-      }),
-      html: null,
-    };
-    await this.queueTurnRender(active, { forceStatus: true });
+    for (const active of activeTurns) {
+      active.pendingArchivedStatus = {
+        text: t(this.localeForChat(active.scopeId), 'mcp_tool_progress', {
+          message: truncateInline(message, 220),
+        }),
+        html: null,
+      };
+      await this.queueTurnRender(active, { forceStatus: true });
+    }
   }
 
   private async handleModelNotification(method: string, params: any): Promise<void> {
@@ -1827,6 +1874,7 @@ export class BridgeSessionCore {
       this.store.markApprovalResolved(approval.localId);
       this.clearApprovalTimer(approval.localId);
       await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
+      this.pendingApprovalMessages.delete(approval.localId);
     }
 
     const userInput = [...this.pendingUserInputs.values()].find(record => sameServerRequestId(record.serverRequestId, requestId)) ?? null;
@@ -2963,7 +3011,7 @@ export class BridgeSessionCore {
       collaborationMode,
     );
     active.authRetry = authRetry;
-    this.activeTurns.set(turnId, active);
+    this.setActiveTurn(scopeId, turnId, active);
     const pendingError = this.pendingTurnErrors.get(turnId);
     if (pendingError) {
       this.pendingTurnErrors.delete(turnId);
@@ -3037,6 +3085,70 @@ export class BridgeSessionCore {
     };
   }
 
+  private setActiveTurn(scopeId: string, turnId: string, active: ActiveTurn): void {
+    const key = activeTurnKey(scopeId, turnId);
+    this.activeTurns.set(key, active);
+    let keys = this.activeTurnsByTurnId.get(turnId);
+    if (!keys) {
+      keys = new Set<string>();
+      this.activeTurnsByTurnId.set(turnId, keys);
+    }
+    keys.add(key);
+  }
+
+  private getActiveTurn(scopeId: string, turnId: string): ActiveTurn | null {
+    return this.activeTurns.get(activeTurnKey(scopeId, turnId)) ?? null;
+  }
+
+  private getActiveTurnsForTurn(turnId: string): ActiveTurn[] {
+    const keys = this.activeTurnsByTurnId.get(turnId);
+    if (!keys) {
+      return [];
+    }
+    const active: ActiveTurn[] = [];
+    for (const key of keys) {
+      const parsed = parseActiveTurnKey(key);
+      if (!parsed || parsed.turnId !== turnId) {
+        continue;
+      }
+      const turn = this.activeTurns.get(key);
+      if (turn) {
+        active.push(turn);
+      }
+    }
+    return active;
+  }
+
+  private getPrimaryActiveTurnForTurn(turnId: string): ActiveTurn | null {
+    const active = this.getActiveTurnsForTurn(turnId);
+    return active.find(turn => !turn.isObserved) ?? active[0] ?? null;
+  }
+
+  private hasAnyActiveTurnForTurn(turnId: string): boolean {
+    return this.getActiveTurnsForTurn(turnId).length > 0;
+  }
+
+  private deleteActiveTurn(scopeId: string, turnId: string): ActiveTurn | null {
+    const key = activeTurnKey(scopeId, turnId);
+    const active = this.activeTurns.get(key) ?? null;
+    if (!active) {
+      return null;
+    }
+    this.activeTurns.delete(key);
+    const keys = this.activeTurnsByTurnId.get(turnId);
+    if (keys) {
+      keys.delete(key);
+      if (keys.size === 0) {
+        this.activeTurnsByTurnId.delete(turnId);
+      }
+    }
+    return active;
+  }
+
+  private deleteActiveTurnRecord(active: ActiveTurn): void {
+    this.deleteActiveTurn(active.scopeId, active.turnId);
+  }
+
   private async completeTurn(active: ActiveTurn): Promise<void> {
     const locale = this.localeForChat(active.scopeId);
     let shouldMarkPartialOutput = false;
@@ -3061,12 +3173,16 @@ export class BridgeSessionCore {
     }
   }
 
-  private async handleTurnActivityEvent(activity: TurnActivityEvent): Promise<void> {
-    const active = this.activeTurns.get(activity.turnId);
-    if (!active) {
-      return;
+  private async handleTurnActivityEvent(activity: TurnActivityEvent, scopeId?: string): Promise<void> {
+    const activeTurns = scopeId
+      ? [this.getActiveTurn(scopeId, activity.turnId)].filter((active): active is ActiveTurn => active !== null)
+      : this.getActiveTurnsForTurn(activity.turnId);
+    for (const active of activeTurns) {
+      await this.handleTurnActivityForActive(active, activity);
     }
+  }
 
+  private async handleTurnActivityForActive(active: ActiveTurn, activity: TurnActivityEvent): Promise<void> {
     switch (activity.kind) {
       case 'user_message': {
         await this.sendObservedCliUserMessage(active.scopeId, activity.text);
@@ -3141,9 +3257,11 @@ export class BridgeSessionCore {
             }
           }
         } finally {
-          this.clearObservedTurnWatcher(active.turnId);
+          if (active.isObserved) {
+            this.clearObservedTurnWatcher(active.turnId, active.scopeId);
+          }
           active.resolver();
-          this.activeTurns.delete(active.turnId);
+          this.deleteActiveTurnRecord(active);
           this.updateStatus();
           const retriedAfterAuthRotation = await this.maybeRunPendingAuthRotation();
           if (!retriedAfterAuthRotation && active.authRetry) {
@@ -3214,10 +3332,38 @@ export class BridgeSessionCore {
   }
 
   private findChatByThread(threadId: string): string | null {
+    const active = this.findActiveTurnByThreadId(threadId);
+    if (active) return active.scopeId;
+    return this.findAllChatsByThread(threadId)[0] ?? null;
+  }
+
+  private findAllChatsByThread(threadId: string): string[] {
+    const scopes = new Set<string>();
     for (const turn of this.activeTurns.values()) {
-      if (turn.threadId === threadId) return turn.scopeId;
+      if (turn.threadId === threadId) {
+        scopes.add(turn.scopeId);
+      }
     }
-    return this.store.findChatIdByThreadId(threadId);
+    for (const scopeId of this.store.findAllChatIdsByThreadId(threadId)) {
+      scopes.add(scopeId);
+    }
+    for (const watcher of this.observedThreadWatchers.values()) {
+      if (!watcher.stopped && watcher.threadId === threadId) {
+        scopes.add(watcher.scopeId);
+      }
+    }
+    return [...scopes];
+  }
+
+  private scopeCanApproveThread(scopeId: string, threadId: string): boolean {
+    if (this.findActiveTurn(scopeId)?.threadId === threadId) {
+      return true;
+    }
+    if (this.store.getBinding(scopeId)?.threadId === threadId) {
+      return true;
+    }
+    const watcher = this.observedThreadWatchers.get(scopeId);
+    return Boolean(watcher && !watcher.stopped && watcher.threadId === threadId);
   }
 
   private withLock(scopeId: string, fn: () => Promise<void>): Promise<void> {
@@ -3431,14 +3577,7 @@ export class BridgeSessionCore {
     }
     try {
       await this.app.respond(parseStoredServerRequestId(approval.serverRequestId), mapApprovalDecision(approval, 'deny'));
-      this.store.markApprovalResolved(localId);
-      await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
-      const locale = this.localeForChat(approval.chatId);
-      if (approval.messageId !== null) {
-        await this.editMessage(approval.chatId, approval.messageId, renderApprovalMessage(locale, approval, 'deny'));
-      } else {
-        await this.sendMessage(approval.chatId, t(locale, 'approval_timed_out_denied', { threadId: approval.threadId }));
-      }
+      await this.markApprovalResolvedForAllScopes(approval, 'deny', approval.chatId);
     } catch (error) {
       this.lastError = String(error);
       this.logger.error('approval.timeout_failed', { localId, error: String(error) });
@@ -3518,8 +3657,11 @@ export class BridgeSessionCore {
     this.observedThreadWatchers.clear();
   }
 
-  private clearObservedTurnWatcher(turnId: string): void {
+  private clearObservedTurnWatcher(turnId: string, scopeId?: string): void {
     for (const watcher of this.observedThreadWatchers.values()) {
+      if (scopeId && watcher.scopeId !== scopeId) {
+        continue;
+      }
       if (watcher.activeTurnId === turnId) {
         watcher.activeTurnId = null;
         if (watcher.mode === 'app_snapshot') {
@@ -3549,7 +3691,7 @@ export class BridgeSessionCore {
     if (!watcher.activeTurnId) {
       return;
     }
-    const active = this.activeTurns.get(watcher.activeTurnId);
+    const active = this.getActiveTurn(scopeId, watcher.activeTurnId);
     if (!active) {
       return;
     }
@@ -3564,7 +3706,7 @@ export class BridgeSessionCore {
       );
     }
     active.resolver();
-    this.activeTurns.delete(active.turnId);
+    this.deleteActiveTurnRecord(active);
     this.updateStatus();
   }
 
@@ -3664,21 +3806,21 @@ export class BridgeSessionCore {
     const latestTurn = findLatestTurn(snapshot);
     if (!liveTurn) {
       if (watcher.activeTurnId && latestTurn && latestTurn.turnId === watcher.activeTurnId) {
-        const active = this.activeTurns.get(watcher.activeTurnId);
+        const active = this.getActiveTurn(watcher.scopeId, watcher.activeTurnId);
         if (active) {
           await this.applyObservedTurnSnapshot(watcher, active, latestTurn, false);
           await this.handleTurnActivityEvent({
             kind: 'turn_completed',
             turnId: active.turnId,
             state: 'completed',
-          });
+          }, watcher.scopeId);
         }
       }
       if (watcher.activeTurnId) {
-        const staleActive = this.activeTurns.get(watcher.activeTurnId);
+        const staleActive = this.getActiveTurn(watcher.scopeId, watcher.activeTurnId);
         if (staleActive) {
           staleActive.resolver();
-          this.activeTurns.delete(staleActive.turnId);
+          this.deleteActiveTurnRecord(staleActive);
           this.updateStatus();
         }
       }
@@ -3688,13 +3830,13 @@ export class BridgeSessionCore {
       return 'idle';
     }
 
-    let active = watcher.activeTurnId ? this.activeTurns.get(watcher.activeTurnId) ?? null : null;
+    let active = watcher.activeTurnId ? this.getActiveTurn(watcher.scopeId, watcher.activeTurnId) : null;
     if (!active || watcher.activeTurnId !== liveTurn.turnId) {
       if (watcher.activeTurnId && watcher.activeTurnId !== liveTurn.turnId) {
-        const staleActive = this.activeTurns.get(watcher.activeTurnId);
+        const staleActive = this.getActiveTurn(watcher.scopeId, watcher.activeTurnId);
         if (staleActive) {
           staleActive.resolver();
-          this.activeTurns.delete(staleActive.turnId);
+          this.deleteActiveTurnRecord(staleActive);
         }
       }
       active = this.createActiveTurnState(
@@ -3707,7 +3849,7 @@ export class BridgeSessionCore {
         0,
         true,
       );
-      this.activeTurns.set(liveTurn.turnId, active);
+      this.setActiveTurn(watcher.scopeId, liveTurn.turnId, active);
       watcher.activeTurnId = liveTurn.turnId;
       watcher.cursor = null;
       watcher.waitingOnApproval = false;
@@ -3801,17 +3943,17 @@ export class BridgeSessionCore {
   }
 
   private async ensureObservedActiveTurnState(watcher: ObservedThreadWatcher, turnId: string): Promise<ActiveTurn> {
-    const existing = this.activeTurns.get(turnId);
+    const existing = this.getActiveTurn(watcher.scopeId, turnId);
     if (existing) {
       watcher.activeTurnId = turnId;
       return existing;
     }
 
     if (watcher.activeTurnId && watcher.activeTurnId !== turnId) {
-      const staleActive = this.activeTurns.get(watcher.activeTurnId);
+      const staleActive = this.getActiveTurn(watcher.scopeId, watcher.activeTurnId);
       if (staleActive) {
         staleActive.resolver();
-        this.activeTurns.delete(staleActive.turnId);
+        this.deleteActiveTurnRecord(staleActive);
       }
     }
 
@@ -3825,7 +3967,7 @@ export class BridgeSessionCore {
       0,
       true,
     );
-    this.activeTurns.set(turnId, active);
+    this.setActiveTurn(watcher.scopeId, turnId, active);
     watcher.activeTurnId = turnId;
     this.updateStatus();
     await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
@@ -3837,10 +3979,10 @@ export class BridgeSessionCore {
     events: TurnActivityEvent[],
   ): Promise<void> {
     for (const event of events) {
-      if (!this.activeTurns.has(event.turnId)) {
+      if (!this.getActiveTurn(watcher.scopeId, event.turnId)) {
         await this.ensureObservedActiveTurnState(watcher, event.turnId);
       }
-      await this.handleTurnActivityEvent(event);
+      await this.handleTurnActivityEvent(event, watcher.scopeId);
     }
   }
 
@@ -3877,6 +4019,10 @@ export class BridgeSessionCore {
     this.queuedPrompts.delete(scopeId);
     const active = this.findActiveTurn(scopeId);
     if (active) {
+      if (active.isObserved) {
+        await this.sendMessage(scopeId, t(locale, 'watch_read_only_active'));
+        return;
+      }
       if (!active.interruptRequested) {
         await this.requestInterrupt(active);
       }
@@ -3895,8 +4041,13 @@ export class BridgeSessionCore {
       return;
     }
 
-    if (!this.findActiveTurn(scopeId)) {
+    const active = this.findActiveTurn(scopeId);
+    if (!active) {
       await this.startBoundTurnFromEvent(event, locale, nextPrompt);
+      return;
+    }
+    if (active.isObserved) {
+      await this.sendMessage(scopeId, t(locale, 'watch_read_only_active'));
       return;
     }
 
@@ -3912,6 +4063,10 @@ export class BridgeSessionCore {
   ): Promise<void> {
     const active = this.findActiveTurn(event.scopeId);
     if (!active) {
+      return;
+    }
+    if (active.isObserved) {
+      await this.sendMessage(event.scopeId, t(locale, 'watch_read_only_active'));
       return;
     }
     const settings = this.store.getChatSettings(event.scopeId);
@@ -5335,10 +5490,14 @@ export class BridgeSessionCore {
 
   private async handleTurnInterruptCallback(event: TelegramCallbackEvent, turnId: string, locale: AppLocale): Promise<void> {
     const scopeId = event.scopeId;
-    const active = this.activeTurns.get(turnId);
-    if (!active || active.scopeId !== scopeId) {
+    const active = this.getActiveTurn(scopeId, turnId);
+    if (!active) {
       await this.cleanupStaleInterruptButton(scopeId, event.messageId, locale);
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'turn_already_finished'));
+      return;
+    }
+    if (active.isObserved) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'watch_read_only_active'));
       return;
     }
     if (active.interruptRequested) {
@@ -5954,7 +6113,7 @@ export class BridgeSessionCore {
     turnId: string;
     messageId: number;
   }): Promise<boolean> {
-    if (this.activeTurns.has(preview.turnId)) {
+    if (this.getActiveTurn(preview.scopeId, preview.turnId)) {
       return true;
     }
     const target = resolveScopeMessageTarget(preview.scopeId);
@@ -5987,7 +6146,7 @@ export class BridgeSessionCore {
       preview.messageId,
       true,
     );
-    this.activeTurns.set(preview.turnId, active);
+    this.setActiveTurn(preview.scopeId, preview.turnId, active);
     const watcher: ObservedThreadWatcher = {
       scopeId: preview.scopeId,
       chatId: target.chatId,
@@ -6114,7 +6273,7 @@ export class BridgeSessionCore {
         );
       }
       active.resolver();
-      this.activeTurns.delete(active.turnId);
+      this.deleteActiveTurnRecord(active);
     }
     if (activeTurns.length > 0) {
       this.updateStatus();
@@ -6127,7 +6286,7 @@ export class BridgeSessionCore {
       this.clearToolBatchTimer(active.toolBatch);
       this.clearRenderRetry(active);
       active.resolver();
-      this.activeTurns.delete(active.turnId);
+      this.deleteActiveTurnRecord(active);
     }
     if (activeTurns.length > 0) {
       this.updateStatus();
@@ -6363,7 +6522,7 @@ export class BridgeSessionCore {
     }
     this.clearToolBatchTimer(batch);
     batch.finalizeTimer = setTimeout(() => {
-      const current = this.activeTurns.get(active.turnId);
+      const current = this.getActiveTurn(active.scopeId, active.turnId);
       if (!current || current.toolBatch !== batch || batch.openCallIds.size > 0) {
         return;
       }
@@ -6398,7 +6557,7 @@ export class BridgeSessionCore {
     }
     active.renderRetryTimer = setTimeout(() => {
       active.renderRetryTimer = null;
-      if (!this.activeTurns.has(active.turnId)) {
+      if (!this.getActiveTurn(active.scopeId, active.turnId)) {
         return;
       }
       void this.queueTurnRender(active, { forceStatus: true, forceStream: true });
@@ -6414,21 +6573,17 @@ export class BridgeSessionCore {
   }
 
   private async notePendingApprovalStatus(threadId: string, kind: PendingApprovalRecord['kind']): Promise<void> {
-    const active = this.findActiveTurnByThreadId(threadId);
-    if (!active) {
-      return;
+    for (const active of this.findActiveTurnsByThreadId(threadId)) {
+      active.pendingApprovalKinds.add(kind);
+      await this.queueTurnRender(active, { forceStatus: true });
     }
-    active.pendingApprovalKinds.add(kind);
-    await this.queueTurnRender(active, { forceStatus: true });
   }
 
   private async clearPendingApprovalStatus(threadId: string, kind: PendingApprovalRecord['kind']): Promise<void> {
-    const active = this.findActiveTurnByThreadId(threadId);
-    if (!active) {
-      return;
+    for (const active of this.findActiveTurnsByThreadId(threadId)) {
+      active.pendingApprovalKinds.delete(kind);
+      await this.queueTurnRender(active, { forceStatus: true });
     }
-    active.pendingApprovalKinds.delete(kind);
-    await this.queueTurnRender(active, { forceStatus: true });
   }
 
   private async syncDraftTurnStream(active: ActiveTurn, force: boolean): Promise<void> {
@@ -6477,12 +6632,12 @@ export class BridgeSessionCore {
   }
 
   private findActiveTurnByThreadId(threadId: string): ActiveTurn | null {
-    for (const active of this.activeTurns.values()) {
-      if (active.threadId === threadId) {
-        return active;
-      }
-    }
-    return null;
+    const active = this.findActiveTurnsByThreadId(threadId);
+    return active.find(turn => !turn.isObserved) ?? active[0] ?? null;
+  }
+
+  private findActiveTurnsByThreadId(threadId: string): ActiveTurn[] {
+    return [...this.activeTurns.values()].filter(active => active.threadId === threadId);
   }
 
   private async syncSegmentTimeline(active: ActiveTurn, segment: ActiveTurnSegment): Promise<void> {
@@ -7437,7 +7592,12 @@ function whereKeyboard(locale: AppLocale, hasBinding: boolean): Array<Array<{ te
   ];
 }
 
-function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord, decision?: ApprovalAction): string {
+function renderApprovalMessage(
+  locale: AppLocale,
+  record: PendingApprovalRecord,
+  decision?: ApprovalAction,
+  renderScopeId = record.chatId,
+): string {
   const lines = [
     t(locale, 'approval_requested', {
       kind: record.kind === 'fileChange'
@@ -7467,7 +7627,7 @@ function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord,
         : 'approval_decision_deny';
     lines.push(t(locale, 'line_decision', { value: t(locale, decisionKey) }));
   }
-  if (!decision && parseWeixinBridgeScope(record.chatId)) {
+  if (!decision && parseWeixinBridgeScope(renderScopeId)) {
     lines.push(
       '',
       t(locale, 'weixin_copy_paste_divider'),
@@ -7603,6 +7763,21 @@ function resolveCollaborationMode(mode: CollaborationModeValue | null | undefine
 
 function attachedThreadKey(scopeId: string, threadId: string): string {
   return `${scopeId}:${threadId}`;
+}
+
+function activeTurnKey(scopeId: string, turnId: string): string {
+  return `${encodeURIComponent(scopeId)}:${encodeURIComponent(turnId)}`;
+}
+
+function parseActiveTurnKey(key: string): { scopeId: string; turnId: string } | null {
+  const split = key.indexOf(':');
+  if (split === -1) {
+    return null;
+  }
+  return {
+    scopeId: decodeURIComponent(key.slice(0, split)),
+    turnId: decodeURIComponent(key.slice(split + 1)),
+  };
 }
 
 function codexAuthDir(): string {
