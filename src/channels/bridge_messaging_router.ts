@@ -18,61 +18,72 @@ export class BridgeMessagingRouter {
   }
 
   private isWeixinScope(scopeId: string): boolean {
-    return scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX) && this.weixin !== null;
+    return scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX);
+  }
+
+  canSendToScope(scopeId: string): boolean {
+    return !this.isWeixinScope(scopeId) || this.weixin !== null;
+  }
+
+  private requireWeixinTransport(scopeId: string): WeixinMessagingPort {
+    if (!this.weixin) {
+      throw new Error(`Weixin channel is disabled for scope ${scopeId}`);
+    }
+    return this.weixin;
   }
 
   sendPlain(scopeId: string, text: string, keyboard?: InlineKeyboard): Promise<number> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.sendPlain(scopeId, text, keyboard);
+      return this.requireWeixinTransport(scopeId).sendPlain(scopeId, text, keyboard);
     }
     return this.telegram.sendPlain(scopeId, text, keyboard);
   }
 
   sendHtml(scopeId: string, text: string, keyboard?: InlineKeyboard): Promise<number> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.sendHtml(scopeId, text, keyboard);
+      return this.requireWeixinTransport(scopeId).sendHtml(scopeId, text, keyboard);
     }
     return this.telegram.sendHtml(scopeId, text, keyboard);
   }
 
   editPlain(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.editPlain(scopeId, messageId, text, keyboard);
+      return this.requireWeixinTransport(scopeId).editPlain(scopeId, messageId, text, keyboard);
     }
     return this.telegram.editPlain(scopeId, messageId, text, keyboard);
   }
 
   editHtml(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.editHtml(scopeId, messageId, text, keyboard);
+      return this.requireWeixinTransport(scopeId).editHtml(scopeId, messageId, text, keyboard);
     }
     return this.telegram.editHtml(scopeId, messageId, text, keyboard);
   }
 
   deleteMessage(scopeId: string, messageId: number): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.deleteMessage(scopeId, messageId);
+      return this.requireWeixinTransport(scopeId).deleteMessage(scopeId, messageId);
     }
     return this.telegram.deleteMessage(scopeId, messageId);
   }
 
   sendTypingInScope(scopeId: string): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.sendTypingInScope(scopeId);
+      return this.requireWeixinTransport(scopeId).sendTypingInScope(scopeId);
     }
     return this.telegram.sendTypingInScope(scopeId);
   }
 
   clearInlineKeyboard(scopeId: string, messageId: number): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.clearInlineKeyboard(scopeId, messageId);
+      return this.requireWeixinTransport(scopeId).clearInlineKeyboard(scopeId, messageId);
     }
     return this.telegram.clearInlineKeyboard(scopeId, messageId);
   }
 
   sendDraft(scopeId: string, draftId: number, text: string): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
-      return this.weixin!.sendDraft(scopeId, draftId, text);
+      return this.requireWeixinTransport(scopeId).sendDraft(scopeId, draftId, text);
     }
     return this.telegram.sendDraft(scopeId, draftId, text);
   }

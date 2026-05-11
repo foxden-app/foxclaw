@@ -826,6 +826,89 @@ test('setup model callbacks are blocked while a turn is active but access still 
   assert.equal(rig.callbackAnswers[1], 'Access: Full access');
 });
 
+test('resuming a shared thread uses Telegram access settings over Weixin settings', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const telegramScope = 'telegram:99::root';
+  const weixinScope = 'weixin:acc1:wx-user-1';
+  rig.store.setBinding(telegramScope, 'thread-shared', rig.tempDir);
+  rig.store.setBinding(weixinScope, 'thread-shared', rig.tempDir);
+  rig.store.setChatAccessPreset(telegramScope, 'full-access');
+  rig.store.setChatAccessPreset(weixinScope, 'read-only');
+
+  const resumes: any[] = [];
+  (rig.controller as any).app.resumeThread = async (options: any) => {
+    resumes.push(options);
+    return {
+      thread: {
+        threadId: options.threadId,
+        name: null,
+        preview: 'shared',
+        cwd: rig.tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: rig.tempDir,
+    };
+  };
+
+  await (rig.controller as any).ensureThreadReady(telegramScope, rig.store.getBinding(telegramScope));
+
+  assert.equal(resumes[0]?.threadId, 'thread-shared');
+  assert.equal(resumes[0]?.approvalPolicy, 'never');
+  assert.equal(resumes[0]?.sandboxMode, 'danger-full-access');
+});
+
+test('/permissions full-access invalidates attached Telegram thread for access refresh', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const scope = 'telegram:99::root';
+  rig.store.setBinding(scope, 'thread-1', rig.tempDir);
+  (rig.controller as any).attachedThreads.add(`${scope}:thread-1`);
+  const resumes: any[] = [];
+  (rig.controller as any).app.resumeThread = async (options: any) => {
+    resumes.push(options);
+    return {
+      thread: {
+        threadId: options.threadId,
+        name: null,
+        preview: 'thread',
+        cwd: rig.tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: rig.tempDir,
+    };
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/permissions full-access'), 'en', 'permissions', ['full-access']);
+  await (rig.controller as any).ensureThreadReady(scope, rig.store.getBinding(scope));
+
+  assert.equal(resumes.length, 1);
+  assert.equal(resumes[0]?.approvalPolicy, 'never');
+  assert.equal(resumes[0]?.sandboxMode, 'danger-full-access');
+});
+
 test('/status includes Codex account usage without exposing email', async (t) => {
   const rig = createControllerRig();
   installTempCodexHome(t, rig.tempDir);
@@ -1936,6 +2019,97 @@ test('plan mode prompts for implementation after clarification answer and plan u
   const pendingPlan = [...(rig.controller as any).pendingPlanImplementations.values()][0];
   assert.ok(pendingPlan);
   assert.match(pendingPlan.planMarkdown, /Patch plan implementation prompt/);
+});
+
+test('weixin default turn with proposed_plan final offers plan implementation command', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const scope = 'weixin:acc1:wx-user-1';
+  rig.store.setChatLocale(scope, 'zh');
+  rig.store.setBinding(scope, 'thread-1', rig.tempDir);
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState(
+    scope,
+    'wx-user-1',
+    'private',
+    null,
+    'thread-1',
+    'turn-1',
+    0,
+    false,
+    'default',
+  );
+  active.segments = [{
+    itemId: 'final-1',
+    phase: 'final',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: '<proposed_plan>\n# 计划\n- 修改 /auth 面板\n</proposed_plan>',
+    completed: true,
+    messages: [],
+  }];
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  const pending = [...(rig.controller as any).pendingPlanImplementations.values()][0];
+  assert.ok(pending);
+  assert.match(pending.planMarkdown, /修改 \/auth 面板/);
+  assert.match(rig.sentMessages.at(-1)!, /Plan 模式已经产出计划/);
+  assert.match(rig.sentMessages.at(-1)!, new RegExp(`/planimpl ${pending.localId} run`));
+});
+
+test('default turn plan progress does not offer implementation without proposed_plan tag', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState(
+    'telegram:99::root',
+    '99',
+    'private',
+    null,
+    'thread-1',
+    'turn-1',
+    0,
+    false,
+    'default',
+  );
+  active.segments = [{
+    itemId: 'plan-1',
+    phase: 'commentary',
+    outputKind: 'commentary',
+    isPlan: true,
+    text: '- Inspect\n- Patch',
+    completed: true,
+    messages: [],
+  }];
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.equal((rig.controller as any).pendingPlanImplementations.size, 0);
+  assert.ok(!rig.sentMessages.some(message => /Plan mode produced a plan/.test(message)));
 });
 
 test('/steer sends same-turn input to the active Codex turn', async (t) => {

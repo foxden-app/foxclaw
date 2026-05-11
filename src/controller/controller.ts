@@ -9,6 +9,7 @@ import type { BridgeStore, PendingUserInputStoredRecord } from '../store/databas
 import type {
   AppLocale,
   ActiveTurnMessageMode,
+  AccessPresetValue,
   ChatSessionSettings,
   CodexAccountInfo,
   CodexAccountRateLimits,
@@ -1033,7 +1034,7 @@ export class BridgeSessionCore {
             );
             return;
           }
-          this.store.setChatAccessPreset(scopeId, preset);
+          this.setChatAccessPreset(scopeId, preset);
           await this.sendMessage(
             scopeId,
             t(locale, 'access_preset_configured', { value: formatAccessPresetLabel(locale, preset) }),
@@ -2061,6 +2062,7 @@ export class BridgeSessionCore {
     const seen = new Set<string>();
     for (const turn of this.activeTurns.values()) {
       if (seen.has(turn.scopeId)) continue;
+      if (!this.messaging.canSendToScope(turn.scopeId)) continue;
       seen.add(turn.scopeId);
       await this.sendMessage(turn.scopeId, message);
     }
@@ -2427,10 +2429,9 @@ export class BridgeSessionCore {
     if (this.findPendingPlanImplementation(active.scopeId, active.turnId)) {
       return false;
     }
-    if (active.collaborationMode !== 'plan') {
-      return false;
-    }
-    const planMarkdown = extractLatestPlanMarkdown(active);
+    const planMarkdown = active.collaborationMode === 'plan'
+      ? extractLatestPlanMarkdown(active)
+      : extractLatestProposedPlanMarkdown(active);
     if (!planMarkdown) {
       return false;
     }
@@ -3371,22 +3372,25 @@ export class BridgeSessionCore {
 
   private findChatByThread(threadId: string): string | null {
     const active = this.findActiveTurnByThreadId(threadId);
-    if (active) return active.scopeId;
+    if (active && this.messaging.canSendToScope(active.scopeId)) return active.scopeId;
     return this.findAllChatsByThread(threadId)[0] ?? null;
   }
 
   private findAllChatsByThread(threadId: string): string[] {
     const scopes = new Set<string>();
     for (const turn of this.activeTurns.values()) {
-      if (turn.threadId === threadId) {
+      if (turn.threadId === threadId && this.messaging.canSendToScope(turn.scopeId)) {
         scopes.add(turn.scopeId);
       }
     }
     for (const scopeId of this.store.findAllChatIdsByThreadId(threadId)) {
+      if (!this.messaging.canSendToScope(scopeId)) {
+        continue;
+      }
       scopes.add(scopeId);
     }
     for (const watcher of this.observedThreadWatchers.values()) {
-      if (!watcher.stopped && watcher.threadId === threadId) {
+      if (!watcher.stopped && watcher.threadId === threadId && this.messaging.canSendToScope(watcher.scopeId)) {
         scopes.add(watcher.scopeId);
       }
     }
@@ -3524,9 +3528,7 @@ export class BridgeSessionCore {
       return binding;
     }
     try {
-      const session = await this.app.resumeThread({
-        threadId: binding.threadId,
-      });
+      const session = await this.resumeThreadForScope(scopeId, binding);
       return this.storeThreadSession(scopeId, session, 'seed');
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
@@ -3636,10 +3638,37 @@ export class BridgeSessionCore {
   }
 
   private async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
-    const session = await this.app.resumeThread({
-      threadId,
-    });
+    const session = await this.resumeThreadForScope(scopeId, { threadId, cwd: null });
     return this.storeThreadSession(scopeId, session, 'replace');
+  }
+
+  private async resumeThreadForScope(
+    scopeId: string,
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+  ): Promise<ThreadSessionState> {
+    const settings = this.store.getChatSettings(scopeId);
+    const access = this.resolveEffectiveAccess(scopeId, settings);
+    return this.app.resumeThread({
+      threadId: binding.threadId,
+      cwd: binding.cwd ?? null,
+      approvalPolicy: access.approvalPolicy,
+      sandboxMode: access.sandboxMode,
+      model: settings?.model ?? null,
+    });
+  }
+
+  private setChatAccessPreset(scopeId: string, preset: AccessPresetValue | null): void {
+    this.store.setChatAccessPreset(scopeId, preset);
+    this.clearAttachedThreadsForScope(scopeId);
+  }
+
+  private clearAttachedThreadsForScope(scopeId: string): void {
+    const prefix = `${scopeId}:`;
+    for (const key of [...this.attachedThreads]) {
+      if (key.startsWith(prefix)) {
+        this.attachedThreads.delete(key);
+      }
+    }
   }
 
   private storeThreadSession(scopeId: string, session: ThreadSessionState, syncMode: 'replace' | 'seed'): ThreadBinding {
@@ -3742,6 +3771,29 @@ export class BridgeSessionCore {
         t(this.localeForChat(active.scopeId), 'stale_preview_expired'),
         active.turnId,
       );
+    }
+    active.resolver();
+    this.deleteActiveTurnRecord(active);
+    this.updateStatus();
+  }
+
+  private async forgetStaleActiveTurn(active: ActiveTurn, locale: AppLocale): Promise<void> {
+    this.clearToolBatchTimer(active.toolBatch);
+    this.clearRenderRetry(active);
+    if (active.previewActive) {
+      if (this.messaging.canSendToScope(active.scopeId)) {
+        await this.retirePreviewMessage(
+          active.scopeId,
+          active.previewMessageId,
+          t(locale, 'stale_preview_expired'),
+          active.turnId,
+        );
+      } else {
+        this.store.removeActiveTurnPreview(active.turnId);
+      }
+    }
+    if (active.isObserved) {
+      this.clearObservedTurnWatcher(active.turnId, active.scopeId);
     }
     active.resolver();
     this.deleteActiveTurnRecord(active);
@@ -4113,7 +4165,21 @@ export class BridgeSessionCore {
       await this.queuePromptAfterActiveTurn(event, locale, text);
       return;
     }
-    await this.steerActiveTurn(active, event, locale, text);
+    try {
+      await this.steerActiveTurn(active, event, locale, text);
+    } catch (error) {
+      if (!isNoActiveTurnToSteerError(error)) {
+        throw error;
+      }
+      this.logger.warn('codex.stale_active_turn_steer', {
+        scopeId: event.scopeId,
+        threadId: active.threadId,
+        turnId: active.turnId,
+        error: toErrorMeta(error),
+      });
+      await this.forgetStaleActiveTurn(active, locale);
+      await this.startBoundTurnFromEvent(event, locale, text);
+    }
   }
 
   private async queuePromptAfterActiveTurn(
@@ -5902,7 +5968,7 @@ export class BridgeSessionCore {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
         return;
       }
-      this.store.setChatAccessPreset(scopeId, nextPreset);
+      this.setChatAccessPreset(scopeId, nextPreset);
       await this.refreshSetupPanel(scopeId, event.messageId, 'access', locale);
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_access', {
         value: formatAccessPresetLabel(locale, nextPreset),
@@ -6026,7 +6092,7 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
-    this.store.setChatAccessPreset(scopeId, nextPreset);
+    this.setChatAccessPreset(scopeId, nextPreset);
     await this.refreshAccessSettingsPanel(scopeId, event.messageId, locale);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'callback_access', {
       value: formatAccessPresetLabel(locale, nextPreset),
@@ -6199,6 +6265,15 @@ export class BridgeSessionCore {
 
   private async cleanupStaleTurnPreviews(): Promise<void> {
     for (const preview of this.store.listActiveTurnPreviews()) {
+      if (!this.messaging.canSendToScope(preview.scopeId)) {
+        this.store.removeActiveTurnPreview(preview.turnId);
+        this.logger.info('telegram.preview_dropped_disabled_channel', {
+          scopeId: preview.scopeId,
+          threadId: preview.threadId,
+          turnId: preview.turnId,
+        });
+        continue;
+      }
       try {
         if (await this.recoverLiveTurnPreview(preview)) {
           continue;
@@ -6228,6 +6303,9 @@ export class BridgeSessionCore {
   }): Promise<boolean> {
     if (this.getActiveTurn(preview.scopeId, preview.turnId)) {
       return true;
+    }
+    if (!this.messaging.canSendToScope(preview.scopeId)) {
+      return false;
     }
     const target = resolveScopeMessageTarget(preview.scopeId);
     if (!target) {
@@ -6745,7 +6823,8 @@ export class BridgeSessionCore {
   }
 
   private findActiveTurnByThreadId(threadId: string): ActiveTurn | null {
-    const active = this.findActiveTurnsByThreadId(threadId);
+    const active = this.findActiveTurnsByThreadId(threadId)
+      .filter(turn => this.messaging.canSendToScope(turn.scopeId));
     return active.find(turn => !turn.isObserved) ?? active[0] ?? null;
   }
 
@@ -8435,6 +8514,14 @@ function planImplementationKeyboard(locale: AppLocale, localId: string): Array<A
 }
 
 function extractLatestPlanMarkdown(active: ActiveTurn): string | null {
+  const segmentPlan = extractLatestPlanSegmentMarkdown(active);
+  if (segmentPlan) {
+    return segmentPlan;
+  }
+  return extractLatestProposedPlanMarkdown(active);
+}
+
+function extractLatestPlanSegmentMarkdown(active: ActiveTurn): string | null {
   for (let index = active.segments.length - 1; index >= 0; index -= 1) {
     const segment = active.segments[index]!;
     if (!segment.isPlan) {
@@ -8445,12 +8532,15 @@ function extractLatestPlanMarkdown(active: ActiveTurn): string | null {
       return text;
     }
   }
-  const tagged = extractLatestProposedPlanBlock([
+  return null;
+}
+
+function extractLatestProposedPlanMarkdown(active: ActiveTurn): string | null {
+  return extractLatestProposedPlanBlock([
     active.finalText,
     active.buffer,
     ...active.segments.map(segment => segment.text),
   ].filter((text): text is string => typeof text === 'string' && text.length > 0).join('\n'));
-  return tagged;
 }
 
 function extractLatestProposedPlanBlock(text: string): string | null {
@@ -8565,6 +8655,10 @@ function formatShortStatusError(error: unknown): string {
 
 function isThreadNotFoundError(error: unknown): boolean {
   return error instanceof Error && /(thread not found|no rollout found for thread id)/i.test(error.message);
+}
+
+function isNoActiveTurnToSteerError(error: unknown): boolean {
+  return error instanceof Error && /no active turn to steer/i.test(error.message);
 }
 
 function isTelegramMessageGone(error: unknown): boolean {
