@@ -306,6 +306,8 @@ interface PendingThreadRename {
 interface PendingThreadNewCwd {
   scopeId: string;
   messageId: number | null;
+  cwdToCreate: string | null;
+  confirmationMessageId: number | null;
   createdAt: number;
 }
 
@@ -875,10 +877,8 @@ export class BridgeSessionCore {
       }
       case 'new': {
         const cwd = args.join(' ').trim() || this.config.defaultCwd;
-        this.queuedPrompts.delete(scopeId);
-        await this.stopWatchingScopeThread(scopeId);
-        const binding = await this.createBinding(scopeId, cwd);
-        await this.sendNewThreadStartedMessage(scopeId, locale, binding, cwd);
+        this.pendingThreadRenames.delete(scopeId);
+        await this.startNewThreadForRequestedCwd(scopeId, locale, cwd, null);
         return;
       }
       case 'fork': {
@@ -1250,6 +1250,11 @@ export class BridgeSessionCore {
     }
     if (event.data === 'thread:new') {
       await this.handleThreadNewCallback(event, locale);
+      return;
+    }
+    const newCwdMatch = /^thread:newcwd:(create|cancel)$/.exec(event.data);
+    if (newCwdMatch) {
+      await this.handleThreadNewCwdCallback(event, newCwdMatch[1]! as 'create' | 'cancel', locale);
       return;
     }
     const threadActionMatch = /^thread:(rename|watch|archive|unarchive):(.+)$/.exec(event.data);
@@ -5595,10 +5600,33 @@ export class BridgeSessionCore {
     this.pendingThreadNewCwds.set(event.scopeId, {
       scopeId: event.scopeId,
       messageId: event.messageId,
+      cwdToCreate: null,
+      confirmationMessageId: null,
       createdAt: Date.now(),
     });
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_new_prompt_short'));
     await this.sendMessage(event.scopeId, t(locale, 'thread_new_prompt', { cwd: this.config.defaultCwd }));
+  }
+
+  private async handleThreadNewCwdCallback(
+    event: TelegramCallbackEvent,
+    action: 'create' | 'cancel',
+    locale: AppLocale,
+  ): Promise<void> {
+    const pending = this.pendingThreadNewCwds.get(event.scopeId);
+    if (!pending || !pending.cwdToCreate) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_new_cwd_expired'));
+      return;
+    }
+    if (action === 'cancel') {
+      this.pendingThreadNewCwds.delete(event.scopeId);
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_new_cwd_cancelled'));
+      await this.finishThreadNewCwdConfirmation(event.scopeId, pending, t(locale, 'thread_new_cwd_cancelled'));
+      return;
+    }
+
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+    await this.createMissingCwdAndStartNewThread(event.scopeId, locale, pending);
   }
 
   private async handleThreadNewCwdTextReply(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
@@ -5607,18 +5635,141 @@ export class BridgeSessionCore {
       return;
     }
     const rawCwd = event.text.trim();
+    if (pending.cwdToCreate && isThreadNewCwdCreateConfirmation(rawCwd)) {
+      await this.createMissingCwdAndStartNewThread(event.scopeId, locale, pending);
+      return;
+    }
+    if (pending.cwdToCreate && isThreadNewCwdCancelConfirmation(rawCwd)) {
+      this.pendingThreadNewCwds.delete(event.scopeId);
+      await this.finishThreadNewCwdConfirmation(event.scopeId, pending, t(locale, 'thread_new_cwd_cancelled'));
+      return;
+    }
     if (!rawCwd) {
       await this.sendMessage(event.scopeId, t(locale, 'thread_new_prompt', { cwd: this.config.defaultCwd }));
       return;
     }
     const cwd = rawCwd === '.' ? this.config.defaultCwd : rawCwd;
-    this.pendingThreadNewCwds.delete(event.scopeId);
-    this.queuedPrompts.delete(event.scopeId);
-    await this.stopWatchingScopeThread(event.scopeId);
-    const binding = await this.createBinding(event.scopeId, cwd);
-    await this.sendNewThreadStartedMessage(event.scopeId, locale, binding, cwd);
-    if (pending.messageId !== null) {
-      await this.showThreadsPanelFromStoredState(event.scopeId, pending.messageId, locale, false);
+    pending.cwdToCreate = null;
+    pending.confirmationMessageId = null;
+    pending.createdAt = Date.now();
+    this.pendingThreadNewCwds.set(event.scopeId, pending);
+    await this.startNewThreadForRequestedCwd(event.scopeId, locale, cwd, pending.messageId);
+  }
+
+  private async startNewThreadForRequestedCwd(
+    scopeId: string,
+    locale: AppLocale,
+    cwd: string,
+    panelMessageId: number | null,
+  ): Promise<void> {
+    const state = await this.inspectNewThreadCwd(cwd);
+    if (state === 'missing') {
+      await this.promptCreateMissingNewThreadCwd(scopeId, locale, cwd, panelMessageId);
+      return;
+    }
+    if (state === 'not_directory') {
+      await this.sendMessage(scopeId, t(locale, 'thread_new_cwd_not_directory', { cwd }));
+      return;
+    }
+    this.pendingThreadNewCwds.delete(scopeId);
+    await this.createAndBindNewThread(scopeId, locale, cwd, panelMessageId);
+  }
+
+  private async createAndBindNewThread(
+    scopeId: string,
+    locale: AppLocale,
+    cwd: string,
+    panelMessageId: number | null,
+  ): Promise<void> {
+    this.queuedPrompts.delete(scopeId);
+    await this.stopWatchingScopeThread(scopeId);
+    const binding = await this.createBinding(scopeId, cwd);
+    await this.sendNewThreadStartedMessage(scopeId, locale, binding, cwd);
+    if (panelMessageId !== null) {
+      await this.showThreadsPanelFromStoredState(scopeId, panelMessageId, locale, false);
+    }
+  }
+
+  private async promptCreateMissingNewThreadCwd(
+    scopeId: string,
+    locale: AppLocale,
+    cwd: string,
+    panelMessageId: number | null,
+  ): Promise<void> {
+    const pending: PendingThreadNewCwd = {
+      scopeId,
+      messageId: panelMessageId,
+      cwdToCreate: cwd,
+      confirmationMessageId: null,
+      createdAt: Date.now(),
+    };
+    this.pendingThreadNewCwds.set(scopeId, pending);
+    const lines = [
+      t(locale, 'thread_new_cwd_missing', { cwd }),
+      t(locale, 'thread_new_cwd_reply_hint'),
+    ];
+    const messageId = await this.sendMessage(scopeId, lines.join('\n'), threadNewCwdCreateKeyboard(locale));
+    pending.confirmationMessageId = messageId;
+  }
+
+  private async createMissingCwdAndStartNewThread(
+    scopeId: string,
+    locale: AppLocale,
+    pending: PendingThreadNewCwd,
+  ): Promise<void> {
+    const cwd = pending.cwdToCreate;
+    if (!cwd) {
+      this.pendingThreadNewCwds.delete(scopeId);
+      await this.sendMessage(scopeId, t(locale, 'thread_new_cwd_expired'));
+      return;
+    }
+    try {
+      await fs.mkdir(cwd, { recursive: true });
+    } catch (error) {
+      await this.sendMessage(scopeId, t(locale, 'thread_new_cwd_create_failed', {
+        cwd,
+        error: formatUserError(error),
+      }));
+      return;
+    }
+
+    const state = await this.inspectNewThreadCwd(cwd);
+    if (state !== 'directory') {
+      await this.sendMessage(scopeId, t(locale, 'thread_new_cwd_create_failed', {
+        cwd,
+        error: state === 'not_directory'
+          ? t(locale, 'thread_new_cwd_not_directory', { cwd })
+          : t(locale, 'thread_new_cwd_still_missing'),
+      }));
+      return;
+    }
+
+    this.pendingThreadNewCwds.delete(scopeId);
+    await this.finishThreadNewCwdConfirmation(scopeId, pending, t(locale, 'thread_new_cwd_created', { cwd }));
+    await this.createAndBindNewThread(scopeId, locale, cwd, pending.messageId);
+  }
+
+  private async finishThreadNewCwdConfirmation(
+    scopeId: string,
+    pending: PendingThreadNewCwd,
+    text: string,
+  ): Promise<void> {
+    if (pending.confirmationMessageId === null) {
+      await this.sendMessage(scopeId, text);
+      return;
+    }
+    await this.editMessage(scopeId, pending.confirmationMessageId, text, []);
+  }
+
+  private async inspectNewThreadCwd(cwd: string): Promise<'directory' | 'missing' | 'not_directory'> {
+    try {
+      const stat = await fs.stat(cwd);
+      return stat.isDirectory() ? 'directory' : 'not_directory';
+    } catch (error) {
+      if (isFileMissingError(error)) {
+        return 'missing';
+      }
+      throw error;
     }
   }
 
@@ -8513,6 +8664,13 @@ function planImplementationKeyboard(locale: AppLocale, localId: string): Array<A
   ];
 }
 
+function threadNewCwdCreateKeyboard(locale: AppLocale): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: t(locale, 'button_create_dir'), callback_data: 'thread:newcwd:create' },
+    { text: t(locale, 'button_cancel'), callback_data: 'thread:newcwd:cancel' },
+  ]];
+}
+
 function extractLatestPlanMarkdown(active: ActiveTurn): string | null {
   const segmentPlan = extractLatestPlanSegmentMarkdown(active);
   if (segmentPlan) {
@@ -8659,6 +8817,14 @@ function isThreadNotFoundError(error: unknown): boolean {
 
 function isNoActiveTurnToSteerError(error: unknown): boolean {
   return error instanceof Error && /no active turn to steer/i.test(error.message);
+}
+
+function isThreadNewCwdCreateConfirmation(text: string): boolean {
+  return /^(y|yes|ok|okay|confirm|create|mkdir|确定|确认|创建|新建|好)$/i.test(text.trim());
+}
+
+function isThreadNewCwdCancelConfirmation(text: string): boolean {
+  return /^(n|no|cancel|stop|取消|不要|不用|算了)$/i.test(text.trim());
 }
 
 function isTelegramMessageGone(error: unknown): boolean {

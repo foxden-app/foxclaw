@@ -2695,6 +2695,7 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
   assert.match(rig.sentMessages.at(-1)!, /Send the PWD for the new thread/);
 
   const newCwd = path.join(rig.tempDir, 'project-a');
+  fs.mkdirSync(newCwd, { recursive: true });
   await (rig.controller as any).handleText(createEvent(newCwd));
 
   assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-new');
@@ -2708,6 +2709,32 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
   assert.equal(watcher?.mode, 'session_file');
   assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-panel');
   assert.match(rig.callbackAnswers.at(-1)!, /Watching thread thread-panel/);
+});
+
+test('/new asks before creating a missing PWD and starts there after confirmation', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const newCwd = path.join(rig.tempDir, 'missing-project', 'app');
+  assert.equal(fs.existsSync(newCwd), false);
+
+  await (rig.controller as any).handleText(createEvent(`/new ${newCwd}`));
+
+  assert.equal(fs.existsSync(newCwd), false);
+  assert.equal(rig.store.getBinding('telegram:99::root'), null);
+  assert.match(rig.sentMessages.at(-1)!, /PWD does not exist/);
+  assert.match(rig.sentMessages.at(-1)!, new RegExp(newCwd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+
+  await (rig.controller as any).handleCallback(createCallback('thread:newcwd:create'));
+
+  assert.equal(fs.existsSync(newCwd), true);
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-new');
+  assert.equal(rig.store.getBinding('telegram:99::root')?.cwd, newCwd);
+  assert.match(rig.editedMessages.at(-1)!, /Created directory/);
+  assert.match(rig.sentMessages.at(-1)!, /Started new thread thread-new/);
 });
 
 test('turn notifications create independent active turns for every bound scope', async (t) => {
