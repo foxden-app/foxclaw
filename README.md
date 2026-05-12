@@ -1,35 +1,37 @@
+中文 ｜ [English](./README_EN.md)
+
 # FoxClaw
 
-FoxClaw is the local execution claw for Foxden agents.
+FoxClaw 是 Foxden agents 的本地执行爪。
 
-It runs on your own computer and lets a trusted Telegram or Weixin chat control your local Codex environment. You do not need a public server: FoxClaw talks to Codex over local `codex app-server`, keeps approvals on your machine, and sends the working conversation back to your phone.
+它运行在你自己的电脑上，让受信任的 Telegram 或微信聊天可以控制本机 Codex 环境。你不需要公网服务器：FoxClaw 通过本地 `codex app-server` 与 Codex 通信，把审批留在你的电脑上，并把工作会话发送回手机。
 
-## Start Here
+## 从这里开始
 
-- Already have a shell-capable agent such as Codex, OpenClaw, QwenPaw, Hermes, OpenCode, or Kimi CLI? Use the [Agent-Assisted Install](./docs/agent-assisted-install.md) first. This is the recommended path.
-- New to Node, Telegram bots, or Codex CLI? Use the [Beginner Install Guide](./docs/install-for-beginners.md).
-- Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
-- Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
+- 已经有 Codex、OpenClaw、QwenPaw、Hermes、OpenCode 或 Kimi CLI 这类能操作 shell 的 agent？优先使用 [Agent 辅助安装](./docs/agent-assisted-install.md)，这是推荐路径。
+- 不熟悉 Node、Telegram 机器人或 Codex CLI？使用 [新手安装指南](./docs/install-for-beginners.md)。
+- 已经熟悉 Git、Node 和 `.env` 文件？可以直接使用下面的快速设置。
+- 遇到问题？查看 [故障排查](./docs/troubleshooting.md)。
 
-FoxClaw is a good fit if you want to:
+如果你希望做到这些，FoxClaw 会很适合：
 
-- use Codex from your phone without exposing your computer to the public internet
-- keep code, shell access, auth, approvals, and runtime data on your own machine
-- use one trusted Telegram user as the remote operator
+- 在手机上使用 Codex，同时不把自己的电脑暴露到公网
+- 将代码、shell 访问、认证、审批和运行数据都保留在自己的机器上
+- 让一个受信任的 Telegram 用户作为远程操作者
 
-The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24, and a logged-in `codex` CLI. A first install usually takes 10-20 minutes.
+最小安装只需要一个 Telegram bot token、你的 Telegram 数字用户 ID、Node.js 24，以及一份已经登录的 `codex` CLI。首次安装通常需要 10-20 分钟。
 
-30-second product example: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
+30 秒产品示例：FoxClaw 运行后，向你的 Telegram 机器人发送 `List files in DEFAULT_CWD`。FoxClaw 会让本地 Codex 检查你电脑上的那个目录，并把答案发回 Telegram。
 
-## Requirements
+## 环境要求
 
-- macOS or Linux with a working `codex` CLI
-- Codex authenticated on the host machine
+- macOS 或 Linux，并且有可用的 `codex` CLI
+- 主机上的 Codex 已完成认证
 - Node.js 24+
-- A Telegram bot token from `@BotFather`
-- Your Telegram numeric user id
+- 来自 `@BotFather` 的 Telegram bot token
+- 你的 Telegram 数字用户 ID
 
-## Quick Setup
+## 快速设置
 
 ```bash
 git clone https://github.com/foxden-app/foxclaw.git
@@ -42,7 +44,7 @@ npm run doctor
 npm run serve
 ```
 
-Edit `.env` before running `doctor` or `serve`. Minimum private-chat config:
+运行 `doctor` 或 `serve` 前先编辑 `.env`。私聊模式的最小配置：
 
 ```dotenv
 TG_BOT_TOKEN=123456:telegram-token
@@ -52,29 +54,29 @@ DEFAULT_APPROVAL_POLICY=on-request
 DEFAULT_SANDBOX_MODE=workspace-write
 ```
 
-FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
+FoxClaw 只接受来自 `TG_ALLOWED_USER_ID` 的消息。把机器人放进群组并不会让每个群成员都能使用它。
 
 <details>
-<summary>What FoxClaw can do after it is running</summary>
+<summary>FoxClaw 运行后可以做什么</summary>
 
-- Telegram private chat, group, and topic control for one allowed Telegram user
-- Optional Weixin/iLink channel for the same bridge core
-- Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, and `/interrupt`
-- Thread lifecycle controls from mobile: rename, archive, unarchive, fork, rollback, compact, review, and diff
-- Chat-scoped setup panel for model, reasoning effort, Fast service tier, access preset, Agent/Plan mode, and active-turn behavior
-- Codex account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, `/auth add <name>`, and guarded `/logout confirm`
-- Automatic local Codex auth rotation across `auth.json_*` candidates when a usage-limit auth fails
-- Inline approval buttons for command, file-change, and granular permission approvals
-- MCP elicitation cards for structured questions raised by tools during a turn
-- Skills, MCP, hooks, plugins, apps, feature flags, config, requirements, and provider diagnostics
-- SQLite persistence for bindings, offsets, approvals, pending input prompts, and audit logs
-- Single-instance process lock to prevent duplicate Telegram polling on the same bot token
+- 允许一个 Telegram 用户通过私聊、群组和话题控制
+- 可选的微信/iLink 通道，复用同一套桥接核心
+- 使用 `/threads`、`/open`、`/new`、`/where` 和 `/interrupt` 进行稳定的聊天到线程绑定
+- 从手机控制线程生命周期：重命名、归档、取消归档、fork、回滚、compact、review 和 diff
+- 面向单个聊天的设置面板：模型、reasoning effort、Fast service tier、access preset、Agent/Plan 模式和 active-turn 行为
+- Codex 账户控制：`/account`、`/quota`、`/login_device`、`/login_cancel`、`/auth add <name>`，以及带保护的 `/logout confirm`
+- 当某个认证触发用量限制时，在本地 `auth.json_*` 候选之间自动切换 Codex 认证
+- 针对命令、文件变更和细粒度权限审批的内联按钮
+- 针对工具在 turn 中提出的结构化问题显示 MCP elicitation 卡片
+- Skills、MCP、hooks、plugins、apps、feature flags、config、requirements 和 provider diagnostics
+- 使用 SQLite 持久化绑定、offset、审批、待处理输入提示和审计日志
+- 单实例进程锁，避免同一个 bot token 上出现重复 Telegram polling
 
 </details>
 
-## Installing As A Service
+## 作为服务安装
 
-Linux user systemd:
+Linux 用户级 systemd：
 
 ```bash
 npm run install-systemd
@@ -82,27 +84,27 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-macOS launchd:
+macOS launchd：
 
 ```bash
 ./scripts/launchd/install.sh
 ```
 
-Default runtime files are stored under `~/.foxclaw`:
+默认运行时文件存储在 `~/.foxclaw`：
 
-- store: `~/.foxclaw/data/bridge.sqlite`
-- bridge log: `~/.foxclaw/logs/service.log`
-- status: `~/.foxclaw/runtime/status.json`
-- app-server state: `~/.foxclaw/runtime/codex-app-server.json`
-- app-server log: `~/.foxclaw/logs/codex-app-server.log`
+- store：`~/.foxclaw/data/bridge.sqlite`
+- bridge log：`~/.foxclaw/logs/service.log`
+- status：`~/.foxclaw/runtime/status.json`
+- app-server state：`~/.foxclaw/runtime/codex-app-server.json`
+- app-server log：`~/.foxclaw/logs/codex-app-server.log`
 
-Override the store, lock, and app-server paths with `STORE_PATH`, `LOCK_PATH`, `CODEX_APP_SERVER_STATE_PATH`, and `CODEX_APP_SERVER_LOG_PATH`.
+可以用 `STORE_PATH`、`LOCK_PATH`、`CODEX_APP_SERVER_STATE_PATH` 和 `CODEX_APP_SERVER_LOG_PATH` 覆盖 store、lock 和 app-server 路径。
 
-## Migrating From telegram-codex-app-bridge
+## 从 telegram-codex-app-bridge 迁移
 
-FoxClaw was originally forked from `Gan-Xing/telegram-codex-app-bridge` and remains distributed under the MIT License.
+FoxClaw 最初 fork 自 `Gan-Xing/telegram-codex-app-bridge`，并继续以 MIT License 分发。
 
-When upgrading an existing local install:
+升级已有本地安装时：
 
 ```bash
 systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
@@ -110,58 +112,58 @@ test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
 npm run install-systemd
 ```
 
-For launchd installs, unload the old plist if present:
+如果使用 launchd 安装，先卸载旧 plist（如存在）：
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist 2>/dev/null || true
 ./scripts/launchd/install.sh
 ```
 
-The old runtime directory is not read automatically. Copy it once if you want to keep existing bindings, cached thread lists, approvals, and status data.
+旧运行时目录不会被自动读取。如果你想保留现有绑定、缓存线程列表、审批和状态数据，请手动复制一次。
 
-## Telegram Setup
+## Telegram 设置
 
-1. Create a bot with `@BotFather` and copy the token into `TG_BOT_TOKEN`.
-2. Get your Telegram numeric user id and place it into `TG_ALLOWED_USER_ID`.
-3. Start FoxClaw with `npm run serve` or the service installer.
-4. Open a private chat with the bot and send `/help`.
+1. 使用 `@BotFather` 创建机器人，并把 token 填入 `TG_BOT_TOKEN`。
+2. 获取你的 Telegram 数字用户 ID，并填入 `TG_ALLOWED_USER_ID`。
+3. 使用 `npm run serve` 或服务安装器启动 FoxClaw。
+4. 打开与机器人的私聊并发送 `/help`。
 
-Optional group/topic config:
+可选的群组/话题配置：
 
 ```dotenv
 TG_ALLOWED_CHAT_ID=-1001234567890
 TG_ALLOWED_TOPIC_ID=42
 ```
 
-- Leave `TG_ALLOWED_CHAT_ID` empty for private-chat mode.
-- Set `TG_ALLOWED_CHAT_ID` only to allow one group as the default conversation scope.
-- Set both `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` to bind one topic as the default scope.
-- Private chat remains available for `TG_ALLOWED_USER_ID` even when a group is configured.
+- 留空 `TG_ALLOWED_CHAT_ID` 表示使用私聊模式。
+- 只设置 `TG_ALLOWED_CHAT_ID` 时，允许一个群组作为默认会话范围。
+- 同时设置 `TG_ALLOWED_CHAT_ID` 和 `TG_ALLOWED_TOPIC_ID` 时，绑定一个话题作为默认范围。
+- 即使配置了群组，`TG_ALLOWED_USER_ID` 仍然可以继续使用私聊。
 
-To discover group and topic ids:
+查找群组和话题 ID：
 
-1. Stop FoxClaw.
-2. Send a message in the target group or topic.
-3. Open `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`.
-4. Read `message.chat.id` as `TG_ALLOWED_CHAT_ID`.
-5. Read `message.message_thread_id` as `TG_ALLOWED_TOPIC_ID`.
+1. 停止 FoxClaw。
+2. 在目标群组或话题中发送一条消息。
+3. 打开 `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`。
+4. 读取 `message.chat.id` 作为 `TG_ALLOWED_CHAT_ID`。
+5. 读取 `message.message_thread_id` 作为 `TG_ALLOWED_TOPIC_ID`。
 
-If FoxClaw is still running, it may consume the update before you inspect it.
+如果 FoxClaw 还在运行，它可能会在你检查前消费掉该 update。
 
-## Telegram Group Checklist
+## Telegram 群组检查清单
 
-For natural-language messages in a group or supergroup:
+对于群组或超级群里的自然语言消息：
 
-1. Add the bot to the target group.
-2. Disable the bot's `privacy mode` in `@BotFather`.
-3. Promote the bot to administrator in that group.
-4. If privacy mode was changed after adding the bot, remove and re-add the bot.
+1. 将机器人加入目标群组。
+2. 在 `@BotFather` 中禁用机器人的 `privacy mode`。
+3. 将机器人提升为该群管理员。
+4. 如果是在加入群组后才修改隐私模式，请移除并重新加入机器人。
 
-Explicit commands such as `/status@botname` can work even when privacy mode blocks normal messages, so use a plain message to verify group setup.
+即使 privacy mode 阻止普通消息，`/status@botname` 这样的显式命令也可能正常工作，所以请用一条普通消息验证群组设置。
 
-## Codex App-Server Lifecycle
+## Codex App-Server 生命周期
 
-By default:
+默认配置：
 
 ```dotenv
 CODEX_APP_AUTOLAUNCH=true
@@ -172,62 +174,62 @@ CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
 ```
 
-FoxClaw starts `codex app-server` as a detached, bridge-managed process and records its pid and port. On restart, it reconnects to the recorded app-server if that process is still alive; otherwise it starts a new one. `/auth_reload` and auth switching restart the managed app-server so the current `auth.json` is reloaded.
+FoxClaw 会把 `codex app-server` 启动为一个由 bridge 管理的 detached 进程，并记录它的 pid 和端口。重启时，如果记录的 app-server 进程仍然存活，FoxClaw 会重新连接；否则会启动一个新进程。`/auth_reload` 和认证切换会重启托管的 app-server，从而重新加载当前 `auth.json`。
 
-No static Codex app-server port is required in normal installs.
+正常安装不需要固定的 Codex app-server 端口。
 
-## Commands
+## 命令
 
 - `/help`
-- `/setup` opens the unified preference panel
+- `/setup` 打开统一偏好设置面板
 - `/fast <on|off|toggle>`
 - `/active <steer|queue>`
-- `/status`, `/account`, `/quota`
+- `/status`、`/account`、`/quota`
 - `/quota_nudge <credits|usage_limit> confirm`
-- `/login_device`, `/login_cancel [id]`, `/logout confirm`
+- `/login_device`、`/login_cancel [id]`、`/logout confirm`
 - `/auth [list|use <n>|enable <n>|disable <n>|reload|add <name>]`
-- `/threads [query]`, `/threads archived`, `/open <n>`
+- `/threads [query]`、`/threads archived`、`/open <n>`
 - `/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]`
-- `/history [limit]`, `/files <query>`, `/remote`
+- `/history [limit]`、`/files <query>`、`/remote`
 - `/new [cwd]`
-- `/steer <message>`, `/takeover <message>`, `/queue <message>`
+- `/steer <message>`、`/takeover <message>`、`/queue <message>`
 - `/review [base <branch>|commit <sha>|custom <instructions>]`
-- `/diff`, `/fork [name]`, `/undo [n]`, `/rollback [n]`
-- `/rename <name>`, `/compact`, `/archive`, `/unarchive <n>`
-- `/skills [query]`, `/skill <name>`, `/skill_enable <name>`, `/skill_disable <name>`
-- `/loaded`, `/hooks`, `/plugins [query]`, `/apps [reload]`, `/features`, `/config`, `/requirements`, `/provider`
-- `/mcp`, `/mcp_reload`, `/mcp_login <server>`, `/mcp_resource <server> <uri>`
-- `/models`, `/model`, `/effort`, `/permissions`, `/access`, `/mode`, `/plan`, and `/agent`
-- `/reveal`, `/where`, `/interrupt`
+- `/diff`、`/fork [name]`、`/undo [n]`、`/rollback [n]`
+- `/rename <name>`、`/compact`、`/archive`、`/unarchive <n>`
+- `/skills [query]`、`/skill <name>`、`/skill_enable <name>`、`/skill_disable <name>`
+- `/loaded`、`/hooks`、`/plugins [query]`、`/apps [reload]`、`/features`、`/config`、`/requirements`、`/provider`
+- `/mcp`、`/mcp_reload`、`/mcp_login <server>`、`/mcp_resource <server> <uri>`
+- `/models`、`/model`、`/effort`、`/permissions`、`/access`、`/mode`、`/plan` 和 `/agent`
+- `/reveal`、`/where`、`/interrupt`
 
-Plain text sends to the current thread, or creates a new one if none is bound.
+普通文本会发送到当前线程；如果当前没有绑定线程，则创建一个新线程。
 
-## Weixin/iLink
+## 微信/iLink
 
-Weixin support is optional and disabled by default:
+微信支持是可选的，默认关闭：
 
 ```dotenv
 WX_ENABLED=true
 WX_ALLOWED_ILINK_USER_IDS=
 ```
 
-Run the QR login helper once after building:
+构建后运行一次二维码登录助手：
 
 ```bash
 npm run weixin-login
 ```
 
-Weixin runtime files default to `~/.foxclaw/weixin`.
+微信运行时文件默认存储在 `~/.foxclaw/weixin`。
 
 ## Codex Skill
 
-This repo ships a Codex skill at [`skills/foxclaw`](./skills/foxclaw). Use it when you want Codex to bootstrap FoxClaw locally or on another Mac over SSH, write `.env`, build, run doctor, install launchd, and guide first-message validation.
+本仓库内置一个 Codex skill：[`skills/foxclaw`](./skills/foxclaw)。当你想让 Codex 在本机或另一台 Mac 上通过 SSH bootstrap FoxClaw、写入 `.env`、构建、运行 doctor、安装 launchd，并指导首次消息验证时，可以使用它。
 
-## Troubleshooting
+## 故障排查
 
-See [Troubleshooting](./docs/troubleshooting.md) for `doctor` failures, Telegram no-reply cases, service logs, reboot behavior, and migration issues.
+`doctor` 失败、Telegram 没有回复、服务日志、重启行为和迁移问题，请查看 [故障排查](./docs/troubleshooting.md)。
 
-## Operations
+## 运维命令
 
 ```bash
 npm run build
@@ -237,6 +239,6 @@ npm run install-systemd
 npm run uninstall-systemd
 ```
 
-## Contributing
+## 贡献
 
-Issues and PRs are welcome at `https://github.com/foxden-app/foxclaw`.
+欢迎在 `https://github.com/foxden-app/foxclaw` 提交 issue 和 PR。
