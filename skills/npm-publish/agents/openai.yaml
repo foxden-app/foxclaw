@@ -1,0 +1,4 @@
+interface:
+  display_name: "NPM Publish"
+  short_description: "Publish npm packages with 2FA web auth"
+  default_prompt: "Publish this npm package using the recorded web-auth flow."
