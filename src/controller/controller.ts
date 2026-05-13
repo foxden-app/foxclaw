@@ -8268,7 +8268,7 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, include
 function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
   const rows = record.candidates.map((candidate, index) => [
     {
-      text: clipButtonText(`${candidate.isCurrent ? '* ' : ''}${candidate.name}${candidate.disabled ? ' off' : ''}`),
+      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${candidate.name}${candidate.disabled ? ' · off' : ''}`),
       callback_data: `auth:${record.localId}:${index}`,
     },
     {

@@ -1,0 +1,222 @@
+# 故障排查
+
+先从这两条命令开始：
+
+```bash
+foxclaw doctor
+foxclaw status
+```
+
+如果 FoxClaw 是 Linux 用户级服务，再看：
+
+```bash
+systemctl --user status foxclaw.service
+journalctl --user -u foxclaw.service -f
+```
+
+## Doctor 检查失败
+
+| 现象 | 含义 | 处理方式 |
+| --- | --- | --- |
+| `[FAIL] node >= 24` | 当前 shell 使用的是旧版 Node.js。 | 运行 `nvm install 24 && nvm use 24`，再重新执行 `foxclaw doctor`。如果服务仍用旧 Node，从 Node 24 的 shell 里重新执行 `foxclaw start`。 |
+| `[FAIL] codex cli available` | `codex` 命令不在 PATH 里。 | 安装 Codex CLI 或修正 PATH，再确认 `codex --version` 可用。 |
+| `[FAIL] telegram bot token configured` | `.env` 里缺少 `TG_BOT_TOKEN`。 | 从 `@BotFather` 复制 token，填入 `.env`。 |
+| `[FAIL] telegram allowed user configured` | `.env` 里缺少 `TG_ALLOWED_USER_ID`。 | 从 `@userinfobot` 获取数字 ID，填入 `.env`。 |
+| `[FAIL] default cwd exists` | `DEFAULT_CWD` 指向不存在的目录。 | 创建该目录，或把 `DEFAULT_CWD` 改成一个真实存在的绝对路径。 |
+
+## Node 或 npm 不存在
+
+如果看到 `node: command not found` 或 `npm: command not found`，用 `nvm` 安装 Node.js 24：
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm install 24
+nvm use 24
+node -v
+npm -v
+```
+
+如果仍然失败，关闭终端，重新打开后运行：
+
+```bash
+nvm use 24
+```
+
+## npm 权限错误
+
+如果 `npm install -g @openai/codex` 或 `npm install -g @foxden-app/foxclaw` 报 `EACCES`、`EPERM`、`permission denied`，说明当前全局 npm 目录不可写。
+
+推荐处理方式是通过 `nvm` 使用用户级 Node，然后重新安装：
+
+```bash
+nvm install 24
+nvm use 24
+npm install -g @openai/codex
+npm install -g @foxden-app/foxclaw
+```
+
+除非你很清楚本机 Node 的安装方式，否则不要直接混用 `sudo npm install -g ...`。`sudo`、系统 Node 和 `nvm` 混在一起，常见结果是 PATH 断掉或服务启动时找不到命令。
+
+如果 `codex` 已安装但 FoxClaw 找不到它，先定位二进制：
+
+```bash
+command -v codex
+```
+
+然后把绝对路径写进 `.env`：
+
+```dotenv
+CODEX_CLI_BIN=/absolute/path/to/codex
+```
+
+## Bot 没有回复
+
+按顺序检查：
+
+1. 确认 FoxClaw 正在运行：
+
+   ```bash
+   foxclaw status
+   ```
+
+2. 先用私聊测试。直接打开 bot 发：
+
+   ```text
+   /help
+   ```
+
+3. 确认 `TG_ALLOWED_USER_ID` 是你的 Telegram 数字 ID，不是 `@username`。
+
+4. 确认 `.env` 里的 bot token 属于你正在聊天的 bot。
+
+5. 修改 `.env` 后重启：
+
+   ```bash
+   foxclaw start
+   ```
+
+   如果正在前台运行，先 `Ctrl+C` 停止，再重新运行 `foxclaw serve`。
+
+## 群组消息不生效
+
+私聊模式最简单。群组或话题模式请检查：
+
+1. 已把 bot 加入目标群组。
+2. 已在 `@BotFather` 里关闭 bot 的 `privacy mode`。
+3. 已把 bot 提升为群管理员。
+4. 如果是加群后才关闭隐私模式，先把 bot 踢出群再重新加入。
+5. 已配置 `TG_ALLOWED_CHAT_ID`，必要时也配置 `TG_ALLOWED_TOPIC_ID`。
+
+`/status@botname` 这种显式命令有时会在隐私模式下仍然可用，所以验证群组配置时请用普通自然语言消息测试。
+
+## 获取群组或话题 ID
+
+1. 停掉 FoxClaw。
+2. 在目标群组或话题里发一条新消息。
+3. 浏览器打开：
+
+   ```text
+   https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+   ```
+
+4. 用 `message.chat.id` 作为 `TG_ALLOWED_CHAT_ID`。
+5. 用 `message.message_thread_id` 作为 `TG_ALLOWED_TOPIC_ID`。
+
+如果 FoxClaw 还在运行，它可能会先消费这条 update，导致你在浏览器里看不到。
+
+## Telegram polling 冲突
+
+如果 Telegram 报 conflict，或者同一个 bot 行为异常，通常是两个进程在轮询同一个 bot token。
+
+检查新旧服务：
+
+```bash
+systemctl --user is-active foxclaw.service
+systemctl --user is-active telegram-codex-app-bridge.service 2>/dev/null || true
+```
+
+停掉旧服务：
+
+```bash
+systemctl --user disable --now telegram-codex-app-bridge.service
+```
+
+然后重启 FoxClaw：
+
+```bash
+foxclaw start
+```
+
+## Codex 或 app-server 异常
+
+FoxClaw 需要本机 Codex 已登录。先检查命令：
+
+```bash
+codex --version
+```
+
+如果没有登录：
+
+```bash
+codex login
+```
+
+`codex --version` 只证明命令存在。要验证认证真的可用，运行：
+
+```bash
+codex
+```
+
+然后输入：
+
+```text
+Say ready and exit.
+```
+
+如果你的 CLI 支持 `codex login status`，也可以一起看；但普通请求能成功回答才是最直接的验证。
+
+FoxClaw app-server 日志默认在：
+
+```bash
+tail -f ~/.foxclaw/logs/codex-app-server.log
+```
+
+Bridge 日志默认在：
+
+```bash
+tail -f ~/.foxclaw/logs/service.log
+```
+
+## 服务用了错误的 Node 版本
+
+systemd 安装脚本会记录当时 PATH 里的 `node`。如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24 的 shell 重新安装：
+
+```bash
+nvm use 24
+foxclaw start
+systemctl --user status foxclaw.service
+```
+
+状态输出里应该能看到 Node 24 的路径。
+
+## 重启后是否会自动运行
+
+Linux 用户级 systemd：
+
+```bash
+systemctl --user is-enabled foxclaw.service
+```
+
+`enabled` 表示会随用户会话启动。如果希望机器重启后未登录也启动用户服务：
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+macOS 上，运行过下面命令后，FoxClaw 会在你登录时由 launchd 启动：
+
+```bash
+foxclaw start
+```
