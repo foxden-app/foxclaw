@@ -83,13 +83,13 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
 
   assert.deepEqual(buildThreadsKeyboard('en', threads), [
     [{
-      text: '1. Review auth flow',
+      text: '🧵 1. Review auth flow',
       callback_data: 'thread:open:thread-2',
     }],
     [
-      { text: 'Rename', callback_data: 'thread:rename:thread-2' },
-      { text: 'Watch', callback_data: 'thread:watch:thread-2' },
-      { text: 'Archive/Delete', callback_data: 'thread:archive:thread-2' },
+      { text: '✏️ Rename', callback_data: 'thread:rename:thread-2' },
+      { text: '👀 Watch', callback_data: 'thread:watch:thread-2' },
+      { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-2' },
     ],
   ]);
 });
@@ -110,13 +110,13 @@ test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
   ];
   assert.deepEqual(buildThreadsKeyboard('en', [{ ...threads[0]!, index: 11 } as AppThread & { index: number }]), [
     [{
-      text: '11. Later page',
+      text: '🧵 11. Later page',
       callback_data: 'thread:open:thread-x',
     }],
     [
-      { text: 'Rename', callback_data: 'thread:rename:thread-x' },
-      { text: 'Watch', callback_data: 'thread:watch:thread-x' },
-      { text: 'Archive/Delete', callback_data: 'thread:archive:thread-x' },
+      { text: '✏️ Rename', callback_data: 'thread:rename:thread-x' },
+      { text: '👀 Watch', callback_data: 'thread:watch:thread-x' },
+      { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-x' },
     ],
   ]);
 });
@@ -137,10 +137,10 @@ test('buildThreadsKeyboard shows unarchive for archived threads', () => {
 
   assert.deepEqual(buildThreadsKeyboard('en', [thread]), [
     [{
-      text: '1. Old work',
+      text: '🧵 1. Old work',
       callback_data: 'thread:open:thread-archived',
     }],
-    [{ text: 'Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
+    [{ text: '♻️ Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
   ]);
 });
 
@@ -190,19 +190,19 @@ test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
       searchTerm: 'auth',
     }),
     [
-      [{ text: '11. Review auth flow', callback_data: 'thread:open:thread-2' }],
+      [{ text: '🧵 11. Review auth flow', callback_data: 'thread:open:thread-2' }],
       [
-        { text: 'Rename', callback_data: 'thread:rename:thread-2' },
-        { text: 'Watch', callback_data: 'thread:watch:thread-2' },
-        { text: 'Archive/Delete', callback_data: 'thread:archive:thread-2' },
+        { text: '✏️ Rename', callback_data: 'thread:rename:thread-2' },
+        { text: '👀 Watch', callback_data: 'thread:watch:thread-2' },
+        { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-2' },
       ],
-      [{ text: 'New', callback_data: 'thread:new' }],
+      [{ text: '➕ New', callback_data: 'thread:new' }],
       [
-        { text: 'Prev', callback_data: 'thread:list:prev' },
-        { text: 'Next', callback_data: 'thread:list:next' },
+        { text: '⬅️ Prev', callback_data: 'thread:list:prev' },
+        { text: '➡️ Next', callback_data: 'thread:list:next' },
       ],
-      [{ text: 'Clear filter', callback_data: 'thread:list:clear' }],
-      [{ text: 'Archived', callback_data: 'thread:list:archived' }],
+      [{ text: '🧹 Clear', callback_data: 'thread:list:clear' }],
+      [{ text: '🗄️ Archived', callback_data: 'thread:list:archived' }],
     ],
   );
 });
@@ -276,13 +276,13 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
 
   const keyboard = buildModelSettingsKeyboard('en', models, settings);
   assert.deepEqual(keyboard[0], [
-    { text: 'Auto', callback_data: 'settings:model:default' },
-    { text: '• o3', callback_data: 'settings:model:o3' },
+    { text: '⚙️ Auto', callback_data: 'settings:model:default' },
+    { text: '• 🤖 o3', callback_data: 'settings:model:o3' },
   ]);
   assert.deepEqual(keyboard[1], [
-    { text: 'o4-mini', callback_data: 'settings:model:o4-mini' },
+    { text: '🤖 o4-mini', callback_data: 'settings:model:o4-mini' },
   ]);
-  assert.equal(keyboard.at(-1)?.at(-1)?.text, '• high');
+  assert.equal(keyboard.at(-1)?.at(-1)?.text, '• 🧠 high');
 });
 
 test('resolveRequestedModel matches model ids and display names', () => {
@@ -345,9 +345,9 @@ test('access presentation renders current preset and marks selected option', () 
   assert.match(rendered, /Sandbox: <b>Danger full access<\/b>/);
 
   assert.deepEqual(buildAccessSettingsKeyboard('en', access), [[
-    { text: 'Read-only', callback_data: 'settings:access:read-only' },
-    { text: 'Default', callback_data: 'settings:access:default' },
-    { text: '• Full access', callback_data: 'settings:access:full-access' },
+    { text: '👁️ Read-only', callback_data: 'settings:access:read-only' },
+    { text: '🛡️ Default', callback_data: 'settings:access:default' },
+    { text: '• 🔓 Full access', callback_data: 'settings:access:full-access' },
   ]]);
 });
 
@@ -401,11 +401,11 @@ test('setup panel renders summary, focus, rows, and fast controls', () => {
   assert.ok(keyboard.some(row => row.some(button => button.callback_data === 'setup:effort:high')));
   assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
     { text: '• ⚡ Fast: on', callback_data: 'setup:fast:on' },
-    { text: 'Fast: off', callback_data: 'setup:fast:off' },
+    { text: '⚪ Fast: off', callback_data: 'setup:fast:off' },
   ]);
   assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:active:'))), [
-    { text: '• Steer current turn', callback_data: 'setup:active:steer' },
-    { text: 'Queue next turn', callback_data: 'setup:active:queue' },
+    { text: '• 🎯 Steer current turn', callback_data: 'setup:active:steer' },
+    { text: '📥 Queue next turn', callback_data: 'setup:active:queue' },
   ]);
 });
 
@@ -431,7 +431,7 @@ test('setup panel shows unsupported fast as noop button', () => {
   assert.equal(resolveSetupSummaryLine(ctx), 'server default · server default · fast=unsupported · default · default · steer');
   assert.match(formatSetupPanelMessage('en', ctx), /Focus: Fast/);
   assert.deepEqual(buildSetupPanelKeyboard('en', ctx).find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
-    { text: 'Fast unsupported', callback_data: 'setup:fast:unsupported' },
+    { text: '⛔ Fast unsupported', callback_data: 'setup:fast:unsupported' },
   ]);
 });
 

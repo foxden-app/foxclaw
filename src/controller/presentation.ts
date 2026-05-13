@@ -95,7 +95,7 @@ export function buildThreadsKeyboard(locale: AppLocale, threads: ThreadLike[]): 
   return threads.flatMap((thread, index) => {
     const ordinal = typeof thread.index === 'number' ? thread.index : index + 1;
     const openRow = [{
-      text: `${ordinal}. ${truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 28)}`,
+      text: `🧵 ${ordinal}. ${truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 28)}`,
       callback_data: `thread:open:${thread.threadId}`,
     }];
     const actionRow = thread.archived
@@ -183,15 +183,15 @@ export function buildAccessSettingsKeyboard(locale: AppLocale, access: ResolvedA
   const currentPreset = access.preset;
   const buttons: InlineButton[] = [
     {
-      text: `${currentPreset === 'read-only' ? '• ' : ''}${t(locale, 'access_preset_read_only')}`,
+      text: selectedButtonText(currentPreset === 'read-only', accessPresetButtonLabel(locale, 'read-only')),
       callback_data: 'settings:access:read-only',
     },
     {
-      text: `${currentPreset === 'default' ? '• ' : ''}${t(locale, 'access_preset_default')}`,
+      text: selectedButtonText(currentPreset === 'default', accessPresetButtonLabel(locale, 'default')),
       callback_data: 'settings:access:default',
     },
     {
-      text: `${currentPreset === 'full-access' ? '• ' : ''}${t(locale, 'access_preset_full_access')}`,
+      text: selectedButtonText(currentPreset === 'full-access', accessPresetButtonLabel(locale, 'full-access')),
       callback_data: 'settings:access:full-access',
     },
   ];
@@ -361,7 +361,7 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
       callback_data: 'setup:model:default',
     },
     ...ctx.models.map((model) => ({
-      text: `${currentModel === model.model ? '• ' : ''}${truncate(model.model, 14)}`,
+      text: selectedButtonText(currentModel === model.model, `🤖 ${truncate(model.model, 14)}`),
       callback_data: `setup:model:${encodeURIComponent(model.model)}`,
     })),
   ], 2));
@@ -372,7 +372,7 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
       callback_data: 'setup:effort:default',
     },
     ...efforts.map((effort) => ({
-      text: `${ctx.settings?.reasoningEffort === effort ? '• ' : ''}${effort}`,
+      text: selectedButtonText(ctx.settings?.reasoningEffort === effort, `🧠 ${effort}`),
       callback_data: `setup:effort:${effort}`,
     })),
   ], 3));
@@ -394,37 +394,37 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
 
   rows.push([
     {
-      text: `${ctx.access.preset === 'read-only' ? '• ' : ''}${t(locale, 'access_preset_read_only')}`,
+      text: selectedButtonText(ctx.access.preset === 'read-only', accessPresetButtonLabel(locale, 'read-only')),
       callback_data: 'setup:access:read-only',
     },
     {
-      text: `${ctx.access.preset === 'default' ? '• ' : ''}${t(locale, 'access_preset_default')}`,
+      text: selectedButtonText(ctx.access.preset === 'default', accessPresetButtonLabel(locale, 'default')),
       callback_data: 'setup:access:default',
     },
     {
-      text: `${ctx.access.preset === 'full-access' ? '• ' : ''}${t(locale, 'access_preset_full_access')}`,
+      text: selectedButtonText(ctx.access.preset === 'full-access', accessPresetButtonLabel(locale, 'full-access')),
       callback_data: 'setup:access:full-access',
     },
   ]);
 
   rows.push([
     {
-      text: `${currentMode === 'default' ? '• ' : ''}${t(locale, 'collaboration_mode_default')}`,
+      text: selectedButtonText(currentMode === 'default', `🤖 ${t(locale, 'collaboration_mode_default')}`),
       callback_data: 'setup:mode:default',
     },
     {
-      text: `${currentMode === 'plan' ? '• ' : ''}${t(locale, 'collaboration_mode_plan')}`,
+      text: selectedButtonText(currentMode === 'plan', `📝 ${t(locale, 'collaboration_mode_plan')}`),
       callback_data: 'setup:mode:plan',
     },
   ]);
 
   rows.push([
     {
-      text: `${activeTurnMessageMode === 'steer' ? '• ' : ''}${t(locale, 'active_turn_message_mode_steer')}`,
+      text: selectedButtonText(activeTurnMessageMode === 'steer', `🎯 ${t(locale, 'active_turn_message_mode_steer')}`),
       callback_data: 'setup:active:steer',
     },
     {
-      text: `${activeTurnMessageMode === 'queue' ? '• ' : ''}${t(locale, 'active_turn_message_mode_queue')}`,
+      text: selectedButtonText(activeTurnMessageMode === 'queue', `📥 ${t(locale, 'active_turn_message_mode_queue')}`),
       callback_data: 'setup:active:queue',
     },
   ]);
@@ -509,6 +509,16 @@ function resolveCollaborationMode(mode: CollaborationModeValue | null | undefine
   return mode === 'plan' ? 'plan' : 'default';
 }
 
+function selectedButtonText(selected: boolean, label: string): string {
+  return `${selected ? '• ' : ''}${label}`;
+}
+
+function accessPresetButtonLabel(locale: AppLocale, preset: AccessPresetValue): string {
+  if (preset === 'read-only') return `👁️ ${formatAccessPresetLabel(locale, preset)}`;
+  if (preset === 'full-access') return `🔓 ${formatAccessPresetLabel(locale, preset)}`;
+  return `🛡️ ${formatAccessPresetLabel(locale, preset)}`;
+}
+
 export function formatModelSettingsMessage(
   locale: AppLocale,
   models: ModelInfo[],
@@ -555,7 +565,7 @@ export function buildModelSettingsKeyboard(
       callback_data: 'settings:model:default',
     },
     ...models.map((model) => ({
-      text: `${currentModel === model.model ? '• ' : ''}${truncate(model.model, 14)}`,
+      text: selectedButtonText(currentModel === model.model, `🤖 ${truncate(model.model, 14)}`),
       callback_data: `settings:model:${encodeURIComponent(model.model)}`,
     })),
   ];
@@ -566,7 +576,7 @@ export function buildModelSettingsKeyboard(
       callback_data: 'settings:effort:default',
     },
     ...efforts.map((effort) => ({
-      text: `${settings?.reasoningEffort === effort ? '• ' : ''}${effort}`,
+      text: selectedButtonText(settings?.reasoningEffort === effort, `🧠 ${effort}`),
       callback_data: `settings:effort:${effort}`,
     })),
   ];

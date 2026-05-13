@@ -2,34 +2,36 @@
 
 # 🦊 FoxClaw · 狸爪
 
-**一个更适配编程需求的移动端 AI 编码助手。**
+**狸爪：一个更适配编程需求的移动端 Codex 控制器。**
 
-FoxClaw（狸爪）让你通过 Telegram 或微信远程操控本机的 Codex，实现手机端的 AI 编程。你可以离开办公桌去吃饭、在跑步机上、在陪小孩逛公园——你的 Codex 依然在正常工作，并随时向你汇报进展。
+FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，`codex app-server` 负责本地执行；你发任务、看进度、批审批、切线程，Codex 在电脑上继续写代码。
 
-不需要公网服务器。FoxClaw 跑在你自己电脑上，在本地和 `codex app-server` 通信，审批在你电脑上完成，结果推送回手机。
+这适合你离开办公桌去吃饭、在旅途中、在跑步机上，或者陪小孩逛公园的时候继续工作。人可以离开电脑，Codex 不必停；它会把关键进展、错误、审批请求和最终结果同步回手机。
+
+不需要公网服务器。FoxClaw 跑在你自己的电脑上，代码、shell、认证、审批和运行数据都留在本机，只把你允许的操作入口暴露给受信任的聊天账号。
 
 ## 为什么是 FoxClaw
 
 **为什么选 Codex 作为底层引擎？**
 
-1. **开源且接口完整** — Codex 是 OpenAI 开源的 CLI agent，提供了 `codex app-server`，暴露了完整的 JSON-RPC 接口，可以被外部程序精确控制。
-2. **GPT 模型体验领先** — Codex 使用 GPT 系列模型（包括 o3/o4-mini 等），在实际编码体验上表现优秀。
-3. **多账号额度切换** — 支持多个 OpenAI 账号的免费额度（Plus 试用、Team 试用、多账号免费额度等）自动轮换。5 小时用量限制一到，自动切换下一个账号继续工作，不用手动操作。
+1. **开源且接口完整** — Codex 是 OpenAI 开源的 CLI agent，并提供 `codex app-server`。FoxClaw 不是模拟终端输入，而是通过更完整的接口读取线程、切换模型、处理审批和恢复会话。
+2. **当前编码体验强** — FoxClaw 直接读取你本机 Codex 可用的模型列表；如果你的 Codex 环境已经有 GPT-5.5，就可以在手机端选择和使用它。对高强度编程工作流来说，Codex/GPT-5.5 的体感已经是很多人优先选择它的原因。
+3. **多账号额度切换** — 免费额度、一个月 Plus/Team 试用、多账号小额度都可以纳入本地 `auth.json_*` 候选。5 小时限制一到，FoxClaw 自动切换下一个可用账号、重启 app-server 并重试刚才的请求。
 
 **适合这些场景：**
 
 - 🍜 离开办公桌去吃饭，Codex 继续编码，有审批需求时手机上点一下
-- 🚶 通勤路上、旅途中，不用打开电脑也能下发编码任务、查看进展
-- 🏃 在跑步机上、陪小孩逛公园，随时监控编码进程、做调试审批
+- 🚶 通勤路上、旅途中，不用打开电脑也能下发任务、查看进展、继续调试
+- 🏃 在跑步机上、陪小孩逛公园，持续监控 Codex 的编码进程
 - 🔒 代码、shell、认证、审批、运行数据全部留在本机，不暴露到公网
 - 👤 只允许一个受信任的 Telegram 用户远程操作
 
 ## 从这里开始
 
-- 手头有 Codex、OpenClaw、QwenPaw、Hermes、OpenCode、Kimi CLI 之类能跑 shell 的 agent？推荐走 [Agent 辅助安装](./docs/agent-assisted-install.md)。
-- 对 Node、Telegram 机器人、Codex CLI 不太熟？看 [新手安装指南](./docs/install-for-beginners.md)。
+- 手头有 Codex、OpenClaw、QwenPaw、Hermes、OpenCode、Kimi CLI 之类能跑 shell 的 agent？推荐走 [Agent 辅助安装](./docs/zh/agent-assisted-install.md)。
+- 对 Node、Telegram 机器人、Codex CLI 不太熟？看 [新手安装指南](./docs/zh/install-for-beginners.md)。
 - Git、Node、`.env` 都玩得转？直接往下看快速设置。
-- 卡住了？看 [故障排查](./docs/troubleshooting.md)。
+- 卡住了？看 [故障排查](./docs/zh/troubleshooting.md)。
 
 最低要求：一个 Telegram bot token、你的 Telegram 数字用户 ID、Node.js 24、一份已登录的 `codex` CLI。首次安装大约 10–20 分钟。
 
@@ -277,11 +279,11 @@ foxclaw weixin-login
 
 ## Codex Skill
 
-仓库自带一个 Codex skill：[`skills/foxclaw`](./skills/foxclaw)。用它可以让 Codex 通过 SSH 在本机或远程 Mac 上 bootstrap FoxClaw——写 `.env`、构建、跑 doctor、装 launchd、引导首次消息验证，一条龙。
+仓库自带一个 Codex skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。它可以让 Codex 通过 SSH 在本机或远程 Mac 上 bootstrap FoxClaw——写 `.env`、构建、跑 doctor、装 launchd、引导首次消息验证，一条龙。
 
 ## 故障排查
 
-`doctor` 报错、Telegram 没回复、服务日志看不懂、重启行为异常、迁移出问题——都看 [故障排查](./docs/troubleshooting.md)。
+`doctor` 报错、Telegram 没回复、服务日志看不懂、重启行为异常、迁移出问题——都看 [故障排查](./docs/zh/troubleshooting.md)。
 
 ## 运维命令
 

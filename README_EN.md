@@ -2,25 +2,27 @@
 
 # 🦊 FoxClaw
 
-**A mobile-first AI coding assistant built for programming workflows.**
+**A mobile Codex controller built for real programming workflows.**
 
-FoxClaw lets you control your local Codex from your phone via Telegram or Weixin. Leave your desk for lunch, hop on a treadmill, or take the kids to the park — your Codex keeps coding and reports back to you in real time.
+FoxClaw turns your phone into a practical web coding cockpit for your local Codex. Telegram or Weixin handles the chat interface, `codex app-server` handles local execution, and you can send tasks, inspect progress, approve actions, switch threads, and keep working without opening a laptop.
 
-No public server required. FoxClaw runs on your own computer, talks to `codex app-server` locally, handles approvals on your machine, and pushes results back to your phone.
+It is built for the moments when you leave your desk for lunch, commute, travel, use a treadmill, or take the kids to the park. You can step away from the keyboard while Codex keeps coding and sends progress, errors, approval requests, and final results back to your phone.
+
+No public server required. FoxClaw runs on your own computer, talks to `codex app-server` locally, and keeps code, shell access, auth, approvals, and runtime data on that machine.
 
 ## Why FoxClaw
 
 **Why Codex as the underlying engine?**
 
-1. **Open source with complete APIs** — Codex is OpenAI's open-source CLI agent. It ships `codex app-server` with a full JSON-RPC interface that external programs can control precisely.
-2. **Strong GPT model performance** — Codex uses GPT-series models (o3, o4-mini, etc.) that deliver excellent real-world coding results.
-3. **Multi-account quota rotation** — Rotate across multiple OpenAI accounts (free tier, Plus trials, Team trials) automatically. When one account hits the 5-hour usage limit, FoxClaw switches to the next available account and keeps working.
+1. **Open source with complete APIs** — Codex is OpenAI's open-source CLI agent and ships `codex app-server`. FoxClaw does not scrape a terminal; it uses the app-server interface to read threads, switch models, handle approvals, and resume sessions.
+2. **Strong current coding experience** — FoxClaw reads the model list from your local Codex app-server. If your Codex environment has GPT-5.5 available, you can select and use it from your phone. For many heavy coding workflows, Codex/GPT-5.5 is already the reason to choose this stack.
+3. **Multi-account quota rotation** — Free quota, trial Plus/Team accounts, and small account-specific allowances can all live as local `auth.json_*` candidates. When one account hits a 5-hour usage limit, FoxClaw switches to the next available account, restarts app-server, and retries the failed request.
 
 **Built for these scenarios:**
 
 - 🍜 Leave your desk for lunch — Codex keeps coding, tap to approve when needed
-- 🚶 Commuting or traveling — dispatch coding tasks and check progress without opening a laptop
-- 🏃 On the treadmill or at the park with kids — monitor coding progress and handle approvals
+- 🚶 Commute or travel — dispatch tasks, inspect progress, and continue debugging without a laptop
+- 🏃 Use a treadmill or spend time at the park — monitor Codex's coding process from your phone
 - 🔒 Code, shell, auth, approvals, and runtime data stay on your machine — nothing exposed to the public internet
 - 👤 Only one trusted Telegram user can operate the bot
 

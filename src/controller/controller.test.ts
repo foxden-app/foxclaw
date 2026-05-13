@@ -2577,14 +2577,14 @@ test('/threads panel supports rename and archive callbacks', async (t) => {
 
   assert.equal(rig.sentHtmlMessages.length, 1);
   assert.deepEqual(rig.sentHtmlKeyboards[0], [
-    [{ text: '1. Panel thread', callback_data: 'thread:open:thread-panel' }],
+    [{ text: '🧵 1. Panel thread', callback_data: 'thread:open:thread-panel' }],
     [
-      { text: 'Rename', callback_data: 'thread:rename:thread-panel' },
-      { text: 'Watch', callback_data: 'thread:watch:thread-panel' },
-      { text: 'Archive/Delete', callback_data: 'thread:archive:thread-panel' },
+      { text: '✏️ Rename', callback_data: 'thread:rename:thread-panel' },
+      { text: '👀 Watch', callback_data: 'thread:watch:thread-panel' },
+      { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-panel' },
     ],
-    [{ text: 'New', callback_data: 'thread:new' }],
-    [{ text: 'Archived', callback_data: 'thread:list:archived' }],
+    [{ text: '➕ New', callback_data: 'thread:new' }],
+    [{ text: '🗄️ Archived', callback_data: 'thread:list:archived' }],
   ]);
 
   await (rig.controller as any).handleCallback(createCallback('thread:rename:thread-panel', 1001));
@@ -2643,10 +2643,10 @@ test('/threads archived panel supports unarchive callback', async (t) => {
 
   assert.equal(rig.sentHtmlMessages.length, 1);
   assert.deepEqual(rig.sentHtmlKeyboards[0], [
-    [{ text: '1. Archived work', callback_data: 'thread:open:thread-archived' }],
-    [{ text: 'Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
-    [{ text: 'New', callback_data: 'thread:new' }],
-    [{ text: 'Recent', callback_data: 'thread:list:recent' }],
+    [{ text: '🧵 1. Archived work', callback_data: 'thread:open:thread-archived' }],
+    [{ text: '♻️ Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
+    [{ text: '➕ New', callback_data: 'thread:new' }],
+    [{ text: '🕘 Recent', callback_data: 'thread:list:recent' }],
   ]);
 
   await (rig.controller as any).handleCallback(createCallback('thread:unarchive:thread-archived', 1001));
