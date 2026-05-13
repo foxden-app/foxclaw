@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-node dist/main.js doctor
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+node "$ROOT_DIR/dist/main.js" doctor

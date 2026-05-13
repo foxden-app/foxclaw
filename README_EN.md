@@ -31,20 +31,27 @@ The minimum install needs only a Telegram bot token, your numeric Telegram user 
 - A Telegram bot token from `@BotFather`
 - Your Telegram numeric user id
 
-## Quick Setup
+## npm Quick Setup
 
 ```bash
-git clone https://github.com/foxden-app/foxclaw.git
-cd foxclaw
-npm install
-cp .env.example .env
-$EDITOR .env
-npm run build
-npm run doctor
-npm run serve
+npm install -g @foxden-app/foxclaw
+foxclaw init
+$EDITOR ~/.foxclaw/.env
+foxclaw doctor
+foxclaw start
 ```
 
-Edit `.env` before running `doctor` or `serve`. Minimum private-chat config:
+pnpm users can use:
+
+```bash
+pnpm add -g @foxden-app/foxclaw
+foxclaw init
+$EDITOR ~/.foxclaw/.env
+foxclaw doctor
+foxclaw start
+```
+
+Edit `.env` before running `doctor` or `start`. Minimum private-chat config:
 
 ```dotenv
 TG_BOT_TOKEN=123456:telegram-token
@@ -53,6 +60,10 @@ DEFAULT_CWD=/absolute/path/to/workspace
 DEFAULT_APPROVAL_POLICY=on-request
 DEFAULT_SANDBOX_MODE=workspace-write
 ```
+
+The default config file is `~/.foxclaw/.env`. Set `FOXCLAW_ENV=/path/to/.env` if you want to keep it somewhere else.
+
+`foxclaw start` runs checks and installs or restarts the background service. It is idempotent, so run it again after upgrading.
 
 FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
 
@@ -74,20 +85,25 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 
 </details>
 
-## Installing As A Service
+## Service And Debugging
 
-Linux user systemd:
+Recommended:
 
 ```bash
-npm run install-systemd
+foxclaw start
+```
+
+It installs or restarts the Linux user systemd service, or loads/reloads launchd on macOS. To inspect Linux service state:
+
+```bash
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-macOS launchd:
+For foreground debugging:
 
 ```bash
-./scripts/launchd/install.sh
+foxclaw serve
 ```
 
 Default runtime files are stored under `~/.foxclaw`:
@@ -109,14 +125,14 @@ When upgrading an existing local install:
 ```bash
 systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
 test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
-npm run install-systemd
+foxclaw start
 ```
 
 For launchd installs, unload the old plist if present:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist 2>/dev/null || true
-./scripts/launchd/install.sh
+foxclaw start
 ```
 
 The old runtime directory is not read automatically. Copy it once if you want to keep existing bindings, cached thread lists, approvals, and status data.
@@ -125,7 +141,7 @@ The old runtime directory is not read automatically. Copy it once if you want to
 
 1. Create a bot with `@BotFather` and copy the token into `TG_BOT_TOKEN`.
 2. Get your Telegram numeric user id and place it into `TG_ALLOWED_USER_ID`.
-3. Start FoxClaw with `npm run serve` or the service installer.
+3. Start FoxClaw with `foxclaw start`.
 4. Open a private chat with the bot and send `/help`.
 
 Optional group/topic config:
@@ -216,7 +232,7 @@ WX_ALLOWED_ILINK_USER_IDS=
 Run the QR login helper once after building:
 
 ```bash
-npm run weixin-login
+foxclaw weixin-login
 ```
 
 Weixin runtime files default to `~/.foxclaw/weixin`.
@@ -232,11 +248,10 @@ See [Troubleshooting](./docs/troubleshooting.md) for `doctor` failures, Telegram
 ## Operations
 
 ```bash
-npm run build
-npm run doctor
-npm run status
-npm run install-systemd
-npm run uninstall-systemd
+foxclaw doctor
+foxclaw status
+foxclaw start
+foxclaw uninstall-systemd
 ```
 
 ## Contributing

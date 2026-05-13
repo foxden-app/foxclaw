@@ -6,13 +6,32 @@ import dotenv from 'dotenv';
 import type { LogLevel } from './logger.js';
 import type { ApprovalPolicyValue, SandboxModeValue } from './types.js';
 
-export const APP_HOME = path.join(os.homedir(), '.foxclaw');
+export const APP_HOME = path.join(process.env.HOME || os.homedir(), '.foxclaw');
 export const DEFAULT_STORE_PATH = path.join(APP_HOME, 'data', 'bridge.sqlite');
 export const DEFAULT_STATUS_PATH = path.join(APP_HOME, 'runtime', 'status.json');
 export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
 export const DEFAULT_LOCK_PATH = path.join(APP_HOME, 'runtime', 'bridge.lock');
 export const DEFAULT_CODEX_APP_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'codex-app-server.json');
 export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'codex-app-server.log');
+export const DEFAULT_ENV_PATH = path.join(APP_HOME, '.env');
+
+let envLoaded = false;
+
+export function loadEnv(): void {
+  if (envLoaded) return;
+  envLoaded = true;
+  const explicitPath = process.env.FOXCLAW_ENV?.trim();
+  if (explicitPath) {
+    dotenv.config({ path: explicitPath, override: true });
+    return;
+  }
+  const cwdEnvPath = path.join(process.cwd(), '.env');
+  if (fs.existsSync(cwdEnvPath)) {
+    dotenv.config({ path: cwdEnvPath });
+    return;
+  }
+  dotenv.config({ path: DEFAULT_ENV_PATH });
+}
 
 export interface AppConfig {
   tgBotToken: string;
@@ -49,7 +68,7 @@ export interface AppConfig {
 }
 
 export function loadConfig(): AppConfig {
-  dotenv.config();
+  loadEnv();
   const config: AppConfig = {
     tgBotToken: required('TG_BOT_TOKEN'),
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
