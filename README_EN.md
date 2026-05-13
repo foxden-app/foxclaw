@@ -1,10 +1,28 @@
 [中文](./README.md) ｜ English
 
-# FoxClaw
+# 🦊 FoxClaw
 
-FoxClaw is the local execution claw for Foxden agents.
+**A mobile-first AI coding assistant built for programming workflows.**
 
-It runs on your own computer and lets a trusted Telegram or Weixin chat control your local Codex environment. You do not need a public server: FoxClaw talks to Codex over local `codex app-server`, keeps approvals on your machine, and sends the working conversation back to your phone.
+FoxClaw lets you control your local Codex from your phone via Telegram or Weixin. Leave your desk for lunch, hop on a treadmill, or take the kids to the park — your Codex keeps coding and reports back to you in real time.
+
+No public server required. FoxClaw runs on your own computer, talks to `codex app-server` locally, handles approvals on your machine, and pushes results back to your phone.
+
+## Why FoxClaw
+
+**Why Codex as the underlying engine?**
+
+1. **Open source with complete APIs** — Codex is OpenAI's open-source CLI agent. It ships `codex app-server` with a full JSON-RPC interface that external programs can control precisely.
+2. **Strong GPT model performance** — Codex uses GPT-series models (o3, o4-mini, etc.) that deliver excellent real-world coding results.
+3. **Multi-account quota rotation** — Rotate across multiple OpenAI accounts (free tier, Plus trials, Team trials) automatically. When one account hits the 5-hour usage limit, FoxClaw switches to the next available account and keeps working.
+
+**Built for these scenarios:**
+
+- 🍜 Leave your desk for lunch — Codex keeps coding, tap to approve when needed
+- 🚶 Commuting or traveling — dispatch coding tasks and check progress without opening a laptop
+- 🏃 On the treadmill or at the park with kids — monitor coding progress and handle approvals
+- 🔒 Code, shell, auth, approvals, and runtime data stay on your machine — nothing exposed to the public internet
+- 👤 Only one trusted Telegram user can operate the bot
 
 ## Start Here
 
@@ -13,15 +31,9 @@ It runs on your own computer and lets a trusted Telegram or Weixin chat control 
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
-FoxClaw is a good fit if you want to:
+The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24, and a logged-in `codex` CLI. A first install usually takes 10–20 minutes.
 
-- use Codex from your phone without exposing your computer to the public internet
-- keep code, shell access, auth, approvals, and runtime data on your own machine
-- use one trusted Telegram user as the remote operator
-
-The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24, and a logged-in `codex` CLI. A first install usually takes 10-20 minutes.
-
-30-second product example: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
+**30-second demo**: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
 
 ## Requirements
 
@@ -31,7 +43,7 @@ The minimum install needs only a Telegram bot token, your numeric Telegram user 
 - A Telegram bot token from `@BotFather`
 - Your Telegram numeric user id
 
-## npm Quick Setup
+## Quick Setup
 
 ```bash
 npm install -g @foxden-app/foxclaw
@@ -41,7 +53,7 @@ foxclaw doctor
 foxclaw start
 ```
 
-pnpm users can use:
+pnpm users:
 
 ```bash
 pnpm add -g @foxden-app/foxclaw
@@ -63,27 +75,51 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 The default config file is `~/.foxclaw/.env`. Set `FOXCLAW_ENV=/path/to/.env` if you want to keep it somewhere else.
 
-`foxclaw start` runs checks and installs or restarts the background service. It is idempotent, so run it again after upgrading.
+`foxclaw start` runs checks and installs or restarts the background service. It is idempotent — run it again after upgrading.
 
 FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
 
 <details>
 <summary>What FoxClaw can do after it is running</summary>
 
-- Telegram private chat, group, and topic control for one allowed Telegram user
-- Optional Weixin/iLink channel for the same bridge core
-- Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, and `/interrupt`
-- Thread lifecycle controls from mobile: rename, archive, unarchive, fork, rollback, compact, review, and diff
-- Chat-scoped setup panel for model, reasoning effort, Fast service tier, access preset, Agent/Plan mode, and active-turn behavior
-- Codex account controls with `/account`, `/quota`, `/login_device`, `/login_cancel`, `/auth add <name>`, and guarded `/logout confirm`
-- Automatic local Codex auth rotation across `auth.json_*` candidates when a usage-limit auth fails
-- Inline approval buttons for command, file-change, and granular permission approvals
+**Core capabilities:**
+- Telegram private chat, group, and topic control for your local Codex
+- Optional Weixin/iLink channel sharing the same bridge core
+- Full thread lifecycle management from mobile: create, rename, archive, fork, rollback, compact, review, diff
+- Inline approval buttons for commands, file changes, and granular permissions — one tap to approve
 - MCP elicitation cards for structured questions raised by tools during a turn
+
+**Multi-account management:**
+- Codex account controls: `/account`, `/quota`, `/login_device`, `/auth add <name>`
+- Automatic auth rotation across local `auth.json_*` files when a usage limit is hit — seamless account switching
+- `/auth` panel to view, enable, disable, and switch between candidate accounts
+
+**Threads and sessions:**
+- `/threads`, `/open`, `/new`, `/where`, `/interrupt` — sticky chat-to-thread binding
+- Chat-scoped setup panel for model, reasoning effort, Fast tier, access preset, Agent/Plan mode
 - Skills, MCP, hooks, plugins, apps, feature flags, config, requirements, and provider diagnostics
+
+**Reliability:**
 - SQLite persistence for bindings, offsets, approvals, pending input prompts, and audit logs
 - Single-instance process lock to prevent duplicate Telegram polling on the same bot token
 
 </details>
+
+## Multi-Account Rotation
+
+A key FoxClaw feature is automatic multi-account switching. When one account's 5-hour usage limit is triggered, FoxClaw automatically switches to the next available account and continues working.
+
+Setup:
+
+1. Place multiple auth files in the Codex auth directory (usually `~/.codex/`), named like `auth.json_personal`, `auth.json_team`, etc.
+2. Use `/auth add <name>` to add new accounts directly from Telegram.
+3. Use `/auth` to view all candidate account statuses.
+4. Use `/auth enable <n>` / `/auth disable <n>` to control which accounts participate in auto-rotation.
+
+When Codex reports a usage-limit error, FoxClaw automatically:
+- Switches to the next non-failed candidate account
+- Restarts app-server to load the new auth
+- Retries the failed request with the new account
 
 ## Service And Debugging
 
@@ -108,13 +144,15 @@ foxclaw serve
 
 Default runtime files are stored under `~/.foxclaw`:
 
-- store: `~/.foxclaw/data/bridge.sqlite`
-- bridge log: `~/.foxclaw/logs/service.log`
-- status: `~/.foxclaw/runtime/status.json`
-- app-server state: `~/.foxclaw/runtime/codex-app-server.json`
-- app-server log: `~/.foxclaw/logs/codex-app-server.log`
+| Purpose | Path |
+|---------|------|
+| Database | `~/.foxclaw/data/bridge.sqlite` |
+| Bridge log | `~/.foxclaw/logs/service.log` |
+| Status | `~/.foxclaw/runtime/status.json` |
+| App-server state | `~/.foxclaw/runtime/codex-app-server.json` |
+| App-server log | `~/.foxclaw/logs/codex-app-server.log` |
 
-Override the store, lock, and app-server paths with `STORE_PATH`, `LOCK_PATH`, `CODEX_APP_SERVER_STATE_PATH`, and `CODEX_APP_SERVER_LOG_PATH`.
+Override with `STORE_PATH`, `LOCK_PATH`, `CODEX_APP_SERVER_STATE_PATH`, and `CODEX_APP_SERVER_LOG_PATH`.
 
 ## Migrating From telegram-codex-app-bridge
 
@@ -156,7 +194,7 @@ TG_ALLOWED_TOPIC_ID=42
 - Set both `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` to bind one topic as the default scope.
 - Private chat remains available for `TG_ALLOWED_USER_ID` even when a group is configured.
 
-To discover group and topic ids:
+**How to find group and topic IDs:**
 
 1. Stop FoxClaw.
 2. Send a message in the target group or topic.
@@ -197,7 +235,7 @@ No static Codex app-server port is required in normal installs.
 ## Commands
 
 - `/help`
-- `/setup` opens the unified preference panel
+- `/setup` — unified preference panel
 - `/fast <on|off|toggle>`
 - `/active <steer|queue>`
 - `/status`, `/account`, `/quota`
@@ -215,7 +253,7 @@ No static Codex app-server port is required in normal installs.
 - `/skills [query]`, `/skill <name>`, `/skill_enable <name>`, `/skill_disable <name>`
 - `/loaded`, `/hooks`, `/plugins [query]`, `/apps [reload]`, `/features`, `/config`, `/requirements`, `/provider`
 - `/mcp`, `/mcp_reload`, `/mcp_login <server>`, `/mcp_resource <server> <uri>`
-- `/models`, `/model`, `/effort`, `/permissions`, `/access`, `/mode`, `/plan`, and `/agent`
+- `/models`, `/model`, `/effort`, `/permissions`, `/access`, `/mode`, `/plan`, `/agent`
 - `/reveal`, `/where`, `/interrupt`
 
 Plain text sends to the current thread, or creates a new one if none is bound.
@@ -239,7 +277,7 @@ Weixin runtime files default to `~/.foxclaw/weixin`.
 
 ## Codex Skill
 
-This repo ships a Codex skill at [`skills/foxclaw`](./skills/foxclaw). Use it when you want Codex to bootstrap FoxClaw locally or on another Mac over SSH, write `.env`, build, run doctor, install launchd, and guide first-message validation.
+This repo ships a Codex skill at [`skills/foxclaw`](./skills/foxclaw). Use it when you want Codex to bootstrap FoxClaw locally or on another Mac over SSH — write `.env`, build, run doctor, install launchd, and guide first-message validation.
 
 ## Troubleshooting
 
@@ -256,4 +294,4 @@ foxclaw uninstall-systemd
 
 ## Contributing
 
-Issues and PRs are welcome at `https://github.com/foxden-app/foxclaw`.
+Issues and PRs are welcome at [GitHub](https://github.com/foxden-app/foxclaw).
