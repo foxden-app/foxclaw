@@ -1,10 +1,10 @@
 # Troubleshooting
 
-Start with these commands from the FoxClaw repo directory:
+Start with these commands:
 
 ```bash
-npm run doctor
-npm run status
+foxclaw doctor
+foxclaw status
 ```
 
 If FoxClaw is installed as a Linux user service, also check:
@@ -18,7 +18,7 @@ journalctl --user -u foxclaw.service -f
 
 | Symptom | Meaning | Fix |
 | --- | --- | --- |
-| `[FAIL] node >= 24` | Your current shell is using an older Node.js. | Run `nvm install 24 && nvm use 24`, then rerun `npm run doctor`. If the service uses old Node, reinstall it from a Node 24 shell with `npm run install-systemd`. |
+| `[FAIL] node >= 24` | Your current shell is using an older Node.js. | Run `nvm install 24 && nvm use 24`, then rerun `foxclaw doctor`. If the service uses old Node, reinstall it from a Node 24 shell with `foxclaw start`. |
 | `[FAIL] codex cli available` | The `codex` command is not in PATH. | Install Codex CLI or fix PATH, then confirm `codex --version` works. |
 | `[FAIL] telegram bot token configured` | `TG_BOT_TOKEN` is missing from `.env`. | Copy the token from `@BotFather` into `.env`. |
 | `[FAIL] telegram allowed user configured` | `TG_ALLOWED_USER_ID` is missing from `.env`. | Get your numeric id from `@userinfobot` and add it to `.env`. |
@@ -77,7 +77,7 @@ Check these in order:
 1. Make sure FoxClaw is running:
 
    ```bash
-   npm run status
+   foxclaw status
    ```
 
 2. Try private chat first. Open your bot directly and send:
@@ -93,10 +93,10 @@ Check these in order:
 5. Restart after changing `.env`:
 
    ```bash
-   systemctl --user restart foxclaw.service
+   foxclaw start
    ```
 
-   If running foreground mode, stop with `Ctrl+C` and run `npm run serve` again.
+   If running foreground mode, stop with `Ctrl+C` and run `foxclaw serve` again.
 
 ## Group Messages Do Not Work
 
@@ -145,7 +145,7 @@ systemctl --user disable --now telegram-codex-app-bridge.service
 Then restart FoxClaw:
 
 ```bash
-systemctl --user restart foxclaw.service
+foxclaw start
 ```
 
 ## Codex Or App-Server Fails
@@ -194,7 +194,7 @@ The systemd installer captures the `node` binary from your current PATH. If you 
 
 ```bash
 nvm use 24
-npm run install-systemd
+foxclaw start
 systemctl --user status foxclaw.service
 ```
 
@@ -217,7 +217,7 @@ loginctl enable-linger "$USER"
 macOS launchd starts FoxClaw when you log in after running:
 
 ```bash
-./scripts/launchd/install.sh
+foxclaw start
 ```
 
 ## Migrating From The Old Project Name
@@ -227,13 +227,10 @@ If this machine still runs `telegram-codex-app-bridge`, migrate once:
 ```bash
 systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
 test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
-git remote set-url origin https://github.com/foxden-app/foxclaw.git
-git fetch origin main
-git checkout main
-git pull --ff-only origin main
-npm install
-npm run build
-npm run install-systemd
+npm install -g @foxden-app/foxclaw@latest
+foxclaw init
+foxclaw doctor
+foxclaw start
 ```
 
-If `git status --short` shows local changes before migration, stop and review those changes before pulling.
+If `~/.foxclaw/.env` already exists, `foxclaw init` leaves it untouched.

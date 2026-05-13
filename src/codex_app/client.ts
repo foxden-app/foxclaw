@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import type { Logger } from '../logger.js';
 import type {
   AppThread,
@@ -124,6 +125,8 @@ interface CodexAppServerRuntimeStatus {
 interface StopOptions {
   terminateServer?: boolean;
 }
+
+const CLIENT_VERSION = readPackageVersion();
 
 export class CodexAppClient extends EventEmitter {
   private child: ChildProcess | null = null;
@@ -776,7 +779,7 @@ export class CodexAppClient extends EventEmitter {
       clientInfo: {
         name: 'foxclaw',
         title: 'FoxClaw',
-        version: '0.2.0',
+        version: CLIENT_VERSION,
       },
       capabilities: {
         experimentalApi: true,
@@ -959,6 +962,16 @@ export class CodexAppClient extends EventEmitter {
       return;
     }
     this.clearServerState();
+  }
+}
+
+function readPackageVersion(): string {
+  try {
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
   }
 }
 

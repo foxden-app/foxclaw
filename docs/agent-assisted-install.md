@@ -27,7 +27,8 @@ Send this to your agent on the target computer:
 Install FoxClaw on this machine.
 
 Repository:
-https://github.com/foxden-app/foxclaw.git
+Published package:
+@foxden-app/foxclaw
 
 Use private Telegram chat first. Do not configure group/topic mode unless I explicitly provide TG_ALLOWED_CHAT_ID or TG_ALLOWED_TOPIC_ID.
 
@@ -37,20 +38,18 @@ TG_ALLOWED_USER_ID=<paste numeric Telegram user id here>
 DEFAULT_CWD=<paste absolute working directory here>
 
 Tasks:
-1. Inspect the machine first. Do not overwrite local changes if a FoxClaw or old telegram-codex-app-bridge repo already exists.
+1. Inspect the machine first. If a FoxClaw or old telegram-codex-app-bridge service already exists, report it before changing services.
 2. Ensure Node.js 24+ is available. If not, install or activate Node 24 with nvm.
 3. Ensure the Codex CLI exists and is logged in. If login is required, stop and tell me exactly what I need to do.
-4. Clone or update https://github.com/foxden-app/foxclaw.git.
-5. Write a local .env. Never commit .env.
-6. Run npm install, npm run build, and npm run doctor.
-7. Start FoxClaw in the foreground first and ask me to send /help and /status to the Telegram bot.
-8. Only after the foreground test works, install the background service:
-   - Linux: npm run install-systemd
-   - macOS: ./scripts/launchd/install.sh
+4. Install or update FoxClaw with npm install -g @foxden-app/foxclaw@latest.
+5. Run foxclaw init, then write ~/.foxclaw/.env. Never print or commit the bot token.
+6. Run foxclaw doctor.
+7. Start FoxClaw with foxclaw start.
+8. Ask me to send /help and /status to the Telegram bot.
 9. Verify the final state:
    - foxclaw.service is active/enabled on Linux
    - old telegram-codex-app-bridge.service is inactive/disabled if present
-   - npm run status works
+   - foxclaw status works
 10. Report the commands used, the final status, and the log command I should use if something stops working. Redact TG_BOT_TOKEN and never print the full token or full .env content.
 ```
 
@@ -61,18 +60,19 @@ Use this when the target computer is still running `telegram-codex-app-bridge`:
 ```text
 Migrate this machine from telegram-codex-app-bridge to FoxClaw.
 
-New repository:
-https://github.com/foxden-app/foxclaw.git
+New package:
+@foxden-app/foxclaw
 
 Please:
-1. Check git status before changing the repo. If there are uncommitted local changes, stop and report them.
+1. Inspect the current install method, service file, and runtime directory before changing anything.
 2. Stop and disable telegram-codex-app-bridge.service if it exists.
 3. If ~/.foxclaw does not exist and ~/.telegram-codex-app-bridge exists, copy ~/.telegram-codex-app-bridge to ~/.foxclaw.
-4. Update the source repo to https://github.com/foxden-app/foxclaw.git and pull main.
-5. Run npm install, npm run build, npm run doctor.
-6. Install and start foxclaw.service with npm run install-systemd.
-7. Verify foxclaw.service is active and telegram-codex-app-bridge.service is inactive/disabled.
-8. Report final status and any blockers. Redact TG_BOT_TOKEN and never print the full token or full .env content.
+4. Install or update FoxClaw with npm install -g @foxden-app/foxclaw@latest.
+5. Run foxclaw init if ~/.foxclaw/.env does not exist, then verify ~/.foxclaw/.env.
+6. Run foxclaw doctor.
+7. Install or restart the FoxClaw service with foxclaw start.
+8. Verify foxclaw.service is active and telegram-codex-app-bridge.service is inactive/disabled.
+9. Report final status and any blockers. Redact TG_BOT_TOKEN and never print the full token or full .env content.
 ```
 
 ## Safety Notes
@@ -81,4 +81,4 @@ Please:
 - Do not commit `.env`.
 - When reporting results, redact `TG_BOT_TOKEN`.
 - Do not use `/` or your whole home directory as `DEFAULT_CWD` for a first install.
-- Do not install the background service before the foreground Telegram test works.
+- Use `foxclaw start` for normal service startup. Use foreground `foxclaw serve` only when troubleshooting.

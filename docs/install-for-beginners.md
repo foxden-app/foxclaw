@@ -11,7 +11,7 @@ Before you start:
 - Do not configure a Telegram group first. Use private chat first.
 - Do not send your bot token to anyone you do not trust.
 - Do not use `/`, `/Users`, `/home`, or your whole home directory as `DEFAULT_CWD` for the first install.
-- Do not install the background service until foreground mode replies to `/help` and `/status`.
+- Use `foxclaw start` for normal startup. Use foreground mode only when troubleshooting.
 
 ## 1. Prepare
 
@@ -114,15 +114,22 @@ The easiest path:
 
 Use the number, not your `@username`.
 
-## 6. Download FoxClaw
+## 6. Install FoxClaw
 
-Choose a stable folder and clone the repo:
+Install the published npm package:
 
 ```bash
-git clone https://github.com/foxden-app/foxclaw.git
-cd foxclaw
-npm install
-cp .env.example .env
+npm install -g @foxden-app/foxclaw
+foxclaw init
+```
+
+This creates the config file at `~/.foxclaw/.env`.
+
+If you prefer pnpm:
+
+```bash
+pnpm add -g @foxden-app/foxclaw
+foxclaw init
 ```
 
 ## 7. Fill In `.env`
@@ -130,7 +137,7 @@ cp .env.example .env
 Open `.env` in a simple editor:
 
 ```bash
-nano .env
+nano ~/.foxclaw/.env
 ```
 
 For a first private-chat install, fill only the important values:
@@ -158,11 +165,10 @@ In `nano`, press `Ctrl+O`, Enter, then `Ctrl+X` to save and exit.
 
 ## 8. Run The First Check
 
-Build and run doctor:
+Run doctor:
 
 ```bash
-npm run build
-npm run doctor
+foxclaw doctor
 ```
 
 You want to see:
@@ -177,15 +183,15 @@ You want to see:
 
 If you see `[FAIL]`, stop and check [Troubleshooting](./troubleshooting.md).
 
-## 9. Start In The Foreground First
+## 9. Start FoxClaw
 
-Run FoxClaw directly before installing it as a background service:
+Start or restart the background service:
 
 ```bash
-npm run serve
+foxclaw start
 ```
 
-Leave this terminal open.
+This command is safe to run again. It runs the same checks as `doctor`, then installs or restarts the service for your platform.
 
 Now open your Telegram bot and send:
 
@@ -223,16 +229,11 @@ Create a short README-style summary of this folder.
 /interrupt
 ```
 
-Stop the foreground process with `Ctrl+C` after the bot works.
+## 10. Service Commands
 
-## 10. Install As A Background Service
-
-Only do this after foreground mode works.
-
-On Linux with systemd:
+On Linux, `foxclaw start` manages a user-level systemd service. Check it with:
 
 ```bash
-npm run install-systemd
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
@@ -243,26 +244,22 @@ The service starts again when your user session starts. If you need it to start 
 loginctl enable-linger "$USER"
 ```
 
-On macOS:
+On macOS, `foxclaw start` manages launchd and starts FoxClaw when you log in.
 
-```bash
-./scripts/launchd/install.sh
-```
-
-launchd starts FoxClaw when you log in.
+For foreground debugging, stop the service first and then run `foxclaw serve`.
 
 ## 11. Day-To-Day Commands
 
 Check current status:
 
 ```bash
-npm run status
+foxclaw status
 ```
 
 Restart Linux service after changing `.env`:
 
 ```bash
-systemctl --user restart foxclaw.service
+foxclaw start
 ```
 
 Stop Linux service:
@@ -274,14 +271,12 @@ systemctl --user stop foxclaw.service
 Uninstall Linux service:
 
 ```bash
-npm run uninstall-systemd
+foxclaw uninstall-systemd
 ```
 
 Update FoxClaw later:
 
 ```bash
-git pull
-npm install
-npm run build
-systemctl --user restart foxclaw.service
+npm install -g @foxden-app/foxclaw@latest
+foxclaw start
 ```
