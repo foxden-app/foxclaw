@@ -146,6 +146,7 @@ journalctl --user -u foxclaw.service -f
 On macOS, `foxclaw start` manages launchd. For foreground debugging, stop the background service and run:
 
 ```bash
+foxclaw stop
 foxclaw serve
 ```
 

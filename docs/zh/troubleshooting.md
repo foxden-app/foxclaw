@@ -94,7 +94,7 @@ CODEX_CLI_BIN=/absolute/path/to/codex
 5. 修改 `.env` 后重启：
 
    ```bash
-   foxclaw start
+   foxclaw restart
    ```
 
    如果正在前台运行，先 `Ctrl+C` 停止，再重新运行 `foxclaw serve`。
@@ -146,7 +146,7 @@ systemctl --user disable --now telegram-codex-app-bridge.service
 然后重启 FoxClaw：
 
 ```bash
-foxclaw start
+foxclaw restart
 ```
 
 ## Codex 或 app-server 异常

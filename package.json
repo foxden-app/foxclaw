@@ -1,6 +1,6 @@
 {
   "name": "@foxden-app/foxclaw",
-  "version": "0.2.7",
+  "version": "0.3.1",
   "description": "Foxden local execution claw for controlling Codex from trusted chat interfaces.",
   "type": "module",
   "main": "dist/main.js",
@@ -38,6 +38,8 @@
     "dev": "tsx src/main.ts serve",
     "serve": "node dist/main.js serve",
     "start-service": "node dist/main.js start",
+    "stop-service": "node dist/main.js stop",
+    "restart-service": "node dist/main.js restart",
     "weixin-login": "node dist/main.js weixin-login",
     "status": "node dist/main.js status",
     "doctor": "node dist/main.js doctor",

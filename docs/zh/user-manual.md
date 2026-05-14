@@ -146,6 +146,7 @@ journalctl --user -u foxclaw.service -f
 macOS 上 `foxclaw start` 会管理 launchd。前台排障时，先停后台服务，再运行：
 
 ```bash
+foxclaw stop
 foxclaw serve
 ```
 

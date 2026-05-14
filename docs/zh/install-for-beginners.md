@@ -257,13 +257,13 @@ foxclaw status
 修改 `.env` 后重启：
 
 ```bash
-foxclaw start
+foxclaw restart
 ```
 
-停止 Linux 服务：
+停止服务：
 
 ```bash
-systemctl --user stop foxclaw.service
+foxclaw stop
 ```
 
 卸载 Linux 服务：
