@@ -16,21 +16,30 @@ export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'co
 export const DEFAULT_ENV_PATH = path.join(APP_HOME, '.env');
 
 let envLoaded = false;
+let loadedEnvPath: string | null = null;
+
+export function resolveEnvPath(): string {
+  const explicitPath = process.env.FOXCLAW_ENV?.trim();
+  if (explicitPath) {
+    return path.resolve(explicitPath);
+  }
+  const cwdEnvPath = path.join(process.cwd(), '.env');
+  if (fs.existsSync(cwdEnvPath)) {
+    return cwdEnvPath;
+  }
+  return DEFAULT_ENV_PATH;
+}
+
+export function getLoadedEnvPath(): string | null {
+  return loadedEnvPath;
+}
 
 export function loadEnv(): void {
   if (envLoaded) return;
   envLoaded = true;
-  const explicitPath = process.env.FOXCLAW_ENV?.trim();
-  if (explicitPath) {
-    dotenv.config({ path: explicitPath, override: true });
-    return;
-  }
-  const cwdEnvPath = path.join(process.cwd(), '.env');
-  if (fs.existsSync(cwdEnvPath)) {
-    dotenv.config({ path: cwdEnvPath });
-    return;
-  }
-  dotenv.config({ path: DEFAULT_ENV_PATH });
+  const envPath = resolveEnvPath();
+  loadedEnvPath = envPath;
+  dotenv.config({ path: envPath, override: Boolean(process.env.FOXCLAW_ENV?.trim()) });
 }
 
 export interface AppConfig {

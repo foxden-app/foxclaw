@@ -183,6 +183,31 @@ Bridge 日志默认在：
 tail -f ~/.foxclaw/logs/service.log
 ```
 
+## ChatGPT 后端 403 或 Unable to load site
+
+如果 Telegram 里看到 `ChatGPT backend 403 Forbidden`，或者 app-server 日志里出现 `Unable to load site`、`cf-ray`、`chatgpt.com/backend-api`，通常不是 `auth.json` 文件坏了，而是服务进程访问 ChatGPT 后端时没有走正确网络。
+
+常见原因是：你在 shell 里配置了代理，或者项目 `.env` 里有代理，但 systemd/launchd 服务实际读的是另一个 env 文件。先看服务用的是哪个 env：
+
+```bash
+systemctl --user cat foxclaw.service
+```
+
+确认 `Environment=FOXCLAW_ENV=...` 指向的文件里有你的代理配置，例如：
+
+```dotenv
+HTTP_PROXY=http://127.0.0.1:20171
+HTTPS_PROXY=http://127.0.0.1:20171
+ALL_PROXY=socks5://127.0.0.1:20170
+NO_PROXY=127.0.0.1,localhost
+```
+
+改完后重启 FoxClaw。重启会同时重启托管的 Codex app-server，让新代理生效：
+
+```bash
+foxclaw restart
+```
+
 ## 服务用了错误的 Node 版本
 
 systemd 安装脚本会记录当时 PATH 里的 `node`。如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24 的 shell 重新安装：

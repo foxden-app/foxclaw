@@ -8363,6 +8363,9 @@ function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {
 }
 
 function isCodexAuthRotationError(params: any): boolean {
+  if (isChatGptBackendAccessBlocked(collectCodexErrorText(params))) {
+    return false;
+  }
   const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
   if (code && /usageLimitExceeded|auth|unauthorized|forbidden|login/i.test(code)) {
     return true;
@@ -8372,15 +8375,81 @@ function isCodexAuthRotationError(params: any): boolean {
 }
 
 function formatCodexNotificationError(params: any): string {
+  const collected = collectCodexErrorText(params);
+  const known = formatKnownCodexAccessError(collected);
+  if (known) {
+    return known;
+  }
   const message = stringOrNull(params?.error?.message);
   if (message) {
-    return message;
+    return clipUserFacingError(cleanUserFacingError(message));
   }
   const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
   if (code) {
-    return code;
+    return clipUserFacingError(cleanUserFacingError(code));
   }
-  return JSON.stringify(params?.error ?? params ?? {});
+  return clipUserFacingError(cleanUserFacingError(JSON.stringify(params?.error ?? params ?? {})));
+}
+
+function collectCodexErrorText(params: any): string {
+  const parts = [
+    stringOrNull(params?.error?.message),
+    stringOrNull(params?.error?.additionalDetails),
+    stringOrNull(params?.additionalDetails),
+    stringOrNull(params?.error?.codexErrorInfo),
+    stringOrNull(params?.error?.code),
+  ].filter((part): part is string => part !== null);
+  if (parts.length > 0) {
+    return parts.join(' ');
+  }
+  try {
+    return JSON.stringify(params?.error ?? params ?? {});
+  } catch {
+    return String(params?.error ?? params ?? '');
+  }
+}
+
+function formatKnownCodexAccessError(raw: string): string | null {
+  if (!isChatGptBackendAccessBlocked(raw)) {
+    return null;
+  }
+  const ray = raw.match(/\bcf-ray:\s*([A-Za-z0-9-]+)/i)?.[1]
+    ?? raw.match(/\bRay ID:\s*([A-Za-z0-9-]+)/i)?.[1]
+    ?? null;
+  return `ChatGPT backend 403 Forbidden: service network/proxy/IP is blocked, not necessarily auth.json invalid. Check HTTP_PROXY/HTTPS_PROXY in the FoxClaw env file and restart FoxClaw${ray ? ` (cf-ray: ${ray})` : ''}.`;
+}
+
+function isChatGptBackendAccessBlocked(raw: string): boolean {
+  const value = raw.toLowerCase();
+  const targetsChatGptBackend = value.includes('chatgpt.com/backend-api')
+    || value.includes('wss://chatgpt.com/backend-api');
+  const isForbidden = value.includes('403 forbidden')
+    || value.includes('status 403')
+    || value.includes('httpstatuscode":403')
+    || value.includes('httpstatuscode:403');
+  const looksLikeHtmlBlock = value.includes('<html')
+    || value.includes('text/html')
+    || value.includes('cf-ray')
+    || value.includes('unable to load site')
+    || value.includes('if you are using a vpn');
+  return targetsChatGptBackend && isForbidden && looksLikeHtmlBlock;
+}
+
+function cleanUserFacingError(raw: string): string {
+  return raw
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function clipUserFacingError(raw: string, limit = 900): string {
+  const cleaned = raw.trim();
+  if (cleaned.length <= limit) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, limit - 3)}...`;
 }
 
 function parseUserInputQuestions(params: any): PendingUserInputQuestion[] {
@@ -8830,7 +8899,12 @@ function formatLocalTimestamp(seconds: number): string {
 }
 
 function formatShortStatusError(error: unknown): string {
-  const message = formatUserError(error).replace(/\s+/g, ' ').trim();
+  const raw = formatUserError(error);
+  const known = formatKnownCodexAccessError(raw);
+  if (known) {
+    return known.length > 120 ? `${known.slice(0, 117)}...` : known;
+  }
+  const message = cleanUserFacingError(raw);
   return message.length > 120 ? `${message.slice(0, 117)}...` : message;
 }
 

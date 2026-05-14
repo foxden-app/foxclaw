@@ -1564,6 +1564,53 @@ test('Codex error notifications are shown on the active Telegram turn', async (t
   assert.ok(rig.sentMessages.includes('Codex error: Usage limit exceeded'));
 });
 
+test('ChatGPT backend HTML 403 errors are summarized and do not rotate auth', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: {
+        message: 'unexpected status 403 Forbidden: <html><head><style global>body{}</style></head><body><p>Unable to load site</p><script>x()</script></body></html>, url: wss://chatgpt.com/backend-api/codex/responses, cf-ray: 9fb7e2029dfd68e6-LAX',
+        codexErrorInfo: 'other',
+        additionalDetails: null,
+      },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+
+  assert.equal(restarts, 0);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  const message = rig.sentMessages.find(entry => entry.startsWith('Codex error: ChatGPT backend 403 Forbidden'));
+  assert.ok(message);
+  assert.doesNotMatch(message, /<html|style global|script/i);
+  assert.ok(message.length < 400);
+});
+
 test('requestUserInput is bridged through Telegram callbacks', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

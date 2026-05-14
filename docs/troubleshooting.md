@@ -182,6 +182,31 @@ Bridge logs are stored here:
 tail -f ~/.foxclaw/logs/service.log
 ```
 
+## ChatGPT Backend 403 Or Unable To Load Site
+
+If Telegram shows `ChatGPT backend 403 Forbidden`, or the app-server log contains `Unable to load site`, `cf-ray`, or `chatgpt.com/backend-api`, the auth file is not necessarily broken. The service process is usually reaching ChatGPT with the wrong network/proxy/IP.
+
+A common cause is that your shell or project `.env` has proxy variables, while the systemd/launchd service reads a different env file. Check the env file installed into the service:
+
+```bash
+systemctl --user cat foxclaw.service
+```
+
+Make sure the file referenced by `Environment=FOXCLAW_ENV=...` contains your proxy variables, for example:
+
+```dotenv
+HTTP_PROXY=http://127.0.0.1:20171
+HTTPS_PROXY=http://127.0.0.1:20171
+ALL_PROXY=socks5://127.0.0.1:20170
+NO_PROXY=127.0.0.1,localhost
+```
+
+Restart FoxClaw after editing. The restart also restarts the managed Codex app-server so the new proxy environment takes effect:
+
+```bash
+foxclaw restart
+```
+
 ## Service Starts With The Wrong Node Version
 
 The systemd installer captures the `node` binary from your current PATH. If you installed the service from a shell using Node 22 or older, reinstall it from a Node 24 shell:
