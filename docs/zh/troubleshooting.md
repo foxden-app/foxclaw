@@ -130,20 +130,14 @@ CODEX_CLI_BIN=/absolute/path/to/codex
 
 如果 Telegram 报 conflict，或者同一个 bot 行为异常，通常是两个进程在轮询同一个 bot token。
 
-检查新旧服务：
+检查服务和额外的前台进程：
 
 ```bash
 systemctl --user is-active foxclaw.service
-systemctl --user is-active telegram-codex-app-bridge.service 2>/dev/null || true
+pgrep -af foxclaw
 ```
 
-停掉旧服务：
-
-```bash
-systemctl --user disable --now telegram-codex-app-bridge.service
-```
-
-然后重启 FoxClaw：
+停掉多余进程或服务后，重启 FoxClaw：
 
 ```bash
 foxclaw restart
