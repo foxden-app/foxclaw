@@ -293,3 +293,7 @@ foxclaw start
 ```
 
 如果 `~/.foxclaw/.env` 已经存在，`foxclaw init` 不会覆盖它。
+
+## 下一步
+
+安装跑通后，继续看 [用户手册](./user-manual.md)，里面系统说明了 `/help`、`/setup`、`/threads`、`/watch`、`/auth`、Codex 登录和多账号轮转。

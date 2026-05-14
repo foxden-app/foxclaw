@@ -30,6 +30,7 @@ No public server required. FoxClaw runs on your own computer, talks to `codex ap
 
 - Already have a shell-capable agent such as Codex, OpenClaw, QwenPaw, Hermes, OpenCode, or Kimi CLI? Use the [Agent-Assisted Install](./docs/agent-assisted-install.md) first. This is the recommended path.
 - New to Node, Telegram bots, or Codex CLI? Use the [Beginner Install Guide](./docs/install-for-beginners.md).
+- Already installed and want the full command guide for `/help`, `/setup`, `/threads`, `/watch`, `/auth`, and auth rotation? Read the [User Manual](./docs/user-manual.md).
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
