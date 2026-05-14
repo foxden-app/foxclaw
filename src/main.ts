@@ -10,6 +10,7 @@ import {
   DEFAULT_ENV_PATH,
   DEFAULT_LOG_PATH,
   DEFAULT_STATUS_PATH,
+  getLoadedEnvPath,
   loadConfig,
   loadEnv,
 } from './config.js';
@@ -180,6 +181,9 @@ async function runServeCli(): Promise<void> {
         lastError: null,
         updatedAt: new Date().toISOString(),
         channels: { telegram: false, weixin: false },
+      });
+      await app.stop({ terminateServer: true }).catch((error) => {
+        logger.warn('codex.app-server.stop_failed', { error: serializeError(error) });
       });
       store?.close();
       processLock.release();
@@ -442,16 +446,14 @@ function installSystemd(): void {
   const unitName = 'foxclaw.service';
   const userSystemdDir = path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '', '.config'), 'systemd', 'user');
   const unitPath = path.join(userSystemdDir, unitName);
-  const configDir = path.dirname(process.env.FOXCLAW_ENV?.trim() || DEFAULT_ENV_PATH);
+  const envPath = serviceEnvPath();
+  const configDir = path.dirname(envPath);
   const nodeBin = process.execPath;
   const nodeDir = path.dirname(nodeBin);
   const pathValue = buildServicePath(nodeDir);
   fs.mkdirSync(userSystemdDir, { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
-  const foxclawEnvLine = process.env.FOXCLAW_ENV?.trim()
-    ? `Environment=FOXCLAW_ENV=${systemdEscape(process.env.FOXCLAW_ENV.trim())}\n`
-    : '';
   fs.writeFileSync(
     unitPath,
     `[Unit]
@@ -469,7 +471,8 @@ Environment=HOME=${systemdEscape(process.env.HOME || '')}
 Environment=USER=${systemdEscape(process.env.USER || '')}
 Environment=LOGNAME=${systemdEscape(process.env.LOGNAME || process.env.USER || '')}
 Environment=PATH=${systemdEscape(pathValue)}
-${foxclawEnvLine}ExecStart=${systemdEscape(nodeBin)} ${systemdEscape(entryPoint)} serve
+Environment=FOXCLAW_ENV=${systemdEscape(envPath)}
+ExecStart=${systemdEscape(nodeBin)} ${systemdEscape(entryPoint)} serve
 Restart=always
 RestartSec=10
 TimeoutStopSec=45
@@ -521,15 +524,11 @@ function installLaunchd(): void {
   }
   const home = process.env.HOME || '';
   const plist = path.join(home, 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
-  const configDir = path.dirname(process.env.FOXCLAW_ENV?.trim() || DEFAULT_ENV_PATH);
+  const envPath = serviceEnvPath();
+  const configDir = path.dirname(envPath);
   fs.mkdirSync(path.dirname(plist), { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
-  const foxclawEnvXml = process.env.FOXCLAW_ENV?.trim()
-    ? `    <key>FOXCLAW_ENV</key>
-    <string>${xmlEscape(process.env.FOXCLAW_ENV.trim())}</string>
-`
-    : '';
   fs.writeFileSync(
     plist,
     `<?xml version="1.0" encoding="UTF-8"?>
@@ -556,7 +555,8 @@ function installLaunchd(): void {
     <string>${xmlEscape(process.env.USER || '')}</string>
     <key>LOGNAME</key>
     <string>${xmlEscape(process.env.LOGNAME || process.env.USER || '')}</string>
-${foxclawEnvXml}
+    <key>FOXCLAW_ENV</key>
+    <string>${xmlEscape(envPath)}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -601,6 +601,10 @@ function buildServicePath(nodeDir: string): string {
     '/bin',
   ];
   return parts.filter((part, index) => part && parts.indexOf(part) === index).join(':');
+}
+
+function serviceEnvPath(): string {
+  return path.resolve(process.env.FOXCLAW_ENV?.trim() || getLoadedEnvPath() || DEFAULT_ENV_PATH);
 }
 
 function spawnChecked(commandName: string, args: string[]): void {
