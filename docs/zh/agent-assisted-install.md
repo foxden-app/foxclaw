@@ -38,7 +38,7 @@ DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 
 任务：
 1. 先检查机器环境。如果已经存在 FoxClaw 服务，先报告再改服务。
-2. 确保 Node.js 24+ 可用；如果没有，请用 nvm 安装或切到 Node 24。
+2. 确保 Node.js 24+ 可用；如果没有，请用任意合适方式安装或切到 Node 24+，nvm 只是常见选择。
 3. 确保 Codex CLI 存在并且已经登录。如果需要登录，停下来告诉我具体要执行什么。
 4. 用 npm install -g @foxden-app/foxclaw@latest 安装或升级 FoxClaw。
 5. 运行 foxclaw init，然后写入 ~/.foxclaw/.env。不要打印或提交 bot token。

@@ -18,7 +18,7 @@ journalctl --user -u foxclaw.service -f
 
 | 现象 | 含义 | 处理方式 |
 | --- | --- | --- |
-| `[FAIL] node >= 24` | 当前 shell 使用的是旧版 Node.js。 | 运行 `nvm install 24 && nvm use 24`，再重新执行 `foxclaw doctor`。如果服务仍用旧 Node，从 Node 24 的 shell 里重新执行 `foxclaw start`。 |
+| `[FAIL] node >= 24` | 当前 shell 使用的是旧版 Node.js。 | 先用任意方式安装或切换到 Node.js 24+，再重新执行 `foxclaw doctor`。如果服务仍用旧 Node，从 Node 24+ 的 shell 里重新执行 `foxclaw start`。 |
 | `[FAIL] codex cli available` | `codex` 命令不在 PATH 里。 | 安装 Codex CLI 或修正 PATH，再确认 `codex --version` 可用。 |
 | `[FAIL] telegram bot token configured` | `.env` 里缺少 `TG_BOT_TOKEN`。 | 从 `@BotFather` 复制 token，填入 `.env`。 |
 | `[FAIL] telegram allowed user configured` | `.env` 里缺少 `TG_ALLOWED_USER_ID`。 | 从 `@userinfobot` 获取数字 ID，填入 `.env`。 |
@@ -26,7 +26,7 @@ journalctl --user -u foxclaw.service -f
 
 ## Node 或 npm 不存在
 
-如果看到 `node: command not found` 或 `npm: command not found`，用 `nvm` 安装 Node.js 24：
+如果看到 `node: command not found` 或 `npm: command not found`，先用你习惯的方式安装 Node.js 24+，例如 nvm、fnm、asdf、mise、Volta、Homebrew 或系统包管理器。下面是 nvm 示例：
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
@@ -38,7 +38,7 @@ node -v
 npm -v
 ```
 
-如果仍然失败，关闭终端，重新打开后运行：
+如果使用 nvm 后仍然失败，关闭终端，重新打开后运行：
 
 ```bash
 nvm use 24
@@ -48,7 +48,7 @@ nvm use 24
 
 如果 `npm install -g @openai/codex` 或 `npm install -g @foxden-app/foxclaw` 报 `EACCES`、`EPERM`、`permission denied`，说明当前全局 npm 目录不可写。
 
-推荐处理方式是通过 `nvm` 使用用户级 Node，然后重新安装：
+推荐处理方式是使用一个用户级 Node.js 24+，然后重新安装。下面是 nvm 示例：
 
 ```bash
 nvm install 24
@@ -57,7 +57,7 @@ npm install -g @openai/codex
 npm install -g @foxden-app/foxclaw
 ```
 
-除非你很清楚本机 Node 的安装方式，否则不要直接混用 `sudo npm install -g ...`。`sudo`、系统 Node 和 `nvm` 混在一起，常见结果是 PATH 断掉或服务启动时找不到命令。
+除非你很清楚本机 Node 的安装方式，否则不要直接混用 `sudo npm install -g ...`。`sudo`、系统 Node 和用户级 Node 管理器混在一起，常见结果是 PATH 断掉或服务启动时找不到命令。
 
 如果 `codex` 已安装但 FoxClaw 找不到它，先定位二进制：
 
@@ -212,9 +212,9 @@ foxclaw restart
 
 ## 服务用了错误的 Node 版本
 
-systemd 安装脚本会记录当时正在运行的 Node 绝对路径，不依赖 systemd 去加载 `nvm.sh`。如果你用 nvm 管多个 Node 版本，原则是：从 Node 24 的 shell 里执行 `foxclaw start`，服务之后就固定使用这个 Node 24 路径。
+systemd 安装脚本会记录当时正在运行的 Node 绝对路径，不依赖 systemd 去加载 `nvm.sh` 或其它 shell 初始化脚本。无论你用 nvm、fnm、asdf、mise、Volta、Homebrew 还是系统 Node，原则都是：从 Node 24+ 的 shell 里执行 `foxclaw start`，服务之后就固定使用这个 Node 24+ 路径。
 
-如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24 的 shell 重新安装：
+如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24+ 的 shell 重新安装。nvm 用户示例：
 
 ```bash
 nvm use 24
@@ -222,7 +222,7 @@ foxclaw start
 systemctl --user status foxclaw.service
 ```
 
-状态输出里应该能看到 Node 24 的路径。`foxclaw doctor` 也会检查已安装服务里的 Node 路径，如果发现路径不存在或版本低于 24，会提示重新运行 `foxclaw start`。
+状态输出里应该能看到 Node 24+ 的路径。`foxclaw doctor` 也会检查已安装服务里的 Node 路径，如果发现路径不存在或版本低于 24，会提示重新运行 `foxclaw start`。
 
 ## 重启后是否会自动运行
 

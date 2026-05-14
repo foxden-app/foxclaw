@@ -40,7 +40,7 @@ FoxClaw is more than message forwarding. It provides Telegram panels for Codex w
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
-The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24, and a logged-in `codex` CLI. A first install usually takes 10–20 minutes.
+The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24+, and a logged-in `codex` CLI. A first install usually takes 10–20 minutes.
 
 **30-second demo**: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
 
