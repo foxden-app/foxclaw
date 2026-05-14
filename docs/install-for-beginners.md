@@ -25,17 +25,17 @@ You need:
 
 Use private chat first. Group and topic setup can wait until the bot replies reliably.
 
-## 2. Install Node.js 24
+## 2. Install Node.js 24+
 
-FoxClaw needs Node.js 24 because it uses the built-in SQLite runtime.
+FoxClaw needs Node.js 24+ because it uses the built-in SQLite runtime. It does not require nvm; you can use nvm, fnm, asdf, mise, Volta, Homebrew, or your system package manager.
 
-If you already have Node 24, this should print `v24...`:
+If you already have Node 24+, this should print `v24...` or newer:
 
 ```bash
 node -v
 ```
 
-If not, install Node 24 with `nvm`:
+If not, nvm is a good default for first-time users. Example:
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
@@ -47,7 +47,7 @@ node -v
 npm -v
 ```
 
-If `node -v` still shows an old version, close the terminal, open a new one, and run:
+If you use nvm and `node -v` still shows an old version, close the terminal, open a new one, and run:
 
 ```bash
 nvm use 24

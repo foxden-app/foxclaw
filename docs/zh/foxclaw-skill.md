@@ -5,7 +5,7 @@
 ## 适合什么时候用
 
 - 你想让 Codex 通过 SSH 帮另一台 Mac 安装 FoxClaw。
-- 你希望 agent 先检查环境，再决定如何安装 Node.js 24、Codex CLI 和 FoxClaw。
+- 你希望 agent 先检查环境，再决定如何安装 Node.js 24+、Codex CLI 和 FoxClaw。
 - 你不想手动复制每一步安装命令，但愿意提供 Telegram bot token、用户 ID 和默认工作目录。
 
 ## 基本流程

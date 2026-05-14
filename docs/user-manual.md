@@ -16,15 +16,15 @@ Your code, shell access, Codex auth, and runtime state stay on the host machine.
 
 ## 1. Full Setup
 
-### 1.1 Install Node.js 24
+### 1.1 Install Node.js 24+
 
-FoxClaw requires Node.js 24. Check first:
+FoxClaw requires Node.js 24+ and does not require nvm. Check first:
 
 ```bash
 node -v
 ```
 
-If this is not `v24...`, install Node 24 with `nvm`:
+If this is not `v24...` or newer, install Node 24+ with nvm, fnm, asdf, mise, Volta, Homebrew, or your system package manager. This is an nvm example:
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash

@@ -18,7 +18,7 @@ journalctl --user -u foxclaw.service -f
 
 | Symptom | Meaning | Fix |
 | --- | --- | --- |
-| `[FAIL] node >= 24` | Your current shell is using an older Node.js. | Run `nvm install 24 && nvm use 24`, then rerun `foxclaw doctor`. If the service uses old Node, reinstall it from a Node 24 shell with `foxclaw start`. |
+| `[FAIL] node >= 24` | Your current shell is using an older Node.js. | Install or activate Node.js 24+ by any method, then rerun `foxclaw doctor`. If the service uses old Node, reinstall it from a Node 24+ shell with `foxclaw start`. |
 | `[FAIL] codex cli available` | The `codex` command is not in PATH. | Install Codex CLI or fix PATH, then confirm `codex --version` works. |
 | `[FAIL] telegram bot token configured` | `TG_BOT_TOKEN` is missing from `.env`. | Copy the token from `@BotFather` into `.env`. |
 | `[FAIL] telegram allowed user configured` | `TG_ALLOWED_USER_ID` is missing from `.env`. | Get your numeric id from `@userinfobot` and add it to `.env`. |
@@ -26,7 +26,7 @@ journalctl --user -u foxclaw.service -f
 
 ## Node Or npm Is Missing
 
-If you see `node: command not found` or `npm: command not found`, install Node.js 24 with `nvm`:
+If you see `node: command not found` or `npm: command not found`, install Node.js 24+ using your preferred tool, such as nvm, fnm, asdf, mise, Volta, Homebrew, or your system package manager. This is an nvm example:
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
@@ -38,7 +38,7 @@ node -v
 npm -v
 ```
 
-If it still fails, close the terminal, open a new one, and run:
+If you use nvm and it still fails, close the terminal, open a new one, and run:
 
 ```bash
 nvm use 24
@@ -48,7 +48,7 @@ nvm use 24
 
 If `npm install -g @openai/codex` fails with `EACCES`, `EPERM`, or `permission denied`, your global npm directory is not writable by your user.
 
-Recommended fix: use Node through `nvm`, then install again:
+Recommended fix: use a user-level Node.js 24+ install, then install again. This is an nvm example:
 
 ```bash
 nvm install 24
@@ -56,7 +56,7 @@ nvm use 24
 npm install -g @openai/codex
 ```
 
-Avoid `sudo npm install -g ...` unless you already understand how your Node installation is managed. Mixing `sudo`, system Node, and `nvm` is a common source of broken PATHs.
+Avoid `sudo npm install -g ...` unless you already understand how your Node installation is managed. Mixing `sudo`, system Node, and user-level Node managers is a common source of broken PATHs.
 
 If `codex` installs but FoxClaw still cannot find it, locate the binary:
 
@@ -211,9 +211,9 @@ foxclaw restart
 
 ## Service Starts With The Wrong Node Version
 
-The systemd installer records the absolute path of the Node process that is currently running FoxClaw. It does not rely on systemd loading `nvm.sh`. If you manage multiple Node versions with nvm, run `foxclaw start` from a Node 24 shell and the service will keep using that Node 24 path.
+The systemd installer records the absolute path of the Node process that is currently running FoxClaw. It does not rely on systemd loading `nvm.sh` or any other shell init script. Whether you use nvm, fnm, asdf, mise, Volta, Homebrew, or system Node, run `foxclaw start` from a Node 24+ shell and the service will keep using that Node 24+ path.
 
-If you installed the service from a shell using Node 22 or older, reinstall it from a Node 24 shell:
+If you installed the service from a shell using Node 22 or older, reinstall it from a Node 24+ shell. Example for nvm users:
 
 ```bash
 nvm use 24
@@ -221,7 +221,7 @@ foxclaw start
 systemctl --user status foxclaw.service
 ```
 
-The status output should show a Node 24 path in `ExecStart`. `foxclaw doctor` also checks the installed service Node path and warns if it is missing or older than 24.
+The status output should show a Node 24+ path in `ExecStart`. `foxclaw doctor` also checks the installed service Node path and warns if it is missing or older than 24.
 
 ## Does It Run After Reboot?
 

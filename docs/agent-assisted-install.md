@@ -39,7 +39,7 @@ DEFAULT_CWD=<paste absolute working directory here>
 
 Tasks:
 1. Inspect the machine first. If a FoxClaw service already exists, report it before changing services.
-2. Ensure Node.js 24+ is available. If not, install or activate Node 24 with nvm.
+2. Ensure Node.js 24+ is available. If not, install or activate Node 24+ by any suitable method; nvm is only one common option.
 3. Ensure the Codex CLI exists and is logged in. If login is required, stop and tell me exactly what I need to do.
 4. Install or update FoxClaw with npm install -g @foxden-app/foxclaw@latest.
 5. Run foxclaw init, then write ~/.foxclaw/.env. Never print or commit the bot token.
