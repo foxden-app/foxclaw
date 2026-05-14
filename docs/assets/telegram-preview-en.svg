@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">FoxClaw Telegram feature preview</title>
+  <desc id="desc">Telegram-style preview of FoxClaw setup and auth management panels.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#152033" flood-opacity="0.16"/>
+    </filter>
+    <style>
+      .label { font: 600 24px Arial, sans-serif; fill: #111827; }
+      .body { font: 500 18px Arial, sans-serif; fill: #243244; }
+      .muted { font: 500 15px Arial, sans-serif; fill: #607086; }
+      .small { font: 600 14px Arial, sans-serif; fill: #42526a; }
+      .button { font: 700 15px Arial, sans-serif; fill: #1f6fb2; }
+      .top { font: 700 18px Arial, sans-serif; fill: #fff; }
+      .mono { font: 600 16px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #334155; }
+    </style>
+  </defs>
+  <rect width="1280" height="760" rx="0" fill="#f3f7fb"/>
+  <circle cx="112" cy="102" r="58" fill="#d7edf9"/>
+  <circle cx="1185" cy="660" r="74" fill="#e5f4ec"/>
+  <text x="80" y="86" class="label">A mobile control panel for Codex</text>
+  <text x="80" y="118" class="body">Send tasks, inspect progress, approve actions, switch threads, and rotate auth accounts from Telegram.</text>
+
+  <g filter="url(#shadow)" transform="translate(96 164)">
+    <rect x="0" y="0" width="520" height="492" rx="36" fill="#17212b"/>
+    <rect x="18" y="18" width="484" height="456" rx="28" fill="#dcebf5"/>
+    <rect x="18" y="18" width="484" height="58" rx="28" fill="#229ed9"/>
+    <text x="48" y="55" class="top">FoxClaw Bot · /setup</text>
+    <rect x="44" y="104" width="432" height="236" rx="18" fill="#ffffff"/>
+    <text x="70" y="142" class="label">Setup · current thread</text>
+    <text x="70" y="176" class="body">Model: GPT-5.5</text>
+    <text x="70" y="206" class="body">Reasoning: High</text>
+    <text x="70" y="236" class="body">Mode: 📝 Plan</text>
+    <text x="70" y="266" class="body">Access: Workspace write</text>
+    <text x="70" y="296" class="body">Fast tier: ⚡ enabled</text>
+    <text x="70" y="326" class="muted">Each chat/thread can keep its own settings.</text>
+    <g transform="translate(44 360)">
+      <rect x="0" y="0" width="100" height="42" rx="12" fill="#e9f5ff"/>
+      <text x="25" y="27" class="button">⚡ Fast</text>
+      <rect x="112" y="0" width="96" height="42" rx="12" fill="#e9f5ff"/>
+      <text x="137" y="27" class="button">🔒 Read</text>
+      <rect x="220" y="0" width="96" height="42" rx="12" fill="#e9f5ff"/>
+      <text x="238" y="27" class="button">✍️ Work</text>
+      <rect x="328" y="0" width="104" height="42" rx="12" fill="#e9f5ff"/>
+      <text x="350" y="27" class="button">🛠️ Full</text>
+      <rect x="0" y="54" width="132" height="42" rx="12" fill="#eaf8ef"/>
+      <text x="34" y="81" class="button">📝 Plan</text>
+      <rect x="144" y="54" width="132" height="42" rx="12" fill="#eef2ff"/>
+      <text x="177" y="81" class="button">Agent</text>
+    </g>
+  </g>
+
+  <g filter="url(#shadow)" transform="translate(664 164)">
+    <rect x="0" y="0" width="520" height="492" rx="36" fill="#17212b"/>
+    <rect x="18" y="18" width="484" height="456" rx="28" fill="#dcebf5"/>
+    <rect x="18" y="18" width="484" height="58" rx="28" fill="#229ed9"/>
+    <text x="48" y="55" class="top">FoxClaw Bot · /auth</text>
+    <rect x="44" y="104" width="432" height="258" rx="18" fill="#ffffff"/>
+    <text x="70" y="142" class="label">Auth · account rotation</text>
+    <text x="70" y="176" class="body">Current: personal · GPT-5.5</text>
+    <text x="70" y="206" class="body">Auto-switches and retries on usage limits.</text>
+    <g transform="translate(70 232)">
+      <rect x="0" y="0" width="376" height="34" rx="10" fill="#f7fafc"/>
+      <text x="14" y="23" class="mono">✅ 1 personal</text>
+      <text x="256" y="23" class="small">32% used</text>
+      <rect x="0" y="44" width="376" height="34" rx="10" fill="#f7fafc"/>
+      <text x="14" y="67" class="mono">✅ 2 team</text>
+      <text x="280" y="67" class="small">ready</text>
+      <rect x="0" y="88" width="376" height="34" rx="10" fill="#f7fafc"/>
+      <text x="14" y="111" class="mono">⏸️ 3 trial</text>
+      <text x="256" y="111" class="small">disabled</text>
+    </g>
+    <g transform="translate(44 386)">
+      <rect x="0" y="0" width="120" height="42" rx="12" fill="#e9f5ff"/>
+      <text x="31" y="27" class="button">✅ enable</text>
+      <rect x="132" y="0" width="120" height="42" rx="12" fill="#fff4e6"/>
+      <text x="167" y="27" class="button">⏸️ pause</text>
+      <rect x="264" y="0" width="168" height="42" rx="12" fill="#eaf8ef"/>
+      <text x="309" y="27" class="button">add auth</text>
+    </g>
+  </g>
+
+  <g transform="translate(138 686)">
+    <rect x="0" y="-30" width="138" height="46" rx="23" fill="#ffffff"/>
+    <text x="25" y="0" class="small">send tasks</text>
+    <rect x="160" y="-30" width="150" height="46" rx="23" fill="#ffffff"/>
+    <text x="186" y="0" class="small">watch progress</text>
+    <rect x="332" y="-30" width="150" height="46" rx="23" fill="#ffffff"/>
+    <text x="359" y="0" class="small">tap approvals</text>
+    <rect x="504" y="-30" width="150" height="46" rx="23" fill="#ffffff"/>
+    <text x="533" y="0" class="small">switch threads</text>
+    <rect x="676" y="-30" width="176" height="46" rx="23" fill="#ffffff"/>
+    <text x="703" y="0" class="small">rotate accounts</text>
+  </g>
+</svg>
