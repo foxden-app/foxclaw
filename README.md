@@ -139,6 +139,14 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
+也可以直接用包装命令：
+
+```bash
+foxclaw status
+foxclaw restart
+foxclaw stop
+```
+
 需要前台调试时：
 
 ```bash
@@ -292,6 +300,8 @@ foxclaw weixin-login
 foxclaw doctor
 foxclaw status
 foxclaw start
+foxclaw restart
+foxclaw stop
 foxclaw uninstall-systemd
 ```
 

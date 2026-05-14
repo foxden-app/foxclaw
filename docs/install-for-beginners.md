@@ -259,13 +259,13 @@ foxclaw status
 Restart Linux service after changing `.env`:
 
 ```bash
-foxclaw start
+foxclaw restart
 ```
 
-Stop Linux service:
+Stop the service:
 
 ```bash
-systemctl --user stop foxclaw.service
+foxclaw stop
 ```
 
 Uninstall Linux service:

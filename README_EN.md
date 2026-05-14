@@ -139,6 +139,14 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
+You can also use the wrapper commands:
+
+```bash
+foxclaw status
+foxclaw restart
+foxclaw stop
+```
+
 For foreground debugging:
 
 ```bash
@@ -292,6 +300,8 @@ See [Troubleshooting](./docs/troubleshooting.md) for `doctor` failures, Telegram
 foxclaw doctor
 foxclaw status
 foxclaw start
+foxclaw restart
+foxclaw stop
 foxclaw uninstall-systemd
 ```
 

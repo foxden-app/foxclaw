@@ -34,7 +34,18 @@ async function main(): Promise<void> {
 
   if (command === 'start') {
     requireNode24(command);
-    startService();
+    startService('start');
+    return;
+  }
+
+  if (command === 'restart') {
+    requireNode24(command);
+    startService('restart');
+    return;
+  }
+
+  if (command === 'stop') {
+    stopService();
     return;
   }
 
@@ -197,10 +208,10 @@ function initConfig(): void {
   console.log('Edit it, then run: foxclaw doctor');
 }
 
-function startService(): void {
+function startService(action: 'start' | 'restart'): void {
   if (!runDoctorChecks()) {
     console.error('');
-    console.error('Fix the failed checks above, then run: foxclaw start');
+    console.error(`Fix the failed checks above, then run: foxclaw ${action}`);
     process.exit(1);
   }
   if (process.platform === 'darwin') {
@@ -208,6 +219,14 @@ function startService(): void {
     return;
   }
   installSystemd();
+}
+
+function stopService(): void {
+  if (process.platform === 'darwin') {
+    stopLaunchd();
+    return;
+  }
+  stopSystemd();
 }
 
 function runDoctorChecks(): boolean {
@@ -318,6 +337,16 @@ function uninstallSystemd(): void {
   console.log(`Removed ${unitPath}`);
 }
 
+function stopSystemd(): void {
+  if (!hasCommand('systemctl')) {
+    console.error('systemctl not found');
+    process.exit(1);
+  }
+  const unitName = 'foxclaw.service';
+  spawnChecked('systemctl', ['--user', 'stop', unitName]);
+  console.log(`Stopped ${unitName}`);
+}
+
 function installLaunchd(): void {
   if (process.platform !== 'darwin') {
     console.error('launchd install is only available on macOS');
@@ -377,6 +406,20 @@ ${foxclawEnvXml}
   spawnSync('launchctl', ['unload', plist], { stdio: 'ignore' });
   spawnChecked('launchctl', ['load', plist]);
   console.log(`Installed ${plist}`);
+}
+
+function stopLaunchd(): void {
+  if (process.platform !== 'darwin') {
+    console.error('launchd stop is only available on macOS');
+    process.exit(1);
+  }
+  const plist = path.join(process.env.HOME || '', 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
+  if (!fs.existsSync(plist)) {
+    console.error(`launchd plist not found: ${plist}`);
+    process.exit(1);
+  }
+  spawnChecked('launchctl', ['unload', plist]);
+  console.log(`Stopped ${plist}`);
 }
 
 function buildServicePath(nodeDir: string): string {

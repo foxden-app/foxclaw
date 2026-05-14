@@ -93,7 +93,7 @@ Check these in order:
 5. Restart after changing `.env`:
 
    ```bash
-   foxclaw start
+   foxclaw restart
    ```
 
    If running foreground mode, stop with `Ctrl+C` and run `foxclaw serve` again.
@@ -145,7 +145,7 @@ systemctl --user disable --now telegram-codex-app-bridge.service
 Then restart FoxClaw:
 
 ```bash
-foxclaw start
+foxclaw restart
 ```
 
 ## Codex Or App-Server Fails
