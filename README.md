@@ -70,7 +70,7 @@ foxclaw doctor
 foxclaw start
 ```
 
-`foxclaw init` 会创建 `~/.foxclaw/.env`，并在终端里提示填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。任何一项都可以直接回车跳过，之后再用 `$EDITOR ~/.foxclaw/.env` 手动修改。
+`foxclaw init` 会创建 `~/.foxclaw/.env`，并在终端里提示填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。如果当前 shell 里有 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理变量，也会询问是否写入 FoxClaw 配置，避免服务启动后 Codex 走不到同一条网络。任何一项都可以直接回车跳过，之后再用 `$EDITOR ~/.foxclaw/.env` 手动修改。
 
 跑 `doctor` 或 `start` 之前先把 `.env` 填好。私聊模式最小配置：
 

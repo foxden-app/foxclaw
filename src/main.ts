@@ -21,6 +21,16 @@ const command = process.argv[2] || 'serve';
 loadEnv();
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const entryPoint = fileURLToPath(import.meta.url);
+const PROXY_ENV_KEYS = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+] as const;
 
 async function main(): Promise<void> {
   if (command === 'init') {
@@ -213,6 +223,7 @@ async function initConfig(): Promise<void> {
   }
 
   if (!canPromptForInit()) {
+    printProxyEnvHint(envPath);
     console.log(`Edit it manually, then run: foxclaw doctor`);
     return;
   }
@@ -230,6 +241,7 @@ async function configureEnvInteractively(envPath: string, existed: boolean): Pro
     if (existed) {
       const updateExisting = (await rl.question('Update Telegram/workspace setup fields now? [y/N]: ')).trim().toLowerCase();
       if (updateExisting !== 'y' && updateExisting !== 'yes') {
+        await maybeSaveProxyEnvFromShell(rl, envPath);
         console.log(`Edit it manually, then run: foxclaw doctor`);
         return;
       }
@@ -240,6 +252,8 @@ async function configureEnvInteractively(envPath: string, existed: boolean): Pro
     const updates: Record<string, string> = {};
     const skipped: string[] = [];
     const warnings: string[] = [];
+
+    Object.assign(updates, await maybeSaveProxyEnvFromShell(rl, envPath));
 
     const token = sanitizeEnvInput(await rl.question('Telegram bot token (TG_BOT_TOKEN): '));
     if (token) {
@@ -365,6 +379,71 @@ function writeEnvUpdates(envPath: string, updates: Record<string, string>): void
   fs.writeFileSync(envPath, text);
 }
 
+async function maybeSaveProxyEnvFromShell(
+  rl: ReturnType<typeof createInterface>,
+  envPath: string,
+): Promise<Record<string, string>> {
+  const proxyUpdates = detectMissingProxyEnv(envPath);
+  const keys = Object.keys(proxyUpdates);
+  if (keys.length === 0) {
+    return {};
+  }
+  console.log(`Detected proxy env in this shell: ${keys.join(', ')}`);
+  const answer = (await rl.question('Save these proxy settings to FoxClaw .env for service use? [Y/n]: ')).trim().toLowerCase();
+  if (answer === 'n' || answer === 'no') {
+    console.log(`Skipped proxy env. Add it to ${envPath} if ChatGPT access needs a proxy.`);
+    return {};
+  }
+  writeEnvUpdates(envPath, proxyUpdates);
+  console.log(`Saved ${keys.join(', ')} to ${envPath}`);
+  return proxyUpdates;
+}
+
+function printProxyEnvHint(envPath: string): void {
+  const proxyUpdates = detectMissingProxyEnv(envPath);
+  const keys = Object.keys(proxyUpdates);
+  if (keys.length === 0) {
+    return;
+  }
+  console.log(`[WARN] Proxy env detected in this shell but missing from ${envPath}: ${keys.join(', ')}`);
+  console.log(`[WARN] Add those proxy variables to ${envPath} if ChatGPT/Codex needs a proxy.`);
+}
+
+function detectMissingProxyEnv(envPath: string): Record<string, string> {
+  const existing = readEnvFileKeys(envPath);
+  const existingCanonical = new Set(Array.from(existing, canonicalProxyEnvKey));
+  const updates: Record<string, string> = {};
+  for (const key of PROXY_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (!value || existing.has(key) || existingCanonical.has(canonicalProxyEnvKey(key))) {
+      continue;
+    }
+    updates[key] = value;
+  }
+  return updates;
+}
+
+function canonicalProxyEnvKey(key: string): string {
+  return key.toUpperCase();
+}
+
+function readEnvFileKeys(envPath: string): Set<string> {
+  const keys = new Set<string>();
+  let text = '';
+  try {
+    text = fs.readFileSync(envPath, 'utf8');
+  } catch {
+    return keys;
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (match?.[1]) {
+      keys.add(match[1]);
+    }
+  }
+  return keys;
+}
+
 function formatEnvValue(value: string): string {
   const cleaned = value.replace(/[\r\n]/g, '').trim();
   if (!/[\s#"\\]/.test(cleaned)) return cleaned;
@@ -435,7 +514,52 @@ function runDoctorChecks(): boolean {
     console.log(`[FAIL] default cwd missing: ${cwd}`);
     passed = false;
   }
+  warnIfProxyEnvMissingFromLoadedEnv();
+  warnIfInstalledServiceNodeLooksWrong();
   return passed;
+}
+
+function warnIfProxyEnvMissingFromLoadedEnv(): void {
+  const envPath = serviceEnvPath();
+  const proxyUpdates = detectMissingProxyEnv(envPath);
+  const keys = Object.keys(proxyUpdates);
+  if (keys.length === 0) {
+    return;
+  }
+  console.log(`[WARN] proxy env is present in this shell but missing from ${envPath}: ${keys.join(', ')}`);
+  console.log(`[WARN] systemd/launchd services do not inherit your shell; add those variables to the FoxClaw env file if Codex needs a proxy.`);
+}
+
+function warnIfInstalledServiceNodeLooksWrong(): void {
+  if (process.platform !== 'linux') {
+    return;
+  }
+  const unitPath = path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '', '.config'), 'systemd', 'user', 'foxclaw.service');
+  let text = '';
+  try {
+    text = fs.readFileSync(unitPath, 'utf8');
+  } catch {
+    return;
+  }
+  const execStart = text.match(/^ExecStart=(.+)$/m)?.[1]?.trim();
+  const nodePath = execStart ? systemdUnescape(execStart.split(/\s+/)[0] ?? '') : '';
+  if (!nodePath) {
+    return;
+  }
+  if (!fs.existsSync(nodePath)) {
+    console.log(`[WARN] installed service node is missing: ${nodePath}`);
+    console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the service unit.');
+    return;
+  }
+  const result = spawnSync(nodePath, ['-p', 'process.versions.node'], { encoding: 'utf8' });
+  const version = result.status === 0 ? result.stdout.trim() : '';
+  const major = Number.parseInt(version.split('.')[0] ?? '', 10);
+  if (Number.isFinite(major) && major >= 24) {
+    console.log(`[OK] service node >= 24: ${nodePath}`);
+    return;
+  }
+  console.log(`[WARN] installed service node is older than 24: ${nodePath}${version ? ` (${version})` : ''}`);
+  console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the service unit.');
 }
 
 function installSystemd(): void {
@@ -616,6 +740,10 @@ function spawnChecked(commandName: string, args: string[]): void {
 
 function systemdEscape(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/ /g, '\\x20');
+}
+
+function systemdUnescape(value: string): string {
+  return value.replace(/\\x20/g, ' ').replace(/\\\\/g, '\\');
 }
 
 function xmlEscape(value: string): string {

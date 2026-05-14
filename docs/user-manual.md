@@ -100,7 +100,7 @@ Both install the same published npm package. Use one global package manager cons
 
 ### 1.6 Fill In The Config
 
-`foxclaw init` creates the default config file at `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace. Press Enter on any field to skip it, then edit manually if needed:
+`foxclaw init` creates the default config file at `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace. If the current shell has proxy variables such as `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, it also asks whether to save them into the FoxClaw config so the service-side Codex app-server uses the same network. Press Enter on any field to skip it, then edit manually if needed:
 
 ```bash
 $EDITOR ~/.foxclaw/.env
