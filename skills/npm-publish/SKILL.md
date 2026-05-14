@@ -5,7 +5,7 @@ description: Publish npm packages safely, especially packages that require npm 2
 
 # NPM Publish
 
-Use this skill to publish an npm package from a repo while preserving the exact web-auth flow that works in this environment.
+Use this skill to publish an npm package from a repo. Prefer the normal no-2FA publish path first. Fall back to npm web-auth only when npm explicitly prompts for it.
 
 ## Release Checklist
 
@@ -41,32 +41,44 @@ Use this skill to publish an npm package from a repo while preserving the exact 
    git push
    ```
 
-## 2FA Web Auth Publish Flow
+## Publish Flow
 
-Use this exact flow when npm returns `EOTP` or when the account uses web auth for publish:
-
-1. Start publish in a TTY and disable local browser opening:
+1. Start publish in a TTY and disable local browser opening. This works both when npm publishes directly and when it asks for web auth:
    ```bash
    BROWSER=true npm publish
    ```
 
-2. Wait for npm to print:
+2. If npm publishes directly, it should finish with:
    ```text
-   Authenticate your account at:
-   https://www.npmjs.com/auth/cli/<auth-id>
-   Press ENTER to open in the browser...
+   + <package-name>@<version>
+   ```
+   Then verify:
+   ```bash
+   npm view <package-name> version
+   git status --short --branch
    ```
 
-3. Send the URL to the user as a bare URL, not inside backticks or a code block. Bare URLs are easier to tap.
+3. If npm instead prints a web-auth prompt, use the fallback flow below.
 
-4. Do not press Enter immediately. Wait until the user says they clicked/confirmed the npm page.
+## Web Auth Fallback
 
-5. After the user confirms, send Enter to the still-running TTY process. npm should retrieve the temporary token and finish:
+Use this only when npm prints:
+```text
+Authenticate your account at:
+https://www.npmjs.com/auth/cli/<auth-id>
+Press ENTER to open in the browser...
+```
+
+1. Send the URL to the user as a bare URL, not inside backticks or a code block. Bare URLs are easier to tap.
+
+2. Do not press Enter immediately. Wait until the user says they clicked/confirmed the npm page.
+
+3. After the user confirms, send Enter to the still-running TTY process. npm should retrieve the temporary token and finish:
    ```text
    + <package-name>@<version>
    ```
 
-6. Verify the published version:
+4. Verify the published version:
    ```bash
    npm view <package-name> version
    git status --short --branch
@@ -74,7 +86,7 @@ Use this exact flow when npm returns `EOTP` or when the account uses web auth fo
 
 ## Failure Modes
 
-- If `npm publish` is run without a TTY, npm may print an `EOTP` error with the auth URL redacted as `***`. Stop that attempt and rerun with a TTY.
+- If `npm publish` is run without a TTY, npm may print an `EOTP` error with the auth URL redacted as `***`. Stop that attempt and rerun with `BROWSER=true npm publish` in a TTY.
 - If `xdg-open` fails because the environment has no browser, rerun with `BROWSER=true npm publish`.
 - If the auth link expires or the publish process exits, rerun `BROWSER=true npm publish` to generate a new link.
 - If the user provides a classic authenticator OTP instead of using the web link, publish can be retried with `npm publish --otp <code>`, but prefer web auth when the user asks for a clickable confirmation link.
