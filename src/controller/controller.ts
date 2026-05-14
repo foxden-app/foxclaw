@@ -1252,6 +1252,11 @@ export class BridgeSessionCore {
       await this.handleThreadNewCallback(event, locale);
       return;
     }
+    const threadNewMatch = /^thread:new:(.+)$/.exec(event.data);
+    if (threadNewMatch) {
+      await this.handleThreadNewFromThreadCallback(event, threadNewMatch[1]!, locale);
+      return;
+    }
     const newCwdMatch = /^thread:newcwd:(create|cancel)$/.exec(event.data);
     if (newCwdMatch) {
       await this.handleThreadNewCwdCallback(event, newCwdMatch[1]! as 'create' | 'cancel', locale);
@@ -5608,6 +5613,24 @@ export class BridgeSessionCore {
     await this.sendMessage(event.scopeId, t(locale, 'thread_new_prompt', { cwd: this.config.defaultCwd }));
   }
 
+  private async handleThreadNewFromThreadCallback(
+    event: TelegramCallbackEvent,
+    threadId: string,
+    locale: AppLocale,
+  ): Promise<void> {
+    const scopeId = event.scopeId;
+    const cached = this.store.listCachedThreads(scopeId).find(thread => thread.threadId === threadId);
+    if (!cached) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'cached_thread_unavailable'));
+      return;
+    }
+
+    this.pendingThreadRenames.delete(scopeId);
+    this.pendingThreadNewCwds.delete(scopeId);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_new_started_short'));
+    await this.startNewThreadForRequestedCwd(scopeId, locale, cached.cwd || this.config.defaultCwd, event.messageId);
+  }
+
   private async handleThreadNewCwdCallback(
     event: TelegramCallbackEvent,
     action: 'create' | 'cancel',
@@ -8272,7 +8295,7 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
       callback_data: `auth:${record.localId}:${index}`,
     },
     {
-      text: t(locale, candidate.disabled ? 'button_auth_enable' : 'button_auth_disable'),
+      text: t(locale, candidate.disabled ? 'button_auth_disable' : 'button_auth_enable'),
       callback_data: `auth:${record.localId}:toggle:${index}`,
     },
   ]);
