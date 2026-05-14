@@ -26,6 +26,12 @@ No public server required. FoxClaw runs on your own computer, talks to `codex ap
 - 🔒 Code, shell, auth, approvals, and runtime data stay on your machine — nothing exposed to the public internet
 - 👤 Only one trusted Telegram user can operate the bot
 
+## Feature Preview
+
+![FoxClaw Telegram feature preview](./docs/assets/telegram-preview-en.svg)
+
+FoxClaw is more than message forwarding. It provides Telegram panels for Codex workflows: `/setup` adjusts model, reasoning, Fast tier, access, and Agent/Plan mode; `/auth` manages multiple Codex auth candidates and rotates them on usage limits; `/threads`, `/watch`, and approval buttons handle thread switching, progress monitoring, and permission requests.
+
 ## Start Here
 
 - Already have a shell-capable agent such as Codex, OpenClaw, QwenPaw, Hermes, OpenCode, or Kimi CLI? Use the [Agent-Assisted Install](./docs/agent-assisted-install.md) first. This is the recommended path.
