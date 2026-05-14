@@ -280,3 +280,7 @@ Update FoxClaw later:
 npm install -g @foxden-app/foxclaw@latest
 foxclaw start
 ```
+
+## Next Step
+
+After the first install works, read the [User Manual](./user-manual.md) for `/help`, `/setup`, `/threads`, `/watch`, `/auth`, Codex login, and multi-account auth rotation.
