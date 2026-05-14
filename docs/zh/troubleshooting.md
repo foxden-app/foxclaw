@@ -193,6 +193,8 @@ tail -f ~/.foxclaw/logs/service.log
 systemctl --user cat foxclaw.service
 ```
 
+`foxclaw init` 会检测当前 shell 里的代理环境变量，并询问是否保存到 FoxClaw `.env`。如果你跳过了这一步，`foxclaw doctor` 会在发现“shell 有代理，但 FoxClaw env 没有代理”时给出 `[WARN]`。
+
 确认 `Environment=FOXCLAW_ENV=...` 指向的文件里有你的代理配置，例如：
 
 ```dotenv
@@ -210,7 +212,9 @@ foxclaw restart
 
 ## 服务用了错误的 Node 版本
 
-systemd 安装脚本会记录当时 PATH 里的 `node`。如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24 的 shell 重新安装：
+systemd 安装脚本会记录当时正在运行的 Node 绝对路径，不依赖 systemd 去加载 `nvm.sh`。如果你用 nvm 管多个 Node 版本，原则是：从 Node 24 的 shell 里执行 `foxclaw start`，服务之后就固定使用这个 Node 24 路径。
+
+如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24 的 shell 重新安装：
 
 ```bash
 nvm use 24
@@ -218,7 +222,7 @@ foxclaw start
 systemctl --user status foxclaw.service
 ```
 
-状态输出里应该能看到 Node 24 的路径。
+状态输出里应该能看到 Node 24 的路径。`foxclaw doctor` 也会检查已安装服务里的 Node 路径，如果发现路径不存在或版本低于 24，会提示重新运行 `foxclaw start`。
 
 ## 重启后是否会自动运行
 

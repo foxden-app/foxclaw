@@ -192,6 +192,8 @@ A common cause is that your shell or project `.env` has proxy variables, while t
 systemctl --user cat foxclaw.service
 ```
 
+`foxclaw init` detects proxy environment variables in the current shell and asks whether to save them into the FoxClaw `.env`. If you skipped that step, `foxclaw doctor` warns when it sees proxy variables in the shell but not in the FoxClaw env file.
+
 Make sure the file referenced by `Environment=FOXCLAW_ENV=...` contains your proxy variables, for example:
 
 ```dotenv
@@ -209,7 +211,9 @@ foxclaw restart
 
 ## Service Starts With The Wrong Node Version
 
-The systemd installer captures the `node` binary from your current PATH. If you installed the service from a shell using Node 22 or older, reinstall it from a Node 24 shell:
+The systemd installer records the absolute path of the Node process that is currently running FoxClaw. It does not rely on systemd loading `nvm.sh`. If you manage multiple Node versions with nvm, run `foxclaw start` from a Node 24 shell and the service will keep using that Node 24 path.
+
+If you installed the service from a shell using Node 22 or older, reinstall it from a Node 24 shell:
 
 ```bash
 nvm use 24
@@ -217,7 +221,7 @@ foxclaw start
 systemctl --user status foxclaw.service
 ```
 
-The status output should show a Node 24 path in `ExecStart`.
+The status output should show a Node 24 path in `ExecStart`. `foxclaw doctor` also checks the installed service Node path and warns if it is missing or older than 24.
 
 ## Does It Run After Reboot?
 

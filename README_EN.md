@@ -70,7 +70,7 @@ foxclaw doctor
 foxclaw start
 ```
 
-`foxclaw init` creates `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace. Press Enter on any field to skip it and edit later with `$EDITOR ~/.foxclaw/.env`.
+`foxclaw init` creates `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace. If the current shell has proxy variables such as `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, it also asks whether to save them into the FoxClaw config so the service uses the same network path as your working Codex CLI. Press Enter on any field to skip it and edit later with `$EDITOR ~/.foxclaw/.env`.
 
 Fill `.env` before running `doctor` or `start`. Minimum private-chat config:
 
