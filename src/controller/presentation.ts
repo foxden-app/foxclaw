@@ -104,6 +104,7 @@ export function buildThreadsKeyboard(locale: AppLocale, threads: ThreadLike[]): 
           { text: t(locale, 'button_thread_rename'), callback_data: `thread:rename:${thread.threadId}` },
           { text: t(locale, 'button_thread_watch'), callback_data: `thread:watch:${thread.threadId}` },
           { text: t(locale, 'button_thread_archive'), callback_data: `thread:archive:${thread.threadId}` },
+          { text: t(locale, 'button_thread_new'), callback_data: `thread:new:${thread.threadId}` },
         ];
     return [openRow, actionRow];
   });
@@ -355,24 +356,25 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
   const activeTurnMessageMode = resolveActiveTurnMessageMode(ctx.settings?.activeTurnMessageMode ?? null);
 
   const rows: InlineButton[][] = [];
+  const autoLabel = setupAutoButtonLabel(locale);
   rows.push(...chunkButtons([
     {
-      text: currentModel === null ? `• ${t(locale, 'button_auto')}` : t(locale, 'button_auto'),
+      text: currentModel === null ? `• ${autoLabel}` : autoLabel,
       callback_data: 'setup:model:default',
     },
     ...ctx.models.map((model) => ({
-      text: selectedButtonText(currentModel === model.model, `🤖 ${truncate(model.model, 14)}`),
+      text: selectedButtonText(currentModel === model.model, truncate(model.model, 14)),
       callback_data: `setup:model:${encodeURIComponent(model.model)}`,
     })),
   ], 2));
 
   rows.push(...chunkButtons([
     {
-      text: (ctx.settings?.reasoningEffort ?? null) === null ? `• ${t(locale, 'button_auto')}` : t(locale, 'button_auto'),
+      text: (ctx.settings?.reasoningEffort ?? null) === null ? `• ${autoLabel}` : autoLabel,
       callback_data: 'setup:effort:default',
     },
     ...efforts.map((effort) => ({
-      text: selectedButtonText(ctx.settings?.reasoningEffort === effort, `🧠 ${effort}`),
+      text: selectedButtonText(ctx.settings?.reasoningEffort === effort, effort),
       callback_data: `setup:effort:${effort}`,
     })),
   ], 3));
@@ -409,7 +411,7 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
 
   rows.push([
     {
-      text: selectedButtonText(currentMode === 'default', `🤖 ${t(locale, 'collaboration_mode_default')}`),
+      text: selectedButtonText(currentMode === 'default', t(locale, 'collaboration_mode_default')),
       callback_data: 'setup:mode:default',
     },
     {
@@ -420,11 +422,11 @@ export function buildSetupPanelKeyboard(locale: AppLocale, ctx: SetupPanelContex
 
   rows.push([
     {
-      text: selectedButtonText(activeTurnMessageMode === 'steer', `🎯 ${t(locale, 'active_turn_message_mode_steer')}`),
+      text: selectedButtonText(activeTurnMessageMode === 'steer', t(locale, 'active_turn_message_mode_steer')),
       callback_data: 'setup:active:steer',
     },
     {
-      text: selectedButtonText(activeTurnMessageMode === 'queue', `📥 ${t(locale, 'active_turn_message_mode_queue')}`),
+      text: selectedButtonText(activeTurnMessageMode === 'queue', t(locale, 'active_turn_message_mode_queue')),
       callback_data: 'setup:active:queue',
     },
   ]);
@@ -517,6 +519,10 @@ function accessPresetButtonLabel(locale: AppLocale, preset: AccessPresetValue): 
   if (preset === 'read-only') return `👁️ ${formatAccessPresetLabel(locale, preset)}`;
   if (preset === 'full-access') return `🔓 ${formatAccessPresetLabel(locale, preset)}`;
   return `🛡️ ${formatAccessPresetLabel(locale, preset)}`;
+}
+
+function setupAutoButtonLabel(locale: AppLocale): string {
+  return locale === 'zh' ? '自动' : 'Auto';
 }
 
 export function formatModelSettingsMessage(

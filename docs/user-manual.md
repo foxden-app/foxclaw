@@ -266,12 +266,12 @@ Access: Default (on-request / workspace-write)
 Mode: Agent
 Active turn: Steer current turn
 
-[⚙️ Auto]        [🤖 gpt-5.5]
-[🧠 low] [🧠 medium] [🧠 high]
-[⚡ Fast on]     [⚪ Fast off]
+[Auto]           [gpt-5.5]
+[low] [medium] [high]
+[⚡ Fast on]     [Fast off]
 [👁️ Read-only]  [🛡️ Default]  [🔓 Full access]
-[🤖 Agent]       [📝 Plan]
-[🎯 Steer current turn] [📥 Queue next turn]
+[Agent]          [📝 Plan]
+[Steer current turn] [Queue next turn]
 ```
 
 Command aliases:
@@ -307,10 +307,10 @@ Current: fix auth rotation
 ~/Projects/foxclaw | 3 minutes ago | idle
 
 [🧵 1. fix auth rotation]
-[✏️ Rename] [👀 Watch] [🗑️ Archive]
+[✏️] [👀] [🗑️] [➕]
 
 [🧵 2. polish README copy]
-[✏️ Rename] [👀 Watch] [🗑️ Archive]
+[✏️] [👀] [🗑️] [➕]
 
 [➕ New]
 [➡️ Next]
@@ -395,11 +395,13 @@ Candidates: 2
 1. auth.json_personal * [enabled]
 2. auth.json_team [enabled]
 
-[✅ auth.json_personal] [⏸️ Disable]
-[🔐 auth.json_team]     [⏸️ Disable]
+[✅ auth.json_personal] [✅]
+[🔐 auth.json_team]     [✅]
 [🛡️ Access]             [🔑 Login]
 [🔄 Reload auth]
 ```
+
+The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state.
 
 Equivalent commands:
 
@@ -440,7 +442,7 @@ auth.json_backup       # backup account, enable or disable as needed
 4. Send a task, for example: `Fix the failing test and run the related test suite.`
 5. Step away from the computer and watch progress on your phone.
 6. Approve or deny command and file-change requests from Telegram.
-7. To observe a task started from Codex CLI, use `/threads`, then tap `👀 Watch` or send `/watch <n>`.
+7. To observe a task started from Codex CLI, use `/threads`, then tap `👀` or send `/watch <n>`.
 8. When quota is hit, let `/auth` candidates auto-rotate, or switch manually with `/auth use <n>`.
 
 ## 8. Safety

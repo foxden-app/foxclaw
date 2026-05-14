@@ -87,9 +87,10 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
       callback_data: 'thread:open:thread-2',
     }],
     [
-      { text: '✏️ Rename', callback_data: 'thread:rename:thread-2' },
-      { text: '👀 Watch', callback_data: 'thread:watch:thread-2' },
-      { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-2' },
+      { text: '✏️', callback_data: 'thread:rename:thread-2' },
+      { text: '👀', callback_data: 'thread:watch:thread-2' },
+      { text: '🗑️', callback_data: 'thread:archive:thread-2' },
+      { text: '➕', callback_data: 'thread:new:thread-2' },
     ],
   ]);
 });
@@ -114,9 +115,10 @@ test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
       callback_data: 'thread:open:thread-x',
     }],
     [
-      { text: '✏️ Rename', callback_data: 'thread:rename:thread-x' },
-      { text: '👀 Watch', callback_data: 'thread:watch:thread-x' },
-      { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-x' },
+      { text: '✏️', callback_data: 'thread:rename:thread-x' },
+      { text: '👀', callback_data: 'thread:watch:thread-x' },
+      { text: '🗑️', callback_data: 'thread:archive:thread-x' },
+      { text: '➕', callback_data: 'thread:new:thread-x' },
     ],
   ]);
 });
@@ -192,9 +194,10 @@ test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
     [
       [{ text: '🧵 11. Review auth flow', callback_data: 'thread:open:thread-2' }],
       [
-        { text: '✏️ Rename', callback_data: 'thread:rename:thread-2' },
-        { text: '👀 Watch', callback_data: 'thread:watch:thread-2' },
-        { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-2' },
+        { text: '✏️', callback_data: 'thread:rename:thread-2' },
+        { text: '👀', callback_data: 'thread:watch:thread-2' },
+        { text: '🗑️', callback_data: 'thread:archive:thread-2' },
+        { text: '➕', callback_data: 'thread:new:thread-2' },
       ],
       [{ text: '➕ New', callback_data: 'thread:new' }],
       [
@@ -397,15 +400,26 @@ test('setup panel renders summary, focus, rows, and fast controls', () => {
   assert.match(message, /• Active turn messages: Steer current turn/);
 
   const keyboard = buildSetupPanelKeyboard('en', ctx);
-  assert.ok(keyboard.some(row => row.some(button => button.callback_data === 'setup:model:gpt-5')));
-  assert.ok(keyboard.some(row => row.some(button => button.callback_data === 'setup:effort:high')));
+  assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:model:'))), [
+    { text: 'Auto', callback_data: 'setup:model:default' },
+    { text: '• gpt-5', callback_data: 'setup:model:gpt-5' },
+  ]);
+  assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:effort:'))), [
+    { text: 'Auto', callback_data: 'setup:effort:default' },
+    { text: 'medium', callback_data: 'setup:effort:medium' },
+    { text: '• high', callback_data: 'setup:effort:high' },
+  ]);
   assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
     { text: '• ⚡ Fast: on', callback_data: 'setup:fast:on' },
-    { text: '⚪ Fast: off', callback_data: 'setup:fast:off' },
+    { text: 'Fast: off', callback_data: 'setup:fast:off' },
+  ]);
+  assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:mode:'))), [
+    { text: 'Agent', callback_data: 'setup:mode:default' },
+    { text: '• 📝 Plan', callback_data: 'setup:mode:plan' },
   ]);
   assert.deepEqual(keyboard.find(row => row.some(button => button.callback_data.startsWith('setup:active:'))), [
-    { text: '• 🎯 Steer current turn', callback_data: 'setup:active:steer' },
-    { text: '📥 Queue next turn', callback_data: 'setup:active:queue' },
+    { text: '• Steer current turn', callback_data: 'setup:active:steer' },
+    { text: 'Queue next turn', callback_data: 'setup:active:queue' },
   ]);
 });
 
@@ -431,7 +445,7 @@ test('setup panel shows unsupported fast as noop button', () => {
   assert.equal(resolveSetupSummaryLine(ctx), 'server default · server default · fast=unsupported · default · default · steer');
   assert.match(formatSetupPanelMessage('en', ctx), /Focus: Fast/);
   assert.deepEqual(buildSetupPanelKeyboard('en', ctx).find(row => row.some(button => button.callback_data.startsWith('setup:fast:'))), [
-    { text: '⛔ Fast unsupported', callback_data: 'setup:fast:unsupported' },
+    { text: 'Fast unsupported', callback_data: 'setup:fast:unsupported' },
   ]);
 });
 

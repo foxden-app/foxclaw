@@ -149,8 +149,10 @@ function createControllerRig() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-controller-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const sentMessages: string[] = [];
+  const sentKeyboards: any[] = [];
   const sentHtmlMessages: string[] = [];
   const editedMessages: string[] = [];
+  const editedKeyboards: any[] = [];
   const editedHtmlMessages: string[] = [];
   const sentHtmlKeyboards: any[] = [];
   const editedHtmlKeyboards: any[] = [];
@@ -158,8 +160,9 @@ function createControllerRig() {
   const deletedMessageIds: number[] = [];
   const bot = {
     stop: () => {},
-    sendMessage: async (_chatId: string, text: string) => {
+    sendMessage: async (_chatId: string, text: string, keyboard?: any) => {
       sentMessages.push(text);
+      sentKeyboards.push(keyboard ?? []);
       return sentMessages.length;
     },
     sendHtmlMessage: async (_chatId: string, text: string, keyboard?: any) => {
@@ -167,8 +170,9 @@ function createControllerRig() {
       sentHtmlKeyboards.push(keyboard ?? []);
       return 1000 + sentHtmlMessages.length;
     },
-    editMessage: async (_chatId: string, _messageId: number, text: string) => {
+    editMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
       editedMessages.push(text);
+      editedKeyboards.push(keyboard ?? []);
     },
     editHtmlMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
       editedHtmlMessages.push(text);
@@ -341,8 +345,10 @@ function createControllerRig() {
     controller,
     store,
     sentMessages,
+    sentKeyboards,
     sentHtmlMessages,
     editedMessages,
+    editedKeyboards,
     editedHtmlMessages,
     sentHtmlKeyboards,
     editedHtmlKeyboards,
@@ -1144,18 +1150,36 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.match(rig.sentMessages[0]!, /auth\.json_b \[enabled\]/);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
+  assert.deepEqual(rig.sentKeyboards[0]?.slice(0, 2), [
+    [
+      { text: '✅ auth.json_a', callback_data: `auth:${list.localId}:0` },
+      { text: '✅', callback_data: `auth:${list.localId}:toggle:0` },
+    ],
+    [
+      { text: '🔐 auth.json_b', callback_data: `auth:${list.localId}:1` },
+      { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
+    ],
+  ]);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:toggle:1`, 1));
 
   assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], ['auth.json_b']);
   assert.equal(rig.callbackAnswers.at(-1), 'Auth disabled');
   assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[disabled\]/);
+  assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
+    { text: '🔐 auth.json_b · off', callback_data: `auth:${list.localId}:1` },
+    { text: '⏸️', callback_data: `auth:${list.localId}:toggle:1` },
+  ]);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:toggle:1`, 1));
 
   assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], []);
   assert.equal(rig.callbackAnswers.at(-1), 'Auth enabled');
   assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[enabled\]/);
+  assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
+    { text: '🔐 auth.json_b', callback_data: `auth:${list.localId}:1` },
+    { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
+  ]);
 });
 
 test('/auth panel can start device login from an inline action', async (t) => {
@@ -2579,9 +2603,10 @@ test('/threads panel supports rename and archive callbacks', async (t) => {
   assert.deepEqual(rig.sentHtmlKeyboards[0], [
     [{ text: '🧵 1. Panel thread', callback_data: 'thread:open:thread-panel' }],
     [
-      { text: '✏️ Rename', callback_data: 'thread:rename:thread-panel' },
-      { text: '👀 Watch', callback_data: 'thread:watch:thread-panel' },
-      { text: '🗑️ Archive/Delete', callback_data: 'thread:archive:thread-panel' },
+      { text: '✏️', callback_data: 'thread:rename:thread-panel' },
+      { text: '👀', callback_data: 'thread:watch:thread-panel' },
+      { text: '🗑️', callback_data: 'thread:archive:thread-panel' },
+      { text: '➕', callback_data: 'thread:new:thread-panel' },
     ],
     [{ text: '➕ New', callback_data: 'thread:new' }],
     [{ text: '🗄️ Archived', callback_data: 'thread:list:archived' }],
@@ -2689,6 +2714,13 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
   (rig.controller as any).app.readThread = async () => thread;
 
   await (rig.controller as any).handleText(createEvent('/threads'));
+  await (rig.controller as any).handleCallback(createCallback('thread:new:thread-panel', 1001));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Starting new thread');
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-new');
+  assert.equal(rig.store.getBinding('telegram:99::root')?.cwd, rig.tempDir);
+  assert.match(rig.sentMessages.at(-1)!, /Started new thread thread-new/);
+
   await (rig.controller as any).handleCallback(createCallback('thread:new', 1001));
 
   assert.equal(rig.callbackAnswers.at(-1), 'Send PWD');
