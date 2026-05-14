@@ -121,7 +121,7 @@ npm install -g @foxden-app/foxclaw
 foxclaw init
 ```
 
-这会创建默认配置文件 `~/.foxclaw/.env`。
+这会创建默认配置文件 `~/.foxclaw/.env`，并提示你填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。
 
 如果你用 pnpm：
 
@@ -132,7 +132,7 @@ foxclaw init
 
 ## 7. 填写 `.env`
 
-用简单编辑器打开配置：
+如果刚才在 `foxclaw init` 里已经填好了 token、用户 ID 和工作目录，可以直接进入下一步检查。如果你选择了跳过，或者想改配置，用简单编辑器打开：
 
 ```bash
 nano ~/.foxclaw/.env
@@ -292,7 +292,7 @@ foxclaw doctor
 foxclaw start
 ```
 
-如果 `~/.foxclaw/.env` 已经存在，`foxclaw init` 不会覆盖它。
+如果 `~/.foxclaw/.env` 已经存在，`foxclaw init` 会先询问是否更新 Telegram 和工作目录相关字段，其它配置保持不变。
 
 ## 下一步
 

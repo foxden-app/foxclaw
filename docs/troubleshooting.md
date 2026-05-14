@@ -233,4 +233,4 @@ foxclaw doctor
 foxclaw start
 ```
 
-If `~/.foxclaw/.env` already exists, `foxclaw init` leaves it untouched.
+If `~/.foxclaw/.env` already exists, `foxclaw init` asks before updating the Telegram/workspace setup fields and leaves the rest untouched.
