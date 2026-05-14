@@ -165,26 +165,9 @@ Default runtime files are stored under `~/.foxclaw`:
 
 Override with `STORE_PATH`, `LOCK_PATH`, `CODEX_APP_SERVER_STATE_PATH`, and `CODEX_APP_SERVER_LOG_PATH`.
 
-## Migrating From telegram-codex-app-bridge
+## Acknowledgements
 
-FoxClaw was originally forked from `Gan-Xing/telegram-codex-app-bridge` and remains distributed under the MIT License.
-
-When upgrading an existing local install:
-
-```bash
-systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
-test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
-foxclaw start
-```
-
-For launchd installs, unload the old plist if present:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist 2>/dev/null || true
-foxclaw start
-```
-
-The old runtime directory is not read automatically. Copy it once if you want to keep existing bindings, cached thread lists, approvals, and status data.
+FoxClaw originally evolved from a fork of `Gan-Xing/telegram-codex-app-bridge` and remains distributed under the MIT License. Thanks to that project for exploring the Telegram-to-local-Codex bridge pattern.
 
 ## Telegram Setup
 
@@ -292,7 +275,7 @@ This repo ships a Codex skill at [`skills/foxclaw`](./skills/foxclaw). Use it wh
 
 ## Troubleshooting
 
-See [Troubleshooting](./docs/troubleshooting.md) for `doctor` failures, Telegram no-reply cases, service logs, reboot behavior, and migration issues.
+See [Troubleshooting](./docs/troubleshooting.md) for `doctor` failures, Telegram no-reply cases, service logs, and reboot behavior.
 
 ## Operations
 

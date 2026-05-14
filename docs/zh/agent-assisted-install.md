@@ -37,7 +37,7 @@ TG_ALLOWED_USER_ID=<把 Telegram 数字用户 ID 粘贴在这里>
 DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 
 任务：
-1. 先检查机器环境。如果已经存在 FoxClaw 或旧的 telegram-codex-app-bridge 服务，先报告再改服务。
+1. 先检查机器环境。如果已经存在 FoxClaw 服务，先报告再改服务。
 2. 确保 Node.js 24+ 可用；如果没有，请用 nvm 安装或切到 Node 24。
 3. 确保 Codex CLI 存在并且已经登录。如果需要登录，停下来告诉我具体要执行什么。
 4. 用 npm install -g @foxden-app/foxclaw@latest 安装或升级 FoxClaw。
@@ -47,31 +47,8 @@ DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 8. 让我在 Telegram bot 里发送 /help 和 /status。
 9. 验证最终状态：
    - Linux 上 foxclaw.service 处于 active/enabled
-   - 如果存在旧 telegram-codex-app-bridge.service，它应当 inactive/disabled
    - foxclaw status 可以正常输出
 10. 汇报执行过的命令、最终状态和后续看日志的命令。请隐藏 TG_BOT_TOKEN，不要打印完整 token 或完整 .env。
-```
-
-## 旧项目迁移提示词
-
-如果目标机器还在跑 `telegram-codex-app-bridge`，用这段：
-
-```text
-请把这台机器从 telegram-codex-app-bridge 迁移到 FoxClaw。
-
-新发布包：
-@foxden-app/foxclaw
-
-请执行：
-1. 修改前先检查现有安装方式、服务文件和运行目录。
-2. 如果存在 telegram-codex-app-bridge.service，停止并禁用它。
-3. 如果 ~/.foxclaw 不存在而 ~/.telegram-codex-app-bridge 存在，把旧目录复制到 ~/.foxclaw。
-4. 用 npm install -g @foxden-app/foxclaw@latest 安装或升级 FoxClaw。
-5. 如果 ~/.foxclaw/.env 不存在，运行 foxclaw init；然后检查配置是否完整。
-6. 运行 foxclaw doctor。
-7. 用 foxclaw start 安装或重启 FoxClaw 服务。
-8. 验证 foxclaw.service 正常运行，旧 telegram-codex-app-bridge.service 已停止或禁用。
-9. 汇报最终状态和阻塞点。请隐藏 TG_BOT_TOKEN，不要打印完整 token 或完整 .env。
 ```
 
 ## 安全注意事项

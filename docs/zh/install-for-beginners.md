@@ -279,20 +279,11 @@ npm install -g @foxden-app/foxclaw@latest
 foxclaw start
 ```
 
-## 从旧项目名迁移
-
-如果这台机器仍在运行 `telegram-codex-app-bridge`，迁移一次即可：
-
-```bash
-systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
-test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
-npm install -g @foxden-app/foxclaw@latest
-foxclaw init
-foxclaw doctor
-foxclaw start
-```
-
 如果 `~/.foxclaw/.env` 已经存在，`foxclaw init` 会先询问是否更新 Telegram 和工作目录相关字段，其它配置保持不变。
+
+## 鸣谢
+
+FoxClaw 最初基于 `Gan-Xing/telegram-codex-app-bridge` fork 演进而来。感谢原项目对 Telegram 与 Codex 本地桥接思路的探索。
 
 ## 下一步
 

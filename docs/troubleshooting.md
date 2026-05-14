@@ -129,20 +129,14 @@ If FoxClaw is still running, it may consume the update before you inspect it.
 
 If Telegram reports conflicts or the same bot behaves strangely, two processes may be polling the same bot token.
 
-Check old and new services:
+Check the service and any extra foreground processes:
 
 ```bash
 systemctl --user is-active foxclaw.service
-systemctl --user is-active telegram-codex-app-bridge.service 2>/dev/null || true
+pgrep -af foxclaw
 ```
 
-Stop the old service:
-
-```bash
-systemctl --user disable --now telegram-codex-app-bridge.service
-```
-
-Then restart FoxClaw:
+Stop the extra process or service, then restart FoxClaw:
 
 ```bash
 foxclaw restart
@@ -219,18 +213,3 @@ macOS launchd starts FoxClaw when you log in after running:
 ```bash
 foxclaw start
 ```
-
-## Migrating From The Old Project Name
-
-If this machine still runs `telegram-codex-app-bridge`, migrate once:
-
-```bash
-systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
-test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
-npm install -g @foxden-app/foxclaw@latest
-foxclaw init
-foxclaw doctor
-foxclaw start
-```
-
-If `~/.foxclaw/.env` already exists, `foxclaw init` asks before updating the Telegram/workspace setup fields and leaves the rest untouched.

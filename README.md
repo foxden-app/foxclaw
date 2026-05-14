@@ -165,26 +165,9 @@ foxclaw serve
 
 可通过 `STORE_PATH`、`LOCK_PATH`、`CODEX_APP_SERVER_STATE_PATH`、`CODEX_APP_SERVER_LOG_PATH` 覆盖。
 
-## 从 telegram-codex-app-bridge 迁移
+## 鸣谢
 
-FoxClaw 最初 fork 自 `Gan-Xing/telegram-codex-app-bridge`，继续以 MIT License 分发。
-
-升级已有安装：
-
-```bash
-systemctl --user disable --now telegram-codex-app-bridge.service 2>/dev/null || true
-test -e ~/.foxclaw || cp -a ~/.telegram-codex-app-bridge ~/.foxclaw
-foxclaw start
-```
-
-macOS launchd 用户先卸载旧 plist：
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist 2>/dev/null || true
-foxclaw start
-```
-
-旧目录不会被自动读取。如果要保留已有的绑定、线程缓存、审批和状态数据，手动复制一次即可。
+FoxClaw 最初基于 `Gan-Xing/telegram-codex-app-bridge` fork 演进而来，继续以 MIT License 分发。感谢原项目对 Telegram 与 Codex 本地桥接思路的探索。
 
 ## Telegram 设置
 
@@ -292,7 +275,7 @@ foxclaw weixin-login
 
 ## 故障排查
 
-`doctor` 报错、Telegram 没回复、服务日志看不懂、重启行为异常、迁移出问题——都看 [故障排查](./docs/zh/troubleshooting.md)。
+`doctor` 报错、Telegram 没回复、服务日志看不懂、重启行为异常——都看 [故障排查](./docs/zh/troubleshooting.md)。
 
 ## 运维命令
 
