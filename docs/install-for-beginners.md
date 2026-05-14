@@ -123,7 +123,7 @@ npm install -g @foxden-app/foxclaw
 foxclaw init
 ```
 
-This creates the config file at `~/.foxclaw/.env`.
+This creates the config file at `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace.
 
 If you prefer pnpm:
 
@@ -134,7 +134,7 @@ foxclaw init
 
 ## 7. Fill In `.env`
 
-Open `.env` in a simple editor:
+If you filled the token, user id, and workspace during `foxclaw init`, go straight to the first check. If you skipped a field or want to change anything, open `.env` in a simple editor:
 
 ```bash
 nano ~/.foxclaw/.env

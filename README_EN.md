@@ -51,7 +51,6 @@ The minimum install needs only a Telegram bot token, your numeric Telegram user 
 ```bash
 npm install -g @foxden-app/foxclaw
 foxclaw init
-$EDITOR ~/.foxclaw/.env
 foxclaw doctor
 foxclaw start
 ```
@@ -61,12 +60,13 @@ pnpm users:
 ```bash
 pnpm add -g @foxden-app/foxclaw
 foxclaw init
-$EDITOR ~/.foxclaw/.env
 foxclaw doctor
 foxclaw start
 ```
 
-Edit `.env` before running `doctor` or `start`. Minimum private-chat config:
+`foxclaw init` creates `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace. Press Enter on any field to skip it and edit later with `$EDITOR ~/.foxclaw/.env`.
+
+Fill `.env` before running `doctor` or `start`. Minimum private-chat config:
 
 ```dotenv
 TG_BOT_TOKEN=123456:telegram-token

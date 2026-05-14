@@ -100,7 +100,7 @@ foxclaw init
 
 ### 1.6 填写配置
 
-默认配置文件是 `~/.foxclaw/.env`：
+`foxclaw init` 会创建默认配置文件 `~/.foxclaw/.env`，并提示填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。任何一项都可以直接回车跳过，之后再手动编辑：
 
 ```bash
 $EDITOR ~/.foxclaw/.env

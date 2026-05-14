@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { createInterface } from 'node:readline/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
@@ -22,7 +23,7 @@ const entryPoint = fileURLToPath(import.meta.url);
 
 async function main(): Promise<void> {
   if (command === 'init') {
-    initConfig();
+    await initConfig();
     return;
   }
 
@@ -195,17 +196,183 @@ async function runServeCli(): Promise<void> {
   }
 }
 
-function initConfig(): void {
+async function initConfig(): Promise<void> {
   const envPath = process.env.FOXCLAW_ENV?.trim() || DEFAULT_ENV_PATH;
   fs.mkdirSync(path.dirname(envPath), { recursive: true });
-  if (fs.existsSync(envPath)) {
+  const existed = fs.existsSync(envPath);
+  if (existed) {
     console.log(`Config already exists: ${envPath}`);
+  } else {
+    const examplePath = path.join(packageRoot, '.env.example');
+    fs.copyFileSync(examplePath, envPath);
+    console.log(`Created ${envPath}`);
+  }
+
+  if (!canPromptForInit()) {
+    console.log(`Edit it manually, then run: foxclaw doctor`);
     return;
   }
-  const examplePath = path.join(packageRoot, '.env.example');
-  fs.copyFileSync(examplePath, envPath);
-  console.log(`Created ${envPath}`);
-  console.log('Edit it, then run: foxclaw doctor');
+
+  await configureEnvInteractively(envPath, existed);
+}
+
+function canPromptForInit(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY && !process.argv.includes('--no-input') && !process.argv.includes('--skip-prompts'));
+}
+
+async function configureEnvInteractively(envPath: string, existed: boolean): Promise<void> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    if (existed) {
+      const updateExisting = (await rl.question('Update Telegram/workspace setup fields now? [y/N]: ')).trim().toLowerCase();
+      if (updateExisting !== 'y' && updateExisting !== 'yes') {
+        console.log(`Edit it manually, then run: foxclaw doctor`);
+        return;
+      }
+    } else {
+      console.log('Interactive setup. Press Enter to skip any field and edit it later.');
+    }
+
+    const updates: Record<string, string> = {};
+    const skipped: string[] = [];
+    const warnings: string[] = [];
+
+    const token = sanitizeEnvInput(await rl.question('Telegram bot token (TG_BOT_TOKEN): '));
+    if (token) {
+      updates.TG_BOT_TOKEN = token;
+      if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
+        warnings.push('TG_BOT_TOKEN does not look like a standard Telegram bot token.');
+      }
+    } else {
+      skipped.push('TG_BOT_TOKEN');
+    }
+
+    const userId = sanitizeEnvInput(await rl.question('Telegram numeric user ID (TG_ALLOWED_USER_ID): '));
+    if (userId) {
+      if (/^\d+$/.test(userId)) {
+        updates.TG_ALLOWED_USER_ID = userId;
+      } else {
+        skipped.push('TG_ALLOWED_USER_ID');
+        warnings.push('TG_ALLOWED_USER_ID must be numeric; use the Id from @userinfobot, not @username.');
+      }
+    } else {
+      skipped.push('TG_ALLOWED_USER_ID');
+    }
+
+    const cwdDefault = defaultInitCwd();
+    const cwdPrompt = cwdDefault
+      ? `Default Codex workspace (DEFAULT_CWD) [${cwdDefault}]: `
+      : 'Default Codex workspace (DEFAULT_CWD): ';
+    const cwdAnswer = sanitizeEnvInput(await rl.question(cwdPrompt));
+    const cwd = cwdAnswer ? normalizeUserPath(cwdAnswer) : cwdDefault;
+    if (cwd) {
+      updates.DEFAULT_CWD = cwd;
+      warnings.push(...validateDefaultCwd(cwd));
+    } else {
+      skipped.push('DEFAULT_CWD');
+    }
+
+    const codexBin = resolveCommand('codex');
+    if (codexBin) {
+      updates.CODEX_CLI_BIN = codexBin;
+    }
+
+    const updatedKeys = Object.keys(updates);
+    if (updatedKeys.length > 0) {
+      writeEnvUpdates(envPath, updates);
+      console.log(`Saved ${updatedKeys.join(', ')} to ${envPath}`);
+    } else {
+      console.log('No setup fields changed.');
+    }
+
+    for (const warning of warnings) {
+      console.log(`[WARN] ${warning}`);
+    }
+    if (skipped.length > 0) {
+      console.log(`Skipped ${skipped.join(', ')}. Edit later: ${editorCommand(envPath)}`);
+    }
+    console.log('Next: foxclaw doctor');
+  } finally {
+    rl.close();
+  }
+}
+
+function sanitizeEnvInput(value: string): string {
+  return value.replace(/[\r\n]/g, '').trim();
+}
+
+function defaultInitCwd(): string | null {
+  const cwd = path.resolve(process.cwd());
+  if (isUnsafeDefaultCwd(cwd)) return null;
+  try {
+    if (fs.statSync(cwd).isDirectory()) return cwd;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function normalizeUserPath(value: string): string {
+  const expanded = value === '~' || value.startsWith('~/')
+    ? path.join(process.env.HOME || '', value.slice(2))
+    : value;
+  return path.resolve(expanded);
+}
+
+function validateDefaultCwd(cwd: string): string[] {
+  const warnings: string[] = [];
+  if (!path.isAbsolute(cwd)) {
+    warnings.push('DEFAULT_CWD should be an absolute path.');
+  }
+  if (isUnsafeDefaultCwd(cwd)) {
+    warnings.push('DEFAULT_CWD points at a very broad directory; use a project/workspace folder for the first install.');
+  }
+  try {
+    if (!fs.statSync(cwd).isDirectory()) {
+      warnings.push('DEFAULT_CWD exists but is not a directory.');
+    }
+  } catch {
+    warnings.push('DEFAULT_CWD does not exist yet; create it or edit the path before starting.');
+  }
+  return warnings;
+}
+
+function isUnsafeDefaultCwd(cwd: string): boolean {
+  const resolved = path.resolve(cwd);
+  const home = process.env.HOME ? path.resolve(process.env.HOME) : '';
+  return resolved === path.parse(resolved).root || resolved === home || resolved === '/home' || resolved === '/Users';
+}
+
+function writeEnvUpdates(envPath: string, updates: Record<string, string>): void {
+  let text = fs.readFileSync(envPath, 'utf8');
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  for (const [key, value] of Object.entries(updates)) {
+    const line = `${key}=${formatEnvValue(value)}`;
+    const pattern = new RegExp(`^${escapeRegExp(key)}=.*$`, 'm');
+    if (pattern.test(text)) {
+      text = text.replace(pattern, line);
+    } else {
+      if (text && !text.endsWith('\n') && !text.endsWith('\r\n')) {
+        text += newline;
+      }
+      text += `${line}${newline}`;
+    }
+  }
+  fs.writeFileSync(envPath, text);
+}
+
+function formatEnvValue(value: string): string {
+  const cleaned = value.replace(/[\r\n]/g, '').trim();
+  if (!/[\s#"\\]/.test(cleaned)) return cleaned;
+  return `"${cleaned.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function editorCommand(envPath: string): string {
+  return `${process.env.EDITOR?.trim() || '$EDITOR'} ${envPath}`;
 }
 
 function startService(action: 'start' | 'restart'): void {
@@ -537,12 +704,17 @@ void main().catch((error) => {
 });
 
 function hasCommand(commandName: string): boolean {
+  return Boolean(resolveCommand(commandName));
+}
+
+function resolveCommand(commandName: string): string | null {
   try {
     const which = process.platform === 'win32' ? 'where' : 'which';
-    const result = spawnSync(which, [commandName], { stdio: 'ignore' });
-    return result.status === 0;
+    const result = spawnSync(which, [commandName], { encoding: 'utf8' });
+    if (result.status !== 0) return null;
+    return result.stdout.split(/\r?\n/).map(line => line.trim()).find(Boolean) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
