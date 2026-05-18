@@ -288,6 +288,17 @@ interface CodexAuthState {
   candidates: CodexAuthCandidate[];
 }
 
+interface CodexAuthSwitchResult {
+  fromLabel: string | null;
+  toLabel: string;
+}
+
+interface CodexAuthSelection {
+  candidate: CodexAuthCandidate;
+  fromLabel: string | null;
+  toLabel: string;
+}
+
 interface PendingAuthChoiceList {
   localId: string;
   chatId: string;
@@ -4493,7 +4504,8 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
       return;
     }
-    await this.sendMessage(scopeId, t(locale, 'auth_switching', { value: candidate.name }));
+    const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
+    await this.sendMessage(scopeId, t(locale, 'auth_switching', this.codexAuthSwitchParams(locale, switchLabels.fromLabel, switchLabels.toLabel)));
     await this.switchCodexAuthAndRestart(scopeId, locale, candidate, false);
   }
 
@@ -5061,8 +5073,10 @@ export class BridgeSessionCore {
 
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_recorded'));
     this.pendingAuthChoiceLists.delete(localId);
+    const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
+    const switchingMessage = t(locale, 'auth_switching', this.codexAuthSwitchParams(locale, switchLabels.fromLabel, switchLabels.toLabel));
     if (record.messageId !== null) {
-      await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_switching', { value: candidate.name }), []);
+      await this.editMessage(event.scopeId, record.messageId, switchingMessage, []);
     }
     await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false);
   }
@@ -5080,16 +5094,17 @@ export class BridgeSessionCore {
     this.authRotationInProgress = true;
     try {
       const failedTargets = rotation.retry?.failedAuthTargets ?? this.authRotationFailedTargets;
-      const candidate = await this.selectNextCodexAuthCandidate(failedTargets);
+      const selection = await this.selectNextCodexAuthCandidate(failedTargets);
       const locale = this.localeForChat(rotation.scopeId);
-      if (!candidate) {
+      if (!selection) {
         await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_no_candidate', {
           error: formatShortStatusError(rotation.reason),
         }));
         return false;
       }
+      const { candidate, fromLabel, toLabel } = selection;
       await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_switching', {
-        value: candidate.name,
+        ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
         error: formatShortStatusError(rotation.reason),
       }));
       await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
@@ -5161,7 +5176,7 @@ export class BridgeSessionCore {
     );
   }
 
-  private async selectNextCodexAuthCandidate(failedTargets: Set<string>): Promise<CodexAuthCandidate | null> {
+  private async selectNextCodexAuthCandidate(failedTargets: Set<string>): Promise<CodexAuthSelection | null> {
     const state = await this.listCodexAuthState();
     if (state.currentTargetPath) {
       failedTargets.add(state.currentTargetPath);
@@ -5177,14 +5192,30 @@ export class BridgeSessionCore {
     for (let offset = 1; offset <= state.candidates.length; offset += 1) {
       const candidate = state.candidates[(currentIndex + offset + state.candidates.length) % state.candidates.length];
       if (candidate && !candidate.disabled && !failedTargets.has(candidate.path)) {
-        return candidate;
+        return { candidate, fromLabel: state.currentLabel, toLabel: await authPathDisplayLabel(candidate.path) };
       }
     }
-    return candidates[0] ?? null;
+    const candidate = candidates[0] ?? null;
+    return candidate ? { candidate, fromLabel: state.currentLabel, toLabel: await authPathDisplayLabel(candidate.path) } : null;
   }
 
   private async listCodexAuthState(): Promise<CodexAuthState> {
     return listCodexAuthState(this.store.listDisabledCodexAuthCandidateNames());
+  }
+
+  private async readCodexAuthSwitchLabels(candidate: CodexAuthCandidate): Promise<CodexAuthSwitchResult> {
+    const state = await this.listCodexAuthState();
+    return {
+      fromLabel: state.currentLabel,
+      toLabel: await authPathDisplayLabel(candidate.path),
+    };
+  }
+
+  private codexAuthSwitchParams(locale: AppLocale, fromLabel: string | null, toLabel: string): { from: string; to: string } {
+    return {
+      from: fromLabel ?? t(locale, 'none'),
+      to: toLabel,
+    };
   }
 
   private async switchCodexAuthAndRestart(
@@ -5193,13 +5224,17 @@ export class BridgeSessionCore {
     candidate: CodexAuthCandidate,
     automatic: boolean,
   ): Promise<void> {
-    await switchCodexAuth(candidate.path);
+    const result = await switchCodexAuth(candidate.path);
     this.authRotationFailedTargets.delete(candidate.path);
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
     await this.app.restart();
 
-    const lines = [t(locale, automatic ? 'auth_auto_done' : 'auth_switch_done', { value: candidate.name })];
+    const lines = [t(
+      locale,
+      automatic ? 'auth_auto_done' : 'auth_switch_done',
+      this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
+    )];
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
   }
@@ -8185,7 +8220,7 @@ async function listCodexAuthState(disabledNames = new Set<string>()): Promise<Co
     authDir,
     authPath,
     currentTargetPath,
-    currentLabel: currentTargetPath ? path.basename(currentTargetPath) : null,
+    currentLabel: currentTargetPath ? await authPathDisplayLabel(currentTargetPath) : null,
     candidates,
   };
 }
@@ -8222,6 +8257,30 @@ async function resolveCurrentAuthTarget(authDir: string, authPath: string): Prom
   return authPath;
 }
 
+async function resolveAuthFinalTargetPath(startPath: string): Promise<string> {
+  let currentPath = startPath;
+  const seen = new Set<string>();
+  for (let depth = 0; depth < 20; depth += 1) {
+    const absolutePath = path.resolve(currentPath);
+    if (seen.has(absolutePath)) {
+      return currentPath;
+    }
+    seen.add(absolutePath);
+
+    const stat = await fs.lstat(currentPath).catch(() => null);
+    if (!stat?.isSymbolicLink()) {
+      return currentPath;
+    }
+    const target = await fs.readlink(currentPath);
+    currentPath = path.resolve(path.dirname(currentPath), target);
+  }
+  return currentPath;
+}
+
+async function authPathDisplayLabel(authPath: string): Promise<string> {
+  return path.basename(await resolveAuthFinalTargetPath(authPath));
+}
+
 async function pointCodexAuthAtTarget(authDir: string, authPath: string, targetPath: string): Promise<void> {
   await fs.mkdir(authDir, { recursive: true });
   const tempLink = path.join(authDir, `.auth.json.${process.pid}.${Date.now()}.tmp`);
@@ -8234,13 +8293,17 @@ async function pointCodexAuthAtTarget(authDir: string, authPath: string, targetP
   }
 }
 
-async function switchCodexAuth(targetPath: string): Promise<void> {
+async function switchCodexAuth(targetPath: string): Promise<CodexAuthSwitchResult> {
   const state = await listCodexAuthState();
   const candidate = state.candidates.find(entry => entry.path === targetPath);
   if (!candidate) {
     throw new Error(`Auth candidate is no longer available: ${path.basename(targetPath)}`);
   }
   await pointCodexAuthAtTarget(state.authDir, state.authPath, candidate.path);
+  return {
+    fromLabel: state.currentLabel,
+    toLabel: await authPathDisplayLabel(candidate.path),
+  };
 }
 
 function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, includeWeixinCopyPaste = false): string {
