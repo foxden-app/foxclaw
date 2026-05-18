@@ -1133,8 +1133,47 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
-  assert.match(rig.editedMessages[0]!, /Switching Codex auth to auth\.json_b/);
-  assert.match(rig.sentMessages.at(-1)!, /Codex auth switched to auth\.json_b/);
+  assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
+  assert.match(rig.sentMessages.at(-1)!, /Codex auth switched: auth\.json_a -> auth\.json_b/);
+});
+
+test('/auth switch labels resolve symlink-backed auth files', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  const currentRealPath = path.join(authDir, 'personal-real.json');
+  const targetRealPath = path.join(authDir, 'work-real.json');
+  fs.writeFileSync(currentRealPath, '{"account":"personal"}');
+  fs.writeFileSync(targetRealPath, '{"account":"work"}');
+  fs.rmSync(path.join(authDir, 'auth.json_a'), { force: true });
+  fs.rmSync(path.join(authDir, 'auth.json_b'), { force: true });
+  fs.unlinkSync(path.join(authDir, 'auth.json'));
+  fs.symlinkSync(currentRealPath, path.join(authDir, 'auth.json_a'));
+  fs.symlinkSync(targetRealPath, path.join(authDir, 'auth.json_b'));
+  fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /Current auth: personal-real\.json/);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  const targetIndex = list.candidates.findIndex((candidate: any) => candidate.name === 'auth.json_b');
+  assert.notEqual(targetIndex, -1);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:${targetIndex}`, 1));
+
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.match(rig.editedMessages[0]!, /Switching Codex auth: personal-real\.json -> work-real\.json/);
+  assert.match(rig.sentMessages.at(-1)!, /Codex auth switched: personal-real\.json -> work-real\.json/);
 });
 
 test('/auth panel can disable and enable candidates for auto rotation', async (t) => {
@@ -1362,7 +1401,7 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
     overrides: { collaborationMode: undefined, recoverMissingThread: false },
   }]);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
-  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_b/.test(message)));
+  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth: auth\.json_a -> auth\.json_b/.test(message)));
   assert.ok(rig.sentMessages.includes('Retrying the same request with the new auth...'));
   assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
 
@@ -1428,7 +1467,7 @@ test('auth auto-rotation skips disabled candidates', async (t) => {
 
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_c'));
-  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth to auth\.json_c/.test(message)));
+  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth: auth\.json_a -> auth\.json_c/.test(message)));
 });
 
 test('auth rotation retries on the scope that owns authRetry even with another bound scope active', async (t) => {
