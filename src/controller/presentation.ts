@@ -88,6 +88,10 @@ export function formatThreadsMessage(
       formatStatusLabel(locale, currentThread.status),
     ].filter(Boolean).join(' | ')));
   }
+  headerLines.push(
+    '',
+    ...threads.map((thread, index) => formatThreadListLine(locale, thread, currentThreadId, index)),
+  );
   return headerLines.join('\n');
 }
 
@@ -101,7 +105,7 @@ export function buildThreadsKeyboard(
     const selected = currentThreadId === thread.threadId;
     const prefix = selected ? '✅ ' : '';
     const openRow = [{
-      text: `${prefix}${ordinal}. ${truncate(formatThreadDisplayName(locale, thread), 28)}`,
+      text: `${prefix}${ordinal}`,
       callback_data: `thread:open:${thread.threadId}`,
     }];
     const actionRow = thread.archived
@@ -114,6 +118,18 @@ export function buildThreadsKeyboard(
         ];
     return [openRow, actionRow];
   });
+}
+
+function formatThreadListLine(
+  locale: AppLocale,
+  thread: ThreadLike,
+  currentThreadId: string | null,
+  index: number,
+): string {
+  const ordinal = typeof thread.index === 'number' ? thread.index : index + 1;
+  const prefix = currentThreadId === thread.threadId ? '✅ ' : '';
+  const title = truncate(formatThreadDisplayName(locale, thread), 72);
+  return `${prefix}${ordinal}. ${escapeTelegramHtml(title)}`;
 }
 
 /** Threads keyboard plus Prev/Next and optional clear-filter row (Telegram only). */

@@ -2686,8 +2686,9 @@ test('/threads panel supports rename and archive callbacks', async (t) => {
   await (rig.controller as any).handleText(createEvent('/threads'));
 
   assert.equal(rig.sentHtmlMessages.length, 1);
+  assert.match(rig.sentHtmlMessages[0]!, /\n✅ 1\. panel\|Panel thread/);
   assert.deepEqual(rig.sentHtmlKeyboards[0], [
-    [{ text: '✅ 1. panel|Panel thread', callback_data: 'thread:open:thread-panel' }],
+    [{ text: '✅ 1', callback_data: 'thread:open:thread-panel' }],
     [
       { text: '✏️', callback_data: 'thread:rename:thread-panel' },
       { text: '👀', callback_data: 'thread:watch:thread-panel' },
@@ -2753,8 +2754,9 @@ test('/threads archived panel supports unarchive callback', async (t) => {
   await (rig.controller as any).handleText(createEvent('/threads archived'));
 
   assert.equal(rig.sentHtmlMessages.length, 1);
+  assert.match(rig.sentHtmlMessages[0]!, /\n1\. archive\|Archived work/);
   assert.deepEqual(rig.sentHtmlKeyboards[0], [
-    [{ text: '1. archive|Archived work', callback_data: 'thread:open:thread-archived' }],
+    [{ text: '1', callback_data: 'thread:open:thread-archived' }],
     [{ text: '♻️ Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
     [{ text: '➕ New', callback_data: 'thread:new' }],
     [{ text: '🕘 Recent', callback_data: 'thread:list:recent' }],
