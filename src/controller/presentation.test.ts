@@ -84,7 +84,7 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
 
   assert.deepEqual(buildThreadsKeyboard('en', threads), [
     [{
-      text: '1',
+      text: '1. repo|Review auth flow',
       callback_data: 'thread:open:thread-2',
     }],
     [
@@ -123,8 +123,8 @@ test('buildThreadsKeyboard marks only the current thread', () => {
   ];
 
   const rows = buildThreadsKeyboard('en', threads, 'thread-current');
-  assert.equal(rows[0]![0]!.text, '✅ 1');
-  assert.equal(rows[2]![0]!.text, '2');
+  assert.equal(rows[0]![0]!.text, '✅ 1. current|Current work');
+  assert.equal(rows[2]![0]!.text, '2. other|Other work');
 });
 
 test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
@@ -143,7 +143,7 @@ test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
   ];
   assert.deepEqual(buildThreadsKeyboard('en', [{ ...threads[0]!, index: 11 } as AppThread & { index: number }]), [
     [{
-      text: '11',
+      text: '11. tmp|Later page',
       callback_data: 'thread:open:thread-x',
     }],
     [
@@ -171,7 +171,7 @@ test('buildThreadsKeyboard shows unarchive for archived threads', () => {
 
   assert.deepEqual(buildThreadsKeyboard('en', [thread]), [
     [{
-      text: '1',
+      text: '1. tmp|Old work',
       callback_data: 'thread:open:thread-archived',
     }],
     [{ text: '♻️ Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
@@ -224,7 +224,7 @@ test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
       searchTerm: 'auth',
     }),
     [
-      [{ text: '11', callback_data: 'thread:open:thread-2' }],
+      [{ text: '11. repo|Review auth flow', callback_data: 'thread:open:thread-2' }],
       [
         { text: '✏️', callback_data: 'thread:rename:thread-2' },
         { text: '👀', callback_data: 'thread:watch:thread-2' },

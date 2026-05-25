@@ -105,7 +105,7 @@ export function buildThreadsKeyboard(
     const selected = currentThreadId === thread.threadId;
     const prefix = selected ? '✅ ' : '';
     const openRow = [{
-      text: `${prefix}${ordinal}`,
+      text: `${prefix}${ordinal}. ${truncate(formatThreadDisplayName(locale, thread), 48)}`,
       callback_data: `thread:open:${thread.threadId}`,
     }];
     const actionRow = thread.archived
