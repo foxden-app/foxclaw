@@ -1,6 +1,6 @@
 ---
 name: foxclaw
-description: Deploy, configure, and validate FoxClaw on macOS, locally or over SSH. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram bot and chat/topic values, write `.env`, enable a launchd service, and guide the user through the first Telegram message test. Trigger on requests about trusted chat interfaces controlling local Codex, copying FoxClaw to another Mac, remote FoxClaw deployment, or turning this repo into an installable Codex skill.
+description: Deploy, configure, validate, develop, and release FoxClaw. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram values, write `.env`, enable launchd/systemd, guide first-message tests, or perform FoxClaw repo wrap-up actions such as Chinese commit messages, push, npm publish, and local install/service update.
 ---
 
 # FoxClaw
@@ -159,6 +159,40 @@ Do this whenever the bridge has been started:
    - bot not admin in group
 
 Do not describe the setup as "done" until this smoke test has either passed or been blocked by missing Telegram-side access.
+
+## Development Wrap-Up
+
+Use this checklist when the user asks for standard closing actions, release wrap-up, local install updates, npm publish, or says things like "收尾动作", "中文 commit msg", "push", "npm publish", or "本地安装更新".
+
+1. Inspect scope before staging:
+   - `git status -sb`
+   - `git diff --stat`
+   - `git diff --name-status`
+2. Run the relevant verification with Node 24+. If the system `node` is older, prepend the known Node 24 bin path or use the repo's documented Node 24 shell.
+   - Code changes: `npm run typecheck`, `npm run lint`, `npm test`
+   - Package/release changes: also run `npm pack --dry-run`
+   - Skill-only changes: validate the skill folder, then run `npm pack --dry-run`
+3. Build before any local service restart:
+   - `npm run build`
+4. Commit intentionally:
+   - Stage only the changed files that belong to the task.
+   - Use a Chinese commit message when the user asked in Chinese or explicitly said "中文 commit msg".
+   - Never stage unrelated local changes.
+5. Push the current branch after a successful commit:
+   - `git push origin <branch>`
+6. Refresh the local install when requested:
+   - If the user has a pnpm global FoxClaw install, prefer `pnpm add -g <repo-path>` so the global `foxclaw` points at the local repo.
+   - Rebuild before restarting because local linked installs run `dist/main.js`.
+   - Refresh systemd with the existing service env path, for example `FOXCLAW_ENV=<existing-env> <node24> dist/main.js install-systemd`. Do not run `install-systemd` from the repo without `FOXCLAW_ENV`, because it may rewrite the service to use the repo `.env`.
+   - For macOS launchd, use the launchd install/start path from this skill and verify with `node dist/main.js status`.
+   - Verify the running service reports the expected FoxClaw version in `status`.
+   - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
+7. Publish to npm when requested:
+   - Check `npm whoami` and `npm view @foxden-app/foxclaw version`.
+   - If the target version is already published, bump with `npm version patch --no-git-tag-version` before validation and commit.
+   - Run `BROWSER=true npm publish` in a TTY.
+   - If npm returns `ENEEDAUTH`, report that npm publish is blocked by registry login and leave the package unreported as published.
+   - Never print npm tokens or `.npmrc` auth values.
 
 ## Resources
 
