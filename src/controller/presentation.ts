@@ -80,7 +80,7 @@ export function formatThreadsMessage(
     );
   }
   if (currentThread) {
-    const currentTitle = truncate(compactWhitespace(currentThread.name || currentThread.preview || t(locale, 'empty')), 40);
+    const currentTitle = truncate(formatThreadDisplayName(locale, currentThread), 40);
     headerLines.push(t(locale, 'threads_current', { title: escapeTelegramHtml(currentTitle) }));
     headerLines.push(escapeTelegramHtml([
       formatCwd(locale, currentThread.cwd),
@@ -91,11 +91,17 @@ export function formatThreadsMessage(
   return headerLines.join('\n');
 }
 
-export function buildThreadsKeyboard(locale: AppLocale, threads: ThreadLike[]): Array<Array<{ text: string; callback_data: string }>> {
+export function buildThreadsKeyboard(
+  locale: AppLocale,
+  threads: ThreadLike[],
+  currentThreadId: string | null = null,
+): Array<Array<{ text: string; callback_data: string }>> {
   return threads.flatMap((thread, index) => {
     const ordinal = typeof thread.index === 'number' ? thread.index : index + 1;
+    const selected = currentThreadId === thread.threadId;
+    const prefix = selected ? '✅ ' : '';
     const openRow = [{
-      text: `🧵 ${ordinal}. ${truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 28)}`,
+      text: `${prefix}${ordinal}. ${truncate(formatThreadDisplayName(locale, thread), 28)}`,
       callback_data: `thread:open:${thread.threadId}`,
     }];
     const actionRow = thread.archived
@@ -115,8 +121,9 @@ export function buildThreadListKeyboard(
   locale: AppLocale,
   threads: ThreadLike[],
   listState: ThreadListPresentationState,
+  currentThreadId: string | null = null,
 ): Array<Array<{ text: string; callback_data: string }>> {
-  const rows = buildThreadsKeyboard(locale, threads);
+  const rows = buildThreadsKeyboard(locale, threads, currentThreadId);
   rows.push([{ text: t(locale, 'button_new_thread'), callback_data: 'thread:new' }]);
   const navigationRow: InlineButton[] = [];
   if (listState.hasPreviousPage) {
@@ -204,6 +211,7 @@ export interface WeixinCopyPasteThreadRow {
   threadId: string;
   name: string | null;
   preview: string;
+  cwd?: string | null;
   archived?: boolean;
 }
 
@@ -227,7 +235,7 @@ export function formatWeixinThreadsCopyPaste(
     for (let i = 0; i < threads.length; i += 1) {
       const index = pageOffset + i + 1;
       const thread = threads[i]!;
-      const title = truncate(compactWhitespace(thread.name || thread.preview || t(locale, 'empty')), 40);
+      const title = truncate(formatThreadDisplayName(locale, thread), 40);
       lines.push(`${index}. ${title}`);
       if (thread.archived) {
         lines.push(`/thread_unarchive ${index}`);
@@ -680,6 +688,15 @@ function formatCwd(locale: AppLocale, cwd: string | null): string {
   if (!cwd) return t(locale, 'no_cwd');
   const base = path.basename(cwd);
   return base || cwd;
+}
+
+function formatThreadDisplayName(
+  locale: AppLocale,
+  thread: { name: string | null; preview: string; cwd?: string | null },
+): string {
+  const folder = compactWhitespace(formatCwd(locale, thread.cwd ?? null));
+  const title = compactWhitespace(thread.name || thread.preview || t(locale, 'empty'));
+  return `${folder}|${title}`;
 }
 
 function compactWhitespace(value: string): string {

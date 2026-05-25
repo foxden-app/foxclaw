@@ -42,7 +42,7 @@ test('formatThreadsMessage highlights current thread and metadata', () => {
   const rendered = formatThreadsMessage('en', threads, 'thread-1');
   assert.match(rendered, /<b>Recent threads<\/b>/);
   assert.match(rendered, /Tap a button below to open or manage a thread/);
-  assert.match(rendered, /Current: <b>Fix Telegram bridge<\/b>/);
+  assert.match(rendered, /Current: <b>project\|Fix Telegram bridge<\/b>/);
   assert.match(rendered, /project \| 2m ago/);
 });
 
@@ -83,7 +83,7 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
 
   assert.deepEqual(buildThreadsKeyboard('en', threads), [
     [{
-      text: '🧵 1. Review auth flow',
+      text: '1. repo|Review auth flow',
       callback_data: 'thread:open:thread-2',
     }],
     [
@@ -93,6 +93,37 @@ test('buildThreadsKeyboard creates one open button per thread', () => {
       { text: '➕', callback_data: 'thread:new:thread-2' },
     ],
   ]);
+});
+
+test('buildThreadsKeyboard marks only the current thread', () => {
+  const threads: AppThread[] = [
+    {
+      threadId: 'thread-current',
+      name: 'Current work',
+      preview: 'Current work',
+      cwd: '/tmp/current',
+      modelProvider: 'openai',
+      source: 'cli',
+      path: '/tmp/current/thread-current.jsonl',
+      status: 'idle',
+      updatedAt: 1,
+    },
+    {
+      threadId: 'thread-other',
+      name: 'Other work',
+      preview: 'Other work',
+      cwd: '/tmp/other',
+      modelProvider: 'openai',
+      source: 'cli',
+      path: '/tmp/other/thread-other.jsonl',
+      status: 'idle',
+      updatedAt: 1,
+    },
+  ];
+
+  const rows = buildThreadsKeyboard('en', threads, 'thread-current');
+  assert.equal(rows[0]![0]!.text, '✅ 1. current|Current work');
+  assert.equal(rows[2]![0]!.text, '2. other|Other work');
 });
 
 test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
@@ -111,7 +142,7 @@ test('buildThreadsKeyboard uses ThreadLike.index for ordinals', () => {
   ];
   assert.deepEqual(buildThreadsKeyboard('en', [{ ...threads[0]!, index: 11 } as AppThread & { index: number }]), [
     [{
-      text: '🧵 11. Later page',
+      text: '11. tmp|Later page',
       callback_data: 'thread:open:thread-x',
     }],
     [
@@ -139,7 +170,7 @@ test('buildThreadsKeyboard shows unarchive for archived threads', () => {
 
   assert.deepEqual(buildThreadsKeyboard('en', [thread]), [
     [{
-      text: '🧵 1. Old work',
+      text: '1. tmp|Old work',
       callback_data: 'thread:open:thread-archived',
     }],
     [{ text: '♻️ Unarchive', callback_data: 'thread:unarchive:thread-archived' }],
@@ -192,7 +223,7 @@ test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {
       searchTerm: 'auth',
     }),
     [
-      [{ text: '🧵 11. Review auth flow', callback_data: 'thread:open:thread-2' }],
+      [{ text: '11. repo|Review auth flow', callback_data: 'thread:open:thread-2' }],
       [
         { text: '✏️', callback_data: 'thread:rename:thread-2' },
         { text: '👀', callback_data: 'thread:watch:thread-2' },
@@ -466,7 +497,7 @@ test('presentation renders chinese locale strings', () => {
   const renderedThreads = formatThreadsMessage('zh', threads, 'thread-zh');
   assert.match(renderedThreads, /<b>最近线程<\/b>/);
   assert.match(renderedThreads, /点击下方按钮即可切换或管理线程/);
-  assert.match(renderedThreads, /当前：<b>修复桥接<\/b>/);
+  assert.match(renderedThreads, /当前：<b>project\|修复桥接<\/b>/);
 
   const models: ModelInfo[] = [
     {
@@ -513,7 +544,7 @@ test('formatWeixinThreadsCopyPaste lists /open lines and filter hint', () => {
     'bug',
   );
   assert.match(withFilter, /Current filter: bug/);
-  assert.match(withFilter, /1\. One/);
+  assert.match(withFilter, /1\. \(no cwd\)\|One/);
   assert.match(withFilter, /\/open 1/);
   assert.match(withFilter, /\/watch 1/);
   assert.match(withFilter, /\/thread_rename 1 <name>/);
@@ -536,7 +567,7 @@ test('formatWeixinThreadsCopyPaste uses unarchive commands for archived rows', (
     { threadId: 'old', name: '旧工作', preview: 'old', archived: true },
   ]);
   assert.match(out, /可复制命令（微信）：/);
-  assert.match(out, /1\. 旧工作/);
+  assert.match(out, /1\. （无工作目录）\|旧工作/);
   assert.match(out, /\/thread_unarchive 1/);
   assert.doesNotMatch(out, /\/thread_archive 1/);
 });

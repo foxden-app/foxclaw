@@ -5547,8 +5547,8 @@ export class BridgeSessionCore {
     };
       const text = formatThreadsMessage(locale, threadLikes, binding.threadId, listState.searchTerm, listState);
       const keyboard = parseWeixinBridgeScope(scopeId)
-        ? buildThreadsKeyboard(locale, threadLikes)
-        : buildThreadListKeyboard(locale, threadLikes, listState);
+        ? buildThreadsKeyboard(locale, threadLikes, binding.threadId)
+        : buildThreadListKeyboard(locale, threadLikes, listState, binding.threadId);
       await this.editHtmlMessage(scopeId, event.messageId, text, keyboard);
     }
 
@@ -6082,13 +6082,14 @@ export class BridgeSessionCore {
         threadId: row.threadId,
         name: row.name,
         preview: row.preview,
+        cwd: row.cwd,
         archived: row.archived,
       }));
       text += `\n\n${formatWeixinThreadsCopyPaste(locale, rows, searchTerm ?? null, offset)}`;
     }
     const keyboard = parseWeixinBridgeScope(scopeId)
-      ? buildThreadsKeyboard(locale, forDisplay)
-      : buildThreadListKeyboard(locale, forDisplay, presentationState);
+      ? buildThreadsKeyboard(locale, forDisplay, binding?.threadId ?? null)
+      : buildThreadListKeyboard(locale, forDisplay, presentationState, binding?.threadId ?? null);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
