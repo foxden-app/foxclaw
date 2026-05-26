@@ -9,7 +9,13 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout public repository without workflow token
+        shell: bash
+        run: |
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c protocol.version=2 fetch --no-tags --depth=1 origin "+${GITHUB_REF}:refs/remotes/origin/checkout"
+          git checkout --detach refs/remotes/origin/checkout
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
