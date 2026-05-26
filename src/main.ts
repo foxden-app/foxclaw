@@ -16,6 +16,7 @@ import {
 } from './config.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
+import { refreshFoxclawExecStartDropIns } from './systemd.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -628,6 +629,7 @@ function installSystemd(): void {
   fs.mkdirSync(userSystemdDir, { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
+  const escapedEntryPoint = systemdEscape(entryPoint);
   fs.writeFileSync(
     unitPath,
     `[Unit]
@@ -646,7 +648,7 @@ Environment=USER=${systemdEscape(process.env.USER || '')}
 Environment=LOGNAME=${systemdEscape(process.env.LOGNAME || process.env.USER || '')}
 Environment=PATH=${systemdEscape(pathValue)}
 Environment=FOXCLAW_ENV=${systemdEscape(envPath)}
-ExecStart=${systemdEscape(nodeBin)} ${systemdEscape(entryPoint)} serve
+ExecStart=${systemdEscape(nodeBin)} ${escapedEntryPoint} serve
 Restart=always
 RestartSec=10
 TimeoutStopSec=45
@@ -656,6 +658,10 @@ KillMode=process
 WantedBy=default.target
 `,
   );
+  const dropInUpdates = refreshFoxclawExecStartDropIns(userSystemdDir, unitName, escapedEntryPoint);
+  for (const update of dropInUpdates) {
+    console.log(`[OK] updated FoxClaw ExecStart override: ${update.path}`);
+  }
   spawnChecked('systemctl', ['--user', 'daemon-reload']);
   spawnChecked('systemctl', ['--user', 'enable', unitName]);
   const restarted = spawnSync('systemctl', ['--user', 'restart', unitName], { stdio: 'inherit' });
