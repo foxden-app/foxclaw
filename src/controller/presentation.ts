@@ -5,6 +5,8 @@ import type {
   ActiveTurnMessageMode,
   AppLocale,
   AppThread,
+  AppTurnItemSnapshot,
+  AppTurnSnapshot,
   ApprovalPolicyValue,
   ChatSessionSettings,
   CollaborationModeValue,
@@ -338,6 +340,21 @@ export function formatWeixinWhereNavCopyPaste(locale: AppLocale, hasBinding: boo
   return lines.join('\n');
 }
 
+export function formatThreadContextSummary(locale: AppLocale, turns: AppTurnSnapshot[]): string | null {
+  const context = selectRecentThreadContext(turns);
+  if (!context) {
+    return null;
+  }
+  return [
+    t(locale, 'thread_context_title'),
+    t(locale, 'thread_context_user'),
+    context.userText || t(locale, 'empty'),
+    '',
+    t(locale, 'thread_context_codex'),
+    context.codexText || t(locale, 'empty'),
+  ].join('\n');
+}
+
 export function formatSetupPanelMessage(locale: AppLocale, ctx: SetupPanelContext): string {
   const currentModel = resolveCurrentModel(ctx.models, ctx.settings?.model ?? null);
   const fastTier = resolveFastTierForModel(currentModel);
@@ -533,6 +550,61 @@ function formatFastSetupLabel(
 
 function resolveCollaborationMode(mode: CollaborationModeValue | null | undefined): CollaborationModeValue {
   return mode === 'plan' ? 'plan' : 'default';
+}
+
+function selectRecentThreadContext(turns: AppTurnSnapshot[]): { userText: string | null; codexText: string | null } | null {
+  for (const turn of turns) {
+    const userText = lastItemText(turn.items, isUserTurnItem);
+    const codexText = lastItemText(turn.items, isCodexTurnItem);
+    if (userText || codexText) {
+      return { userText, codexText };
+    }
+  }
+  return null;
+}
+
+function lastItemText(
+  items: AppTurnItemSnapshot[],
+  predicate: (item: AppTurnItemSnapshot) => boolean,
+): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (!predicate(item)) {
+      continue;
+    }
+    const text = normalizeThreadContextText(item.text ?? item.aggregatedOutput ?? item.command ?? '');
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function isUserTurnItem(item: AppTurnItemSnapshot): boolean {
+  const type = normalizeTurnItemType(item.type);
+  return type === 'user'
+    || type === 'usermessage'
+    || type === 'humanmessage'
+    || type === 'userinput'
+    || type === 'userrequest';
+}
+
+function isCodexTurnItem(item: AppTurnItemSnapshot): boolean {
+  const type = normalizeTurnItemType(item.type);
+  return type === 'agent'
+    || type === 'assistant'
+    || type === 'agentmessage'
+    || type === 'assistantmessage'
+    || type === 'plan';
+}
+
+function normalizeTurnItemType(value: string): string {
+  return value.replace(/[^a-z]/gi, '').toLowerCase();
+}
+
+function normalizeThreadContextText(value: string): string {
+  const trimmed = value.replace(/\r\n/g, '\n').trim().replace(/\n{3,}/g, '\n\n');
+  return truncate(trimmed, 1200);
 }
 
 function selectedButtonText(selected: boolean, label: string): string {

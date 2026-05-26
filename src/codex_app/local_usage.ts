@@ -18,7 +18,16 @@ export interface CodexLocalUsageStats {
   turns: number;
   usageEvents: number;
   totals: CodexLocalUsageTotals;
+  outputSpeed: CodexLocalOutputSpeedStats;
   latestSessionMtimeMs: number | null;
+}
+
+export interface CodexLocalOutputSpeedStats {
+  samples: number;
+  outputTokens: number;
+  seconds: number;
+  latestTokensPerSecond: number | null;
+  latestSampleAtMs: number | null;
 }
 
 interface RawTokenUsage {
@@ -44,6 +53,7 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
   let sessionsWithUsage = 0;
   let usageEvents = 0;
   let latestSessionMtimeMs: number | null = null;
+  const outputSpeed = emptyOutputSpeedStats();
 
   for (const filePath of sessionFiles) {
     const stat = await fs.stat(filePath).catch(() => null);
@@ -52,6 +62,7 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
     }
     const fileUsage = await readSessionUsage(filePath, turnIds);
     usageEvents += fileUsage.usageEvents;
+    addOutputSpeed(outputSpeed, fileUsage.outputSpeed);
     if (fileUsage.totalUsage) {
       sessionsWithUsage += 1;
       addUsage(totals, fileUsage.totalUsage);
@@ -64,6 +75,7 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
     turns: turnIds.size,
     usageEvents,
     totals,
+    outputSpeed,
     latestSessionMtimeMs,
   };
 }
@@ -96,11 +108,16 @@ async function collectJsonlFiles(targetPath: string, results: string[]): Promise
   }
 }
 
-async function readSessionUsage(filePath: string, turnIds: Set<string>): Promise<{ usageEvents: number; totalUsage: RawTokenUsage | null }> {
+async function readSessionUsage(
+  filePath: string,
+  turnIds: Set<string>,
+): Promise<{ usageEvents: number; totalUsage: RawTokenUsage | null; outputSpeed: CodexLocalOutputSpeedStats }> {
   const stream = createReadStream(filePath, { encoding: 'utf8' });
   const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let totalUsage: RawTokenUsage | null = null;
   let usageEvents = 0;
+  let generationStartMs: number | null = null;
+  const outputSpeed = emptyOutputSpeedStats();
 
   try {
     for await (const line of reader) {
@@ -111,13 +128,22 @@ async function readSessionUsage(filePath: string, turnIds: Set<string>): Promise
       } catch {
         continue;
       }
+      const timestampMs = parseTimestampMs(event?.timestamp);
       const turnId = typeof event?.payload?.turn_id === 'string' ? event.payload.turn_id : null;
       if (turnId) {
         turnIds.add(turnId);
       }
+      if (timestampMs !== null && isGenerationBoundary(event)) {
+        generationStartMs = timestampMs;
+      }
       const info = event?.payload?.info;
-      if (info?.last_token_usage || info?.lastTokenUsage) {
+      const lastTokenUsage = info?.last_token_usage ?? info?.lastTokenUsage;
+      if (lastTokenUsage) {
         usageEvents += 1;
+        addOutputSpeedSample(outputSpeed, lastTokenUsage, generationStartMs, timestampMs);
+        if (timestampMs !== null) {
+          generationStartMs = timestampMs;
+        }
       }
       const totalTokenUsage = info?.total_token_usage ?? info?.totalTokenUsage;
       if (totalTokenUsage) {
@@ -128,7 +154,7 @@ async function readSessionUsage(filePath: string, turnIds: Set<string>): Promise
     reader.close();
   }
 
-  return { usageEvents, totalUsage };
+  return { usageEvents, totalUsage, outputSpeed };
 }
 
 function emptyTotals(): CodexLocalUsageTotals {
@@ -138,6 +164,16 @@ function emptyTotals(): CodexLocalUsageTotals {
     outputTokens: 0,
     reasoningOutputTokens: 0,
     totalTokens: 0,
+  };
+}
+
+function emptyOutputSpeedStats(): CodexLocalOutputSpeedStats {
+  return {
+    samples: 0,
+    outputTokens: 0,
+    seconds: 0,
+    latestTokensPerSecond: null,
+    latestSampleAtMs: null,
   };
 }
 
@@ -152,9 +188,68 @@ function addUsage(totals: CodexLocalUsageTotals, usage: RawTokenUsage): void {
   totals.totalTokens += totalTokens || inputTokens + outputTokens;
 }
 
+function addOutputSpeed(target: CodexLocalOutputSpeedStats, source: CodexLocalOutputSpeedStats): void {
+  target.samples += source.samples;
+  target.outputTokens += source.outputTokens;
+  target.seconds += source.seconds;
+  if (
+    source.latestTokensPerSecond !== null
+    && source.latestSampleAtMs !== null
+    && (target.latestSampleAtMs === null || source.latestSampleAtMs > target.latestSampleAtMs)
+  ) {
+    target.latestTokensPerSecond = source.latestTokensPerSecond;
+    target.latestSampleAtMs = source.latestSampleAtMs;
+  }
+}
+
+function addOutputSpeedSample(
+  stats: CodexLocalOutputSpeedStats,
+  usage: RawTokenUsage,
+  generationStartMs: number | null,
+  timestampMs: number | null,
+): void {
+  if (generationStartMs === null || timestampMs === null || timestampMs <= generationStartMs) {
+    return;
+  }
+  const outputTokens = numberField(usage, 'output_tokens', 'outputTokens');
+  if (outputTokens <= 0) {
+    return;
+  }
+  const seconds = (timestampMs - generationStartMs) / 1000;
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return;
+  }
+  stats.samples += 1;
+  stats.outputTokens += outputTokens;
+  stats.seconds += seconds;
+  stats.latestTokensPerSecond = outputTokens / seconds;
+  stats.latestSampleAtMs = timestampMs;
+}
+
 function numberField(source: RawTokenUsage, snakeKey: keyof RawTokenUsage, camelKey: keyof RawTokenUsage): number {
   const snakeValue = source[snakeKey];
   const value = snakeValue === undefined || snakeValue === null ? source[camelKey] : snakeValue;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function isGenerationBoundary(event: any): boolean {
+  const payload = event?.payload;
+  if (event?.type === 'response_item' && payload?.type === 'function_call_output') {
+    return true;
+  }
+  if (event?.type !== 'event_msg') {
+    return false;
+  }
+  return payload?.type === 'task_started'
+    || payload?.type === 'exec_command_end'
+    || payload?.type === 'user_message';
 }

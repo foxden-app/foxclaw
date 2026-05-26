@@ -13,6 +13,7 @@ import {
   formatModelSettingsMessage,
   formatSandboxModeLabel,
   formatSetupPanelMessage,
+  formatThreadContextSummary,
   formatThreadsMessage,
   formatWeixinAccessCopyPaste,
   formatWeixinModelCopyPaste,
@@ -200,6 +201,38 @@ test('formatThreadsMessage shows range when listState is set', () => {
     searchTerm: null,
   });
   assert.match(rendered, /Showing 11-11/);
+});
+
+test('formatThreadContextSummary renders latest user and Codex messages', () => {
+  const rendered = formatThreadContextSummary('en', [
+    {
+      turnId: 'turn-2',
+      status: 'completed',
+      error: null,
+      items: [
+        { itemId: 'u2', type: 'userMessage', phase: null, text: 'Continue from the deploy step', command: null, status: null, aggregatedOutput: null },
+        { itemId: 'a2', type: 'agentMessage', phase: 'final_answer', text: 'Deployment is complete.', command: null, status: null, aggregatedOutput: null },
+      ],
+    },
+    {
+      turnId: 'turn-1',
+      status: 'completed',
+      error: null,
+      items: [
+        { itemId: 'u1', type: 'userMessage', phase: null, text: 'Older prompt', command: null, status: null, aggregatedOutput: null },
+        { itemId: 'a1', type: 'agentMessage', phase: 'final_answer', text: 'Older answer', command: null, status: null, aggregatedOutput: null },
+      ],
+    },
+  ]);
+
+  assert.equal(rendered, [
+    'Recent context:',
+    'User:',
+    'Continue from the deploy step',
+    '',
+    'Codex:',
+    'Deployment is complete.',
+  ].join('\n'));
 });
 
 test('buildThreadListKeyboard adds Prev/Next and clear filter', () => {

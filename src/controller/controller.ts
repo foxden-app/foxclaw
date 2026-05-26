@@ -57,6 +57,7 @@ import {
   formatSandboxModeLabel,
   formatServiceTierStatusLabel,
   formatSetupPanelMessage,
+  formatThreadContextSummary,
   formatThreadsMessage,
   formatWeixinAccessCopyPaste,
   formatWeixinModelCopyPaste,
@@ -859,6 +860,7 @@ export class BridgeSessionCore {
           lines.push(revealError ? t(locale, 'codex_sync_failed', { error: revealError }) : t(locale, 'opened_in_codex'));
         }
         await this.sendMessage(scopeId, lines.join('\n'));
+        await this.sendThreadContextSummary(scopeId, locale, binding.threadId);
         return;
       }
       case 'watch': {
@@ -1198,13 +1200,16 @@ export class BridgeSessionCore {
     const mode = watch.mode;
     if (mode === 'already') {
       await this.sendMessage(scopeId, t(locale, 'watch_already_enabled', { threadId: watchedThreadId }));
+      await this.sendThreadContextSummary(scopeId, locale, watchedThreadId);
       return;
     }
     if (mode === 'active') {
       await this.sendMessage(scopeId, t(locale, 'watch_started_active', { threadId: watchedThreadId }));
+      await this.sendThreadContextSummary(scopeId, locale, watchedThreadId);
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'watch_started_idle', { threadId: watchedThreadId }));
+    await this.sendThreadContextSummary(scopeId, locale, watchedThreadId);
   }
 
   private async handleThreadArchiveIndexCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -5358,11 +5363,25 @@ export class BridgeSessionCore {
           cached: formatTokenCount(stats.totals.cachedInputTokens),
           reasoning: formatTokenCount(stats.totals.reasoningOutputTokens),
         }),
+        ...this.formatCodexLocalOutputSpeedStatusLines(locale, stats),
       ];
     } catch (error) {
       this.logger.warn('codex.local_usage_failed', { error: formatUserError(error) });
       return [t(locale, 'status_codex_local_usage_unavailable', { error: formatShortStatusError(error) })];
     }
+  }
+
+  private formatCodexLocalOutputSpeedStatusLines(locale: AppLocale, stats: CodexLocalUsageStats): string[] {
+    const speed = stats.outputSpeed;
+    if (speed.samples === 0 || speed.outputTokens <= 0 || speed.seconds <= 0) {
+      return [];
+    }
+    const avg = speed.outputTokens / speed.seconds;
+    return [t(locale, 'status_codex_local_speed', {
+      avg: formatCompactNumber(avg),
+      latest: speed.latestTokensPerSecond === null ? t(locale, 'unknown') : formatCompactNumber(speed.latestTokensPerSecond),
+      samples: formatTokenCount(speed.samples),
+    })];
   }
 
   private async resolveFastStatusLabel(locale: AppLocale, settings: ChatSessionSettings | null): Promise<string> {
@@ -5384,6 +5403,22 @@ export class BridgeSessionCore {
     const stats = await readCodexLocalUsageStats();
     this.localUsageCache = { stats, expiresAt: now + CODEX_LOCAL_USAGE_CACHE_MS };
     return stats;
+  }
+
+  private async sendThreadContextSummary(scopeId: string, locale: AppLocale, threadId: string): Promise<void> {
+    try {
+      const turns = await this.app.listThreadTurns(threadId, 5);
+      const text = formatThreadContextSummary(locale, turns);
+      if (text) {
+        await this.sendMessage(scopeId, text);
+      }
+    } catch (error) {
+      this.logger.warn('codex.thread_context_summary_failed', {
+        scopeId,
+        threadId,
+        error: formatUserError(error),
+      });
+    }
   }
 
   private async handleModelCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
@@ -5558,6 +5593,7 @@ export class BridgeSessionCore {
       callbackText = revealError ? t(locale, 'opened_sync_failed_short') : t(locale, 'opened_in_codex_short');
     }
     await this.messaging.answerCallback(event.callbackQueryId, callbackText);
+    await this.sendThreadContextSummary(scopeId, locale, binding.threadId);
   }
 
   private async handleThreadActionCallback(
@@ -5611,6 +5647,7 @@ export class BridgeSessionCore {
       const watch = await this.watchThread(scopeId, target.chatId, target.chatType, target.topicId, binding);
       await this.showThreadsPanelFromStoredState(scopeId, event.messageId, locale, false);
       await this.messaging.answerCallback(event.callbackQueryId, formatWatchCallbackText(locale, watch.mode, watch.threadId));
+      await this.sendThreadContextSummary(scopeId, locale, watch.threadId);
       return;
     }
 

@@ -983,7 +983,15 @@ test('/status includes local Codex token history from session logs', async (t) =
   fs.mkdirSync(sessionDir, { recursive: true });
   fs.writeFileSync(path.join(sessionDir, 'rollout-a.jsonl'), [
     JSON.stringify({
+      timestamp: '2026-05-26T00:00:00.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_started', turn_id: 'turn-a' },
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-26T00:00:02.000Z',
+      type: 'event_msg',
       payload: {
+        type: 'token_count',
         turn_id: 'turn-a',
         info: {
           last_token_usage: {
@@ -1004,7 +1012,10 @@ test('/status includes local Codex token history from session logs', async (t) =
       },
     }),
     JSON.stringify({
+      timestamp: '2026-05-26T00:00:05.000Z',
+      type: 'event_msg',
       payload: {
+        type: 'token_count',
         turn_id: 'turn-a',
         info: {
           last_token_usage: {
@@ -1025,27 +1036,37 @@ test('/status includes local Codex token history from session logs', async (t) =
       },
     }),
   ].join('\n'));
-  fs.writeFileSync(path.join(sessionDir, 'rollout-b.jsonl'), `${JSON.stringify({
-    payload: {
-      turn_id: 'turn-b',
-      info: {
-        last_token_usage: {
-          input_tokens: 100,
-          cached_input_tokens: 20,
-          output_tokens: 10,
-          reasoning_output_tokens: 4,
-          total_tokens: 110,
-        },
-        total_token_usage: {
-          input_tokens: 100,
-          cached_input_tokens: 20,
-          output_tokens: 10,
-          reasoning_output_tokens: 4,
-          total_tokens: 110,
+  fs.writeFileSync(path.join(sessionDir, 'rollout-b.jsonl'), [
+    JSON.stringify({
+      timestamp: '2026-05-26T00:01:00.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_started', turn_id: 'turn-b' },
+    }),
+    JSON.stringify({
+      timestamp: '2026-05-26T00:01:05.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        turn_id: 'turn-b',
+        info: {
+          last_token_usage: {
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            output_tokens: 10,
+            reasoning_output_tokens: 4,
+            total_tokens: 110,
+          },
+          total_token_usage: {
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            output_tokens: 10,
+            reasoning_output_tokens: 4,
+            total_tokens: 110,
+          },
         },
       },
-    },
-  })}\n`);
+    }),
+  ].join('\n'));
 
   await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
 
@@ -1053,6 +1074,10 @@ test('/status includes local Codex token history from session logs', async (t) =
   assert.match(
     rig.sentMessages[0]!,
     /Codex local tokens: total 147; input 130, output 17, cached input 24, reasoning output 7/,
+  );
+  assert.match(
+    rig.sentMessages[0]!,
+    /Codex local output speed: avg 1\.7 token\/s, latest 2 token\/s \(3 samples\)/,
   );
 });
 
@@ -2800,6 +2825,17 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
     cwd: rig.tempDir,
   });
   (rig.controller as any).app.readThread = async () => thread;
+  (rig.controller as any).app.listThreadTurns = async () => [
+    {
+      turnId: 'turn-latest',
+      status: 'completed',
+      error: null,
+      items: [
+        { itemId: 'user-latest', type: 'userMessage', phase: null, text: 'resume this thread', command: null, status: null, aggregatedOutput: null },
+        { itemId: 'codex-latest', type: 'agentMessage', phase: 'final_answer', text: 'ready to continue', command: null, status: null, aggregatedOutput: null },
+      ],
+    },
+  ];
 
   await (rig.controller as any).handleText(createEvent('/threads'));
   await (rig.controller as any).handleCallback(createCallback('thread:new:thread-panel', 1001));
@@ -2829,6 +2865,7 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
   assert.equal(watcher?.mode, 'session_file');
   assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-panel');
   assert.match(rig.callbackAnswers.at(-1)!, /Watching thread thread-panel/);
+  assert.match(rig.sentMessages.at(-1)!, /Recent context:\nUser:\nresume this thread\n\nCodex:\nready to continue/);
 });
 
 test('/new asks before creating a missing PWD and starts there after confirmation', async (t) => {
