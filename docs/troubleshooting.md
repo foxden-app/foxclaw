@@ -203,11 +203,27 @@ ALL_PROXY=socks5://127.0.0.1:20170
 NO_PROXY=127.0.0.1,localhost
 ```
 
+When `HTTP_PROXY` or `HTTPS_PROXY` is configured, FoxClaw passes those variables to systemd/launchd explicitly and starts Node with `--use-env-proxy`. Do not rely on proxy variables from the current shell; service processes do not inherit them automatically.
+
 Restart FoxClaw after editing. The restart also restarts the managed Codex app-server so the new proxy environment takes effect:
 
 ```bash
 foxclaw restart
 ```
+
+If a Linux host must use `proxychains4` to reach Telegram or ChatGPT, do not hand-write a systemd drop-in that overrides `ExecStart`. Add this to the FoxClaw env file instead:
+
+```dotenv
+FOXCLAW_PROXYCHAINS_CONF=/home/wuya/.proxychains-rt.conf
+```
+
+Then run:
+
+```bash
+foxclaw restart
+```
+
+FoxClaw writes proxychains into the main service and removes stale FoxClaw `ExecStart` overrides, so later upgrades still only need the normal `pnpm install -g` and `foxclaw restart`.
 
 ## Service Starts With The Wrong Node Version
 

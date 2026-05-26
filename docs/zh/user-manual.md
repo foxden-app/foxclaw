@@ -100,7 +100,7 @@ foxclaw init
 
 ### 1.6 填写配置
 
-`foxclaw init` 会创建默认配置文件 `~/.foxclaw/.env`，并提示填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。如果当前 shell 里有 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理变量，它也会询问是否写入 FoxClaw 配置，让服务里的 Codex app-server 使用同样的网络。任何一项都可以直接回车跳过，之后再手动编辑：
+`foxclaw init` 会创建默认配置文件 `~/.foxclaw/.env`，并提示填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。如果当前 shell 里有 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等代理变量，它也会询问是否写入 FoxClaw 配置。配置了 `HTTP_PROXY` 或 `HTTPS_PROXY` 后，FoxClaw 会在安装服务时显式传给 systemd/launchd，并启用 Node 的 env proxy。任何一项都可以直接回车跳过，之后再手动编辑：
 
 ```bash
 $EDITOR ~/.foxclaw/.env

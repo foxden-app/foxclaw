@@ -204,11 +204,27 @@ ALL_PROXY=socks5://127.0.0.1:20170
 NO_PROXY=127.0.0.1,localhost
 ```
 
+只要配置了 `HTTP_PROXY` 或 `HTTPS_PROXY`，FoxClaw 安装 systemd/launchd 时会把这些变量显式传给服务，并给 Node 加上 `--use-env-proxy`。不要依赖“当前 shell 里有代理变量”，服务进程不会自动继承它们。
+
 改完后重启 FoxClaw。重启会同时重启托管的 Codex app-server，让新代理生效：
 
 ```bash
 foxclaw restart
 ```
+
+如果这台 Linux 机器必须用 `proxychains4` 才能访问 Telegram 或 ChatGPT，不要手写 systemd drop-in 覆盖 `ExecStart`。在 FoxClaw env 文件里写：
+
+```dotenv
+FOXCLAW_PROXYCHAINS_CONF=/home/wuya/.proxychains-rt.conf
+```
+
+然后运行：
+
+```bash
+foxclaw restart
+```
+
+FoxClaw 会把 proxychains 写进主 service，并清理旧的 FoxClaw `ExecStart` 覆盖，后续升级仍然只需要正常 `pnpm install -g` 和 `foxclaw restart`。
 
 ## 服务用了错误的 Node 版本
 

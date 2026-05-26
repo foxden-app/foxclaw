@@ -184,6 +184,7 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - If the user has a pnpm global FoxClaw install, prefer `pnpm add -g <repo-path>` so the global `foxclaw` points at the local repo.
    - Rebuild before restarting because local linked installs run `dist/main.js`.
    - Refresh systemd with the existing service env path, for example `FOXCLAW_ENV=<existing-env> <node24> dist/main.js install-systemd`. Do not run `install-systemd` from the repo without `FOXCLAW_ENV`, because it may rewrite the service to use the repo `.env`.
+   - Do not create systemd drop-ins that override FoxClaw `ExecStart`. For Linux hosts that require proxychains, set `FOXCLAW_PROXYCHAINS_CONF=/absolute/path/to/proxychains.conf` in the FoxClaw env file and rerun `foxclaw restart`.
    - For macOS launchd, use the launchd install/start path from this skill and verify with `node dist/main.js status`.
    - Verify the running service reports the expected FoxClaw version in `status`.
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.

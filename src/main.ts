@@ -16,7 +16,7 @@ import {
 } from './config.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
-import { refreshFoxclawExecStartDropIns } from './systemd.js';
+import { refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -33,6 +33,7 @@ const PROXY_ENV_KEYS = [
   'all_proxy',
   'no_proxy',
 ] as const;
+const STANDARD_NODE_PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const;
 
 async function main(): Promise<void> {
   if (isVersionCommand(command)) {
@@ -566,8 +567,36 @@ function runDoctorChecks(): boolean {
     passed = false;
   }
   warnIfProxyEnvMissingFromLoadedEnv();
+  warnIfProxyConfigNeedsAttention();
   warnIfInstalledServiceNodeLooksWrong();
   return passed;
+}
+
+function warnIfProxyConfigNeedsAttention(): void {
+  const proxychainsConf = process.env.FOXCLAW_PROXYCHAINS_CONF?.trim() || '';
+  if (proxychainsConf) {
+    if (process.platform !== 'linux') {
+      console.log('[WARN] FOXCLAW_PROXYCHAINS_CONF is only used by systemd on Linux.');
+    } else if (!fs.existsSync(proxychainsConf)) {
+      console.log(`[WARN] FOXCLAW_PROXYCHAINS_CONF does not exist: ${proxychainsConf}`);
+    } else if (!hasCommand('proxychains4')) {
+      console.log('[WARN] proxychains4 is not available, but FOXCLAW_PROXYCHAINS_CONF is set.');
+    } else {
+      console.log(`[OK] proxychains config exists: ${proxychainsConf}`);
+    }
+    return;
+  }
+
+  const proxyKeys = PROXY_ENV_KEYS.filter((key) => proxyEnvValue(key));
+  if (proxyKeys.length === 0) {
+    return;
+  }
+  if (hasStandardNodeProxyEnv()) {
+    console.log(`[OK] service proxy env configured: ${proxyKeys.join(', ')}`);
+    return;
+  }
+  console.log('[WARN] Only ALL_PROXY/all_proxy is configured. Node service proxying works best with HTTP_PROXY/HTTPS_PROXY.');
+  console.log('[WARN] For SOCKS-only hosts, set FOXCLAW_PROXYCHAINS_CONF=/absolute/path/to/proxychains.conf and run foxclaw restart.');
 }
 
 function warnIfProxyEnvMissingFromLoadedEnv(): void {
@@ -593,7 +622,7 @@ function warnIfInstalledServiceNodeLooksWrong(): void {
     return;
   }
   const execStart = text.match(/^ExecStart=(.+)$/m)?.[1]?.trim();
-  const nodePath = execStart ? systemdUnescape(execStart.split(/\s+/)[0] ?? '') : '';
+  const nodePath = execStart ? extractNodePathFromExecStart(execStart) : '';
   if (!nodePath) {
     return;
   }
@@ -613,6 +642,15 @@ function warnIfInstalledServiceNodeLooksWrong(): void {
   console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the service unit.');
 }
 
+function extractNodePathFromExecStart(execStart: string): string {
+  const tokens = execStart.split(/\s+/).map(systemdUnescape).filter(Boolean);
+  const directNode = tokens[0] || '';
+  if (path.basename(directNode) === 'node') {
+    return directNode;
+  }
+  return tokens.find((token) => path.basename(token) === 'node') || directNode;
+}
+
 function installSystemd(): void {
   if (!hasCommand('systemctl')) {
     console.error('systemctl not found (need systemd)');
@@ -626,6 +664,12 @@ function installSystemd(): void {
   const nodeBin = process.execPath;
   const nodeDir = path.dirname(nodeBin);
   const pathValue = buildServicePath(nodeDir);
+  const proxychainsConf = process.env.FOXCLAW_PROXYCHAINS_CONF?.trim() || '';
+  const proxychainsBin = proxychainsConf ? resolveCommand('proxychains4') || '/usr/bin/proxychains4' : '';
+  const nodeProxyArgs = !proxychainsConf && hasStandardNodeProxyEnv() ? ' --use-env-proxy' : '';
+  const execStart = proxychainsConf
+    ? `${systemdEscape(proxychainsBin)} -f ${systemdEscape(proxychainsConf)} ${systemdEscape(nodeBin)} ${systemdEscape(entryPoint)} serve`
+    : `${systemdEscape(nodeBin)}${nodeProxyArgs} ${systemdEscape(entryPoint)} serve`;
   fs.mkdirSync(userSystemdDir, { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
@@ -643,12 +687,13 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=${systemdEscape(configDir)}
+EnvironmentFile=-${systemdEscape(envPath)}
 Environment=HOME=${systemdEscape(process.env.HOME || '')}
 Environment=USER=${systemdEscape(process.env.USER || '')}
 Environment=LOGNAME=${systemdEscape(process.env.LOGNAME || process.env.USER || '')}
 Environment=PATH=${systemdEscape(pathValue)}
 Environment=FOXCLAW_ENV=${systemdEscape(envPath)}
-ExecStart=${systemdEscape(nodeBin)} ${escapedEntryPoint} serve
+ExecStart=${execStart}
 Restart=always
 RestartSec=10
 TimeoutStopSec=45
@@ -658,9 +703,21 @@ KillMode=process
 WantedBy=default.target
 `,
   );
-  const dropInUpdates = refreshFoxclawExecStartDropIns(userSystemdDir, unitName, escapedEntryPoint);
-  for (const update of dropInUpdates) {
-    console.log(`[OK] updated FoxClaw ExecStart override: ${update.path}`);
+  if (proxychainsConf) {
+    console.log(`[OK] systemd proxychains enabled: ${proxychainsConf}`);
+  } else if (nodeProxyArgs) {
+    console.log('[OK] systemd Node env proxy enabled');
+  }
+  if (proxychainsConf) {
+    const dropInUpdates = removeFoxclawExecStartDropIns(userSystemdDir, unitName);
+    for (const update of dropInUpdates) {
+      console.log(`[OK] removed stale FoxClaw ExecStart override: ${update.path}`);
+    }
+  } else {
+    const dropInUpdates = refreshFoxclawExecStartDropIns(userSystemdDir, unitName, escapedEntryPoint);
+    for (const update of dropInUpdates) {
+      console.log(`[OK] updated FoxClaw ExecStart override: ${update.path}`);
+    }
   }
   spawnChecked('systemctl', ['--user', 'daemon-reload']);
   spawnChecked('systemctl', ['--user', 'enable', unitName]);
@@ -706,6 +763,9 @@ function installLaunchd(): void {
   const plist = path.join(home, 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
   const envPath = serviceEnvPath();
   const configDir = path.dirname(envPath);
+  const nodeProxyArgs = hasStandardNodeProxyEnv() ? ['--use-env-proxy'] : [];
+  const nodeProxyArgXml = nodeProxyArgs.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join('\n');
+  const proxyEnvXml = buildLaunchdProxyEnvironmentXml();
   fs.mkdirSync(path.dirname(plist), { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
@@ -720,7 +780,7 @@ function installLaunchd(): void {
   <key>ProgramArguments</key>
   <array>
     <string>${xmlEscape(process.execPath)}</string>
-    <string>${xmlEscape(entryPoint)}</string>
+${nodeProxyArgXml ? `${nodeProxyArgXml}\n` : ''}    <string>${xmlEscape(entryPoint)}</string>
     <string>serve</string>
   </array>
   <key>WorkingDirectory</key>
@@ -737,6 +797,7 @@ function installLaunchd(): void {
     <string>${xmlEscape(process.env.LOGNAME || process.env.USER || '')}</string>
     <key>FOXCLAW_ENV</key>
     <string>${xmlEscape(envPath)}</string>
+${proxyEnvXml}
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -753,6 +814,9 @@ function installLaunchd(): void {
   spawnSync('launchctl', ['unload', plist], { stdio: 'ignore' });
   spawnChecked('launchctl', ['load', plist]);
   console.log(`Installed ${plist}`);
+  if (nodeProxyArgs.length > 0) {
+    console.log('[OK] launchd Node env proxy enabled');
+  }
 }
 
 function stopLaunchd(): void {
@@ -785,6 +849,25 @@ function buildServicePath(nodeDir: string): string {
 
 function serviceEnvPath(): string {
   return path.resolve(process.env.FOXCLAW_ENV?.trim() || getLoadedEnvPath() || DEFAULT_ENV_PATH);
+}
+
+function hasStandardNodeProxyEnv(): boolean {
+  return STANDARD_NODE_PROXY_ENV_KEYS.some((key) => Boolean(proxyEnvValue(key)));
+}
+
+function proxyEnvValue(key: string): string {
+  return process.env[key]?.trim() || '';
+}
+
+function buildLaunchdProxyEnvironmentXml(): string {
+  const entries: string[] = [];
+  for (const key of PROXY_ENV_KEYS) {
+    const value = proxyEnvValue(key);
+    if (!value) continue;
+    entries.push(`    <key>${xmlEscape(key)}</key>`);
+    entries.push(`    <string>${xmlEscape(value)}</string>`);
+  }
+  return entries.length > 0 ? `${entries.join('\n')}\n` : '';
 }
 
 function spawnChecked(commandName: string, args: string[]): void {
