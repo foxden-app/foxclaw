@@ -17,7 +17,8 @@ import {
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 
-const command = process.argv[2] || 'serve';
+const rawCommand = process.argv[2];
+const command = rawCommand || 'serve';
 loadEnv();
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const entryPoint = fileURLToPath(import.meta.url);
@@ -33,6 +34,16 @@ const PROXY_ENV_KEYS = [
 ] as const;
 
 async function main(): Promise<void> {
+  if (isVersionCommand(command)) {
+    console.log(readPackageVersion());
+    return;
+  }
+
+  if (isHelpCommand(command)) {
+    printUsage();
+    return;
+  }
+
   if (command === 'init') {
     await initConfig();
     return;
@@ -93,8 +104,47 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command !== 'serve') {
+    console.error(`Unknown command: ${command}`);
+    printUsage();
+    process.exit(1);
+  }
+
   requireNode24(command);
   await runServeCli();
+}
+
+function isVersionCommand(value: string): boolean {
+  return value === 'version' || value === '--version' || value === '-v' || value === '-V';
+}
+
+function isHelpCommand(value: string): boolean {
+  return value === 'help' || value === '--help' || value === '-h';
+}
+
+function readPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' && pkg.version.trim() ? pkg.version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+function printUsage(): void {
+  console.log(`FoxClaw ${readPackageVersion()}
+
+Usage:
+  foxclaw [serve]
+  foxclaw init
+  foxclaw doctor
+  foxclaw status
+  foxclaw start|restart|stop
+  foxclaw install-systemd|uninstall-systemd
+  foxclaw install-launchd
+  foxclaw weixin-login [account-id]
+  foxclaw --version
+  foxclaw --help`);
 }
 
 async function runServeCli(): Promise<void> {
