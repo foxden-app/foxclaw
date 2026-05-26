@@ -190,10 +190,12 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
 7. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
+   - Treat `workflow_dispatch` only as a retry path from an existing matching release tag; do not manually run publishing from `main`.
    - Configure npmjs.com trusted publishing for `foxden-app/foxclaw` and workflow `publish.yml`; do not store npm tokens if OIDC trusted publishing is available.
    - Temporary fallback: store an npm automation/bypass-2FA token as the GitHub Actions secret `NPM_TOKEN`. Never print the token or commit it.
    - Check `npm whoami` and `npm view @foxden-app/foxclaw version`.
    - If the target version is already published, bump with `npm version patch --no-git-tag-version` before validation and commit.
+   - If a workflow fails before `npm publish`, inspect that failed GitHub Actions step before attributing it to npm trusted publishing.
    - Manual fallback only: run `BROWSER=true npm publish` in a TTY.
    - If npm returns `ENEEDAUTH`, report that npm publish is blocked by registry login and leave the package unreported as published.
    - Never print npm tokens or `.npmrc` auth values.

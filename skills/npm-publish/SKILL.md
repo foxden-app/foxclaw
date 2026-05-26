@@ -73,6 +73,8 @@ Use this path when the repo has `.github/workflows/publish.yml` and npmjs.com ha
    npm view <package-name> version
    ```
 
+If the workflow provides `workflow_dispatch` as a recovery path, dispatch it only from an existing release tag whose version matches `package.json`. Do not dispatch publishing from a branch containing an unpublished version unless the workflow explicitly resolves and validates a release tag.
+
 Do not store or print npm tokens when trusted publishing is available. If trusted publishing is not configured on npmjs.com, the workflow can use a GitHub Actions secret named `NPM_TOKEN` as a temporary fallback. Store only automation/bypass-2FA tokens there, never paste tokens in chat or commit them.
 
 ### Manual Publish
@@ -124,4 +126,5 @@ Press ENTER to open in the browser...
 - If `xdg-open` fails because the environment has no browser, rerun with `BROWSER=true npm publish`.
 - If the auth link expires or the publish process exits, rerun `BROWSER=true npm publish` to generate a new link.
 - If the user provides a classic authenticator OTP instead of using the web link, publish can be retried with `npm publish --otp <code>`, but prefer web auth when the user asks for a clickable confirmation link.
+- If a GitHub Actions release fails before the `npm publish` step, such as during checkout or action download authentication, do not diagnose it as a trusted publishing rejection. Inspect the failed step and GitHub Actions status first.
 - Never print npm tokens or `.npmrc` auth values.

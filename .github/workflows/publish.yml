@@ -37,12 +37,15 @@ jobs:
           package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
 
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            tag_version="${GITHUB_REF_NAME#v}"
-            if [[ "${tag_version}" != "${package_version}" ]]; then
-              echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}."
-              exit 1
-            fi
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != v* ]]; then
+            echo "::error::Publish must run from a version tag, not ${GITHUB_REF}."
+            exit 1
+          fi
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "${tag_version}" != "${package_version}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}."
+            exit 1
           fi
 
           published_version="$(npm view "${package_name}" version 2>/dev/null || true)"
