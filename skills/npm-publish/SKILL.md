@@ -73,7 +73,7 @@ Use this path when the repo has `.github/workflows/publish.yml` and npmjs.com ha
    npm view <package-name> version
    ```
 
-Do not store or print npm tokens when trusted publishing is available. If trusted publishing is not configured on npmjs.com, the workflow will fail during `npm publish`; configure the npm package trusted publisher or use the manual fallback below.
+Do not store or print npm tokens when trusted publishing is available. If trusted publishing is not configured on npmjs.com, the workflow can use a GitHub Actions secret named `NPM_TOKEN` as a temporary fallback. Store only automation/bypass-2FA tokens there, never paste tokens in chat or commit them.
 
 ### Manual Publish
 

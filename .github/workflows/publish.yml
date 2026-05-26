@@ -53,6 +53,17 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm pack --dry-run
+      - name: Configure npm token fallback
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -n "${NPM_TOKEN}" ]]; then
+            npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+            echo "Configured npm token fallback."
+          else
+            echo "No npm token fallback configured; npm trusted publishing will be used."
+          fi
       - name: Publish to npm
         if: steps.version.outputs.already_published != 'true'
         run: npm publish --access public

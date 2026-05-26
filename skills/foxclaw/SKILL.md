@@ -190,6 +190,7 @@ Use this checklist when the user asks for standard closing actions, release wrap
 7. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
    - Configure npmjs.com trusted publishing for `foxden-app/foxclaw` and workflow `publish.yml`; do not store npm tokens if OIDC trusted publishing is available.
+   - Temporary fallback: store an npm automation/bypass-2FA token as the GitHub Actions secret `NPM_TOKEN`. Never print the token or commit it.
    - Check `npm whoami` and `npm view @foxden-app/foxclaw version`.
    - If the target version is already published, bump with `npm version patch --no-git-tag-version` before validation and commit.
    - Manual fallback only: run `BROWSER=true npm publish` in a TTY.
