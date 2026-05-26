@@ -136,6 +136,8 @@ foxclaw start
 foxclaw status
 ```
 
+For later upgrades, run `foxclaw update`. It uses the npm or pnpm installation method currently managing FoxClaw, upgrades globally, runs checks, and restarts the background service.
+
 Linux service logs:
 
 ```bash
@@ -226,11 +228,12 @@ For group messages:
 
 Later commands are sorted by recent usage. Plain text, photos, and files continue the currently bound thread; if no thread is bound, FoxClaw creates one.
 
-### 3.2 `/status`, `/account`, `/quota`
+### 3.2 `/status`, `/account`, `/quota`, `/update`
 
 - `/status`: FoxClaw, app-server, current thread binding, model, access, and Codex usage summary.
 - `/account`: current Codex account.
 - `/quota`: Codex usage and quota window.
+- `/update`: upgrade FoxClaw, run checks, and restart the service; it refuses while a turn, approval, or question is active, then reports the result after restart.
 
 ### 3.3 `/config`, `/requirements`, `/provider`
 

@@ -84,7 +84,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 The default config file is `~/.foxclaw/.env`. Set `FOXCLAW_ENV=/path/to/.env` if you want to keep it somewhere else.
 
-`foxclaw start` runs checks and installs or restarts the background service. It is idempotent — run it again after upgrading.
+`foxclaw start` runs checks and installs or restarts the background service. For later upgrades, run `foxclaw update`; it preserves the current npm/pnpm global-install method, runs checks, and restarts the service.
 
 FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
 
@@ -150,6 +150,7 @@ You can also use the wrapper commands:
 ```bash
 foxclaw status
 foxclaw restart
+foxclaw update
 foxclaw stop
 ```
 
@@ -238,7 +239,7 @@ No static Codex app-server port is required in normal installs.
 - `/setup` — unified preference panel
 - `/fast <on|off|toggle>`
 - `/active <steer|queue>`
-- `/status`, `/account`, `/quota`
+- `/status`, `/account`, `/quota`, `/update`
 - `/quota_nudge <credits|usage_limit> confirm`
 - `/login_device`, `/login_cancel [id]`, `/logout confirm`
 - `/auth [list|use <n>|enable <n>|disable <n>|reload|add <name>]`
@@ -290,6 +291,7 @@ foxclaw doctor
 foxclaw status
 foxclaw start
 foxclaw restart
+foxclaw update
 foxclaw stop
 foxclaw uninstall-systemd
 ```

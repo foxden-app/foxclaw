@@ -224,7 +224,7 @@ FOXCLAW_PROXYCHAINS_CONF=/home/wuya/.proxychains-rt.conf
 foxclaw restart
 ```
 
-FoxClaw 会把 proxychains 写进主 service，并清理旧的 FoxClaw `ExecStart` 覆盖，后续升级仍然只需要正常 `pnpm install -g` 和 `foxclaw restart`。
+FoxClaw 会把 proxychains 写进主 service，并清理旧的 FoxClaw `ExecStart` 覆盖，后续升级直接运行 `foxclaw update` 即可。
 
 ## 服务用了错误的 Node 版本
 

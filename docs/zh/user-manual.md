@@ -136,6 +136,8 @@ foxclaw start
 foxclaw status
 ```
 
+后续升级只需运行 `foxclaw update`；它会使用当前安装 FoxClaw 的 npm 或 pnpm，全局升级后执行自检并重启后台服务。
+
 Linux 查看服务日志：
 
 ```bash
@@ -226,11 +228,12 @@ TG_ALLOWED_TOPIC_ID=42
 
 后面的命令会按你最近使用情况排序。直接发送普通文本、图片或文件时，FoxClaw 会继续当前绑定线程；如果没有绑定线程，会自动新建线程。
 
-### 3.2 `/status`、`/account`、`/quota`
+### 3.2 `/status`、`/account`、`/quota`、`/update`
 
 - `/status`：查看 FoxClaw、app-server、当前绑定线程、模型、权限和 Codex 用量摘要。
 - `/account`：查看当前 Codex 登录账号。
 - `/quota`：查看 Codex 用量和额度窗口。
+- `/update`：升级 FoxClaw、自检并重启服务；当前有运行中回复、审批或待确认问题时会拒绝执行，重启后会回报结果。
 
 ### 3.3 `/config`、`/requirements`、`/provider`
 

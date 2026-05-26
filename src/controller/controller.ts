@@ -110,6 +110,7 @@ import {
 } from './session_observer.js';
 import { renderActiveTurnStatus } from './status.js';
 import { writeRuntimeStatus } from '../runtime.js';
+import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
 interface RenderedTelegramMessage {
   messageId: number;
@@ -363,6 +364,7 @@ const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
 const CODEX_LOCAL_USAGE_CACHE_MS = 30_000;
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
+const SELF_UPDATE_STATUS_POLL_MS = 1000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
 const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
 
@@ -384,6 +386,7 @@ const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
   { key: 'active', line: '/active <steer|queue>' },
   { key: 'account', line: '/account' },
   { key: 'quota', line: '/quota' },
+  { key: 'update', line: '/update' },
   { key: 'login_device', line: '/login_device' },
   { key: 'threads_archived', line: '/threads archived [query]' },
   { key: 'open', line: '/open <n>' },
@@ -456,6 +459,7 @@ export class BridgeSessionCore {
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
+  private selfUpdatePollTimer: NodeJS.Timeout | null = null;
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -470,6 +474,7 @@ export class BridgeSessionCore {
     private readonly bot: TelegramGateway,
     private readonly app: CodexAppClient,
     outbound: BridgeMessagingRouter,
+    private readonly selfUpdater: SelfUpdateRuntime | null = null,
   ) {
     this.messaging = outbound;
   }
@@ -537,6 +542,7 @@ export class BridgeSessionCore {
     await this.bot.start();
     this.botUsername = this.bot.username;
     this.updateStatus();
+    this.scheduleSelfUpdateStatusPoll(0);
   }
 
   /** Telegram-only default startup (single channel). */
@@ -574,6 +580,7 @@ export class BridgeSessionCore {
       clearTimeout(timer);
     }
     this.submittedUserInputTimers.clear();
+    this.clearSelfUpdateStatusPoll();
     await this.app.stop({ terminateServer: false });
     this.updateStatus();
   }
@@ -736,6 +743,10 @@ export class BridgeSessionCore {
       }
       case 'quota': {
         await this.handleQuotaCommand(scopeId, locale);
+        return;
+      }
+      case 'update': {
+        await this.handleSelfUpdateCommand(scopeId, locale);
         return;
       }
       case 'quota_nudge': {
@@ -4445,6 +4456,78 @@ export class BridgeSessionCore {
     const lines = [t(locale, 'auth_reload_done')];
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
+  }
+
+  private async handleSelfUpdateCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    if (!this.selfUpdater) {
+      await this.sendMessage(scopeId, t(locale, 'update_unavailable'));
+      return;
+    }
+    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+      await this.sendMessage(scopeId, t(locale, 'update_blocked_active'));
+      return;
+    }
+    const status = await this.selfUpdater.readStatus();
+    if (status?.state === 'pending') {
+      await this.sendMessage(scopeId, t(locale, 'update_already_running'));
+      this.scheduleSelfUpdateStatusPoll();
+      return;
+    }
+    if (status) {
+      await this.selfUpdater.clearStatus();
+    }
+    await this.sendMessage(scopeId, t(locale, 'update_started'));
+    try {
+      await this.selfUpdater.launch(scopeId, locale);
+      this.scheduleSelfUpdateStatusPoll();
+    } catch (error) {
+      await this.selfUpdater.clearStatus().catch(() => undefined);
+      await this.sendMessage(scopeId, t(locale, 'update_failed', { error: formatUserError(error) }));
+    }
+  }
+
+  private scheduleSelfUpdateStatusPoll(delay = SELF_UPDATE_STATUS_POLL_MS): void {
+    if (!this.selfUpdater || this.selfUpdatePollTimer) {
+      return;
+    }
+    this.selfUpdatePollTimer = setTimeout(() => {
+      this.selfUpdatePollTimer = null;
+      void this.pollSelfUpdateStatus().catch((error) => {
+        this.logger.error('self_update.poll_failed', { error: toErrorMeta(error) });
+        this.scheduleSelfUpdateStatusPoll();
+      });
+    }, delay);
+  }
+
+  private clearSelfUpdateStatusPoll(): void {
+    if (!this.selfUpdatePollTimer) {
+      return;
+    }
+    clearTimeout(this.selfUpdatePollTimer);
+    this.selfUpdatePollTimer = null;
+  }
+
+  private async pollSelfUpdateStatus(): Promise<void> {
+    const status = await this.selfUpdater?.readStatus();
+    if (!status) {
+      return;
+    }
+    if (status.state === 'pending') {
+      this.scheduleSelfUpdateStatusPoll();
+      return;
+    }
+    await this.sendMessage(status.scopeId, this.formatSelfUpdateResult(status));
+    await this.selfUpdater?.clearStatus();
+  }
+
+  private formatSelfUpdateResult(status: SelfUpdateStatus): string {
+    if (status.state === 'succeeded') {
+      return t(status.locale, 'update_succeeded', {
+        from: status.fromVersion,
+        to: status.toVersion ?? t(status.locale, 'unknown'),
+      });
+    }
+    return t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
   }
 
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {

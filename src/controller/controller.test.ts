@@ -9,6 +9,7 @@ import { TelegramMessagingPort } from '../channels/telegram/telegram_messaging_p
 import { BridgeStore } from '../store/database.js';
 import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
+import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
 const loggerStub = {
   debug(): void {},
@@ -145,7 +146,7 @@ function installTempCodexHome(t: TestContext, tempDir: string): string {
   return codexHome;
 }
 
-function createControllerRig() {
+function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-controller-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const sentMessages: string[] = [];
@@ -339,7 +340,7 @@ function createControllerRig() {
     interruptTurn: async () => {},
   };
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
-  const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound);
+  const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound, selfUpdater);
   (controller as any).updateStatus = () => {};
   return {
     controller,
@@ -952,6 +953,68 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.match(rig.sentMessages[0]!, /5h window: 63% used/);
   assert.match(rig.sentMessages[0]!, /7d window: 56.5% used/);
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
+});
+
+test('/update launches a background self-update and reports the completed result', async (t) => {
+  let status: SelfUpdateStatus | null = null;
+  let launches = 0;
+  const updater: SelfUpdateRuntime = {
+    async launch(scopeId, locale) {
+      launches += 1;
+      status = {
+        state: 'pending',
+        scopeId,
+        locale,
+        fromVersion: '0.3.13',
+        toVersion: null,
+        error: null,
+        updatedAt: new Date().toISOString(),
+      };
+    },
+    async readStatus() {
+      return status;
+    },
+    async clearStatus() {
+      status = null;
+    },
+  };
+  const rig = createControllerRig(updater);
+  t.after(() => {
+    (rig.controller as any).clearSelfUpdateStatusPoll();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/update'), 'zh', 'update', []);
+
+  assert.equal(launches, 1);
+  assert.match(rig.sentMessages[0]!, /已开始升级 FoxClaw/);
+
+  status = {
+    state: 'succeeded',
+    scopeId: 'telegram:99::root',
+    locale: 'zh',
+    fromVersion: '0.3.13',
+    toVersion: '0.3.14',
+    error: null,
+    updatedAt: new Date().toISOString(),
+  };
+  await (rig.controller as any).pollSelfUpdateStatus();
+
+  assert.match(rig.sentMessages[1]!, /FoxClaw 已升级并重启：0\.3\.13 -> 0\.3\.14/);
+  assert.equal(status, null);
+});
+
+test('/update reports terminal fallback when self-update is unavailable', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/update'), 'en', 'update', []);
+
+  assert.match(rig.sentMessages[0]!, /foxclaw update/);
 });
 
 test('/help pins important commands and sorts the rest by recent use', async (t) => {

@@ -223,7 +223,7 @@ Then run:
 foxclaw restart
 ```
 
-FoxClaw writes proxychains into the main service and removes stale FoxClaw `ExecStart` overrides, so later upgrades still only need the normal `pnpm install -g` and `foxclaw restart`.
+FoxClaw writes proxychains into the main service and removes stale FoxClaw `ExecStart` overrides, so later upgrades only need `foxclaw update`.
 
 ## Service Starts With The Wrong Node Version
 

@@ -277,9 +277,10 @@ foxclaw uninstall-systemd
 Update FoxClaw later:
 
 ```bash
-npm install -g @foxden-app/foxclaw@latest
-foxclaw start
+foxclaw update
 ```
+
+You can also send `/update` in an authorized Telegram chat. When no turn, approval, or question is active, it upgrades, checks, restarts the service, and reports the result after restart.
 
 ## Next Step
 

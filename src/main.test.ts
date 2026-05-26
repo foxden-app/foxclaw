@@ -44,6 +44,7 @@ test('CLI version and help commands do not enter serve mode', () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /Usage:/);
   assert.match(help.stdout, /foxclaw status/);
+  assert.match(help.stdout, /foxclaw update/);
   assert.equal(help.stderr, '');
 });
 

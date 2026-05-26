@@ -17,6 +17,7 @@ import {
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 import { refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
+import { createSelfUpdateRuntime, performSelfUpdate } from './update.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -67,6 +68,19 @@ async function main(): Promise<void> {
     requireNode24(command);
     startService('restart');
     return;
+  }
+
+  if (command === 'update') {
+    requireNode24(command);
+    const notificationFile = readOptionValue('--notification-file');
+    const options = {
+      entryPoint,
+      nodePath: process.execPath,
+      version: readPackageVersion(),
+      ...(notificationFile ? { notificationFile } : {}),
+    };
+    const outcome = performSelfUpdate(options);
+    process.exit(outcome.ok ? 0 : 1);
   }
 
   if (command === 'stop') {
@@ -142,6 +156,7 @@ Usage:
   foxclaw doctor
   foxclaw status
   foxclaw start|restart|stop
+  foxclaw update
   foxclaw install-systemd|uninstall-systemd
   foxclaw install-launchd
   foxclaw weixin-login [account-id]
@@ -206,7 +221,14 @@ async function runServeCli(): Promise<void> {
       ? new WeixinMessagingPort(store, (id) => loadWeixinAccount(config.weixinAccountsDir, id))
       : null;
     const outbound = new BridgeMessagingRouter(telegramMessaging, weixinMessaging);
-    const core = new BridgeSessionCore(config, store, logger, bot, app, outbound);
+    const selfUpdater = createSelfUpdateRuntime({
+      entryPoint,
+      nodePath: process.execPath,
+      version: readPackageVersion(),
+      statusPath: config.statusPath,
+      logPath: path.join(APP_HOME, 'logs', 'update.log'),
+    });
+    const core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater);
     const telegram = new TelegramChannelAdapter(core);
     if (config.wxEnabled) {
       weixinAdapter = new WeixinChannelAdapter(core, store, config, logger);
@@ -508,6 +530,12 @@ function escapeRegExp(value: string): string {
 
 function editorCommand(envPath: string): string {
   return `${process.env.EDITOR?.trim() || '$EDITOR'} ${envPath}`;
+}
+
+function readOptionValue(option: string): string | undefined {
+  const index = process.argv.indexOf(option);
+  const value = index >= 0 ? process.argv[index + 1] : undefined;
+  return value && !value.startsWith('--') ? value : undefined;
 }
 
 function startService(action: 'start' | 'restart'): void {

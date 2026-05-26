@@ -84,7 +84,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 配置文件默认在 `~/.foxclaw/.env`。想放别处的话设 `FOXCLAW_ENV=/path/to/.env`。
 
-`foxclaw start` 会自动检查环境并安装/重启后台服务，幂等操作，升级后再跑一次就行。
+`foxclaw start` 会自动检查环境并安装/重启后台服务。后续升级直接运行 `foxclaw update`，它会沿用当前的 npm/pnpm 全局安装方式，完成安装、自检和服务重启。
 
 FoxClaw 只响应 `TG_ALLOWED_USER_ID` 的消息——把机器人拉进群不代表群里所有人都能用。
 
@@ -150,6 +150,7 @@ journalctl --user -u foxclaw.service -f
 ```bash
 foxclaw status
 foxclaw restart
+foxclaw update
 foxclaw stop
 ```
 
@@ -238,7 +239,7 @@ FoxClaw 会把 `codex app-server` 作为 detached 子进程启动，记录其 pi
 - `/setup` — 统一设置面板
 - `/fast <on|off|toggle>`
 - `/active <steer|queue>`
-- `/status`、`/account`、`/quota`
+- `/status`、`/account`、`/quota`、`/update`
 - `/quota_nudge <credits|usage_limit> confirm`
 - `/login_device`、`/login_cancel [id]`、`/logout confirm`
 - `/auth [list|use <n>|enable <n>|disable <n>|reload|add <name>]`
@@ -290,6 +291,7 @@ foxclaw doctor
 foxclaw status
 foxclaw start
 foxclaw restart
+foxclaw update
 foxclaw stop
 foxclaw uninstall-systemd
 ```
