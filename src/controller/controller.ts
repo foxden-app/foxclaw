@@ -93,7 +93,13 @@ import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
-import { readCodexLocalUsageStats, type CodexLocalUsageStats } from '../codex_app/local_usage.js';
+import {
+  readCodexLocalUsageSnapshot,
+  readCodexLocalUsageStats,
+  writeCodexLocalUsageSnapshot,
+  type CodexLocalUsageSnapshot,
+  type CodexLocalUsageStats,
+} from '../codex_app/local_usage.js';
 import {
   normalizeTurnActivityEvent,
   type RawExecCommandEvent,
@@ -362,7 +368,8 @@ class UserFacingError extends Error {}
 const OBSERVED_THREAD_POLL_MS = 1500;
 const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
-const CODEX_LOCAL_USAGE_CACHE_MS = 30_000;
+const CODEX_LOCAL_USAGE_REFRESH_MS = 30 * 60_000;
+const CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME = 'codex-local-usage.json';
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const SELF_UPDATE_STATUS_POLL_MS = 1000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
@@ -450,7 +457,9 @@ export class BridgeSessionCore {
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
   private authRotationFailedTargets = new Set<string>();
-  private localUsageCache: { expiresAt: number; stats: CodexLocalUsageStats } | null = null;
+  private localUsageCache: CodexLocalUsageSnapshot | null = null;
+  private localUsageCacheLoaded = false;
+  private localUsageRefresh: Promise<void> | null = null;
   private lastRemoteControlStatus: RemoteControlStatusState | null = null;
   private pendingThreadRenames = new Map<string, PendingThreadRename>();
   private pendingThreadNewCwds = new Map<string, PendingThreadNewCwd>();
@@ -534,6 +543,9 @@ export class BridgeSessionCore {
     await this.app.start();
     await this.restorePendingUserInputs();
     await this.cleanupStaleTurnPreviews();
+    void this.refreshCodexLocalUsageIfNeeded().catch((error) => {
+      this.logger.warn('codex.local_usage_background_refresh_failed', { error: formatUserError(error) });
+    });
     this.updateStatus();
   }
 
@@ -704,7 +716,11 @@ export class BridgeSessionCore {
         const binding = this.store.getBinding(scopeId);
         const settings = this.store.getChatSettings(scopeId);
         const access = this.resolveEffectiveAccess(scopeId, settings);
-        const fastStatus = await this.resolveFastStatusLabel(locale, settings);
+        const [fastStatus, codexUsageLines, codexLocalUsageLines] = await Promise.all([
+          this.resolveFastStatusLabel(locale, settings),
+          this.buildCodexUsageStatusLines(locale),
+          this.buildCodexLocalUsageStatusLines(locale),
+        ]);
         const appServer = this.app.getServerStatus();
         const appServerLabel = appServer.pid && appServer.port
           ? `${appServer.running ? t(locale, 'status_app_server_running') : t(locale, 'status_app_server_stale')} pid=${appServer.pid} port=${appServer.port}`
@@ -732,8 +748,8 @@ export class BridgeSessionCore {
           t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
-        lines.push(...await this.buildCodexUsageStatusLines(locale));
-        lines.push(...await this.buildCodexLocalUsageStatusLines(locale));
+        lines.push(...codexUsageLines);
+        lines.push(...codexLocalUsageLines);
         await this.sendMessage(scopeId, lines.join('\n'));
         return;
       }
@@ -5429,7 +5445,14 @@ export class BridgeSessionCore {
 
   private async buildCodexLocalUsageStatusLines(locale: AppLocale): Promise<string[]> {
     try {
-      const stats = await this.readCachedCodexLocalUsageStats();
+      const snapshot = await this.readCachedCodexLocalUsageStats();
+      void this.refreshCodexLocalUsageIfNeeded(snapshot).catch((error) => {
+        this.logger.warn('codex.local_usage_background_refresh_failed', { error: formatUserError(error) });
+      });
+      if (!snapshot) {
+        return [t(locale, 'status_codex_local_usage_refreshing')];
+      }
+      const stats = snapshot.stats;
       if (stats.sessionFiles === 0 || stats.sessionsWithUsage === 0) {
         return [];
       }
@@ -5447,6 +5470,9 @@ export class BridgeSessionCore {
           reasoning: formatTokenCount(stats.totals.reasoningOutputTokens),
         }),
         ...this.formatCodexLocalOutputSpeedStatusLines(locale, stats),
+        t(locale, 'status_codex_local_snapshot_at', {
+          value: formatLocalTimestamp(snapshot.computedAtMs / 1000),
+        }),
       ];
     } catch (error) {
       this.logger.warn('codex.local_usage_failed', { error: formatUserError(error) });
@@ -5478,14 +5504,39 @@ export class BridgeSessionCore {
     }
   }
 
-  private async readCachedCodexLocalUsageStats(): Promise<CodexLocalUsageStats> {
-    const now = Date.now();
-    if (this.localUsageCache && this.localUsageCache.expiresAt > now) {
-      return this.localUsageCache.stats;
+  private async readCachedCodexLocalUsageStats(): Promise<CodexLocalUsageSnapshot | null> {
+    if (this.localUsageCacheLoaded) {
+      return this.localUsageCache;
     }
+    this.localUsageCache = await readCodexLocalUsageSnapshot(this.codexLocalUsageSnapshotPath());
+    this.localUsageCacheLoaded = true;
+    return this.localUsageCache;
+  }
+
+  private async refreshCodexLocalUsageIfNeeded(snapshot?: CodexLocalUsageSnapshot | null): Promise<void> {
+    const current = snapshot === undefined ? await this.readCachedCodexLocalUsageStats() : snapshot;
+    if (current && Date.now() - current.computedAtMs < CODEX_LOCAL_USAGE_REFRESH_MS) {
+      return;
+    }
+    if (this.localUsageRefresh) {
+      return;
+    }
+    this.localUsageRefresh = this.refreshCodexLocalUsageStats().finally(() => {
+      this.localUsageRefresh = null;
+    });
+    await this.localUsageRefresh;
+  }
+
+  private async refreshCodexLocalUsageStats(): Promise<void> {
     const stats = await readCodexLocalUsageStats();
-    this.localUsageCache = { stats, expiresAt: now + CODEX_LOCAL_USAGE_CACHE_MS };
-    return stats;
+    const snapshot = { computedAtMs: Date.now(), stats };
+    this.localUsageCache = snapshot;
+    this.localUsageCacheLoaded = true;
+    await writeCodexLocalUsageSnapshot(this.codexLocalUsageSnapshotPath(), snapshot);
+  }
+
+  private codexLocalUsageSnapshotPath(): string {
+    return path.join(path.dirname(this.config.statusPath), CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME);
   }
 
   private async sendThreadContextSummary(scopeId: string, locale: AppLocale, threadId: string): Promise<void> {

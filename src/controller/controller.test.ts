@@ -1131,6 +1131,7 @@ test('/status includes local Codex token history from session logs', async (t) =
     }),
   ].join('\n'));
 
+  await (rig.controller as any).refreshCodexLocalUsageStats();
   await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
 
   assert.match(rig.sentMessages[0]!, /Codex local history: 2 sessions, 2 turns, 3 usage records/);
@@ -1142,6 +1143,21 @@ test('/status includes local Codex token history from session logs', async (t) =
     rig.sentMessages[0]!,
     /Codex local output speed: avg 1\.7 token\/s, latest 2 token\/s \(3 samples\)/,
   );
+  assert.match(rig.sentMessages[0]!, /Codex local stats snapshot: /);
+});
+
+test('/status does not wait for local usage history when no snapshot exists', async (t) => {
+  const rig = createControllerRig();
+  installTempCodexHome(t, rig.tempDir);
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
+
+  assert.match(rig.sentMessages[0]!, /Codex local history: building snapshot in background/);
+  await (rig.controller as any).localUsageRefresh;
 });
 
 test('/auth_reload restarts Codex app-server and reports refreshed usage', async (t) => {

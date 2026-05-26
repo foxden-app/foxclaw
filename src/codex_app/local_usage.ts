@@ -22,6 +22,11 @@ export interface CodexLocalUsageStats {
   latestSessionMtimeMs: number | null;
 }
 
+export interface CodexLocalUsageSnapshot {
+  computedAtMs: number;
+  stats: CodexLocalUsageStats;
+}
+
 export interface CodexLocalOutputSpeedStats {
   samples: number;
   outputTokens: number;
@@ -78,6 +83,28 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
     outputSpeed,
     latestSessionMtimeMs,
   };
+}
+
+export async function readCodexLocalUsageSnapshot(snapshotPath: string): Promise<CodexLocalUsageSnapshot | null> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(snapshotPath, 'utf8')) as Partial<CodexLocalUsageSnapshot>;
+    if (!isFiniteNumber(parsed.computedAtMs) || !isCodexLocalUsageStats(parsed.stats)) {
+      return null;
+    }
+    return { computedAtMs: parsed.computedAtMs, stats: parsed.stats };
+  } catch {
+    return null;
+  }
+}
+
+export async function writeCodexLocalUsageSnapshot(
+  snapshotPath: string,
+  snapshot: CodexLocalUsageSnapshot,
+): Promise<void> {
+  await fs.mkdir(path.dirname(snapshotPath), { recursive: true });
+  const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
+  await fs.writeFile(temporaryPath, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(temporaryPath, snapshotPath);
 }
 
 function resolveCodexHome(): string {
@@ -175,6 +202,40 @@ function emptyOutputSpeedStats(): CodexLocalOutputSpeedStats {
     latestTokensPerSecond: null,
     latestSampleAtMs: null,
   };
+}
+
+function isCodexLocalUsageStats(value: unknown): value is CodexLocalUsageStats {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const stats = value as Partial<CodexLocalUsageStats>;
+  const totals = stats.totals as Partial<CodexLocalUsageTotals> | undefined;
+  const speed = stats.outputSpeed as Partial<CodexLocalOutputSpeedStats> | undefined;
+  return isFiniteNumber(stats.sessionFiles)
+    && isFiniteNumber(stats.sessionsWithUsage)
+    && isFiniteNumber(stats.turns)
+    && isFiniteNumber(stats.usageEvents)
+    && Boolean(totals)
+    && isFiniteNumber(totals?.inputTokens)
+    && isFiniteNumber(totals?.cachedInputTokens)
+    && isFiniteNumber(totals?.outputTokens)
+    && isFiniteNumber(totals?.reasoningOutputTokens)
+    && isFiniteNumber(totals?.totalTokens)
+    && Boolean(speed)
+    && isFiniteNumber(speed?.samples)
+    && isFiniteNumber(speed?.outputTokens)
+    && isFiniteNumber(speed?.seconds)
+    && isNullableFiniteNumber(speed?.latestTokensPerSecond)
+    && isNullableFiniteNumber(speed?.latestSampleAtMs)
+    && isNullableFiniteNumber(stats.latestSessionMtimeMs);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || isFiniteNumber(value);
 }
 
 function addUsage(totals: CodexLocalUsageTotals, usage: RawTokenUsage): void {

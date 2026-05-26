@@ -230,7 +230,7 @@ Later commands are sorted by recent usage. Plain text, photos, and files continu
 
 ### 3.2 `/status`, `/account`, `/quota`, `/update`
 
-- `/status`: FoxClaw, app-server, current thread binding, model, access, and Codex usage summary.
+- `/status`: FoxClaw, app-server, current thread binding, model, access, and Codex usage summary. Local session, token, and output-speed metrics use a background-generated historical snapshot instead of scanning large logs during the request.
 - `/account`: current Codex account.
 - `/quota`: Codex usage and quota window.
 - `/update`: upgrade FoxClaw, run checks, and restart the service; it refuses while a turn, approval, or question is active, then reports the result after restart.
