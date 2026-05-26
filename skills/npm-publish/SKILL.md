@@ -5,7 +5,7 @@ description: Publish npm packages safely, especially packages that require npm 2
 
 # NPM Publish
 
-Use this skill to publish an npm package from a repo. Prefer the normal no-2FA publish path first. Fall back to npm web-auth only when npm explicitly prompts for it.
+Use this skill to publish an npm package from a repo. Prefer CI trusted publishing when the repository has a publish workflow. Prefer the normal no-2FA publish path first only when CI publishing is not available. Fall back to npm web-auth only when npm explicitly prompts for it.
 
 ## Release Checklist
 
@@ -42,6 +42,40 @@ Use this skill to publish an npm package from a repo. Prefer the normal no-2FA p
    ```
 
 ## Publish Flow
+
+### GitHub Actions Trusted Publishing
+
+Use this path when the repo has `.github/workflows/publish.yml` and npmjs.com has a trusted publisher configured for the package.
+
+1. Verify the package version is not already published:
+   ```bash
+   npm view <package-name> version
+   ```
+
+2. If needed, bump the package version and commit it before tagging:
+   ```bash
+   npm version patch --no-git-tag-version
+   git add package.json package-lock.json
+   git commit -m "<Chinese release message when appropriate>"
+   git push origin <branch>
+   ```
+
+3. Publish by pushing a matching version tag:
+   ```bash
+   git tag v<package-version>
+   git push origin v<package-version>
+   ```
+
+4. Watch the GitHub Actions `Publish` workflow. It must run lint, typecheck, tests, `npm pack --dry-run`, then `npm publish --access public` through trusted publishing.
+
+5. Verify the registry after the workflow succeeds:
+   ```bash
+   npm view <package-name> version
+   ```
+
+Do not store or print npm tokens when trusted publishing is available. If trusted publishing is not configured on npmjs.com, the workflow will fail during `npm publish`; configure the npm package trusted publisher or use the manual fallback below.
+
+### Manual Publish
 
 1. Start publish in a TTY and disable local browser opening. This works both when npm publishes directly and when it asks for web auth:
    ```bash

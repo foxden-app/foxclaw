@@ -188,9 +188,11 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - Verify the running service reports the expected FoxClaw version in `status`.
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
 7. Publish to npm when requested:
+   - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
+   - Configure npmjs.com trusted publishing for `foxden-app/foxclaw` and workflow `publish.yml`; do not store npm tokens if OIDC trusted publishing is available.
    - Check `npm whoami` and `npm view @foxden-app/foxclaw version`.
    - If the target version is already published, bump with `npm version patch --no-git-tag-version` before validation and commit.
-   - Run `BROWSER=true npm publish` in a TTY.
+   - Manual fallback only: run `BROWSER=true npm publish` in a TTY.
    - If npm returns `ENEEDAUTH`, report that npm publish is blocked by registry login and leave the package unreported as published.
    - Never print npm tokens or `.npmrc` auth values.
 

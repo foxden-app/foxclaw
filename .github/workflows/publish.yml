@@ -1,0 +1,58 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - name: Validate package version
+        id: version
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "${tag_version}" != "${package_version}" ]]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}."
+              exit 1
+            fi
+          fi
+
+          published_version="$(npm view "${package_name}" version 2>/dev/null || true)"
+          if [[ "${published_version}" == "${package_version}" ]]; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+            echo "::notice::${package_name}@${package_version} is already published."
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          echo "package=${package_name}" >> "${GITHUB_OUTPUT}"
+          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm pack --dry-run
+      - name: Publish to npm
+        if: steps.version.outputs.already_published != 'true'
+        run: npm publish --access public
