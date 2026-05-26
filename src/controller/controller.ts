@@ -286,6 +286,13 @@ interface CodexAuthCandidate {
   isCurrent: boolean;
   disabled: boolean;
   mtimeMs: number;
+  quota: CodexAuthQuotaSnapshot | null;
+}
+
+interface CodexAuthQuotaSnapshot {
+  capturedAtMs: number;
+  primaryRemainingPercent: number | null;
+  secondaryRemainingPercent: number | null;
 }
 
 interface CodexAuthState {
@@ -370,6 +377,7 @@ const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
 const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
 const CODEX_LOCAL_USAGE_REFRESH_MS = 30 * 60_000;
 const CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME = 'codex-local-usage.json';
+const CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME = 'codex-auth-quota.json';
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const SELF_UPDATE_STATUS_POLL_MS = 1000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
@@ -460,6 +468,8 @@ export class BridgeSessionCore {
   private localUsageCache: CodexLocalUsageSnapshot | null = null;
   private localUsageCacheLoaded = false;
   private localUsageRefresh: Promise<void> | null = null;
+  private authQuotaSnapshots: Record<string, CodexAuthQuotaSnapshot> = {};
+  private authQuotaSnapshotsLoaded = false;
   private lastRemoteControlStatus: RemoteControlStatusState | null = null;
   private pendingThreadRenames = new Map<string, PendingThreadRename>();
   private pendingThreadNewCwds = new Map<string, PendingThreadNewCwd>();
@@ -4570,6 +4580,7 @@ export class BridgeSessionCore {
     }
 
     const state = await this.listCodexAuthState();
+    await this.refreshCurrentCodexAuthQuota(state);
     const record: PendingAuthChoiceList = {
       localId: crypto.randomBytes(8).toString('hex'),
       chatId: scopeId,
@@ -5304,7 +5315,12 @@ export class BridgeSessionCore {
   }
 
   private async listCodexAuthState(): Promise<CodexAuthState> {
-    return listCodexAuthState(this.store.listDisabledCodexAuthCandidateNames());
+    const state = await listCodexAuthState(this.store.listDisabledCodexAuthCandidateNames());
+    const snapshots = await this.readCodexAuthQuotaSnapshots();
+    state.candidates.forEach((candidate) => {
+      candidate.quota = snapshots[candidate.name] ?? null;
+    });
+    return state;
   }
 
   private async readCodexAuthSwitchLabels(candidate: CodexAuthCandidate): Promise<CodexAuthSwitchResult> {
@@ -5426,7 +5442,7 @@ export class BridgeSessionCore {
       }
       lines.push(t(locale, 'status_codex_usage_window', {
         window: formatRateLimitWindowLabel(locale, window, kind),
-        percent: formatUsagePercent(window.usedPercent),
+        percent: formatRemainingUsagePercent(window.usedPercent),
         reset: window.resetsAt
           ? t(locale, 'status_codex_usage_reset', { value: formatLocalTimestamp(window.resetsAt) })
           : '',
@@ -5537,6 +5553,60 @@ export class BridgeSessionCore {
 
   private codexLocalUsageSnapshotPath(): string {
     return path.join(path.dirname(this.config.statusPath), CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME);
+  }
+
+  private async refreshCurrentCodexAuthQuota(state: CodexAuthState): Promise<void> {
+    const candidate = state.candidates.find(entry => entry.isCurrent);
+    if (!candidate) {
+      return;
+    }
+    try {
+      const snapshot = selectCodexRateLimitSnapshot(await this.app.readAccountRateLimits());
+      if (!snapshot) {
+        return;
+      }
+      const quota = authQuotaSnapshotFromRateLimit(snapshot);
+      candidate.quota = quota;
+      this.authQuotaSnapshots[candidate.name] = quota;
+      await this.writeCodexAuthQuotaSnapshots();
+    } catch (error) {
+      this.logger.warn('codex.auth_quota_refresh_failed', { error: formatUserError(error) });
+    }
+  }
+
+  private async readCodexAuthQuotaSnapshots(): Promise<Record<string, CodexAuthQuotaSnapshot>> {
+    if (this.authQuotaSnapshotsLoaded) {
+      return this.authQuotaSnapshots;
+    }
+    this.authQuotaSnapshotsLoaded = true;
+    try {
+      const parsed = JSON.parse(await fs.readFile(this.codexAuthQuotaSnapshotPath(), 'utf8')) as unknown;
+      if (parsed && typeof parsed === 'object') {
+        for (const [name, value] of Object.entries(parsed)) {
+          if (isCodexAuthQuotaSnapshot(value)) {
+            this.authQuotaSnapshots[name] = value;
+          }
+        }
+      }
+    } catch {
+      // A missing or invalid historical cache should not block the auth panel.
+    }
+    return this.authQuotaSnapshots;
+  }
+
+  private async writeCodexAuthQuotaSnapshots(): Promise<void> {
+    const snapshotPath = this.codexAuthQuotaSnapshotPath();
+    await fs.mkdir(path.dirname(snapshotPath), { recursive: true });
+    const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
+    await fs.writeFile(temporaryPath, `${JSON.stringify(this.authQuotaSnapshots, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await fs.rename(temporaryPath, snapshotPath);
+  }
+
+  private codexAuthQuotaSnapshotPath(): string {
+    return path.join(path.dirname(this.config.statusPath), CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME);
   }
 
   private async sendThreadContextSummary(scopeId: string, locale: AppLocale, threadId: string): Promise<void> {
@@ -8384,6 +8454,7 @@ async function listCodexAuthState(disabledNames = new Set<string>()): Promise<Co
       isCurrent: currentTargetPath === candidatePath,
       disabled: disabledNames.has(entry.name),
       mtimeMs: stat.mtimeMs,
+      quota: null,
     });
   }
 
@@ -8499,12 +8570,13 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, include
     return lines.join('\n');
   }
   lines.push(t(locale, 'auth_candidate_count', { value: state.candidates.length }));
+  lines.push(t(locale, 'auth_quota_legend'));
   state.candidates.forEach((candidate, index) => {
     const marker = candidate.isCurrent ? ' *' : '';
     const status = candidate.disabled
       ? t(locale, 'auth_candidate_status_disabled')
       : t(locale, 'auth_candidate_status_enabled');
-    lines.push(`${index + 1}. ${candidate.name}${marker} [${status}]`);
+    lines.push(`${index + 1}. ${formatAuthQuotaPrefix(candidate.quota)}|${candidate.name}${marker} [${status}]`);
   });
   if (includeWeixinCopyPaste) {
     lines.push(
@@ -8526,7 +8598,7 @@ function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, include
 function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
   const rows = record.candidates.map((candidate, index) => [
     {
-      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${candidate.name}${candidate.disabled ? ' · off' : ''}`),
+      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaPrefix(candidate.quota)}|${candidate.name}${candidate.disabled ? ' · off' : ''}`),
       callback_data: `auth:${record.localId}:${index}`,
     },
     {
@@ -9114,6 +9186,50 @@ function formatUsagePercent(value: number): string {
     return '?';
   }
   return formatCompactNumber(value);
+}
+
+function formatRemainingUsagePercent(usedPercent: number): string {
+  const remainingPercent = remainingUsagePercent(usedPercent);
+  return remainingPercent === null ? '?' : formatUsagePercent(remainingPercent);
+}
+
+function authQuotaSnapshotFromRateLimit(snapshot: CodexRateLimitSnapshot): CodexAuthQuotaSnapshot {
+  return {
+    capturedAtMs: Date.now(),
+    primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
+    secondaryRemainingPercent: snapshot.secondary ? remainingUsagePercent(snapshot.secondary.usedPercent) : null,
+  };
+}
+
+function remainingUsagePercent(usedPercent: number): number | null {
+  if (!Number.isFinite(usedPercent)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, 100 - usedPercent));
+}
+
+function formatAuthQuotaPrefix(snapshot: CodexAuthQuotaSnapshot | null): string {
+  if (!snapshot) {
+    return '--|--';
+  }
+  const primary = snapshot.primaryRemainingPercent === null ? '--' : formatUsagePercent(snapshot.primaryRemainingPercent);
+  const secondary = snapshot.secondaryRemainingPercent === null ? '--' : formatUsagePercent(snapshot.secondaryRemainingPercent);
+  return `${primary}|${secondary}`;
+}
+
+function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapshot {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const snapshot = value as Partial<CodexAuthQuotaSnapshot>;
+  return typeof snapshot.capturedAtMs === 'number'
+    && Number.isFinite(snapshot.capturedAtMs)
+    && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
+    && isNullableFiniteNumber(snapshot.secondaryRemainingPercent);
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value));
 }
 
 function formatCompactNumber(value: number): string {

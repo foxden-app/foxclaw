@@ -387,7 +387,7 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 ### 6.3 `/auth` 面板
 
-`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。
+`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。每个候选名前的 `5h|7d` 数字表示上次记录到的两个额度窗口剩余百分比；当前 auth 会在打开面板时刷新，其他候选不会为了查询额度被自动切换。
 
 示意：
 
@@ -396,16 +396,17 @@ Codex auth
 Current: auth.json_personal
 Auth dir: /home/alice/.codex
 Candidates: 2
-1. auth.json_personal * [enabled]
-2. auth.json_team [enabled]
+额度剩余：5h|7d|auth
+1. 20|25|auth.json_personal * [enabled]
+2. --|--|auth.json_team [enabled]
 
-[✅ auth.json_personal] [✅]
-[🔐 auth.json_team]     [✅]
+[✅ 20|25|auth.json_personal] [✅]
+[🔐 --|--|auth.json_team]     [✅]
 [🛡️ Access]             [🔑 设备登录]
 [🔄 Reload auth]
 ```
 
-右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。
+右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。`--|--` 表示该候选还没有额度历史快照。
 
 命令等价用法：
 

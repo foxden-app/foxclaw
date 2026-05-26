@@ -387,7 +387,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 ### 6.3 The `/auth` Panel
 
-`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload.
+`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota.
 
 Approximation:
 
@@ -396,16 +396,17 @@ Codex auth
 Current: auth.json_personal
 Auth dir: /home/alice/.codex
 Candidates: 2
-1. auth.json_personal * [enabled]
-2. auth.json_team [enabled]
+Quota remaining: 5h|7d|auth
+1. 20|25|auth.json_personal * [enabled]
+2. --|--|auth.json_team [enabled]
 
-[✅ auth.json_personal] [✅]
-[🔐 auth.json_team]     [✅]
+[✅ 20|25|auth.json_personal] [✅]
+[🔐 --|--|auth.json_team]     [✅]
 [🛡️ Access]             [🔑 Login]
 [🔄 Reload auth]
 ```
 
-The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state.
+The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. `--|--` means no quota snapshot has been observed for that candidate yet.
 
 Equivalent commands:
 

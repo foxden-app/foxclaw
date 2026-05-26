@@ -950,8 +950,8 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.ok(rig.sentMessages[0]!.includes(`CWD: ${rig.tempDir}`));
   assert.match(rig.sentMessages[0]!, /Codex plan: Plus/);
   assert.match(rig.sentMessages[0]!, /Codex usage \(codex\):/);
-  assert.match(rig.sentMessages[0]!, /5h window: 63% used/);
-  assert.match(rig.sentMessages[0]!, /7d window: 56.5% used/);
+  assert.match(rig.sentMessages[0]!, /5h window: 37% remaining/);
+  assert.match(rig.sentMessages[0]!, /7d window: 43.5% remaining/);
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
 });
 
@@ -1295,11 +1295,11 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.ok(list);
   assert.deepEqual(rig.sentKeyboards[0]?.slice(0, 2), [
     [
-      { text: '✅ auth.json_a', callback_data: `auth:${list.localId}:0` },
+      { text: '✅ --|--|auth.json_a', callback_data: `auth:${list.localId}:0` },
       { text: '✅', callback_data: `auth:${list.localId}:toggle:0` },
     ],
     [
-      { text: '🔐 auth.json_b', callback_data: `auth:${list.localId}:1` },
+      { text: '🔐 --|--|auth.json_b', callback_data: `auth:${list.localId}:1` },
       { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
     ],
   ]);
@@ -1310,7 +1310,7 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.equal(rig.callbackAnswers.at(-1), 'Auth disabled');
   assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[disabled\]/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
-    { text: '🔐 auth.json_b · off', callback_data: `auth:${list.localId}:1` },
+    { text: '🔐 --|--|auth.json_b · off', callback_data: `auth:${list.localId}:1` },
     { text: '⏸️', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
 
@@ -1320,9 +1320,57 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.equal(rig.callbackAnswers.at(-1), 'Auth enabled');
   assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[enabled\]/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
-    { text: '🔐 auth.json_b', callback_data: `auth:${list.localId}:1` },
+    { text: '🔐 --|--|auth.json_b', callback_data: `auth:${list.localId}:1` },
     { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
+});
+
+test('/auth records and displays current candidate remaining quota without probing other candidates', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  let reads = 0;
+  (rig.controller as any).app.readAccountRateLimits = async () => {
+    reads += 1;
+    const usedPercent = reads === 1
+      ? { primary: 80, secondary: 75 }
+      : { primary: 10, secondary: 5 };
+    return {
+      rateLimits: {
+        limitId: 'codex',
+        limitName: null,
+        primary: { usedPercent: usedPercent.primary, windowDurationMins: 300, resetsAt: null },
+        secondary: { usedPercent: usedPercent.secondary, windowDurationMins: 10080, resetsAt: null },
+        credits: null,
+        planType: 'plus',
+        rateLimitReachedType: null,
+      },
+      rateLimitsByLimitId: null,
+    };
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.equal(reads, 1);
+  assert.match(rig.sentMessages[0]!, /Quota remaining: 5h\|7d\|auth/);
+  assert.match(rig.sentMessages[0]!, /20\|25\|auth\.json_a \* \[enabled\]/);
+  assert.match(rig.sentMessages[0]!, /--\|--\|auth\.json_b \[enabled\]/);
+  assert.match(rig.sentKeyboards[0]?.[0]?.[0]?.text, /✅ 20\|25\|auth\.json_a/);
+  assert.equal(
+    fs.existsSync(path.join(rig.tempDir, 'codex-auth-quota.json')),
+    true,
+  );
+
+  fs.unlinkSync(path.join(authDir, 'auth.json'));
+  fs.symlinkSync(path.join(authDir, 'auth.json_b'), path.join(authDir, 'auth.json'));
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.equal(reads, 2);
+  assert.match(rig.sentMessages[1]!, /20\|25\|auth\.json_a \[enabled\]/);
+  assert.match(rig.sentMessages[1]!, /90\|95\|auth\.json_b \* \[enabled\]/);
 });
 
 test('/auth panel can start device login from an inline action', async (t) => {
