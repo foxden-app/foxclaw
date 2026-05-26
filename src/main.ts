@@ -17,7 +17,7 @@ import {
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 import { refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
-import { createSelfUpdateRuntime, performSelfUpdate } from './update.js';
+import { createSelfUpdateRuntime, inferPnpmHomeFromEntryPoint, performSelfUpdate } from './update.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -862,9 +862,17 @@ function stopLaunchd(): void {
 }
 
 function buildServicePath(nodeDir: string): string {
+  const pnpmPath = resolveCommand('pnpm');
+  const inferredPnpmHome = inferPnpmHomeFromEntryPoint(entryPoint) || '';
+  const configuredPnpmHome = process.env.PNPM_HOME?.trim() || '';
   const parts = [
     path.join(process.env.HOME || '', '.local', 'bin'),
     nodeDir,
+    inferredPnpmHome,
+    inferredPnpmHome ? path.join(inferredPnpmHome, 'bin') : '',
+    configuredPnpmHome,
+    configuredPnpmHome ? path.join(configuredPnpmHome, 'bin') : '',
+    pnpmPath ? path.dirname(pnpmPath) : '',
     '/usr/local/sbin',
     '/usr/local/bin',
     '/usr/sbin',

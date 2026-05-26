@@ -59,25 +59,48 @@ export function selfUpdateStatusPath(statusPath: string): string {
   return path.join(path.dirname(statusPath), UPDATE_STATUS_FILENAME);
 }
 
+export function inferPnpmHomeFromEntryPoint(entryPoint: string): string | null {
+  const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
+  const globalMarker = '/global/';
+  const globalIndex = normalizedEntryPoint.indexOf(globalMarker);
+  if (globalIndex <= 0 || !normalizedEntryPoint.includes('/.pnpm/')) {
+    return null;
+  }
+  return normalizedEntryPoint.slice(0, globalIndex);
+}
+
 export function resolveSelfUpdateInstaller(
   entryPoint: string,
   nodePath = process.execPath,
   exists: (target: string) => boolean = fs.existsSync,
+  env: NodeJS.ProcessEnv = process.env,
 ): SelfUpdateInstaller {
-  const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
-  const globalMarker = '/global/';
-  const globalIndex = normalizedEntryPoint.indexOf(globalMarker);
-  if (globalIndex > 0 && normalizedEntryPoint.includes('/.pnpm/')) {
-    const pnpmHome = normalizedEntryPoint.slice(0, globalIndex);
-    const pnpmCommand = path.join(pnpmHome, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm');
-    if (!exists(pnpmCommand)) {
-      throw new Error(`Current installation is managed by pnpm, but pnpm was not found at ${pnpmCommand}.`);
+  const pnpmHome = inferPnpmHomeFromEntryPoint(entryPoint);
+  if (pnpmHome) {
+    const commandName = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+    const candidates = executableCandidates(commandName, nodePath, env, [
+      path.join(pnpmHome, commandName),
+      path.join(pnpmHome, 'bin', commandName),
+      env.PNPM_HOME?.trim() ? path.join(env.PNPM_HOME.trim(), commandName) : '',
+      env.PNPM_HOME?.trim() ? path.join(env.PNPM_HOME.trim(), 'bin', commandName) : '',
+    ]);
+    const pnpmCommand = candidates.find((candidate) => exists(candidate));
+    if (pnpmCommand) {
+      return {
+        manager: 'pnpm',
+        command: pnpmCommand,
+        installArgs: ['add', '--global', PACKAGE_SPEC],
+        rootArgs: ['root', '--global'],
+      };
     }
+    const npmCommandName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const npmCommand = executableCandidates(npmCommandName, nodePath, env)
+      .find((candidate) => exists(candidate)) ?? npmCommandName;
     return {
       manager: 'pnpm',
-      command: pnpmCommand,
-      installArgs: ['add', '--global', PACKAGE_SPEC],
-      rootArgs: ['root', '--global'],
+      command: npmCommand,
+      installArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'add', '--global', PACKAGE_SPEC],
+      rootArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'root', '--global'],
     };
   }
 
@@ -181,13 +204,14 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
   const env = options.env ?? process.env;
   let toVersion: string | null = null;
   try {
-    const installer = resolveSelfUpdateInstaller(options.entryPoint, options.nodePath);
+    const installer = resolveSelfUpdateInstaller(options.entryPoint, options.nodePath, fs.existsSync, env);
+    const installerEnv = buildInstallerEnv(options.entryPoint, installer, env);
     console.log(`[UPDATE] Installing ${PACKAGE_SPEC} with ${installer.manager}...`);
-    runInherited(installer.command, installer.installArgs, env);
-    const updatedEntryPoint = resolveUpdatedEntryPoint(installer, env);
+    runInherited(installer.command, installer.installArgs, installerEnv);
+    const updatedEntryPoint = resolveUpdatedEntryPoint(installer, installerEnv);
     toVersion = readInstalledPackageVersion(updatedEntryPoint);
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
-    runInherited(options.nodePath, [updatedEntryPoint, 'start'], env);
+    runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
     completeNotification(options.notificationFile, 'succeeded', toVersion, null);
     console.log(`[OK] FoxClaw updated and restarted: ${options.version} -> ${toVersion}`);
     return {
@@ -207,6 +231,43 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
       error: message,
     };
   }
+}
+
+function executableCandidates(
+  commandName: string,
+  nodePath: string,
+  env: NodeJS.ProcessEnv,
+  preferred: string[] = [],
+): string[] {
+  return [
+    ...preferred,
+    path.join(path.dirname(nodePath), commandName),
+    ...(env.PATH || '').split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, commandName)),
+  ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+}
+
+function buildInstallerEnv(
+  entryPoint: string,
+  installer: SelfUpdateInstaller,
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const pnpmHome = installer.manager === 'pnpm' ? inferPnpmHomeFromEntryPoint(entryPoint) : null;
+  if (!pnpmHome) {
+    return env;
+  }
+  const configuredPnpmHome = env.PNPM_HOME?.trim() || pnpmHome;
+  const pathEntries = [
+    configuredPnpmHome,
+    path.join(configuredPnpmHome, 'bin'),
+    pnpmHome,
+    path.join(pnpmHome, 'bin'),
+    ...(env.PATH || '').split(path.delimiter).filter(Boolean),
+  ];
+  return {
+    ...env,
+    PNPM_HOME: configuredPnpmHome,
+    PATH: pathEntries.filter((entry, index, all) => all.indexOf(entry) === index).join(path.delimiter),
+  };
 }
 
 function runInherited(command: string, args: string[], env: NodeJS.ProcessEnv): void {

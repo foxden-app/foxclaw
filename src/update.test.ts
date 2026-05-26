@@ -23,6 +23,66 @@ test('resolveSelfUpdateInstaller preserves pnpm-managed global installations', (
   assert.deepEqual(installer.installArgs, ['add', '--global', '@foxden-app/foxclaw@latest']);
 });
 
+test('resolveSelfUpdateInstaller finds pnpm beside the Node executable when PNPM_HOME has no binary', () => {
+  const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
+  const installer = resolveSelfUpdateInstaller(
+    entryPoint,
+    '/home/user/.nvm/versions/node/v24/bin/node',
+    (target) => target === '/home/user/.nvm/versions/node/v24/bin/pnpm',
+    { PATH: '/usr/bin:/bin' },
+  );
+
+  assert.equal(installer.manager, 'pnpm');
+  assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/pnpm');
+});
+
+test('resolveSelfUpdateInstaller finds pnpm in PNPM_HOME bin layout', () => {
+  const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
+  const installer = resolveSelfUpdateInstaller(
+    entryPoint,
+    '/opt/node/bin/node',
+    (target) => target === '/home/user/.local/share/pnpm/bin/pnpm',
+    { PATH: '/usr/bin:/bin' },
+  );
+
+  assert.equal(installer.command, '/home/user/.local/share/pnpm/bin/pnpm');
+});
+
+test('resolveSelfUpdateInstaller finds pnpm in PATH for a pnpm-managed install', () => {
+  const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
+  const installer = resolveSelfUpdateInstaller(
+    entryPoint,
+    '/opt/node/bin/node',
+    (target) => target === '/home/user/bin/pnpm',
+    { PATH: '/home/user/bin:/usr/bin' },
+  );
+
+  assert.equal(installer.command, '/home/user/bin/pnpm');
+});
+
+test('resolveSelfUpdateInstaller falls back to npm exec when pnpm is not installed', () => {
+  const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
+  const installer = resolveSelfUpdateInstaller(
+    entryPoint,
+    '/home/user/.nvm/versions/node/v24/bin/node',
+    (target) => target === '/home/user/.nvm/versions/node/v24/bin/npm',
+    { PATH: '/usr/bin:/bin' },
+  );
+
+  assert.equal(installer.manager, 'pnpm');
+  assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/npm');
+  assert.deepEqual(installer.installArgs, [
+    'exec',
+    '--yes',
+    '--package=pnpm@latest',
+    '--',
+    'pnpm',
+    'add',
+    '--global',
+    '@foxden-app/foxclaw@latest',
+  ]);
+});
+
 test('resolveSelfUpdateInstaller uses the npm beside Node for npm installations', () => {
   const installer = resolveSelfUpdateInstaller(
     '/home/user/.nvm/versions/node/v24/lib/node_modules/@foxden-app/foxclaw/dist/main.js',
