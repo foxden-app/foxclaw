@@ -26,6 +26,7 @@ interface DefaultScopeParams {
   allowedChatId: string | null;
   allowedTopicId: number | null;
   topicId: number | null;
+  requireExplicitGroupAddressing?: boolean;
 }
 
 export function resolveTelegramAddressing(params: ResolveTelegramAddressingParams): TelegramAddressingDecision {
@@ -52,6 +53,9 @@ export function resolveTelegramAddressing(params: ResolveTelegramAddressingParam
 export function isDefaultTelegramScope(params: DefaultScopeParams): boolean {
   if (params.chatType === 'private') {
     return true;
+  }
+  if (params.requireExplicitGroupAddressing) {
+    return false;
   }
   if (params.allowedChatId === null) {
     return false;

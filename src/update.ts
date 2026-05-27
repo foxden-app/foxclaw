@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import type { AppLocale } from './types.js';
 
 const PACKAGE_SPEC = '@foxden-app/foxclaw@latest';
+const CODEX_PACKAGE_SPEC = '@openai/codex@latest';
 const UPDATE_STATUS_FILENAME = 'self-update.json';
 
 export type SelfUpdateState = 'pending' | 'succeeded' | 'failed';
@@ -15,6 +16,7 @@ export interface SelfUpdateStatus {
   locale: AppLocale;
   fromVersion: string;
   toVersion: string | null;
+  codexUpdate?: string | null;
   error: string | null;
   updatedAt: string;
 }
@@ -30,6 +32,7 @@ export interface SelfUpdateInstaller {
   command: string;
   installArgs: string[];
   rootArgs: string[];
+  pnpmHome?: string;
 }
 
 interface CreateSelfUpdateRuntimeOptions {
@@ -38,6 +41,7 @@ interface CreateSelfUpdateRuntimeOptions {
   version: string;
   statusPath: string;
   logPath: string;
+  codexCliBin?: string;
 }
 
 interface PerformSelfUpdateOptions {
@@ -45,6 +49,7 @@ interface PerformSelfUpdateOptions {
   nodePath: string;
   version: string;
   notificationFile?: string;
+  codexCliBin?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -91,6 +96,7 @@ export function resolveSelfUpdateInstaller(
         command: pnpmCommand,
         installArgs: ['add', '--global', PACKAGE_SPEC],
         rootArgs: ['root', '--global'],
+        pnpmHome,
       };
     }
     const npmCommandName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -101,6 +107,7 @@ export function resolveSelfUpdateInstaller(
       command: npmCommand,
       installArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'add', '--global', PACKAGE_SPEC],
       rootArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'root', '--global'],
+      pnpmHome,
     };
   }
 
@@ -111,6 +118,77 @@ export function resolveSelfUpdateInstaller(
     installArgs: ['install', '--global', PACKAGE_SPEC],
     rootArgs: ['root', '--global'],
   };
+}
+
+export function resolveCodexUpdateInstaller(
+  codexCliBin: string,
+  nodePath = process.execPath,
+  exists: (target: string) => boolean = fs.existsSync,
+  env: NodeJS.ProcessEnv = process.env,
+  realpath: (target: string) => string = fs.realpathSync,
+  readText: (target: string) => string = (target) => fs.readFileSync(target, 'utf8'),
+): SelfUpdateInstaller | null {
+  const resolved = resolveManagedCodexEntryPoint(codexCliBin, realpath, readText);
+  if (!resolved) return null;
+  const normalized = resolved.replace(/\\/g, '/');
+  const pnpmManaged = normalized.includes('/global/') && normalized.includes('/.pnpm/@openai+codex@');
+  const npmManaged = normalized.includes('/lib/node_modules/@openai/codex/')
+    || normalized.includes('/npm/node_modules/@openai/codex/');
+  if (!pnpmManaged && !npmManaged) {
+    return null;
+  }
+  const installer = resolveSelfUpdateInstaller(resolved, nodePath, exists, env);
+  return {
+    ...installer,
+    installArgs: installer.installArgs.map((argument) => (
+      argument === PACKAGE_SPEC ? CODEX_PACKAGE_SPEC : argument
+    )),
+  };
+}
+
+function resolveManagedCodexEntryPoint(
+  codexCliBin: string,
+  realpath: (target: string) => string,
+  readText: (target: string) => string,
+): string | null {
+  const pending = [codexCliBin];
+  const visited = new Set<string>();
+  while (pending.length > 0 && visited.size < 4) {
+    const candidate = pending.shift()!;
+    let resolved = candidate;
+    try {
+      resolved = realpath(candidate);
+    } catch {
+      // Wrapper inspection below can still reveal its managed target.
+    }
+    if (visited.has(resolved)) continue;
+    visited.add(resolved);
+    const normalized = resolved.replace(/\\/g, '/');
+    if (isManagedCodexPackagePath(normalized)) {
+      return resolved;
+    }
+    let contents = '';
+    try {
+      contents = readText(resolved);
+    } catch {
+      continue;
+    }
+    const embeddedPackageRoot = contents.match(/\/[^\s"']*\/global\/[^\s"']*\/\.pnpm\/@openai\+codex@[^\s"']*\/node_modules\/@openai\/codex/)?.[0];
+    if (embeddedPackageRoot) {
+      return path.join(embeddedPackageRoot, 'bin', 'codex.js');
+    }
+    const wrappedExecutable = contents.match(/\bexec\s+"([^"]*codex[^"]*)"/)?.[1];
+    if (wrappedExecutable) {
+      pending.push(wrappedExecutable);
+    }
+  }
+  return null;
+}
+
+function isManagedCodexPackagePath(normalized: string): boolean {
+  return (normalized.includes('/global/') && normalized.includes('/.pnpm/@openai+codex@'))
+    || normalized.includes('/lib/node_modules/@openai/codex/')
+    || normalized.includes('/npm/node_modules/@openai/codex/');
 }
 
 export function readSelfUpdateStatus(statusFile: string): SelfUpdateStatus | null {
@@ -131,6 +209,7 @@ export function readSelfUpdateStatus(statusFile: string): SelfUpdateStatus | nul
       locale: parsed.locale,
       fromVersion: parsed.fromVersion,
       toVersion: typeof parsed.toVersion === 'string' ? parsed.toVersion : null,
+      ...(typeof parsed.codexUpdate === 'string' ? { codexUpdate: parsed.codexUpdate } : {}),
       error: typeof parsed.error === 'string' ? parsed.error : null,
       updatedAt: parsed.updatedAt,
     };
@@ -160,6 +239,7 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
         locale,
         fromVersion: options.version,
         toVersion: null,
+        codexUpdate: null,
         error: null,
         updatedAt: new Date().toISOString(),
       });
@@ -172,7 +252,7 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           {
             detached: true,
             stdio: ['ignore', logFd, logFd],
-            env: process.env,
+            env: options.codexCliBin ? { ...process.env, CODEX_CLI_BIN: options.codexCliBin } : process.env,
           },
         );
         child.unref();
@@ -183,6 +263,7 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           locale,
           fromVersion: options.version,
           toVersion: null,
+          codexUpdate: null,
           error: formatError(error),
           updatedAt: new Date().toISOString(),
         });
@@ -203,7 +284,10 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
 export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdateOutcome {
   const env = options.env ?? process.env;
   let toVersion: string | null = null;
+  let codexUpdate: string | null = null;
   try {
+    codexUpdate = updateManagedCodexCli(options.codexCliBin ?? env.CODEX_CLI_BIN ?? '', options.nodePath, env);
+    console.log(`[UPDATE] ${codexUpdate}`);
     const installer = resolveSelfUpdateInstaller(options.entryPoint, options.nodePath, fs.existsSync, env);
     const installerEnv = buildInstallerEnv(options.entryPoint, installer, env);
     console.log(`[UPDATE] Installing ${PACKAGE_SPEC} with ${installer.manager}...`);
@@ -212,7 +296,7 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     toVersion = readInstalledPackageVersion(updatedEntryPoint);
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
     runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
-    completeNotification(options.notificationFile, 'succeeded', toVersion, null);
+    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null);
     console.log(`[OK] FoxClaw updated and restarted: ${options.version} -> ${toVersion}`);
     return {
       ok: true,
@@ -222,7 +306,7 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     };
   } catch (error) {
     const message = formatError(error);
-    completeNotification(options.notificationFile, 'failed', toVersion, message);
+    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message);
     console.error(`[FAIL] FoxClaw update failed: ${message}`);
     return {
       ok: false,
@@ -230,6 +314,23 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
       toVersion,
       error: message,
     };
+  }
+}
+
+function updateManagedCodexCli(codexCliBin: string, nodePath: string, env: NodeJS.ProcessEnv): string {
+  if (!codexCliBin) {
+    return 'Codex CLI update skipped: CODEX_CLI_BIN is not configured.';
+  }
+  const installer = resolveCodexUpdateInstaller(codexCliBin, nodePath, fs.existsSync, env);
+  if (!installer) {
+    return 'Codex CLI update skipped: configured installation is not a recognized global npm/pnpm package.';
+  }
+  try {
+    const installerEnv = buildInstallerEnv(fs.realpathSync(codexCliBin), installer, env);
+    runInherited(installer.command, installer.installArgs, installerEnv);
+    return `Codex CLI updated with ${installer.manager}.`;
+  } catch (error) {
+    return `Codex CLI update failed without blocking FoxClaw update: ${formatError(error)}`;
   }
 }
 
@@ -251,7 +352,9 @@ function buildInstallerEnv(
   installer: SelfUpdateInstaller,
   env: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-  const pnpmHome = installer.manager === 'pnpm' ? inferPnpmHomeFromEntryPoint(entryPoint) : null;
+  const pnpmHome = installer.manager === 'pnpm'
+    ? installer.pnpmHome ?? inferPnpmHomeFromEntryPoint(entryPoint)
+    : null;
   if (!pnpmHome) {
     return env;
   }
@@ -313,6 +416,7 @@ function completeNotification(
   notificationFile: string | undefined,
   state: Extract<SelfUpdateState, 'succeeded' | 'failed'>,
   toVersion: string | null,
+  codexUpdate: string | null,
   error: string | null,
 ): void {
   if (!notificationFile) {
@@ -326,6 +430,7 @@ function completeNotification(
     ...pending,
     state,
     toVersion,
+    codexUpdate,
     error,
     updatedAt: new Date().toISOString(),
   });

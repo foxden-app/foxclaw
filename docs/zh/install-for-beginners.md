@@ -141,7 +141,7 @@ nano ~/.foxclaw/.env
 第一次私聊模式只需要重点填写这些值：
 
 ```dotenv
-TG_BOT_TOKEN=123456789:replace_with_your_bot_token
+TG_BOT_TOKENS=123456789:replace_with_your_bot_token
 TG_ALLOWED_USER_ID=123456789
 TG_ALLOWED_CHAT_ID=
 TG_ALLOWED_TOPIC_ID=
@@ -174,7 +174,7 @@ foxclaw doctor
 ```text
 [OK] node >= 24
 [OK] codex cli available
-[OK] telegram bot token configured
+[OK] telegram bot token(s) configured
 [OK] telegram allowed user configured
 [OK] default cwd exists
 ```
@@ -278,7 +278,7 @@ foxclaw uninstall-systemd
 foxclaw update
 ```
 
-也可以在已授权的 Telegram 私聊里发送 `/update`。它会在当前没有运行中回复、审批或待确认问题时，完成升级、自检和服务重启，并在重启后回报结果。
+也可以在已授权的 Telegram 私聊里发送 `/update`。它会在所有 bot 都没有运行中回复、审批或待确认问题时，尝试升级 npm/pnpm 安装的 Codex CLI，完成 FoxClaw 升级、自检和服务重启，并在重启后回报结果。
 
 如果 `~/.foxclaw/.env` 已经存在，`foxclaw init` 会先询问是否更新 Telegram 和工作目录相关字段，其它配置保持不变。
 

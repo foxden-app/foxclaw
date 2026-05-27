@@ -11,13 +11,17 @@ export interface WeixinBridgeScope {
   fromUserId: string;
 }
 
+export interface TelegramBridgeTarget extends TelegramScope {
+  botId: string | null;
+}
+
 export function isBridgeScopedKey(key: string): boolean {
   return key.startsWith(BRIDGE_SCOPE_TELEGRAM_PREFIX) || key.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX);
 }
 
 /** Wrap legacy Telegram inner scope (`chat::topic`) for storage and routing. */
-export function toTelegramBridgeScopeId(telegramInnerScopeId: string): string {
-  return `${BRIDGE_SCOPE_TELEGRAM_PREFIX}${telegramInnerScopeId}`;
+export function toTelegramBridgeScopeId(telegramInnerScopeId: string, botId: string | null = null): string {
+  return `${BRIDGE_SCOPE_TELEGRAM_PREFIX}${botId ? `${botId}:` : ''}${telegramInnerScopeId}`;
 }
 
 /** Strip `telegram:` prefix; returns `null` if not a Telegram bridge scope. */
@@ -28,12 +32,16 @@ export function telegramInnerScopeFromBridge(bridgeScopeId: string): string | nu
   return bridgeScopeId.slice(BRIDGE_SCOPE_TELEGRAM_PREFIX.length);
 }
 
-export function parseTelegramTargetFromBridgeScope(bridgeScopeId: string): TelegramScope {
+export function parseTelegramTargetFromBridgeScope(bridgeScopeId: string): TelegramBridgeTarget {
   const inner = telegramInnerScopeFromBridge(bridgeScopeId);
   if (inner === null) {
     throw new Error(`Expected ${BRIDGE_SCOPE_TELEGRAM_PREFIX} scope, got: ${bridgeScopeId}`);
   }
-  return parseTelegramScopeId(inner);
+  const namespaced = /^(bot\d+):(.*)$/.exec(inner);
+  if (!namespaced) {
+    return { ...parseTelegramScopeId(inner), botId: null };
+  }
+  return { ...parseTelegramScopeId(namespaced[2]!), botId: namespaced[1]! };
 }
 
 /** Parse `weixin:<accountId>:<from_user_id>`; returns `null` if not a Weixin scope. */

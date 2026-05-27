@@ -20,7 +20,7 @@ journalctl --user -u foxclaw.service -f
 | --- | --- | --- |
 | `[FAIL] node >= 24` | 当前 shell 使用的是旧版 Node.js。 | 先用任意方式安装或切换到 Node.js 24+，再重新执行 `foxclaw doctor`。如果服务仍用旧 Node，从 Node 24+ 的 shell 里重新执行 `foxclaw start`。 |
 | `[FAIL] codex cli available` | `codex` 命令不在 PATH 里。 | 安装 Codex CLI 或修正 PATH，再确认 `codex --version` 可用。 |
-| `[FAIL] telegram bot token configured` | `.env` 里缺少 `TG_BOT_TOKEN`。 | 从 `@BotFather` 复制 token，填入 `.env`。 |
+| `[FAIL] telegram bot token(s) configured` | `.env` 里没有 `TG_BOT_TOKENS`，也没有兼容变量 `TG_BOT_TOKEN`。 | 从 `@BotFather` 复制一个或多个 token，用逗号分隔填入 `TG_BOT_TOKENS`。 |
 | `[FAIL] telegram allowed user configured` | `.env` 里缺少 `TG_ALLOWED_USER_ID`。 | 从 `@userinfobot` 获取数字 ID，填入 `.env`。 |
 | `[FAIL] default cwd exists` | `DEFAULT_CWD` 指向不存在的目录。 | 创建该目录，或把 `DEFAULT_CWD` 改成一个真实存在的绝对路径。 |
 

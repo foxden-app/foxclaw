@@ -118,6 +118,12 @@ import { renderActiveTurnStatus } from './status.js';
 import { writeRuntimeStatus } from '../runtime.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
+export interface CoreCoordinator {
+  canSelfUpdate?: () => boolean;
+  authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
+  statusUpdated?: (status: RuntimeStatus) => void;
+}
+
 interface RenderedTelegramMessage {
   messageId: number;
   text: string;
@@ -494,6 +500,7 @@ export class BridgeSessionCore {
     private readonly app: CodexAppClient,
     outbound: BridgeMessagingRouter,
     private readonly selfUpdater: SelfUpdateRuntime | null = null,
+    private readonly coordinator: CoreCoordinator | null = null,
   ) {
     this.messaging = outbound;
   }
@@ -689,6 +696,7 @@ export class BridgeSessionCore {
         allowedChatId: this.config.tgAllowedChatId,
         allowedTopicId: this.config.tgAllowedTopicId,
         topicId: event.topicId,
+        requireExplicitGroupAddressing: this.config.tgRequireExplicitGroupAddressing,
       }),
       replyToBot: event.replyToBot,
     });
@@ -2032,6 +2040,15 @@ export class BridgeSessionCore {
         return;
       }
       const lines = [t(locale, 'auth_add_done', { value: pendingAuthAdd.name })];
+      try {
+        await this.coordinator?.authCandidateUpdated?.(this.authRuntimeId(), pendingAuthAdd.name);
+      } catch (error) {
+        this.logger.warn('codex.auth_candidate_sync_failed', {
+          candidate: pendingAuthAdd.name,
+          runtimeId: this.authRuntimeId(),
+          error: toErrorMeta(error),
+        });
+      }
       lines.push(...await this.buildCodexUsageStatusLines(locale));
       await this.sendMessage(scopeId, lines.join('\n'));
       return;
@@ -2042,7 +2059,7 @@ export class BridgeSessionCore {
   }
 
   private async restorePendingAuthAdd(record: PendingAuthAdd): Promise<void> {
-    const state = await listCodexAuthState();
+    const state = await this.listCodexAuthState();
     await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, record.previousTargetPath);
   }
 
@@ -2360,6 +2377,9 @@ export class BridgeSessionCore {
 
   private async restorePendingUserInputs(): Promise<void> {
     for (const stored of this.store.listPendingUserInputs()) {
+      if (!this.ownsScope(stored.chatId)) {
+        continue;
+      }
       const record = parseStoredPendingUserInput(stored);
       if (!record) {
         this.store.markPendingUserInputResolved(stored.localId);
@@ -3187,6 +3207,37 @@ export class BridgeSessionCore {
     };
   }
 
+  isIdleForServiceUpdate(): boolean {
+    return this.activeTurns.size === 0
+      && this.pendingApprovalMessages.size === 0
+      && this.pendingUserInputs.size === 0
+      && this.pendingMcpElicitations.size === 0
+      && this.pendingLoginsByScope.size === 0
+      && !this.authRotationInProgress;
+  }
+
+  private hasLocalBlockingActivity(): boolean {
+    return !this.isIdleForServiceUpdate();
+  }
+
+  private authRuntimeId(): string {
+    return this.config.tgScopeBotId ?? 'default';
+  }
+
+  private ownsScope(scopeId: string): boolean {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      return this.messaging.hasWeixinTransport;
+    }
+    if (!this.config.tgScopeBotId) {
+      return parseTelegramTargetFromBridgeScope(scopeId).botId === null;
+    }
+    try {
+      return parseTelegramTargetFromBridgeScope(scopeId).botId === this.config.tgScopeBotId;
+    } catch {
+      return false;
+    }
+  }
+
   private setActiveTurn(scopeId: string, turnId: string, active: ActiveTurn): void {
     const key = activeTurnKey(scopeId, turnId);
     this.activeTurns.set(key, active);
@@ -3447,7 +3498,7 @@ export class BridgeSessionCore {
       }
     }
     for (const scopeId of this.store.findAllChatIdsByThreadId(threadId)) {
-      if (!this.messaging.canSendToScope(scopeId)) {
+      if (!this.ownsScope(scopeId) || !this.messaging.canSendToScope(scopeId)) {
         continue;
       }
       scopes.add(scopeId);
@@ -3483,7 +3534,12 @@ export class BridgeSessionCore {
   }
 
   private updateStatus(): void {
-    writeRuntimeStatus(this.config.statusPath, this.getRuntimeStatus());
+    const status = this.getRuntimeStatus();
+    if (this.coordinator?.statusUpdated) {
+      this.coordinator.statusUpdated(status);
+      return;
+    }
+    writeRuntimeStatus(this.config.statusPath, status);
   }
 
   private async sendMessage(
@@ -4469,7 +4525,7 @@ export class BridgeSessionCore {
   }
 
   private async handleAuthReloadCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+    if (this.hasLocalBlockingActivity()) {
       await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
       return;
     }
@@ -4489,7 +4545,7 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'update_unavailable'));
       return;
     }
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+    if (!this.isIdleForServiceUpdate() || this.store.countPendingApprovals() > 0 || this.store.countPendingUserInputs() > 0 || (this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate())) {
       await this.sendMessage(scopeId, t(locale, 'update_blocked_active'));
       return;
     }
@@ -4542,18 +4598,24 @@ export class BridgeSessionCore {
       this.scheduleSelfUpdateStatusPoll();
       return;
     }
+    if (!this.ownsScope(status.scopeId)) {
+      this.scheduleSelfUpdateStatusPoll();
+      return;
+    }
     await this.sendMessage(status.scopeId, this.formatSelfUpdateResult(status));
     await this.selfUpdater?.clearStatus();
   }
 
   private formatSelfUpdateResult(status: SelfUpdateStatus): string {
     if (status.state === 'succeeded') {
-      return t(status.locale, 'update_succeeded', {
+      const result = t(status.locale, 'update_succeeded', {
         from: status.fromVersion,
         to: status.toVersion ?? t(status.locale, 'unknown'),
       });
+      return status.codexUpdate ? `${result}\n${status.codexUpdate}` : result;
     }
-    return t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
+    const result = t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
+    return status.codexUpdate ? `${result}\n${status.codexUpdate}` : result;
   }
 
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -4598,7 +4660,7 @@ export class BridgeSessionCore {
   }
 
   private async handleAuthUseCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+    if (this.hasLocalBlockingActivity()) {
       await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
       return;
     }
@@ -4642,7 +4704,7 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
       return;
     }
-    this.store.setCodexAuthCandidateDisabled(candidate.name, disabled);
+    this.store.setCodexAuthCandidateDisabled(candidate.name, disabled, this.authRuntimeId());
     await this.sendMessage(scopeId, t(locale, disabled ? 'auth_candidate_disabled' : 'auth_candidate_enabled', {
       value: candidate.name,
     }));
@@ -4662,7 +4724,7 @@ export class BridgeSessionCore {
   }
 
   private async handleAuthAddCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+    if (this.hasLocalBlockingActivity()) {
       await this.sendMessage(scopeId, t(locale, 'auth_reload_blocked_active'));
       return;
     }
@@ -5147,7 +5209,7 @@ export class BridgeSessionCore {
       return;
     }
     const disabled = !candidate.disabled;
-    this.store.setCodexAuthCandidateDisabled(candidate.name, disabled);
+    this.store.setCodexAuthCandidateDisabled(candidate.name, disabled, this.authRuntimeId());
     const state = await this.listCodexAuthState();
     record.candidates = state.candidates;
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, disabled ? 'auth_candidate_disabled_short' : 'auth_candidate_enabled_short'));
@@ -5176,7 +5238,7 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
       return;
     }
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+    if (this.hasLocalBlockingActivity()) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_blocked_active'));
       return;
     }
@@ -5200,7 +5262,7 @@ export class BridgeSessionCore {
     if (!this.pendingAuthRotation || this.authRotationInProgress) {
       return false;
     }
-    if (this.activeTurns.size > 0 || this.store.countPendingApprovals() > 0 || this.pendingUserInputs.size > 0 || this.pendingMcpElicitations.size > 0) {
+    if (this.hasLocalBlockingActivity()) {
       return false;
     }
 
@@ -5315,12 +5377,22 @@ export class BridgeSessionCore {
   }
 
   private async listCodexAuthState(): Promise<CodexAuthState> {
-    const state = await listCodexAuthState(this.store.listDisabledCodexAuthCandidateNames());
+    const state = await listCodexAuthState(
+      this.store.listDisabledCodexAuthCandidateNames(this.authRuntimeId()),
+      this.resolveAuthDir(),
+    );
     const snapshots = await this.readCodexAuthQuotaSnapshots();
     state.candidates.forEach((candidate) => {
       candidate.quota = snapshots[candidate.name] ?? null;
     });
     return state;
+  }
+
+  private resolveAuthDir(): string {
+    return this.config.codexAuthDir
+      ?? (this.config.tgMultiBotMode ? this.config.codexHome : null)
+      ?? process.env.CODEX_AUTH_DIR
+      ?? path.join(os.homedir(), '.codex');
   }
 
   private async readCodexAuthSwitchLabels(candidate: CodexAuthCandidate): Promise<CodexAuthSwitchResult> {
@@ -5344,7 +5416,7 @@ export class BridgeSessionCore {
     candidate: CodexAuthCandidate,
     automatic: boolean,
   ): Promise<void> {
-    const result = await switchCodexAuth(candidate.path);
+    const result = await switchCodexAuth(candidate.path, this.resolveAuthDir());
     this.authRotationFailedTargets.delete(candidate.path);
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
@@ -5552,7 +5624,7 @@ export class BridgeSessionCore {
   }
 
   private async refreshCodexLocalUsageStats(): Promise<void> {
-    const stats = await readCodexLocalUsageStats();
+    const stats = await readCodexLocalUsageStats(this.config.codexHome ?? undefined);
     const snapshot = { computedAtMs: Date.now(), stats };
     this.localUsageCache = snapshot;
     this.localUsageCacheLoaded = true;
@@ -5560,7 +5632,7 @@ export class BridgeSessionCore {
   }
 
   private codexLocalUsageSnapshotPath(): string {
-    return path.join(path.dirname(this.config.statusPath), CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME);
+    return path.join(path.dirname(this.config.statusPath), this.runtimeSnapshotFilename(CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME));
   }
 
   private async refreshCurrentCodexAuthQuota(state: CodexAuthState): Promise<void> {
@@ -5614,7 +5686,14 @@ export class BridgeSessionCore {
   }
 
   private codexAuthQuotaSnapshotPath(): string {
-    return path.join(path.dirname(this.config.statusPath), CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME);
+    return path.join(path.dirname(this.config.statusPath), this.runtimeSnapshotFilename(CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME));
+  }
+
+  private runtimeSnapshotFilename(filename: string): string {
+    if (!this.config.tgScopeBotId) {
+      return filename;
+    }
+    return filename.replace(/\.json$/, `-${this.config.tgScopeBotId}.json`);
   }
 
   private async sendThreadContextSummary(scopeId: string, locale: AppLocale, threadId: string): Promise<void> {
@@ -6724,6 +6803,9 @@ export class BridgeSessionCore {
 
   private async cleanupStaleTurnPreviews(): Promise<void> {
     for (const preview of this.store.listActiveTurnPreviews()) {
+      if (!this.ownsScope(preview.scopeId)) {
+        continue;
+      }
       if (!this.messaging.canSendToScope(preview.scopeId)) {
         this.store.removeActiveTurnPreview(preview.turnId);
         this.logger.info('telegram.preview_dropped_disabled_channel', {
@@ -8431,12 +8513,15 @@ function parseActiveTurnKey(key: string): { scopeId: string; turnId: string } | 
   };
 }
 
-function codexAuthDir(): string {
-  return process.env.CODEX_AUTH_DIR || path.join(os.homedir(), '.codex');
+function codexAuthDir(explicitAuthDir: string | null = null): string {
+  return explicitAuthDir || process.env.CODEX_AUTH_DIR || path.join(os.homedir(), '.codex');
 }
 
-async function listCodexAuthState(disabledNames = new Set<string>()): Promise<CodexAuthState> {
-  const authDir = codexAuthDir();
+async function listCodexAuthState(
+  disabledNames = new Set<string>(),
+  explicitAuthDir: string | null = null,
+): Promise<CodexAuthState> {
+  const authDir = codexAuthDir(explicitAuthDir);
   const authPath = path.join(authDir, 'auth.json');
   const currentTargetPath = await resolveCurrentAuthTarget(authDir, authPath);
   const candidates: CodexAuthCandidate[] = [];
@@ -8544,8 +8629,8 @@ async function pointCodexAuthAtTarget(authDir: string, authPath: string, targetP
   }
 }
 
-async function switchCodexAuth(targetPath: string): Promise<CodexAuthSwitchResult> {
-  const state = await listCodexAuthState();
+async function switchCodexAuth(targetPath: string, explicitAuthDir: string | null = null): Promise<CodexAuthSwitchResult> {
+  const state = await listCodexAuthState(new Set(), explicitAuthDir);
   const candidate = state.candidates.find(entry => entry.path === targetPath);
   if (!candidate) {
     throw new Error(`Auth candidate is no longer available: ${path.basename(targetPath)}`);

@@ -13,6 +13,7 @@ export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
 export const DEFAULT_LOCK_PATH = path.join(APP_HOME, 'runtime', 'bridge.lock');
 export const DEFAULT_CODEX_APP_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'codex-app-server.json');
 export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'codex-app-server.log');
+export const DEFAULT_CODEX_TELEGRAM_HOME = path.join(APP_HOME, 'codex', 'telegram');
 export const DEFAULT_ENV_PATH = path.join(APP_HOME, '.env');
 
 let envLoaded = false;
@@ -44,6 +45,10 @@ export function loadEnv(): void {
 
 export interface AppConfig {
   tgBotToken: string;
+  tgBotTokens: string[];
+  tgMultiBotMode: boolean;
+  tgScopeBotId: string | null;
+  tgRequireExplicitGroupAddressing: boolean;
   tgAllowedUserId: string;
   tgAllowedChatId: string | null;
   tgAllowedTopicId: number | null;
@@ -52,6 +57,8 @@ export interface AppConfig {
   codexAppLaunchCmd: string;
   codexAppServerStatePath: string;
   codexAppServerLogPath: string;
+  codexAuthDir: string | null;
+  codexHome: string | null;
   codexAppSyncOnOpen: boolean;
   codexAppSyncOnTurnComplete: boolean;
   storePath: string;
@@ -78,8 +85,22 @@ export interface AppConfig {
 
 export function loadConfig(): AppConfig {
   loadEnv();
+  const configuredTokens = parseCommaSeparatedIds(process.env.TG_BOT_TOKENS);
+  const legacyToken = optional('TG_BOT_TOKEN');
+  const tgBotTokens = configuredTokens.length > 0
+    ? configuredTokens
+    : legacyToken
+      ? [legacyToken]
+      : [];
+  if (tgBotTokens.length === 0) {
+    throw new Error('TG_BOT_TOKENS or TG_BOT_TOKEN is required');
+  }
   const config: AppConfig = {
-    tgBotToken: required('TG_BOT_TOKEN'),
+    tgBotToken: tgBotTokens[0]!,
+    tgBotTokens,
+    tgMultiBotMode: configuredTokens.length > 0,
+    tgScopeBotId: null,
+    tgRequireExplicitGroupAddressing: configuredTokens.length > 1,
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
     tgAllowedChatId: optional('TG_ALLOWED_CHAT_ID'),
     tgAllowedTopicId: nullableIntEnv('TG_ALLOWED_TOPIC_ID'),
@@ -88,6 +109,8 @@ export function loadConfig(): AppConfig {
     codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || 'codex app',
     codexAppServerStatePath: process.env.CODEX_APP_SERVER_STATE_PATH || DEFAULT_CODEX_APP_SERVER_STATE_PATH,
     codexAppServerLogPath: process.env.CODEX_APP_SERVER_LOG_PATH || DEFAULT_CODEX_APP_SERVER_LOG_PATH,
+    codexAuthDir: process.env.CODEX_AUTH_DIR?.trim() || null,
+    codexHome: process.env.CODEX_HOME?.trim() || null,
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
     codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,

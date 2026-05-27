@@ -21,6 +21,10 @@ const loggerStub = {
 function createConfig(tempDir: string): AppConfig {
   return {
     tgBotToken: 'token',
+    tgBotTokens: ['token'],
+    tgMultiBotMode: false,
+    tgScopeBotId: null,
+    tgRequireExplicitGroupAddressing: false,
     tgAllowedUserId: '42',
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
@@ -29,6 +33,8 @@ function createConfig(tempDir: string): AppConfig {
     codexAppLaunchCmd: 'codex app',
     codexAppServerStatePath: path.join(tempDir, 'codex-app-server.json'),
     codexAppServerLogPath: path.join(tempDir, 'codex-app-server.log'),
+    codexAuthDir: null,
+    codexHome: null,
     codexAppSyncOnOpen: false,
     codexAppSyncOnTurnComplete: false,
     storePath: path.join(tempDir, 'bridge.sqlite'),

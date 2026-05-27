@@ -18,7 +18,13 @@ test('toTelegramBridgeScopeId wraps inner telegram scope', () => {
 
 test('parseTelegramTargetFromBridgeScope unwraps telegram prefix', () => {
   const id = toTelegramBridgeScopeId(createTelegramScopeId('42', null));
-  assert.deepEqual(parseTelegramTargetFromBridgeScope(id), { chatId: '42', topicId: null });
+  assert.deepEqual(parseTelegramTargetFromBridgeScope(id), { chatId: '42', topicId: null, botId: null });
+});
+
+test('Telegram bot namespaces keep identical chats independent', () => {
+  const id = toTelegramBridgeScopeId(createTelegramScopeId('42', null), 'bot777');
+  assert.equal(id, 'telegram:bot777:42::root');
+  assert.deepEqual(parseTelegramTargetFromBridgeScope(id), { chatId: '42', topicId: null, botId: 'bot777' });
 });
 
 test('telegramInnerScopeFromBridge returns null for non-telegram scopes', () => {

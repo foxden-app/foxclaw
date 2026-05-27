@@ -8,7 +8,7 @@
 
 先准备这几个值：
 
-- `TG_BOT_TOKEN`：从 `@BotFather` 拿到的 Telegram bot token
+- `TG_BOT_TOKENS`：从 `@BotFather` 拿到的一个或多个 Telegram bot token，多项用逗号分隔
 - `TG_ALLOWED_USER_ID`：你的 Telegram 数字用户 ID
 - `DEFAULT_CWD`：希望 Codex 默认工作的目录
 
@@ -32,7 +32,7 @@
 先使用 Telegram 私聊模式。除非我明确提供 TG_ALLOWED_CHAT_ID 或 TG_ALLOWED_TOPIC_ID，否则不要配置群组/话题模式。
 
 必需配置：
-TG_BOT_TOKEN=<把 token 粘贴在这里>
+TG_BOT_TOKENS=<粘贴一个 token，或多个逗号分隔 token>
 TG_ALLOWED_USER_ID=<把 Telegram 数字用户 ID 粘贴在这里>
 DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 
@@ -48,13 +48,13 @@ DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 9. 验证最终状态：
    - Linux 上 foxclaw.service 处于 active/enabled
    - foxclaw status 可以正常输出
-10. 汇报执行过的命令、最终状态和后续看日志的命令。请隐藏 TG_BOT_TOKEN，不要打印完整 token 或完整 .env。
+10. 汇报执行过的命令、最终状态和后续看日志的命令。请隐藏 TG_BOT_TOKENS，不要打印完整 token 或完整 .env。
 ```
 
 ## 安全注意事项
 
 - 不要把 bot token 粘贴到公开 issue、公开聊天或代码仓库。
 - 不要提交 `.env`。
-- 汇报结果时隐藏 `TG_BOT_TOKEN`。
+- 汇报结果时隐藏 `TG_BOT_TOKENS` 和兼容变量 `TG_BOT_TOKEN`。
 - 第一次安装不要把 `/`、整个 `/Users`、整个 `/home` 或完整 home 目录设为 `DEFAULT_CWD`。
 - 日常启动用 `foxclaw start`；只有排障时才用前台模式 `foxclaw serve`。

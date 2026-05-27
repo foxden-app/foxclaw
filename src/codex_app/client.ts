@@ -147,6 +147,7 @@ export class CodexAppClient extends EventEmitter {
     private readonly serverStatePath: string,
     private readonly serverLogPath: string,
     private readonly logger: Logger,
+    private readonly childEnv: NodeJS.ProcessEnv | null = null,
   ) {
     super();
   }
@@ -647,7 +648,12 @@ export class CodexAppClient extends EventEmitter {
     }
 
     if (this.autolaunch) {
-      const launcher = spawn(this.launchCommand, { shell: true, detached: true, stdio: 'ignore' });
+      const launcher = spawn(this.launchCommand, {
+        shell: true,
+        detached: true,
+        stdio: 'ignore',
+        env: this.childEnv ? { ...process.env, ...this.childEnv } : process.env,
+      });
       launcher.unref();
     }
     this.port = await reservePort();
@@ -657,6 +663,7 @@ export class CodexAppClient extends EventEmitter {
       child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
         detached: true,
         stdio: ['ignore', stdoutFd, stderrFd],
+        env: this.childEnv ? { ...process.env, ...this.childEnv } : process.env,
       });
     } finally {
       fs.closeSync(stdoutFd);

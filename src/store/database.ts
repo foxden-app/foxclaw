@@ -52,6 +52,12 @@ export class BridgeStore {
         bot_key TEXT PRIMARY KEY,
         update_id INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS telegram_private_scopes (
+        bot_id TEXT PRIMARY KEY,
+        scope_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS chat_bindings (
         chat_id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -150,6 +156,13 @@ export class BridgeStore {
         disabled INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS codex_auth_candidate_runtime (
+        runtime_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (runtime_id, name)
+      );
     `);
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
@@ -177,6 +190,19 @@ export class BridgeStore {
       VALUES (?, ?)
       ON CONFLICT(bot_key) DO UPDATE SET update_id = excluded.update_id
     `).run(botKey, updateId);
+  }
+
+  rememberTelegramPrivateScope(botId: string, scopeId: string, chatId: string): void {
+    this.db.prepare(`
+      INSERT INTO telegram_private_scopes (bot_id, scope_id, chat_id, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(bot_id) DO UPDATE SET scope_id = excluded.scope_id, chat_id = excluded.chat_id, updated_at = excluded.updated_at
+    `).run(botId, scopeId, chatId, Date.now());
+  }
+
+  getTelegramPrivateChatId(botId: string): string | null {
+    const row = this.db.prepare('SELECT chat_id FROM telegram_private_scopes WHERE bot_id = ?').get(botId) as { chat_id: string } | undefined;
+    return row ? String(row.chat_id) : null;
   }
 
   getBinding(chatId: string): ThreadBinding | null {
@@ -649,12 +675,26 @@ export class BridgeStore {
     `).run(scopeId, contextToken, Date.now());
   }
 
-  listDisabledCodexAuthCandidateNames(): Set<string> {
+  listDisabledCodexAuthCandidateNames(runtimeId = 'default'): Set<string> {
+    if (runtimeId !== 'default') {
+      const runtimeRows = this.db.prepare(
+        'SELECT name FROM codex_auth_candidate_runtime WHERE runtime_id = ? AND disabled = 1',
+      ).all(runtimeId) as Array<{ name: string }>;
+      return new Set(runtimeRows.map(row => String(row.name)));
+    }
     const rows = this.db.prepare('SELECT name FROM codex_auth_candidates WHERE disabled = 1').all() as Array<{ name: string }>;
     return new Set(rows.map(row => String(row.name)));
   }
 
-  setCodexAuthCandidateDisabled(name: string, disabled: boolean): void {
+  setCodexAuthCandidateDisabled(name: string, disabled: boolean, runtimeId = 'default'): void {
+    if (runtimeId !== 'default') {
+      this.db.prepare(`
+        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(runtime_id, name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
+      `).run(runtimeId, name, disabled ? 1 : 0, Date.now());
+      return;
+    }
     this.db.prepare(`
       INSERT INTO codex_auth_candidates (name, disabled, updated_at)
       VALUES (?, ?, ?)

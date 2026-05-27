@@ -8,7 +8,7 @@ This works well with Codex, OpenClaw, QwenPaw, Hermes, OpenCode, Kimi CLI, or an
 
 Prepare these values before asking the agent:
 
-- `TG_BOT_TOKEN`: Telegram bot token from `@BotFather`
+- `TG_BOT_TOKENS`: one or more comma-separated Telegram bot tokens from `@BotFather`
 - `TG_ALLOWED_USER_ID`: your numeric Telegram user id
 - `DEFAULT_CWD`: the folder where Codex should work
 
@@ -33,7 +33,7 @@ Published package:
 Use private Telegram chat first. Do not configure group/topic mode unless I explicitly provide TG_ALLOWED_CHAT_ID or TG_ALLOWED_TOPIC_ID.
 
 Here are the required values:
-TG_BOT_TOKEN=<paste token here>
+TG_BOT_TOKENS=<paste one token, or comma-separated tokens here>
 TG_ALLOWED_USER_ID=<paste numeric Telegram user id here>
 DEFAULT_CWD=<paste absolute working directory here>
 
@@ -49,13 +49,13 @@ Tasks:
 9. Verify the final state:
    - foxclaw.service is active/enabled on Linux
    - foxclaw status works
-10. Report the commands used, the final status, and the log command I should use if something stops working. Redact TG_BOT_TOKEN and never print the full token or full .env content.
+10. Report the commands used, the final status, and the log command I should use if something stops working. Redact TG_BOT_TOKENS and never print the full token or full .env content.
 ```
 
 ## Safety Notes
 
 - Do not paste bot tokens into public issue trackers or public chat logs.
 - Do not commit `.env`.
-- When reporting results, redact `TG_BOT_TOKEN`.
+- When reporting results, redact `TG_BOT_TOKENS` and legacy `TG_BOT_TOKEN`.
 - Do not use `/` or your whole home directory as `DEFAULT_CWD` for a first install.
 - Use `foxclaw start` for normal service startup. Use foreground `foxclaw serve` only when troubleshooting.

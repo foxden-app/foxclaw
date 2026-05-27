@@ -104,6 +104,7 @@ export class TelegramGateway extends EventEmitter {
     private readonly pollIntervalMs: number,
     private readonly store: BridgeStore,
     private readonly logger: Logger,
+    private readonly namespacedScopes = false,
   ) {
     super();
     this.botKey = `telegram:${crypto.createHash('sha256').update(this.botToken).digest('hex').slice(0, 8)}`;
@@ -113,10 +114,21 @@ export class TelegramGateway extends EventEmitter {
     return this.botUsername;
   }
 
+  get identity(): string | null {
+    return this.botUserId === null ? null : `bot${this.botUserId}`;
+  }
+
+  async initializeIdentity(): Promise<string> {
+    await this.resolveBotIdentity(true);
+    return this.identity!;
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    await this.resolveBotIdentity();
+    if (this.botUserId === null) {
+      await this.resolveBotIdentity(this.namespacedScopes);
+    }
     await this.registerCommands();
     void this.pollLoop();
   }
@@ -261,12 +273,16 @@ export class TelegramGateway extends EventEmitter {
     return downloadTelegramFile(this.botToken, remoteFilePath, destinationPath);
   }
 
-  private async resolveBotIdentity(): Promise<void> {
+  private async resolveBotIdentity(required = false): Promise<void> {
     const result = await callTelegramApi<GetMeResult>(this.botToken, 'getMe', {});
     if (result.ok && result.result) {
       this.botKey = `telegram:bot${result.result.id}`;
       this.botUserId = result.result.id;
       this.botUsername = result.result.username ?? null;
+      return;
+    }
+    if (required) {
+      throw new Error(result.description || 'Failed to resolve Telegram bot identity');
     }
   }
 
@@ -315,7 +331,10 @@ export class TelegramGateway extends EventEmitter {
       const attachments = extractAttachments(update.message);
       const text = update.message.text ?? update.message.caption ?? '';
       const topicId = update.message.message_thread_id ?? null;
-      const scopeId = toTelegramBridgeScopeId(createTelegramScopeId(String(update.message.chat.id), topicId));
+      const scopeId = toTelegramBridgeScopeId(
+        createTelegramScopeId(String(update.message.chat.id), topicId),
+        this.namespacedScopes ? this.identity : null,
+      );
       const entities = update.message.text ? (update.message.entities ?? []) : (update.message.caption_entities ?? []);
       const replyToBot = this.botUserId !== null && update.message.reply_to_message?.from?.id === this.botUserId;
       if (text || attachments.length > 0) {
@@ -332,6 +351,9 @@ export class TelegramGateway extends EventEmitter {
           replyToBot,
           ...(update.message.from.language_code ? { languageCode: update.message.from.language_code } : {}),
         } satisfies TelegramTextEvent);
+        if (update.message.chat.type === 'private' && this.identity) {
+          this.store.rememberTelegramPrivateScope(this.identity, scopeId, String(update.message.chat.id));
+        }
         return;
       }
     }
@@ -345,6 +367,7 @@ export class TelegramGateway extends EventEmitter {
         topicId,
         scopeId: toTelegramBridgeScopeId(
           createTelegramScopeId(String(update.callback_query.message.chat.id), topicId),
+          this.namespacedScopes ? this.identity : null,
         ),
         userId: String(update.callback_query.from.id),
         data: update.callback_query.data,

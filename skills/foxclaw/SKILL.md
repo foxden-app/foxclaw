@@ -25,6 +25,7 @@ Follow this order every time:
    - private chat only
    - one allowed group
    - one allowed topic inside one group
+   - parallel bots on one host, using comma-separated tokens and independent Codex runtimes
 4. Collect the Telegram values and filesystem paths listed below.
 5. Run the correct bootstrap script with explicit arguments.
 6. Run post-install validation.
@@ -37,7 +38,7 @@ Do not stop after "install completed" if the user asked for a working bot.
 
 Collect these values before running bootstrap:
 
-- `TG_BOT_TOKEN`
+- `TG_BOT_TOKENS` (one or more bot tokens separated by commas)
 - `TG_ALLOWED_USER_ID`
 - `DEFAULT_CWD`
 
@@ -63,18 +64,21 @@ Telegram behavior:
 
 - private chat with `TG_ALLOWED_USER_ID` remains available even when `TG_ALLOWED_CHAT_ID` or `TG_ALLOWED_TOPIC_ID` is set
 - `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` choose the default group or topic scope; they do not disable private chat
+- when `TG_BOT_TOKENS` contains multiple bots, one FoxClaw service starts independent Codex app-servers and auth selections per bot
+- in a group with multiple configured bots, address a bot by mention, reply, or suffixed command such as `/status@botname`
 
 If `TG_ALLOWED_CHAT_ID` or `TG_ALLOWED_TOPIC_ID` is missing, read [references/telegram-setup.md](./references/telegram-setup.md) and explicitly guide the user through collecting it.
 
 ## Deployment Rules
 
-1. If the user is deploying to a second Mac, prefer one bot per device.
-2. If no unique bot token has been provided for the second Mac, bootstrap with `--no-start`.
-3. If group or topic mode is involved, read [references/telegram-setup.md](./references/telegram-setup.md) before continuing.
-4. Always explain to the user which values will be written into `.env` before starting bootstrap.
-5. After bootstrap, check `codex login status`. If authentication is missing, tell the user to run `codex login` or open `codex app` on that Mac.
-6. If the user only says "set it up" and has not given all required values, ask for the missing values directly instead of guessing Telegram IDs.
-7. If the user wants a fully usable setup, continue until first-message validation is done or clearly blocked by Telegram-side prerequisites.
+1. If the user is deploying to a second Mac, do not reuse a token that another running host is polling.
+2. On one capable host, use multiple tokens in `TG_BOT_TOKENS` when the user wants parallel Codex conversations.
+3. If no unique bot token has been provided for another host, bootstrap with `--no-start`.
+4. If group or topic mode is involved, read [references/telegram-setup.md](./references/telegram-setup.md) before continuing.
+5. Always explain to the user which values will be written into `.env` before starting bootstrap.
+6. After bootstrap, check `codex login status`. If authentication is missing, tell the user to run `codex login` or open `codex app` on that Mac.
+7. If the user only says "set it up" and has not given all required values, ask for the missing values directly instead of guessing Telegram IDs.
+8. If the user wants a fully usable setup, continue until first-message validation is done or clearly blocked by Telegram-side prerequisites.
 
 ## What To Ask The User
 
@@ -82,7 +86,7 @@ Use short direct questions when values are missing. The minimum useful checklist
 
 1. Where should the repo live on the target Mac?
 2. Which directory should be the bridge's default working directory?
-3. What is the Telegram bot token?
+3. What are the Telegram bot tokens? Use one token for a single conversation lane or multiple comma-separated tokens for parallel lanes.
 4. What is the Telegram numeric user id allowed to control the bridge?
 5. Are we using private chat only, a group, or a specific topic?
 6. If group/topic mode: what are the `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` values?
@@ -95,7 +99,7 @@ Run:
 
 ```bash
 python3 "$CODEX_HOME/skills/foxclaw/scripts/bootstrap_host.py" \
-  --tg-bot-token "<BOT_TOKEN>" \
+  --tg-bot-tokens "<BOT_TOKEN_OR_COMMA_SEPARATED_TOKENS>" \
   --tg-allowed-user-id "<USER_ID>" \
   --default-cwd "<ABSOLUTE_CWD>" \
   --tg-allowed-chat-id "<CHAT_ID>" \
@@ -117,7 +121,7 @@ Run:
 python3 "$CODEX_HOME/skills/foxclaw/scripts/bootstrap_remote.py" \
   --ssh-host "<USER@HOST>" \
   --install-dir "<REMOTE_INSTALL_DIR>" \
-  --tg-bot-token "<BOT_TOKEN>" \
+  --tg-bot-tokens "<BOT_TOKEN_OR_COMMA_SEPARATED_TOKENS>" \
   --tg-allowed-user-id "<USER_ID>" \
   --default-cwd "<REMOTE_ABSOLUTE_CWD>" \
   --tg-allowed-chat-id "<CHAT_ID>" \
@@ -146,8 +150,8 @@ Do this whenever the bridge has been started:
 
 1. Tell the user exactly where to send the first test message:
    - private chat mode: send `/help` to the bot in private chat
-   - group mode: send `/help@botname` or `/help` in the configured default scope
-   - topic mode: send `/help` inside the configured topic, then send one plain-language message
+   - group mode: send `/help@botname` in the configured scope; in multi-bot mode all group traffic must explicitly address the intended bot
+   - topic mode: send `/help@botname` inside the configured topic, then send one message mentioning the bot
 2. After the user sends that message, verify the bridge is listening:
    - `node dist/main.js status`
    - launchd or service log if there is no reply
@@ -188,6 +192,7 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - For macOS launchd, use the launchd install/start path from this skill and verify with `node dist/main.js status`.
    - Verify the running service reports the expected FoxClaw version in `status`.
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
+   - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations and refuses to restart while any configured bot runtime is busy.
 7. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
    - Treat `workflow_dispatch` only as a retry path from an existing matching release tag; do not manually run publishing from `main`.

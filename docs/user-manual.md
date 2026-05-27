@@ -100,7 +100,7 @@ Both install the same published npm package. Use one global package manager cons
 
 ### 1.6 Fill In The Config
 
-`foxclaw init` creates the default config file at `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace. If the current shell has proxy variables such as `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, it also asks whether to save them into the FoxClaw config. When `HTTP_PROXY` or `HTTPS_PROXY` is configured, FoxClaw passes it to systemd/launchd explicitly and enables Node's env proxy support. Press Enter on any field to skip it, then edit manually if needed:
+`foxclaw init` creates the default config file at `~/.foxclaw/.env` and prompts for one or more comma-separated Telegram bot tokens, your numeric Telegram user id, and the default workspace. If the current shell has proxy variables such as `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY`, it also asks whether to save them into the FoxClaw config. When `HTTP_PROXY` or `HTTPS_PROXY` is configured, FoxClaw passes it to systemd/launchd explicitly and enables Node's env proxy support. Press Enter on any field to skip it, then edit manually if needed:
 
 ```bash
 $EDITOR ~/.foxclaw/.env
@@ -109,7 +109,7 @@ $EDITOR ~/.foxclaw/.env
 Minimum private-chat config:
 
 ```dotenv
-TG_BOT_TOKEN=123456789:replace_with_your_bot_token
+TG_BOT_TOKENS=123456789:replace_with_your_bot_token
 TG_ALLOWED_USER_ID=123456789
 TG_ALLOWED_CHAT_ID=
 TG_ALLOWED_TOPIC_ID=
@@ -120,7 +120,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 Fields:
 
-- `TG_BOT_TOKEN`: the token from `@BotFather`.
+- `TG_BOT_TOKENS`: one or more `@BotFather` tokens separated by commas. The legacy single-bot `TG_BOT_TOKEN` setting remains compatible.
 - `TG_ALLOWED_USER_ID`: your numeric Telegram user id.
 - `TG_ALLOWED_CHAT_ID`: leave empty for the first private-chat setup.
 - `TG_ALLOWED_TOPIC_ID`: leave empty unless binding a Telegram topic.
@@ -136,7 +136,7 @@ foxclaw start
 foxclaw status
 ```
 
-For later upgrades, run `foxclaw update`. It uses the npm or pnpm installation method currently managing FoxClaw, upgrades globally, runs checks, and restarts the background service.
+For later upgrades, run `foxclaw update`. It uses the npm or pnpm installation method currently managing FoxClaw, attempts to update a globally npm/pnpm-managed Codex CLI, runs checks, and restarts the background service.
 
 Linux service logs:
 
@@ -233,7 +233,7 @@ Later commands are sorted by recent usage. Plain text, photos, and files continu
 - `/status`: FoxClaw, app-server, current thread binding, model, access, and Codex usage summary. Local session, token, and visible-reply-throughput metrics use a background-generated historical snapshot instead of scanning large logs during the request; throughput is computed end-to-end for completed turns, excluding reasoning tokens while including waiting and tool execution time.
 - `/account`: current Codex account.
 - `/quota`: Codex usage and quota window.
-- `/update`: upgrade FoxClaw, run checks, and restart the service; it refuses while a turn, approval, or question is active, then reports the result after restart.
+- `/update`: upgrade FoxClaw, attempt to update an npm/pnpm-managed Codex CLI, run checks, and restart the service; it refuses while any bot runtime has a turn, approval, or question active, then reports the result after restart.
 
 ### 3.3 `/config`, `/requirements`, `/provider`
 
@@ -335,11 +335,11 @@ Watch mode mirrors live turn progress and approval requests. The watching chat i
 
 ## 6. Codex Login And Auth Rotation
 
-This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to.
+This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to. In `TG_BOT_TOKENS` mode, each bot has an isolated Codex home, app-server, and current candidate, so bots can run and switch accounts independently; validated login/refresh credentials are safely mirrored between bot homes.
 
 ### 6.1 File Format
 
-Candidate files live in the Codex auth directory, usually `~/.codex/`. If `CODEX_AUTH_DIR` is set, FoxClaw uses that directory.
+In single-bot compatibility mode, candidate files live in the Codex auth directory, usually `~/.codex/`. If `CODEX_AUTH_DIR` is set, FoxClaw uses that directory. Multi-bot mode treats that directory as its candidate source and stores isolated bot copies under `~/.foxclaw/codex/telegram/bot<id>/home/`.
 
 Recommended layout:
 
@@ -357,7 +357,7 @@ FoxClaw recognizes candidate names in these forms:
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON; FoxClaw treats those private fields as opaque and you should not hand-write them.
+`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity matches and its refresh timestamp is newer, preventing a same-name candidate from overwriting a different account.
 
 If you already have a working `auth.json`, you can save it as a candidate:
 
@@ -416,7 +416,7 @@ Equivalent commands:
 - `/auth disable <n>`: skip candidate n during auto-rotation.
 - `/auth reload` or `/auth_reload`: restart app-server and reload the current `auth.json`.
 
-If active turns, pending approvals, pending user inputs, or MCP elicitations exist, FoxClaw refuses manual auth switching to avoid changing accounts mid-request.
+If the requesting bot runtime has active turns, pending approvals, pending user inputs, or MCP elicitations, FoxClaw refuses manual auth switching to avoid changing accounts mid-request; another idle bot is unaffected.
 
 ### 6.4 How Auto-Rotation Works
 
@@ -452,7 +452,7 @@ auth.json_backup       # backup account, enable or disable as needed
 
 ## 8. Safety
 
-- Do not share `TG_BOT_TOKEN`, `~/.codex/auth.json*`, or `.env`.
+- Do not share `TG_BOT_TOKENS`, `TG_BOT_TOKEN`, `~/.codex/auth.json*`, or `.env`.
 - Do not use `/`, `/home`, `/Users`, or your whole home directory as the first `DEFAULT_CWD`.
 - When unsure, use `/permissions read-only` or select `Read-only` in `/setup`.
 - Group mode still only accepts `TG_ALLOWED_USER_ID`, but use trusted groups.

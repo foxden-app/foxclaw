@@ -10,7 +10,7 @@
 
 ## 基本流程
 
-1. 准备 `TG_BOT_TOKEN`、`TG_ALLOWED_USER_ID` 和 `DEFAULT_CWD`。
+1. 准备 `TG_BOT_TOKENS`（一个或多个逗号分隔的 bot token）、`TG_ALLOWED_USER_ID` 和 `DEFAULT_CWD`。
 2. 让 Codex 使用 `skills/foxclaw`。
 3. 如果是远程机器，提供 SSH 目标。
 4. 让 Codex 执行安装、写配置、跑 `foxclaw doctor`。

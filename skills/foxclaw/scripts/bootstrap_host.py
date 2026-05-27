@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-ref")
     parser.add_argument("--install-dir")
     parser.add_argument("--default-cwd")
+    parser.add_argument("--tg-bot-tokens")
     parser.add_argument("--tg-bot-token")
     parser.add_argument("--tg-allowed-user-id")
     parser.add_argument("--tg-allowed-chat-id")
@@ -42,6 +43,7 @@ def merged_config(args: argparse.Namespace) -> dict:
         "repo_ref": REPO_REF_DEFAULT,
         "install_dir": os.path.expanduser("~/foxclaw"),
         "default_cwd": os.path.expanduser("~/foxclaw"),
+        "tg_bot_tokens": None,
         "tg_bot_token": None,
         "tg_allowed_user_id": None,
         "tg_allowed_chat_id": None,
@@ -59,6 +61,7 @@ def merged_config(args: argparse.Namespace) -> dict:
         "repo_ref": args.repo_ref,
         "install_dir": args.install_dir,
         "default_cwd": args.default_cwd,
+        "tg_bot_tokens": args.tg_bot_tokens,
         "tg_bot_token": args.tg_bot_token,
         "tg_allowed_user_id": args.tg_allowed_user_id,
         "tg_allowed_chat_id": args.tg_allowed_chat_id,
@@ -252,7 +255,7 @@ def ensure_repo(config: dict) -> None:
 def write_env_file(config: dict, codex_bin: str) -> str:
     env_path = os.path.join(config["install_dir"], ".env")
     lines = [
-        f"TG_BOT_TOKEN={config['tg_bot_token']}",
+        f"TG_BOT_TOKENS={config['tg_bot_tokens']}",
         f"TG_ALLOWED_USER_ID={config['tg_allowed_user_id']}",
         f"TG_ALLOWED_CHAT_ID={config['tg_allowed_chat_id'] or ''}",
         f"TG_ALLOWED_TOPIC_ID={config['tg_allowed_topic_id'] or ''}",
@@ -311,7 +314,7 @@ def main() -> None:
 
     args = parse_args()
     config = merged_config(args)
-    config["tg_bot_token"] = require(config["tg_bot_token"], "TG_BOT_TOKEN")
+    config["tg_bot_tokens"] = require(config["tg_bot_tokens"] or config["tg_bot_token"], "TG_BOT_TOKENS")
     config["tg_allowed_user_id"] = require(config["tg_allowed_user_id"], "TG_ALLOWED_USER_ID")
     os.makedirs(config["default_cwd"], exist_ok=True)
 

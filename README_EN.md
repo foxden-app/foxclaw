@@ -75,7 +75,7 @@ foxclaw start
 Fill `.env` before running `doctor` or `start`. Minimum private-chat config:
 
 ```dotenv
-TG_BOT_TOKEN=123456:telegram-token
+TG_BOT_TOKENS=123456:telegram-token
 TG_ALLOWED_USER_ID=123456789
 DEFAULT_CWD=/absolute/path/to/workspace
 DEFAULT_APPROVAL_POLICY=on-request
@@ -84,7 +84,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 The default config file is `~/.foxclaw/.env`. Set `FOXCLAW_ENV=/path/to/.env` if you want to keep it somewhere else.
 
-`foxclaw start` runs checks and installs or restarts the background service. For later upgrades, run `foxclaw update`; it preserves the current npm/pnpm global-install method, runs checks, and restarts the service.
+`foxclaw start` runs checks and installs or restarts the background service. For later upgrades, run `foxclaw update`; it preserves the current npm/pnpm global-install method, attempts to update an npm/pnpm-managed Codex CLI, runs checks, and restarts the service.
 
 FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
 
@@ -111,6 +111,7 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 **Reliability:**
 - SQLite persistence for bindings, offsets, approvals, pending input prompts, and audit logs
 - Single-instance process lock to prevent duplicate Telegram polling on the same bot token
+- `TG_BOT_TOKENS` runs multiple Telegram bots on one host with independent Codex app-servers, sessions, and `/auth` selections
 
 </details>
 
@@ -178,7 +179,7 @@ FoxClaw originally evolved from a fork of `Gan-Xing/telegram-codex-app-bridge` a
 
 ## Telegram Setup
 
-1. Create a bot with `@BotFather` and copy the token into `TG_BOT_TOKEN`.
+1. Create one or more bots with `@BotFather` and put their comma-separated tokens into `TG_BOT_TOKENS`.
 2. Get your Telegram numeric user id and place it into `TG_ALLOWED_USER_ID`.
 3. Start FoxClaw with `foxclaw start`.
 4. Open a private chat with the bot and send `/help`.
@@ -194,6 +195,15 @@ TG_ALLOWED_TOPIC_ID=42
 - Set `TG_ALLOWED_CHAT_ID` only to allow one group as the default conversation scope.
 - Set both `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` to bind one topic as the default scope.
 - Private chat remains available for `TG_ALLOWED_USER_ID` even when a group is configured.
+- With multiple bots, a configured group handles only `@botname` commands, mentions, or replies addressed to each bot, preventing duplicate Codex responses.
+
+Parallel bot example:
+
+```dotenv
+TG_BOT_TOKENS=123456:token_a,234567:token_b
+```
+
+FoxClaw remains one system service, but starts an independent `codex app-server` and `CODEX_HOME` for each bot. While bot A is running a turn, bot B can switch its own `/auth` selection. Candidate credentials are mirrored only after validated login or refresh; current selections remain independent.
 
 **How to find group and topic IDs:**
 
@@ -229,7 +239,7 @@ CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
 ```
 
-FoxClaw starts `codex app-server` as a detached, bridge-managed process and records its pid and port. On restart, it reconnects to the recorded app-server if that process is still alive; otherwise it starts a new one. `/auth_reload` and auth switching restart the managed app-server so the current `auth.json` is reloaded.
+FoxClaw starts `codex app-server` as a detached, bridge-managed process and records its pid and port. With `TG_BOT_TOKENS`, each bot has its own app-server and Codex home. On restart, FoxClaw reconnects to each live recorded app-server or starts a replacement. `/auth_reload` and auth switching restart only the requesting bot runtime.
 
 No static Codex app-server port is required in normal installs.
 

@@ -45,6 +45,25 @@ test('BridgeStore persists disabled Codex auth candidates', () => {
   });
 });
 
+test('BridgeStore isolates disabled Codex auth candidates per runtime', () => {
+  withStore((store) => {
+    store.setCodexAuthCandidateDisabled('auth.json_a', true, 'bot1');
+    store.setCodexAuthCandidateDisabled('auth.json_b', true, 'bot2');
+    assert.deepEqual([...store.listDisabledCodexAuthCandidateNames('bot1')], ['auth.json_a']);
+    assert.deepEqual([...store.listDisabledCodexAuthCandidateNames('bot2')], ['auth.json_b']);
+    assert.deepEqual([...store.listDisabledCodexAuthCandidateNames()], []);
+  });
+});
+
+test('BridgeStore remembers a private chat for each bot notification route', () => {
+  withStore((store) => {
+    store.rememberTelegramPrivateScope('bot1', 'telegram:bot1:42::root', '42');
+    store.rememberTelegramPrivateScope('bot2', 'telegram:bot2:42::root', '42');
+    assert.equal(store.getTelegramPrivateChatId('bot1'), '42');
+    assert.equal(store.getTelegramPrivateChatId('bot2'), '42');
+  });
+});
+
 test('BridgeStore persists and resolves thread bindings', () => {
   withStore((store) => {
     store.setBinding(S1, 'thread-1', '/tmp/project');

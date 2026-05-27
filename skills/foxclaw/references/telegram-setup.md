@@ -18,7 +18,7 @@ Rules:
 
 ## Required Values
 
-- `TG_BOT_TOKEN`
+- `TG_BOT_TOKENS` (one token, or comma-separated tokens for parallel Codex runtimes)
 - `TG_ALLOWED_USER_ID`
 - `DEFAULT_CWD`
 
@@ -33,8 +33,9 @@ Behavior:
 - `TG_ALLOWED_CHAT_ID` only: the whole group becomes the default scope
 - `TG_ALLOWED_CHAT_ID` + `TG_ALLOWED_TOPIC_ID`: that topic becomes the default scope
 - Private chat with `TG_ALLOWED_USER_ID` still works in every mode above
+- Multiple tokens start independent Codex runtimes in one FoxClaw service; group messages must mention or reply to the intended bot
 
-If multiple bots share one group, keep the same `TG_ALLOWED_CHAT_ID` and give each bot a different `TG_ALLOWED_TOPIC_ID`.
+If multiple bots share one group, keep the same `TG_ALLOWED_CHAT_ID`; use explicit `@botname` mentions or replies. Separate topics are still useful for organization.
 
 ## Path Guidance
 

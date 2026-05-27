@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   readSelfUpdateStatus,
+  resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
   selfUpdateStatusPath,
   writeSelfUpdateStatus,
@@ -92,6 +93,52 @@ test('resolveSelfUpdateInstaller uses the npm beside Node for npm installations'
 
   assert.equal(installer.manager, 'npm');
   assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/npm');
+});
+
+test('resolveCodexUpdateInstaller upgrades a pnpm-managed Codex package', () => {
+  const commandPath = '/home/user/.local/share/pnpm/codex';
+  const realPath = '/home/user/.local/share/pnpm/global/5/.pnpm/@openai+codex@1.2.3/node_modules/@openai/codex/bin/codex.js';
+  const installer = resolveCodexUpdateInstaller(
+    commandPath,
+    '/opt/node/bin/node',
+    (target) => target === '/home/user/.local/share/pnpm/pnpm',
+    { PATH: '/usr/bin' },
+    () => realPath,
+  );
+
+  assert.equal(installer?.manager, 'pnpm');
+  assert.deepEqual(installer?.installArgs, ['add', '--global', '@openai/codex@latest']);
+});
+
+test('resolveCodexUpdateInstaller leaves unrecognized Codex installations alone', () => {
+  assert.equal(resolveCodexUpdateInstaller(
+    '/workspace/bin/codex',
+    '/opt/node/bin/node',
+    () => false,
+    { PATH: '/usr/bin' },
+    () => '/workspace/packages/codex/bin/codex.js',
+  ), null);
+});
+
+test('resolveCodexUpdateInstaller follows pnpm command launchers and FoxClaw wrappers', () => {
+  const wrapper = '/home/user/.local/foxclaw/bin/codex-wrapper';
+  const shim = '/home/user/.local/share/pnpm/codex';
+  const packageEntry = '/home/user/.local/share/pnpm/global/5/.pnpm/@openai+codex@1.2.3/node_modules/@openai/codex/bin/codex.js';
+  const files: Record<string, string> = {
+    [wrapper]: `#!/bin/sh\nexec "${shim}" "$@"\n`,
+    [shim]: `#!/bin/sh\nexec node "${packageEntry}" "$@"\n`,
+  };
+  const installer = resolveCodexUpdateInstaller(
+    wrapper,
+    '/opt/node/bin/node',
+    (target) => target === '/home/user/.local/share/pnpm/pnpm',
+    { PATH: '/usr/bin' },
+    (target) => target,
+    (target) => files[target] ?? '',
+  );
+
+  assert.equal(installer?.manager, 'pnpm');
+  assert.deepEqual(installer?.installArgs, ['add', '--global', '@openai/codex@latest']);
 });
 
 test('self-update statuses are stored alongside runtime status', () => {

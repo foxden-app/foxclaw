@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
@@ -7,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   APP_HOME,
+  DEFAULT_CODEX_TELEGRAM_HOME,
   DEFAULT_ENV_PATH,
   DEFAULT_LOG_PATH,
   DEFAULT_STATUS_PATH,
@@ -77,6 +79,9 @@ async function main(): Promise<void> {
       entryPoint,
       nodePath: process.execPath,
       version: readPackageVersion(),
+      ...(process.env.CODEX_CLI_BIN || resolveCommand('codex')
+        ? { codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex')! }
+        : {}),
       ...(notificationFile ? { notificationFile } : {}),
     };
     const outcome = performSelfUpdate(options);
@@ -178,6 +183,7 @@ async function runServeCli(): Promise<void> {
     { CodexAppClient },
     { BridgeSessionCore },
     { TelegramChannelAdapter },
+    { AuthCandidateMirror },
   ] = await Promise.all([
     import('./channels/bridge_messaging_router.js'),
     import('./channels/telegram/telegram_messaging_port.js'),
@@ -191,6 +197,7 @@ async function runServeCli(): Promise<void> {
     import('./codex_app/client.js'),
     import('./controller/controller.js'),
     import('./channels/telegram/telegram_channel_adapter.js'),
+    import('./auth/mirror.js'),
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
@@ -198,8 +205,170 @@ async function runServeCli(): Promise<void> {
   const processLock = acquireProcessLock(config.lockPath);
   let store: InstanceType<typeof BridgeStore> | null = null;
   let weixinAdapter: InstanceType<typeof WeixinChannelAdapter> | null = null;
+  let activeTelegramAdapters: Array<InstanceType<typeof TelegramChannelAdapter>> = [];
+  let managedApps: Array<InstanceType<typeof CodexAppClient>> = [];
+  let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    if (config.tgMultiBotMode) {
+      type RuntimeSeed = {
+        id: string;
+        home: string;
+        config: typeof config;
+        bot: InstanceType<typeof TelegramGateway>;
+        app: InstanceType<typeof CodexAppClient>;
+      };
+      type Runtime = RuntimeSeed & {
+        core: InstanceType<typeof BridgeSessionCore>;
+        telegram: InstanceType<typeof TelegramChannelAdapter>;
+      };
+      const seeds: RuntimeSeed[] = [];
+      for (const token of config.tgBotTokens) {
+        const bot = new TelegramGateway(
+          token,
+          config.tgAllowedUserId,
+          config.tgAllowedChatId,
+          config.telegramPollIntervalMs,
+          store,
+          logger,
+          true,
+        );
+        const id = await bot.initializeIdentity();
+        if (seeds.some((runtime) => runtime.id === id)) {
+          throw new Error(`TG_BOT_TOKENS contains duplicate Telegram bot identity: ${id}`);
+        }
+        const home = path.join(DEFAULT_CODEX_TELEGRAM_HOME, id, 'home');
+        fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+        const runtimeConfig = {
+          ...config,
+          tgBotToken: token,
+          tgBotTokens: [token],
+          tgScopeBotId: id,
+          codexAuthDir: home,
+          codexHome: home,
+          codexAppServerStatePath: path.join(APP_HOME, 'runtime', `codex-app-server-${id}.json`),
+          codexAppServerLogPath: path.join(APP_HOME, 'logs', `codex-app-server-${id}.log`),
+        };
+        const app = new CodexAppClient(
+          runtimeConfig.codexCliBin,
+          runtimeConfig.codexAppLaunchCmd,
+          runtimeConfig.codexAppAutolaunch,
+          runtimeConfig.codexAppServerStatePath,
+          runtimeConfig.codexAppServerLogPath,
+          logger,
+          { CODEX_HOME: home },
+        );
+        seeds.push({ id, home, config: runtimeConfig, bot, app });
+      }
+
+      const canonicalAuthDir = config.codexAuthDir ?? config.codexHome ?? path.join(os.homedir(), '.codex');
+      const mirror = new AuthCandidateMirror(
+        canonicalAuthDir,
+        seeds.map((runtime) => ({
+          id: runtime.id,
+          authDir: runtime.home,
+          notify: async (message: string): Promise<void> => {
+            const chatId = store!.getTelegramPrivateChatId(runtime.id);
+            if (chatId) {
+              await runtime.bot.sendMessage(chatId, message);
+            }
+          },
+        })),
+        logger,
+      );
+      await mirror.initialize();
+      mirror.start();
+      activeAuthMirror = mirror;
+      managedApps = seeds.map((runtime) => runtime.app);
+
+      const selfUpdater = createSelfUpdateRuntime({
+        entryPoint,
+        nodePath: process.execPath,
+        version: readPackageVersion(),
+        statusPath: config.statusPath,
+        logPath: path.join(APP_HOME, 'logs', 'update.log'),
+        codexCliBin: config.codexCliBin,
+      });
+      const runtimes: Runtime[] = [];
+      const writeAggregateStatus = (running = true): void => {
+        const statuses = runtimes.map((runtime) => runtime.core.getRuntimeStatus());
+        const first = statuses[0] ?? null;
+        writeRuntimeStatus(config.statusPath, {
+          running,
+          connected: running && statuses.every((status) => status.connected),
+          userAgent: first?.userAgent ?? null,
+          ...(first?.codexAppServer ? { codexAppServer: first.codexAppServer } : {}),
+          botUsername: first?.botUsername ?? null,
+          currentBindings: store!.countBindings(),
+          pendingApprovals: store!.countPendingApprovals(),
+          pendingUserInputs: store!.countPendingUserInputs(),
+          activeTurns: statuses.reduce((sum, status) => sum + status.activeTurns, 0),
+          lastError: statuses.find((status) => status.lastError)?.lastError ?? null,
+          updatedAt: new Date().toISOString(),
+          channels: { telegram: running, weixin: running && config.wxEnabled },
+          bots: runtimes.map((runtime, index) => ({
+            id: runtime.id,
+            username: statuses[index]?.botUsername ?? runtime.bot.username,
+            connected: running && Boolean(statuses[index]?.connected),
+            activeTurns: running ? (statuses[index]?.activeTurns ?? 0) : 0,
+            ...(statuses[index]?.codexAppServer ? { codexAppServer: statuses[index].codexAppServer } : {}),
+          })),
+        });
+      };
+      const coordinator = {
+        canSelfUpdate: (): boolean => runtimes.every((runtime) => runtime.core.isIdleForServiceUpdate()),
+        authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
+          mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
+        statusUpdated: (): void => writeAggregateStatus(),
+      };
+      for (const [index, seed] of seeds.entries()) {
+        const telegramMessaging = new TelegramMessagingPort(seed.bot);
+        const weixinMessaging = index === 0 && config.wxEnabled
+          ? new WeixinMessagingPort(store, (id) => loadWeixinAccount(config.weixinAccountsDir, id))
+          : null;
+        const outbound = new BridgeMessagingRouter(telegramMessaging, weixinMessaging);
+        const core = new BridgeSessionCore(seed.config, store, logger, seed.bot, seed.app, outbound, selfUpdater, coordinator);
+        runtimes.push({ ...seed, core, telegram: new TelegramChannelAdapter(core) });
+      }
+      if (config.wxEnabled) {
+        weixinAdapter = new WeixinChannelAdapter(runtimes[0]!.core, store, runtimes[0]!.config, logger);
+      }
+      activeTelegramAdapters = runtimes.map((runtime) => runtime.telegram);
+
+      process.on('unhandledRejection', (error) => {
+        logger.error('process.unhandled_rejection', { error: serializeError(error) });
+      });
+      process.on('uncaughtException', (error) => {
+        logger.error('process.uncaught_exception', { error: serializeError(error) });
+      });
+
+      for (const runtime of runtimes) {
+        await runtime.telegram.start();
+      }
+      if (weixinAdapter) {
+        await weixinAdapter.start();
+      }
+      writeAggregateStatus();
+      logger.info('bridge.started', { bots: runtimes.map((runtime) => runtime.id) });
+
+      const shutdown = async (signal: string): Promise<void> => {
+        logger.info('bridge.shutting_down', { signal });
+        mirror.stop();
+        await weixinAdapter?.stop();
+        await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
+        writeAggregateStatus(false);
+        await Promise.all(runtimes.map((runtime) => runtime.app.stop({ terminateServer: true }).catch((error) => {
+          logger.warn('codex.app-server.stop_failed', { runtimeId: runtime.id, error: serializeError(error) });
+        })));
+        store?.close();
+        processLock.release();
+        process.exit(0);
+      };
+
+      process.on('SIGINT', () => void shutdown('SIGINT'));
+      process.on('SIGTERM', () => void shutdown('SIGTERM'));
+      return;
+    }
     const bot = new TelegramGateway(
       config.tgBotToken,
       config.tgAllowedUserId,
@@ -227,9 +396,12 @@ async function runServeCli(): Promise<void> {
       version: readPackageVersion(),
       statusPath: config.statusPath,
       logPath: path.join(APP_HOME, 'logs', 'update.log'),
+      codexCliBin: config.codexCliBin,
     });
     const core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater);
     const telegram = new TelegramChannelAdapter(core);
+    managedApps = [app];
+    activeTelegramAdapters = [telegram];
     if (config.wxEnabled) {
       weixinAdapter = new WeixinChannelAdapter(core, store, config, logger);
     }
@@ -277,7 +449,10 @@ async function runServeCli(): Promise<void> {
     process.on('SIGINT', () => void shutdown('SIGINT'));
     process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
+    activeAuthMirror?.stop();
     await weixinAdapter?.stop().catch(() => {});
+    await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
+    await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
     store?.close();
     processLock.release();
     throw error;
@@ -329,14 +504,14 @@ async function configureEnvInteractively(envPath: string, existed: boolean): Pro
 
     Object.assign(updates, await maybeSaveProxyEnvFromShell(rl, envPath));
 
-    const token = sanitizeEnvInput(await rl.question('Telegram bot token (TG_BOT_TOKEN): '));
-    if (token) {
-      updates.TG_BOT_TOKEN = token;
-      if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
-        warnings.push('TG_BOT_TOKEN does not look like a standard Telegram bot token.');
+    const tokens = sanitizeEnvInput(await rl.question('Telegram bot token(s), comma-separated (TG_BOT_TOKENS): '));
+    if (tokens) {
+      updates.TG_BOT_TOKENS = tokens;
+      if (tokens.split(',').map((token) => token.trim()).some((token) => !/^\d+:[A-Za-z0-9_-]+$/.test(token))) {
+        warnings.push('One or more TG_BOT_TOKENS values do not look like standard Telegram bot tokens.');
       }
     } else {
-      skipped.push('TG_BOT_TOKEN');
+      skipped.push('TG_BOT_TOKENS');
     }
 
     const userId = sanitizeEnvInput(await rl.question('Telegram numeric user ID (TG_ALLOWED_USER_ID): '));
@@ -564,7 +739,7 @@ function runDoctorChecks(): boolean {
   const checks: Array<[string, boolean]> = [
     ['node >= 24', Number(process.versions.node.split('.')[0]) >= 24],
     ['codex cli available', hasConfiguredCodexBin(configuredCodexBin) || hasCommand('codex')],
-    ['telegram bot token configured', Boolean(process.env.TG_BOT_TOKEN)],
+    ['telegram bot token(s) configured', Boolean(process.env.TG_BOT_TOKENS?.trim() || process.env.TG_BOT_TOKEN?.trim())],
     ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
   ];
   if (process.env.WX_ENABLED === 'true' || process.env.WX_ENABLED === '1') {

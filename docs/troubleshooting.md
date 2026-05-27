@@ -20,7 +20,7 @@ journalctl --user -u foxclaw.service -f
 | --- | --- | --- |
 | `[FAIL] node >= 24` | Your current shell is using an older Node.js. | Install or activate Node.js 24+ by any method, then rerun `foxclaw doctor`. If the service uses old Node, reinstall it from a Node 24+ shell with `foxclaw start`. |
 | `[FAIL] codex cli available` | The `codex` command is not in PATH. | Install Codex CLI or fix PATH, then confirm `codex --version` works. |
-| `[FAIL] telegram bot token configured` | `TG_BOT_TOKEN` is missing from `.env`. | Copy the token from `@BotFather` into `.env`. |
+| `[FAIL] telegram bot token(s) configured` | Neither `TG_BOT_TOKENS` nor legacy `TG_BOT_TOKEN` is present in `.env`. | Put one or more comma-separated `@BotFather` tokens in `TG_BOT_TOKENS`. |
 | `[FAIL] telegram allowed user configured` | `TG_ALLOWED_USER_ID` is missing from `.env`. | Get your numeric id from `@userinfobot` and add it to `.env`. |
 | `[FAIL] default cwd exists` | `DEFAULT_CWD` points to a folder that does not exist. | Create the folder or change `DEFAULT_CWD` to an existing absolute path. |
 

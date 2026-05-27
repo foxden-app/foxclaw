@@ -107,6 +107,16 @@ test('allowed group without configured topic uses whole chat as default scope', 
   }), true);
 });
 
+test('multi-bot group mode requires a mention or reply even in the allowed chat', () => {
+  assert.equal(isDefaultTelegramScope({
+    chatType: 'supergroup',
+    allowedChatId: '-100123',
+    allowedTopicId: null,
+    topicId: null,
+    requireExplicitGroupAddressing: true,
+  }), false);
+});
+
 test('allowed group with configured topic only treats that topic as default scope', () => {
   assert.equal(isDefaultTelegramScope({
     chatType: 'supergroup',

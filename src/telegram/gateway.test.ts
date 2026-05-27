@@ -7,6 +7,7 @@ const storeStub = {
     return 0;
   },
   setTelegramOffset(): void {},
+  rememberTelegramPrivateScope(): void {},
 };
 
 const loggerStub = {
@@ -144,4 +145,23 @@ test('TelegramGateway still emits private chat messages when a group chat is con
   assert.equal(events[0]?.scopeId, 'telegram:99::root');
   assert.equal(events[0]?.chatType, 'private');
   assert.equal(events[0]?.topicId, null);
+});
+
+test('TelegramGateway namespaces scopes by bot identity in multi-bot mode', async () => {
+  const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any, true);
+  (gateway as any).botUserId = 777;
+  const events: TelegramTextEvent[] = [];
+  gateway.on('text', (event: TelegramTextEvent) => events.push(event));
+
+  await (gateway as any).handleUpdate({
+    update_id: 5,
+    message: {
+      message_id: 14,
+      chat: { id: 99, type: 'private' },
+      from: { id: 42 },
+      text: '/status',
+    },
+  });
+
+  assert.equal(events[0]?.scopeId, 'telegram:bot777:99::root');
 });

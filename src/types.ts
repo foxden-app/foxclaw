@@ -358,4 +358,11 @@ export interface RuntimeStatus {
   updatedAt: string;
   /** Which messaging transports are expected active in this process. */
   channels?: { telegram: boolean; weixin: boolean };
+  bots?: Array<{
+    id: string;
+    username: string | null;
+    connected: boolean;
+    activeTurns: number;
+    codexAppServer?: RuntimeStatus['codexAppServer'];
+  }>;
 }

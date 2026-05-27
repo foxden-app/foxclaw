@@ -143,7 +143,7 @@ nano ~/.foxclaw/.env
 For a first private-chat install, fill only the important values:
 
 ```dotenv
-TG_BOT_TOKEN=123456789:replace_with_your_bot_token
+TG_BOT_TOKENS=123456789:replace_with_your_bot_token
 TG_ALLOWED_USER_ID=123456789
 TG_ALLOWED_CHAT_ID=
 TG_ALLOWED_TOPIC_ID=
@@ -176,7 +176,7 @@ You want to see:
 ```text
 [OK] node >= 24
 [OK] codex cli available
-[OK] telegram bot token configured
+[OK] telegram bot token(s) configured
 [OK] telegram allowed user configured
 [OK] default cwd exists
 ```
@@ -280,7 +280,7 @@ Update FoxClaw later:
 foxclaw update
 ```
 
-You can also send `/update` in an authorized Telegram chat. When no turn, approval, or question is active, it upgrades, checks, restarts the service, and reports the result after restart.
+You can also send `/update` in an authorized Telegram chat. When every bot is idle with no approval or question active, it attempts to update an npm/pnpm-managed Codex CLI, upgrades FoxClaw, checks, restarts the service, and reports the result after restart.
 
 ## Next Step
 

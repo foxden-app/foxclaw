@@ -14,7 +14,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo-ref", default="main")
     parser.add_argument("--install-dir", default="~/foxclaw")
     parser.add_argument("--default-cwd", required=True)
-    parser.add_argument("--tg-bot-token", required=True)
+    parser.add_argument("--tg-bot-tokens")
+    parser.add_argument("--tg-bot-token")
     parser.add_argument("--tg-allowed-user-id", required=True)
     parser.add_argument("--tg-allowed-chat-id")
     parser.add_argument("--tg-allowed-topic-id")
@@ -27,6 +28,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    tg_bot_tokens = args.tg_bot_tokens or args.tg_bot_token
+    if not tg_bot_tokens:
+        raise SystemExit("--tg-bot-tokens is required")
     script_path = os.path.join(os.path.dirname(__file__), "bootstrap_host.py")
     with open(script_path, "rb") as handle:
         script_bytes = handle.read()
@@ -36,7 +40,7 @@ def main() -> None:
         "repo_ref": args.repo_ref,
         "install_dir": args.install_dir,
         "default_cwd": args.default_cwd,
-        "tg_bot_token": args.tg_bot_token,
+        "tg_bot_tokens": tg_bot_tokens,
         "tg_allowed_user_id": args.tg_allowed_user_id,
         "tg_allowed_chat_id": args.tg_allowed_chat_id,
         "tg_allowed_topic_id": args.tg_allowed_topic_id,
