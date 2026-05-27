@@ -122,6 +122,13 @@ export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
   statusUpdated?: (status: RuntimeStatus) => void;
+  getServiceStatus?: () => Promise<{
+    bots: NonNullable<RuntimeStatus['bots']>;
+    weixinRuntime?: RuntimeStatus['weixinRuntime'];
+    authMirror?: RuntimeStatus['authMirror'];
+    lastUpdate?: SelfUpdateStatus | null;
+  }>;
+  selfUpdateCompleted?: (status: SelfUpdateStatus) => void;
 }
 
 interface RenderedTelegramMessage {
@@ -501,6 +508,7 @@ export class BridgeSessionCore {
     outbound: BridgeMessagingRouter,
     private readonly selfUpdater: SelfUpdateRuntime | null = null,
     private readonly coordinator: CoreCoordinator | null = null,
+    private readonly ownsTelegramRuntime = true,
   ) {
     this.messaging = outbound;
   }
@@ -564,6 +572,7 @@ export class BridgeSessionCore {
       this.logger.warn('codex.local_usage_background_refresh_failed', { error: formatUserError(error) });
     });
     this.updateStatus();
+    this.scheduleSelfUpdateStatusPoll(0);
   }
 
   /** Begin Telegram Bot API long-polling after handlers and Codex are ready. */
@@ -571,7 +580,6 @@ export class BridgeSessionCore {
     await this.bot.start();
     this.botUsername = this.bot.username;
     this.updateStatus();
-    this.scheduleSelfUpdateStatusPoll(0);
   }
 
   /** Telegram-only default startup (single channel). */
@@ -628,7 +636,7 @@ export class BridgeSessionCore {
       lastError: this.lastError,
       updatedAt: new Date().toISOString(),
       channels: {
-        telegram: true,
+        telegram: this.ownsTelegramRuntime,
         weixin: Boolean(this.config.wxEnabled && this.messaging.hasWeixinTransport),
       },
     };
@@ -734,10 +742,13 @@ export class BridgeSessionCore {
         const binding = this.store.getBinding(scopeId);
         const settings = this.store.getChatSettings(scopeId);
         const access = this.resolveEffectiveAccess(scopeId, settings);
-        const [fastStatus, codexUsageLines, codexLocalUsageLines] = await Promise.all([
+        const [fastStatus, codexUsageLines, codexLocalUsageLines, serviceStatus] = await Promise.all([
           this.resolveFastStatusLabel(locale, settings),
           this.buildCodexUsageStatusLines(locale),
           this.buildCodexLocalUsageStatusLines(locale),
+          this.config.tgMultiBotMode
+            ? (this.coordinator?.getServiceStatus?.() ?? Promise.resolve(null))
+            : Promise.resolve(null),
         ]);
         const appServer = this.app.getServerStatus();
         const appServerLabel = appServer.pid && appServer.port
@@ -766,6 +777,42 @@ export class BridgeSessionCore {
           t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
+        if (serviceStatus) {
+          lines.push('', t(locale, 'status_runtime_overview'));
+          for (const runtime of serviceStatus.bots) {
+            lines.push(t(locale, 'status_runtime_bot', {
+              bot: runtime.username ? `@${runtime.username}` : runtime.id,
+              connected: t(locale, runtime.connected ? 'yes' : 'no'),
+              auth: runtime.currentAuth ?? t(locale, 'none'),
+              turns: runtime.activeTurns,
+            }));
+          }
+          if (serviceStatus.weixinRuntime) {
+            lines.push(t(locale, 'status_runtime_weixin', {
+              connected: t(locale, serviceStatus.weixinRuntime.connected ? 'yes' : 'no'),
+              turns: serviceStatus.weixinRuntime.activeTurns,
+            }));
+          }
+          lines.push(serviceStatus.authMirror
+            ? t(locale, 'status_auth_mirror_synced', {
+              candidate: serviceStatus.authMirror.candidateName,
+              source: serviceStatus.authMirror.sourceLabel,
+              time: serviceStatus.authMirror.syncedAt,
+            })
+            : t(locale, 'status_auth_mirror_none'));
+          if (serviceStatus.lastUpdate) {
+            lines.push(t(locale, 'status_last_update', {
+              from: serviceStatus.lastUpdate.fromVersion,
+              to: serviceStatus.lastUpdate.toVersion ?? t(locale, 'unknown'),
+              time: serviceStatus.lastUpdate.updatedAt,
+            }));
+            if (serviceStatus.lastUpdate.codexUpdate) {
+              lines.push(t(locale, 'status_last_codex_update', { value: serviceStatus.lastUpdate.codexUpdate }));
+            }
+          } else {
+            lines.push(t(locale, 'status_last_update_none'));
+          }
+        }
         lines.push(...codexUsageLines);
         lines.push(...codexLocalUsageLines);
         await this.sendMessage(scopeId, lines.join('\n'));
@@ -3207,6 +3254,10 @@ export class BridgeSessionCore {
     };
   }
 
+  async getCurrentAuthLabel(): Promise<string | null> {
+    return (await this.listCodexAuthState()).currentLabel;
+  }
+
   isIdleForServiceUpdate(): boolean {
     return this.activeTurns.size === 0
       && this.pendingApprovalMessages.size === 0
@@ -3224,9 +3275,17 @@ export class BridgeSessionCore {
     return this.config.tgScopeBotId ?? 'default';
   }
 
+  private authDisplayBotLabel(): string | null {
+    if (!this.config.tgScopeBotId) return null;
+    return this.botUsername ? `@${this.botUsername}` : this.config.tgScopeBotId;
+  }
+
   private ownsScope(scopeId: string): boolean {
     if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
       return this.messaging.hasWeixinTransport;
+    }
+    if (!this.ownsTelegramRuntime) {
+      return false;
     }
     if (!this.config.tgScopeBotId) {
       return parseTelegramTargetFromBridgeScope(scopeId).botId === null;
@@ -4602,6 +4661,7 @@ export class BridgeSessionCore {
       this.scheduleSelfUpdateStatusPoll();
       return;
     }
+    this.coordinator?.selfUpdateCompleted?.(status);
     await this.sendMessage(status.scopeId, this.formatSelfUpdateResult(status));
     await this.selfUpdater?.clearStatus();
   }
@@ -4653,7 +4713,7 @@ export class BridgeSessionCore {
     this.pendingAuthChoiceLists.set(record.localId, record);
     const messageId = await this.sendMessage(
       scopeId,
-      renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null),
+      renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null),
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
@@ -4678,7 +4738,7 @@ export class BridgeSessionCore {
     if (!candidate) {
       await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
       const state = await this.listCodexAuthState();
-      await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
+      await this.sendMessage(scopeId, renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null));
       return;
     }
     const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
@@ -4701,7 +4761,7 @@ export class BridgeSessionCore {
     const candidate = state.candidates[index - 1];
     if (!candidate) {
       await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
-      await this.sendMessage(scopeId, renderAuthListMessage(locale, state, parseWeixinBridgeScope(scopeId) !== null));
+      await this.sendMessage(scopeId, renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null));
       return;
     }
     this.store.setCodexAuthCandidateDisabled(candidate.name, disabled, this.authRuntimeId());
@@ -5217,7 +5277,7 @@ export class BridgeSessionCore {
       await this.editMessage(
         event.scopeId,
         record.messageId,
-        renderAuthListMessage(locale, state, parseWeixinBridgeScope(event.scopeId) !== null),
+        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null),
         authChoiceKeyboard(locale, record),
       );
     }
@@ -8642,12 +8702,22 @@ async function switchCodexAuth(targetPath: string, explicitAuthDir: string | nul
   };
 }
 
-function renderAuthListMessage(locale: AppLocale, state: CodexAuthState, includeWeixinCopyPaste = false): string {
+function renderAuthListMessage(
+  locale: AppLocale,
+  state: CodexAuthState,
+  botLabel: string | null = null,
+  includeWeixinCopyPaste = false,
+): string {
   const lines = [
     t(locale, 'auth_list_title'),
+  ];
+  if (botLabel) {
+    lines.push(t(locale, 'auth_bot', { value: botLabel }));
+  }
+  lines.push(
     t(locale, 'auth_current', { value: state.currentLabel ?? t(locale, 'none') }),
     t(locale, 'auth_dir', { value: state.authDir }),
-  ];
+  );
   if (state.candidates.length === 0) {
     lines.push(t(locale, 'auth_no_candidates'));
     if (includeWeixinCopyPaste) {

@@ -121,7 +121,7 @@ npm install -g @foxden-app/foxclaw
 foxclaw init
 ```
 
-这会创建默认配置文件 `~/.foxclaw/.env`，并提示你填写 Telegram bot token、Telegram 数字用户 ID 和默认工作目录。
+这会创建默认配置文件 `~/.foxclaw/.env`，并提示你填写一个或多个 Telegram bot token（多个用英文逗号分隔）、Telegram 数字用户 ID 和默认工作目录。新安装使用 `TG_BOT_TOKENS`；旧的 `TG_BOT_TOKEN` 仅用于兼容已有单 bot 配置。
 
 如果你用 pnpm：
 
@@ -151,6 +151,14 @@ DEFAULT_SANDBOX_MODE=workspace-write
 ```
 
 `TG_ALLOWED_CHAT_ID=` 和 `TG_ALLOWED_TOPIC_ID=` 第一次保持为空，不要删掉这两行；留空表示私聊模式。
+
+只有一个 bot 时先按上面的配置跑通即可。需要三条互不打断的 Codex 会话时，把多个 token 写在同一行：
+
+```dotenv
+TG_BOT_TOKENS=123456789:token_a,234567890:token_b,345678901:token_c
+```
+
+FoxClaw 仍只安装一个服务，但每个 bot 会有独立 app-server、会话目录和当前 auth。服务启动后请分别私聊每个 bot 发送 `/help` 与 `/status`。
 
 `DEFAULT_CWD` 必须是真实存在的目录，例如：
 
@@ -278,7 +286,7 @@ foxclaw uninstall-systemd
 foxclaw update
 ```
 
-也可以在已授权的 Telegram 私聊里发送 `/update`。它会在所有 bot 都没有运行中回复、审批或待确认问题时，尝试升级 npm/pnpm 安装的 Codex CLI，完成 FoxClaw 升级、自检和服务重启，并在重启后回报结果。
+也可以在已授权的 Telegram 私聊里发送 `/update`。它会在所有 Telegram bot、已启用的微信默认 runtime 和 auth 镜像写入都空闲时，尝试升级 npm/pnpm 安装的 Codex CLI，完成 FoxClaw 升级、自检和服务重启，并在发起命令的 bot 中回报结果。
 
 如果 `~/.foxclaw/.env` 已经存在，`foxclaw init` 会先询问是否更新 Telegram 和工作目录相关字段，其它配置保持不变。
 

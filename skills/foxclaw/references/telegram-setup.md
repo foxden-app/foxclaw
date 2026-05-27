@@ -34,6 +34,7 @@ Behavior:
 - `TG_ALLOWED_CHAT_ID` + `TG_ALLOWED_TOPIC_ID`: that topic becomes the default scope
 - Private chat with `TG_ALLOWED_USER_ID` still works in every mode above
 - Multiple tokens start independent Codex runtimes in one FoxClaw service; group messages must mention or reply to the intended bot
+- Each bot keeps its own Codex home, sessions, and current auth selection; verify it privately with `/status` and `/auth`
 
 If multiple bots share one group, keep the same `TG_ALLOWED_CHAT_ID`; use explicit `@botname` mentions or replies. Separate topics are still useful for organization.
 
@@ -73,6 +74,7 @@ After the bridge is started:
 
 1. Private chat mode:
    - send `/help` to the bot in private chat
+   - for each configured bot, send `/status` and `/auth` and confirm its isolated runtime is shown
    - send one plain-language message such as `show /status`
 2. Group mode:
    - send `/help` in the configured group or default topic

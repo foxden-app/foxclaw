@@ -230,10 +230,10 @@ Later commands are sorted by recent usage. Plain text, photos, and files continu
 
 ### 3.2 `/status`, `/account`, `/quota`, `/update`
 
-- `/status`: FoxClaw, app-server, current thread binding, model, access, and Codex usage summary. Local session, token, and visible-reply-throughput metrics use a background-generated historical snapshot instead of scanning large logs during the request; throughput is computed end-to-end for completed turns, excluding reasoning tokens while including waiting and tool execution time.
+- `/status`: FoxClaw, app-server, current thread binding, model, access, and Codex usage summary. In multi-bot mode it also lists every bot's connection, current auth, active turns, and the most recent auth mirror and service/Codex update outcomes. Local session, token, and visible-reply-throughput metrics use a background-generated historical snapshot instead of scanning large logs during the request; throughput is computed end-to-end for completed turns, excluding reasoning tokens while including waiting and tool execution time.
 - `/account`: current Codex account.
 - `/quota`: Codex usage and quota window.
-- `/update`: upgrade FoxClaw, attempt to update an npm/pnpm-managed Codex CLI, run checks, and restart the service; it refuses while any bot runtime has a turn, approval, or question active, then reports the result after restart.
+- `/update`: upgrade FoxClaw, attempt to update an npm/pnpm-managed Codex CLI, run checks, and restart the service; it refuses while any Telegram bot runtime, an enabled Weixin default runtime, or an auth mirror write is busy, then reports the result through the initiating bot after restart.
 
 ### 3.3 `/config`, `/requirements`, `/provider`
 
@@ -335,7 +335,7 @@ Watch mode mirrors live turn progress and approval requests. The watching chat i
 
 ## 6. Codex Login And Auth Rotation
 
-This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to. In `TG_BOT_TOKENS` mode, each bot has an isolated Codex home, app-server, and current candidate, so bots can run and switch accounts independently; validated login/refresh credentials are safely mirrored between bot homes.
+This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to. In `TG_BOT_TOKENS` mode, each bot has an isolated Codex home, app-server, and current candidate, so bots can run and switch accounts independently; isolated Telegram runtimes force file-backed credential storage. Validated login/refresh credentials are safely mirrored between bot homes, but sessions are never shared.
 
 ### 6.1 File Format
 
@@ -387,7 +387,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 ### 6.3 The `/auth` Panel
 
-`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota.
+`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota.
 
 Approximation:
 

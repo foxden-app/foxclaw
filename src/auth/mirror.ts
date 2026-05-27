@@ -5,8 +5,16 @@ import type { Logger } from '../logger.js';
 
 export interface AuthMirrorRuntime {
   id: string;
+  label?: string;
   authDir: string;
   notify?: (message: string) => Promise<void>;
+}
+
+export interface AuthMirrorStatus {
+  candidateName: string;
+  sourceRuntimeId: string;
+  sourceLabel: string;
+  syncedAt: string;
 }
 
 interface AuthRecord {
@@ -20,14 +28,18 @@ const AUTH_SCAN_INTERVAL_MS = 5_000;
 export class AuthCandidateMirror {
   private timer: NodeJS.Timeout | null = null;
   private readonly lastSyncedRefresh = new Map<string, number>();
+  private activeOperations = 0;
+  private lastStatus: AuthMirrorStatus | null = null;
 
   constructor(
     private readonly canonicalDir: string,
     private readonly runtimes: AuthMirrorRuntime[],
     private readonly logger: Logger,
+    private readonly statusPath: string | null = null,
   ) {}
 
   async initialize(): Promise<void> {
+    this.lastStatus = await readMirrorStatus(this.statusPath);
     await fs.mkdir(this.canonicalDir, { recursive: true, mode: 0o700 });
     await this.ensureCanonicalDefaultCandidate();
     const candidateNames = await this.collectCandidateNames();
@@ -68,20 +80,30 @@ export class AuthCandidateMirror {
     this.timer = null;
   }
 
+  isIdle(): boolean {
+    return this.activeOperations === 0;
+  }
+
+  getStatus(): AuthMirrorStatus | null {
+    return this.lastStatus;
+  }
+
   async syncRuntimeCandidate(runtimeId: string, candidateName: string): Promise<boolean> {
     if (!isAuthCandidateName(candidateName)) return false;
     const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
     if (!runtime) return false;
-    return this.propagateValidatedCandidate(runtime, candidateName);
+    return this.withActivity(() => this.propagateValidatedCandidate(runtime, candidateName));
   }
 
   private async scan(): Promise<void> {
-    for (const runtime of this.runtimes) {
-      const names = await listAuthCandidateNames(runtime.authDir);
-      for (const name of names) {
-        await this.propagateValidatedCandidate(runtime, name);
+    await this.withActivity(async () => {
+      for (const runtime of this.runtimes) {
+        const names = await listAuthCandidateNames(runtime.authDir);
+        for (const name of names) {
+          await this.propagateValidatedCandidate(runtime, name);
+        }
       }
-    }
+    });
   }
 
   private async propagateValidatedCandidate(runtime: AuthMirrorRuntime, name: string): Promise<boolean> {
@@ -105,10 +127,27 @@ export class AuthCandidateMirror {
       }
     }
     this.lastSyncedRefresh.set(name, record.lastRefreshMs);
+    const sourceLabel = runtime.label ?? runtime.id;
+    this.lastStatus = {
+      candidateName: name,
+      sourceRuntimeId: runtime.id,
+      sourceLabel,
+      syncedAt: new Date().toISOString(),
+    };
+    await writeMirrorStatus(this.statusPath, this.lastStatus);
     this.logger.info('auth.mirror.synced', { sourceRuntimeId: runtime.id, name });
-    const message = `${name} has been refreshed by ${runtime.id} and synchronized to the other Codex homes.`;
+    const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
     await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
     return true;
+  }
+
+  private async withActivity<T>(operation: () => Promise<T>): Promise<T> {
+    this.activeOperations += 1;
+    try {
+      return await operation();
+    } finally {
+      this.activeOperations -= 1;
+    }
   }
 
   private async ensureCanonicalDefaultCandidate(): Promise<void> {
@@ -222,4 +261,35 @@ async function exists(filePath: string): Promise<boolean> {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function readMirrorStatus(statusPath: string | null): Promise<AuthMirrorStatus | null> {
+  if (!statusPath) return null;
+  try {
+    const parsed = JSON.parse(await fs.readFile(statusPath, 'utf8')) as Partial<AuthMirrorStatus>;
+    if (
+      typeof parsed.candidateName !== 'string'
+      || typeof parsed.sourceRuntimeId !== 'string'
+      || typeof parsed.sourceLabel !== 'string'
+      || typeof parsed.syncedAt !== 'string'
+    ) {
+      return null;
+    }
+    return {
+      candidateName: parsed.candidateName,
+      sourceRuntimeId: parsed.sourceRuntimeId,
+      sourceLabel: parsed.sourceLabel,
+      syncedAt: parsed.syncedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function writeMirrorStatus(statusPath: string | null, status: AuthMirrorStatus): Promise<void> {
+  if (!statusPath) return;
+  await fs.mkdir(path.dirname(statusPath), { recursive: true, mode: 0o700 });
+  const temporary = `${statusPath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(status, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await fs.rename(temporary, statusPath);
 }

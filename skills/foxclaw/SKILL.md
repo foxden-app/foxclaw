@@ -65,6 +65,8 @@ Telegram behavior:
 - private chat with `TG_ALLOWED_USER_ID` remains available even when `TG_ALLOWED_CHAT_ID` or `TG_ALLOWED_TOPIC_ID` is set
 - `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` choose the default group or topic scope; they do not disable private chat
 - when `TG_BOT_TOKENS` contains multiple bots, one FoxClaw service starts independent Codex app-servers and auth selections per bot
+- isolated Telegram runtimes use independent `CODEX_HOME` directories and file-backed credentials; they do not share Codex sessions
+- if Weixin is enabled alongside multiple Telegram bots, it remains on the default Codex runtime instead of borrowing a Telegram bot runtime
 - in a group with multiple configured bots, address a bot by mention, reply, or suffixed command such as `/status@botname`
 
 If `TG_ALLOWED_CHAT_ID` or `TG_ALLOWED_TOPIC_ID` is missing, read [references/telegram-setup.md](./references/telegram-setup.md) and explicitly guide the user through collecting it.
@@ -143,6 +145,7 @@ After either bootstrap path:
    - the bot is an admin in the group
    - the configured `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` match the target group/topic
 5. If group or topic mode is enabled, also verify that private chat still responds for the configured `TG_ALLOWED_USER_ID`.
+6. With multiple bots, send `/status` and `/auth` privately to each bot; verify the status lists each app-server and the auth panel names the intended bot runtime.
 
 ## First Telegram Message Check
 
@@ -192,7 +195,7 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - For macOS launchd, use the launchd install/start path from this skill and verify with `node dist/main.js status`.
    - Verify the running service reports the expected FoxClaw version in `status`.
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
-   - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations and refuses to restart while any configured bot runtime is busy.
+   - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations and refuses to restart while any configured Telegram runtime, enabled Weixin default runtime, or auth mirror write is busy.
 7. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
    - Treat `workflow_dispatch` only as a retry path from an existing matching release tag; do not manually run publishing from `main`.

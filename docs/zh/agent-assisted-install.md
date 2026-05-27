@@ -17,7 +17,7 @@
 - `TG_ALLOWED_CHAT_ID`
 - `TG_ALLOWED_TOPIC_ID`
 
-第一次请先用 Telegram 私聊跑通。群组和话题模式等私聊稳定后再开。
+第一次请先用 Telegram 私聊跑通。群组和话题模式等私聊稳定后再开。多个 token 表示同一服务内多个独立 Codex runtime；每个 bot 都必须单独完成私聊验收。
 
 ## 复制给 agent 的安装提示词
 
@@ -44,11 +44,12 @@ DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 5. 运行 foxclaw init，然后写入 ~/.foxclaw/.env。不要打印或提交 bot token。
 6. 运行 foxclaw doctor。
 7. 用 foxclaw start 启动 FoxClaw。
-8. 让我在 Telegram bot 里发送 /help 和 /status。
+8. 让我在每个已配置的 Telegram bot 私聊里发送 /help、/status 和 /auth；确认 /auth 显示对应 bot runtime。
 9. 验证最终状态：
    - Linux 上 foxclaw.service 处于 active/enabled
    - foxclaw status 可以正常输出
 10. 汇报执行过的命令、最终状态和后续看日志的命令。请隐藏 TG_BOT_TOKENS，不要打印完整 token 或完整 .env。
+11. 如果启用了多个 bot，确认 foxclaw status 列出独立 app-server；群聊测试必须点名或回复目标 bot。
 ```
 
 ## 安全注意事项

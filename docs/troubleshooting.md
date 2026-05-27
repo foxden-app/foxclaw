@@ -182,6 +182,18 @@ Bridge logs are stored here:
 tail -f ~/.foxclaw/logs/service.log
 ```
 
+## Checking Multi-Bot Mode
+
+After configuring `TG_BOT_TOKENS`, `foxclaw status` should contain one bot id, connection status, and independent app-server for each token. Send `/status` privately to any bot to see the runtime summary; send `/auth` to confirm the panel names the current `@botname` and its auth directory.
+
+Each isolated app-server log is stored at:
+
+```bash
+tail -f ~/.foxclaw/logs/codex-app-server-bot<id>.log
+```
+
+When multiple bots share a group, unaddressed messages intentionally do not trigger them; mention `@botname`, reply to the intended bot, or send `/status@botname`. When enabled, Weixin stays on the default Codex runtime and does not appear inside an isolated Telegram bot's thread list.
+
 ## ChatGPT Backend 403 Or Unable To Load Site
 
 If Telegram shows `ChatGPT backend 403 Forbidden`, or the app-server log contains `Unable to load site`, `cf-ray`, or `chatgpt.com/backend-api`, the auth file is not necessarily broken. The service process is usually reaching ChatGPT with the wrong network/proxy/IP.

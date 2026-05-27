@@ -14,11 +14,13 @@
 2. 让 Codex 使用 `skills/foxclaw`。
 3. 如果是远程机器，提供 SSH 目标。
 4. 让 Codex 执行安装、写配置、跑 `foxclaw doctor`。
-5. 启动服务后，在 Telegram bot 里发送 `/help` 和 `/status` 验证。
+5. 启动服务后，在每个配置的 Telegram bot 私聊里发送 `/help`、`/status` 和 `/auth` 验证。
 
 ## 注意事项
 
 - 不要让 agent 把完整 bot token 打印到日志或提交到仓库。
 - 第一次请先用私聊模式跑通。
+- 多个 token 会在同一服务中建立多个独立 Codex home、session 与 auth 选择；群组中必须点名或回复目标 bot。
+- 同时启用微信时，微信仍使用默认 Codex runtime，不共享隔离 Telegram bot 的线程。
 - 不要把整个 home 目录或根目录作为首次 `DEFAULT_CWD`。
 - 只有在 `doctor` 通过、服务已启动、Telegram 首条消息验证通过后，才算安装完成。

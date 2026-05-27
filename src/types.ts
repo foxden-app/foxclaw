@@ -363,6 +363,25 @@ export interface RuntimeStatus {
     username: string | null;
     connected: boolean;
     activeTurns: number;
+    currentAuth?: string | null;
     codexAppServer?: RuntimeStatus['codexAppServer'];
   }>;
+  weixinRuntime?: {
+    connected: boolean;
+    activeTurns: number;
+    codexAppServer?: RuntimeStatus['codexAppServer'];
+  };
+  authMirror?: {
+    candidateName: string;
+    sourceRuntimeId: string;
+    sourceLabel: string;
+    syncedAt: string;
+  } | null;
+  lastUpdate?: {
+    state: string;
+    fromVersion: string;
+    toVersion: string | null;
+    codexUpdate?: string | null;
+    updatedAt: string;
+  } | null;
 }

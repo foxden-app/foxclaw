@@ -183,6 +183,18 @@ Bridge 日志默认在：
 tail -f ~/.foxclaw/logs/service.log
 ```
 
+## 多 bot 模式核查
+
+配置 `TG_BOT_TOKENS` 后，`foxclaw status` 的 `bots` 列表应为每个 token 显示一个 bot id、连接状态和独立 app-server。私聊任一 bot 发送 `/status` 会显示全部 runtime 摘要；发送 `/auth` 应显示当前 `@botname` 和该 bot 的 auth 目录。
+
+每个隔离 app-server 的日志路径为：
+
+```bash
+tail -f ~/.foxclaw/logs/codex-app-server-bot<id>.log
+```
+
+群组里配置了多个 bot 时，普通未点名消息不会触发它们；使用 `@botname`、回复目标 bot，或 `/status@botname`。微信启用后仍使用默认 Codex runtime，不会出现在某个 Telegram bot 的隔离线程中。
+
 ## ChatGPT 后端 403 或 Unable to load site
 
 如果 Telegram 里看到 `ChatGPT backend 403 Forbidden`，或者 app-server 日志里出现 `Unable to load site`、`cf-ray`、`chatgpt.com/backend-api`，通常不是 `auth.json` 文件坏了，而是服务进程访问 ChatGPT 后端时没有走正确网络。

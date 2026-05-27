@@ -17,7 +17,7 @@ Optional later:
 - `TG_ALLOWED_CHAT_ID`
 - `TG_ALLOWED_TOPIC_ID`
 
-Use private Telegram chat first. Configure groups/topics only after private chat works.
+Use private Telegram chat first. Configure groups/topics only after private chat works. Multiple tokens mean independent Codex runtimes inside one service; validate each bot privately.
 
 ## Copy-Paste Prompt
 
@@ -45,11 +45,12 @@ Tasks:
 5. Run foxclaw init, then write ~/.foxclaw/.env. Never print or commit the bot token.
 6. Run foxclaw doctor.
 7. Start FoxClaw with foxclaw start.
-8. Ask me to send /help and /status to the Telegram bot.
+8. Ask me to send /help, /status, and /auth privately to each configured Telegram bot; confirm /auth names that bot runtime.
 9. Verify the final state:
    - foxclaw.service is active/enabled on Linux
    - foxclaw status works
 10. Report the commands used, the final status, and the log command I should use if something stops working. Redact TG_BOT_TOKENS and never print the full token or full .env content.
+11. If multiple bots are enabled, confirm foxclaw status lists independent app-servers; group-chat tests must mention or reply to the intended bot.
 ```
 
 ## Safety Notes

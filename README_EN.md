@@ -40,7 +40,7 @@ FoxClaw is more than message forwarding. It provides Telegram panels for Codex w
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
-The minimum install needs only a Telegram bot token, your numeric Telegram user id, Node.js 24+, and a logged-in `codex` CLI. A first install usually takes 10–20 minutes.
+The minimum install needs one or more Telegram bot tokens, your numeric Telegram user id, Node.js 24+, and a logged-in `codex` CLI. A first install usually takes 10–20 minutes. New installs should use `TG_BOT_TOKENS`; `TG_BOT_TOKEN` exists only for legacy single-runtime compatibility.
 
 **30-second demo**: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
 
@@ -93,7 +93,7 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 
 **Core capabilities:**
 - Telegram private chat, group, and topic control for your local Codex
-- Optional Weixin/iLink channel sharing the same bridge core
+- Optional Weixin/iLink channel; in multi-Telegram mode it stays on the original default Codex runtime rather than sharing an isolated bot session
 - Full thread lifecycle management from mobile: create, rename, archive, fork, rollback, compact, review, diff
 - Inline approval buttons for commands, file changes, and granular permissions — one tap to approve
 - MCP elicitation cards for structured questions raised by tools during a turn
@@ -203,7 +203,7 @@ Parallel bot example:
 TG_BOT_TOKENS=123456:token_a,234567:token_b
 ```
 
-FoxClaw remains one system service, but starts an independent `codex app-server` and `CODEX_HOME` for each bot. While bot A is running a turn, bot B can switch its own `/auth` selection. Candidate credentials are mirrored only after validated login or refresh; current selections remain independent.
+FoxClaw remains one system service, but starts an independent `codex app-server` and `CODEX_HOME` for each bot. While bot A is running a turn, bot B can switch its own `/auth` selection. Candidate credentials are mirrored only after validated login or refresh; current selections remain independent. Send `/help` and `/status` in a private chat with each bot after installation; `/auth` names the runtime being managed, and `/status` summarizes every bot's connection, selected auth, and active turns.
 
 **How to find group and topic IDs:**
 
@@ -239,7 +239,7 @@ CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
 ```
 
-FoxClaw starts `codex app-server` as a detached, bridge-managed process and records its pid and port. With `TG_BOT_TOKENS`, each bot has its own app-server and Codex home. On restart, FoxClaw reconnects to each live recorded app-server or starts a replacement. `/auth_reload` and auth switching restart only the requesting bot runtime.
+FoxClaw starts `codex app-server` as a detached, bridge-managed process and records its pid and port. With `TG_BOT_TOKENS`, each bot has its own app-server and Codex home, and its isolated runtime is forced to use file-backed credentials. Isolated Telegram runtimes do not auto-launch Codex Desktop, avoiding simultaneous desktop-state initialization for fresh homes. On restart, FoxClaw reconnects to each live recorded app-server or starts a replacement. `/auth_reload` and auth switching restart only the requesting bot runtime.
 
 No static Codex app-server port is required in normal installs.
 
@@ -284,7 +284,7 @@ Run the QR login helper once after building:
 foxclaw weixin-login
 ```
 
-Weixin runtime files default to `~/.foxclaw/weixin`.
+Weixin runtime files default to `~/.foxclaw/weixin`. When `TG_BOT_TOKENS` is enabled, Weixin continues to use the default Codex runtime and original home; it does not inspect or resume isolated Telegram bot threads.
 
 ## Codex Skill
 

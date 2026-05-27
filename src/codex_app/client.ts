@@ -128,6 +128,15 @@ interface StopOptions {
 
 const CLIENT_VERSION = readPackageVersion();
 
+export function buildCodexAppServerArgs(port: number, configOverrides: readonly string[] = []): string[] {
+  const args = ['app-server'];
+  for (const override of configOverrides) {
+    args.push('-c', override);
+  }
+  args.push('--listen', `ws://127.0.0.1:${port}`);
+  return args;
+}
+
 export class CodexAppClient extends EventEmitter {
   private child: ChildProcess | null = null;
   private socket: WebSocket | null = null;
@@ -148,6 +157,7 @@ export class CodexAppClient extends EventEmitter {
     private readonly serverLogPath: string,
     private readonly logger: Logger,
     private readonly childEnv: NodeJS.ProcessEnv | null = null,
+    private readonly appServerConfigOverrides: readonly string[] = [],
   ) {
     super();
   }
@@ -657,10 +667,11 @@ export class CodexAppClient extends EventEmitter {
       launcher.unref();
     }
     this.port = await reservePort();
+    const serverArgs = buildCodexAppServerArgs(this.port, this.appServerConfigOverrides);
     const [stdoutFd, stderrFd] = this.openServerLogFiles();
     let child: ChildProcess;
     try {
-      child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
+      child = spawn(this.codexCliBin, serverArgs, {
         detached: true,
         stdio: ['ignore', stdoutFd, stderrFd],
         env: this.childEnv ? { ...process.env, ...this.childEnv } : process.env,
@@ -678,7 +689,7 @@ export class CodexAppClient extends EventEmitter {
     this.writeServerState({
       pid: child.pid,
       port: this.port,
-      command: `${this.codexCliBin} app-server --listen ws://127.0.0.1:${this.port}`,
+      command: [this.codexCliBin, ...serverArgs].join(' '),
       logPath: this.serverLogPath,
       bridgePid: process.pid,
       startedAt: new Date().toISOString(),

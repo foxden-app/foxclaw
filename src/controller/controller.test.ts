@@ -961,9 +961,63 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
 });
 
+test('/status in multi-bot mode reports isolated auth runtimes and recent coordination state', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).config.tgMultiBotMode = true;
+  (rig.controller as any).coordinator = {
+    getServiceStatus: async () => ({
+      bots: [
+        { id: 'bot1', username: 'bot_one', connected: true, activeTurns: 1, currentAuth: 'auth.json_a' },
+        { id: 'bot2', username: 'bot_two', connected: true, activeTurns: 0, currentAuth: 'auth.json_b' },
+      ],
+      authMirror: {
+        candidateName: 'auth.json_a',
+        sourceRuntimeId: 'bot1',
+        sourceLabel: '@bot_one',
+        syncedAt: '2026-05-27T10:00:00.000Z',
+      },
+      lastUpdate: {
+        state: 'succeeded',
+        scopeId: 'telegram:bot1:99::root',
+        locale: 'en',
+        fromVersion: '0.3.19',
+        toVersion: '0.4.0',
+        codexUpdate: 'Codex CLI updated with pnpm.',
+        error: null,
+        updatedAt: '2026-05-27T10:01:00.000Z',
+      },
+    }),
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
+
+  assert.match(rig.sentMessages[0]!, /Telegram bot runtimes:/);
+  assert.match(rig.sentMessages[0]!, /@bot_one: connected yes, auth auth\.json_a, active turns 1/);
+  assert.match(rig.sentMessages[0]!, /Last auth mirror: auth\.json_a from @bot_one/);
+  assert.match(rig.sentMessages[0]!, /Last service update: 0\.3\.19 -> 0\.4\.0/);
+  assert.match(rig.sentMessages[0]!, /Last Codex update: Codex CLI updated with pnpm\./);
+});
+
+test('a Weixin-only default runtime does not own Telegram scopes', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).ownsTelegramRuntime = false;
+
+  assert.equal((rig.controller as any).ownsScope('telegram:bot1:99::root'), false);
+  assert.equal((rig.controller as any).ownsScope('weixin:account:user'), true);
+});
+
 test('/update launches a background self-update and reports the completed result', async (t) => {
   let status: SelfUpdateStatus | null = null;
   let launches = 0;
+  const completed: { status: SelfUpdateStatus | null } = { status: null };
   const updater: SelfUpdateRuntime = {
     async launch(scopeId, locale) {
       launches += 1;
@@ -985,6 +1039,11 @@ test('/update launches a background self-update and reports the completed result
     },
   };
   const rig = createControllerRig(updater);
+  (rig.controller as any).coordinator = {
+    selfUpdateCompleted: (terminalStatus: SelfUpdateStatus) => {
+      completed.status = terminalStatus;
+    },
+  };
   t.after(() => {
     (rig.controller as any).clearSelfUpdateStatusPoll();
     rig.store.close();
@@ -1009,6 +1068,7 @@ test('/update launches a background self-update and reports the completed result
 
   assert.match(rig.sentMessages[1]!, /FoxClaw 已升级并重启：0\.3\.13 -> 0\.3\.14/);
   assert.equal(status, null);
+  assert.equal(completed.status?.toVersion, '0.3.14');
 });
 
 test('/update reports terminal fallback when self-update is unavailable', async (t) => {
@@ -1255,6 +1315,21 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
   assert.match(rig.sentMessages.at(-1)!, /Codex auth switched: auth\.json_a -> auth\.json_b/);
+});
+
+test('/auth identifies the requesting bot runtime in multi-bot mode', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+  (rig.controller as any).config.tgScopeBotId = 'bot123';
+  (rig.controller as any).botUsername = 'bot_one';
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /Bot runtime: @bot_one/);
 });
 
 test('/auth switch labels resolve symlink-backed auth files', async (t) => {

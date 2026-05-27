@@ -123,7 +123,7 @@ npm install -g @foxden-app/foxclaw
 foxclaw init
 ```
 
-This creates the config file at `~/.foxclaw/.env` and prompts for the Telegram bot token, your numeric Telegram user id, and the default workspace.
+This creates the config file at `~/.foxclaw/.env` and prompts for one or more comma-separated Telegram bot tokens, your numeric Telegram user id, and the default workspace. New installs use `TG_BOT_TOKENS`; legacy `TG_BOT_TOKEN` is only for existing single-bot configurations.
 
 If you prefer pnpm:
 
@@ -153,6 +153,14 @@ DEFAULT_SANDBOX_MODE=workspace-write
 ```
 
 Keep `TG_ALLOWED_CHAT_ID=` and `TG_ALLOWED_TOPIC_ID=` empty for the first install. Do not delete those lines; leaving them empty means private-chat mode.
+
+Start with one bot. To add three independent Codex lanes later, put the tokens on the same line:
+
+```dotenv
+TG_BOT_TOKENS=123456789:token_a,234567890:token_b,345678901:token_c
+```
+
+FoxClaw still installs one service, but each bot receives its own app-server, session home, and current auth selection. After startup, privately send `/help` and `/status` to each bot.
 
 `DEFAULT_CWD` must be a real folder. Examples:
 
@@ -280,7 +288,7 @@ Update FoxClaw later:
 foxclaw update
 ```
 
-You can also send `/update` in an authorized Telegram chat. When every bot is idle with no approval or question active, it attempts to update an npm/pnpm-managed Codex CLI, upgrades FoxClaw, checks, restarts the service, and reports the result after restart.
+You can also send `/update` in an authorized Telegram chat. When every Telegram bot runtime, an enabled Weixin default runtime, and auth mirror writes are idle, it attempts to update an npm/pnpm-managed Codex CLI, upgrades FoxClaw, checks, restarts the service, and reports the result through the bot that started it.
 
 ## Next Step
 
