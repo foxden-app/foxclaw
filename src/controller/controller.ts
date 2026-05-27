@@ -5481,11 +5481,12 @@ export class BridgeSessionCore {
         t(locale, 'status_codex_local_tokens', {
           total: formatTokenCount(stats.totals.totalTokens),
           input: formatTokenCount(stats.totals.inputTokens),
+          visible: formatTokenCount(Math.max(0, stats.totals.outputTokens - stats.totals.reasoningOutputTokens)),
           output: formatTokenCount(stats.totals.outputTokens),
           cached: formatTokenCount(stats.totals.cachedInputTokens),
           reasoning: formatTokenCount(stats.totals.reasoningOutputTokens),
         }),
-        ...this.formatCodexLocalOutputSpeedStatusLines(locale, stats),
+        ...this.formatCodexLocalResponseThroughputStatusLines(locale, stats),
         t(locale, 'status_codex_local_snapshot_at', {
           value: formatLocalTimestamp(snapshot.computedAtMs / 1000),
         }),
@@ -5496,16 +5497,23 @@ export class BridgeSessionCore {
     }
   }
 
-  private formatCodexLocalOutputSpeedStatusLines(locale: AppLocale, stats: CodexLocalUsageStats): string[] {
-    const speed = stats.outputSpeed;
-    if (speed.samples === 0 || speed.outputTokens <= 0 || speed.seconds <= 0) {
+  private formatCodexLocalResponseThroughputStatusLines(locale: AppLocale, stats: CodexLocalUsageStats): string[] {
+    const throughput = stats.responseThroughput;
+    if (
+      throughput.completedTurns === 0
+      || throughput.visibleOutputTokens <= 0
+      || throughput.seconds <= 0
+      || throughput.recentCompletedTurns === 0
+      || throughput.recentVisibleOutputTokens <= 0
+      || throughput.recentSeconds <= 0
+    ) {
       return [];
     }
-    const avg = speed.outputTokens / speed.seconds;
-    return [t(locale, 'status_codex_local_speed', {
-      avg: formatCompactNumber(avg),
-      latest: speed.latestTokensPerSecond === null ? t(locale, 'unknown') : formatCompactNumber(speed.latestTokensPerSecond),
-      samples: formatTokenCount(speed.samples),
+    return [t(locale, 'status_codex_local_throughput', {
+      overall: formatCompactNumber(throughput.visibleOutputTokens / throughput.seconds),
+      recent: formatCompactNumber(throughput.recentVisibleOutputTokens / throughput.recentSeconds),
+      recentTurns: formatTokenCount(throughput.recentCompletedTurns),
+      turns: formatTokenCount(throughput.completedTurns),
     })];
   }
 

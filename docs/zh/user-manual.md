@@ -230,7 +230,7 @@ TG_ALLOWED_TOPIC_ID=42
 
 ### 3.2 `/status`、`/account`、`/quota`、`/update`
 
-- `/status`：查看 FoxClaw、app-server、当前绑定线程、模型、权限和 Codex 用量摘要。本地 session/Token/输出速度使用后台生成的历史快照，避免状态查询现场扫描大量日志。
+- `/status`：查看 FoxClaw、app-server、当前绑定线程、模型、权限和 Codex 用量摘要。本地 session/Token/可见答复吞吐使用后台生成的历史快照，避免状态查询现场扫描大量日志；答复吞吐按完成轮次端到端耗时计算，排除推理 token，但包含等待与工具执行时间。
 - `/account`：查看当前 Codex 登录账号。
 - `/quota`：查看 Codex 用量和额度窗口。
 - `/update`：升级 FoxClaw、自检并重启服务；当前有运行中回复、审批或待确认问题时会拒绝执行，重启后会回报结果。

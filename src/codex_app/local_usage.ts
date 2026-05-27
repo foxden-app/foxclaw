@@ -18,7 +18,7 @@ export interface CodexLocalUsageStats {
   turns: number;
   usageEvents: number;
   totals: CodexLocalUsageTotals;
-  outputSpeed: CodexLocalOutputSpeedStats;
+  responseThroughput: CodexLocalResponseThroughputStats;
   latestSessionMtimeMs: number | null;
 }
 
@@ -27,13 +27,28 @@ export interface CodexLocalUsageSnapshot {
   stats: CodexLocalUsageStats;
 }
 
-export interface CodexLocalOutputSpeedStats {
-  samples: number;
-  outputTokens: number;
+export interface CodexLocalResponseThroughputStats {
+  completedTurns: number;
+  visibleOutputTokens: number;
   seconds: number;
-  latestTokensPerSecond: number | null;
-  latestSampleAtMs: number | null;
+  recentCompletedTurns: number;
+  recentVisibleOutputTokens: number;
+  recentSeconds: number;
 }
+
+interface CodexLocalCompletedTurnSample {
+  completedAtMs: number;
+  visibleOutputTokens: number;
+  seconds: number;
+}
+
+interface ActiveTurnUsage {
+  turnId: string;
+  startedAtMs: number;
+  visibleOutputTokens: number;
+}
+
+const RECENT_COMPLETED_TURNS = 10;
 
 interface RawTokenUsage {
   input_tokens?: unknown;
@@ -58,7 +73,7 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
   let sessionsWithUsage = 0;
   let usageEvents = 0;
   let latestSessionMtimeMs: number | null = null;
-  const outputSpeed = emptyOutputSpeedStats();
+  const completedTurnSamples: CodexLocalCompletedTurnSample[] = [];
 
   for (const filePath of sessionFiles) {
     const stat = await fs.stat(filePath).catch(() => null);
@@ -67,7 +82,7 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
     }
     const fileUsage = await readSessionUsage(filePath, turnIds);
     usageEvents += fileUsage.usageEvents;
-    addOutputSpeed(outputSpeed, fileUsage.outputSpeed);
+    completedTurnSamples.push(...fileUsage.completedTurnSamples);
     if (fileUsage.totalUsage) {
       sessionsWithUsage += 1;
       addUsage(totals, fileUsage.totalUsage);
@@ -80,7 +95,7 @@ export async function readCodexLocalUsageStats(codexHome = resolveCodexHome()): 
     turns: turnIds.size,
     usageEvents,
     totals,
-    outputSpeed,
+    responseThroughput: summarizeResponseThroughput(completedTurnSamples),
     latestSessionMtimeMs,
   };
 }
@@ -138,13 +153,17 @@ async function collectJsonlFiles(targetPath: string, results: string[]): Promise
 async function readSessionUsage(
   filePath: string,
   turnIds: Set<string>,
-): Promise<{ usageEvents: number; totalUsage: RawTokenUsage | null; outputSpeed: CodexLocalOutputSpeedStats }> {
+): Promise<{
+  usageEvents: number;
+  totalUsage: RawTokenUsage | null;
+  completedTurnSamples: CodexLocalCompletedTurnSample[];
+}> {
   const stream = createReadStream(filePath, { encoding: 'utf8' });
   const reader = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let totalUsage: RawTokenUsage | null = null;
   let usageEvents = 0;
-  let generationStartMs: number | null = null;
-  const outputSpeed = emptyOutputSpeedStats();
+  let activeTurn: ActiveTurnUsage | null = null;
+  const completedTurnSamples: CodexLocalCompletedTurnSample[] = [];
 
   try {
     for await (const line of reader) {
@@ -160,28 +179,53 @@ async function readSessionUsage(
       if (turnId) {
         turnIds.add(turnId);
       }
-      if (timestampMs !== null && isGenerationBoundary(event)) {
-        generationStartMs = timestampMs;
+      if (
+        timestampMs !== null
+        && turnId
+        && event?.type === 'event_msg'
+        && event?.payload?.type === 'task_started'
+      ) {
+        activeTurn = { turnId, startedAtMs: timestampMs, visibleOutputTokens: 0 };
       }
       const info = event?.payload?.info;
       const lastTokenUsage = info?.last_token_usage ?? info?.lastTokenUsage;
       if (lastTokenUsage) {
         usageEvents += 1;
-        addOutputSpeedSample(outputSpeed, lastTokenUsage, generationStartMs, timestampMs);
-        if (timestampMs !== null) {
-          generationStartMs = timestampMs;
+        if (activeTurn) {
+          activeTurn.visibleOutputTokens += visibleOutputTokens(lastTokenUsage);
         }
       }
       const totalTokenUsage = info?.total_token_usage ?? info?.totalTokenUsage;
       if (totalTokenUsage) {
         totalUsage = totalTokenUsage;
       }
+      const completedTurn = activeTurn;
+      if (
+        completedTurn !== null
+        && timestampMs !== null
+        && turnId
+        && completedTurn.turnId === turnId
+        && event?.type === 'event_msg'
+        && (event?.payload?.type === 'task_complete' || event?.payload?.type === 'turn_aborted')
+      ) {
+        if (event.payload.type === 'task_complete' && completedTurn.visibleOutputTokens > 0) {
+          const seconds = (timestampMs - completedTurn.startedAtMs) / 1000;
+          if (Number.isFinite(seconds) && seconds > 0) {
+            completedTurnSamples.push({
+              completedAtMs: timestampMs,
+              visibleOutputTokens: completedTurn.visibleOutputTokens,
+              seconds,
+            });
+          }
+        }
+        activeTurn = null;
+      }
     }
   } finally {
     reader.close();
   }
 
-  return { usageEvents, totalUsage, outputSpeed };
+  return { usageEvents, totalUsage, completedTurnSamples };
 }
 
 function emptyTotals(): CodexLocalUsageTotals {
@@ -194,23 +238,13 @@ function emptyTotals(): CodexLocalUsageTotals {
   };
 }
 
-function emptyOutputSpeedStats(): CodexLocalOutputSpeedStats {
-  return {
-    samples: 0,
-    outputTokens: 0,
-    seconds: 0,
-    latestTokensPerSecond: null,
-    latestSampleAtMs: null,
-  };
-}
-
 function isCodexLocalUsageStats(value: unknown): value is CodexLocalUsageStats {
   if (!value || typeof value !== 'object') {
     return false;
   }
   const stats = value as Partial<CodexLocalUsageStats>;
   const totals = stats.totals as Partial<CodexLocalUsageTotals> | undefined;
-  const speed = stats.outputSpeed as Partial<CodexLocalOutputSpeedStats> | undefined;
+  const throughput = stats.responseThroughput as Partial<CodexLocalResponseThroughputStats> | undefined;
   return isFiniteNumber(stats.sessionFiles)
     && isFiniteNumber(stats.sessionsWithUsage)
     && isFiniteNumber(stats.turns)
@@ -221,12 +255,13 @@ function isCodexLocalUsageStats(value: unknown): value is CodexLocalUsageStats {
     && isFiniteNumber(totals?.outputTokens)
     && isFiniteNumber(totals?.reasoningOutputTokens)
     && isFiniteNumber(totals?.totalTokens)
-    && Boolean(speed)
-    && isFiniteNumber(speed?.samples)
-    && isFiniteNumber(speed?.outputTokens)
-    && isFiniteNumber(speed?.seconds)
-    && isNullableFiniteNumber(speed?.latestTokensPerSecond)
-    && isNullableFiniteNumber(speed?.latestSampleAtMs)
+    && Boolean(throughput)
+    && isFiniteNumber(throughput?.completedTurns)
+    && isFiniteNumber(throughput?.visibleOutputTokens)
+    && isFiniteNumber(throughput?.seconds)
+    && isFiniteNumber(throughput?.recentCompletedTurns)
+    && isFiniteNumber(throughput?.recentVisibleOutputTokens)
+    && isFiniteNumber(throughput?.recentSeconds)
     && isNullableFiniteNumber(stats.latestSessionMtimeMs);
 }
 
@@ -249,42 +284,27 @@ function addUsage(totals: CodexLocalUsageTotals, usage: RawTokenUsage): void {
   totals.totalTokens += totalTokens || inputTokens + outputTokens;
 }
 
-function addOutputSpeed(target: CodexLocalOutputSpeedStats, source: CodexLocalOutputSpeedStats): void {
-  target.samples += source.samples;
-  target.outputTokens += source.outputTokens;
-  target.seconds += source.seconds;
-  if (
-    source.latestTokensPerSecond !== null
-    && source.latestSampleAtMs !== null
-    && (target.latestSampleAtMs === null || source.latestSampleAtMs > target.latestSampleAtMs)
-  ) {
-    target.latestTokensPerSecond = source.latestTokensPerSecond;
-    target.latestSampleAtMs = source.latestSampleAtMs;
-  }
+function visibleOutputTokens(usage: RawTokenUsage): number {
+  return Math.max(
+    0,
+    numberField(usage, 'output_tokens', 'outputTokens')
+      - numberField(usage, 'reasoning_output_tokens', 'reasoningOutputTokens'),
+  );
 }
 
-function addOutputSpeedSample(
-  stats: CodexLocalOutputSpeedStats,
-  usage: RawTokenUsage,
-  generationStartMs: number | null,
-  timestampMs: number | null,
-): void {
-  if (generationStartMs === null || timestampMs === null || timestampMs <= generationStartMs) {
-    return;
-  }
-  const outputTokens = numberField(usage, 'output_tokens', 'outputTokens');
-  if (outputTokens <= 0) {
-    return;
-  }
-  const seconds = (timestampMs - generationStartMs) / 1000;
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return;
-  }
-  stats.samples += 1;
-  stats.outputTokens += outputTokens;
-  stats.seconds += seconds;
-  stats.latestTokensPerSecond = outputTokens / seconds;
-  stats.latestSampleAtMs = timestampMs;
+function summarizeResponseThroughput(
+  samples: CodexLocalCompletedTurnSample[],
+): CodexLocalResponseThroughputStats {
+  const ordered = samples.slice().sort((left, right) => left.completedAtMs - right.completedAtMs);
+  const recent = ordered.slice(-RECENT_COMPLETED_TURNS);
+  return {
+    completedTurns: ordered.length,
+    visibleOutputTokens: ordered.reduce((total, sample) => total + sample.visibleOutputTokens, 0),
+    seconds: ordered.reduce((total, sample) => total + sample.seconds, 0),
+    recentCompletedTurns: recent.length,
+    recentVisibleOutputTokens: recent.reduce((total, sample) => total + sample.visibleOutputTokens, 0),
+    recentSeconds: recent.reduce((total, sample) => total + sample.seconds, 0),
+  };
 }
 
 function numberField(source: RawTokenUsage, snakeKey: keyof RawTokenUsage, camelKey: keyof RawTokenUsage): number {
@@ -300,17 +320,4 @@ function parseTimestampMs(value: unknown): number | null {
   }
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestamp : null;
-}
-
-function isGenerationBoundary(event: any): boolean {
-  const payload = event?.payload;
-  if (event?.type === 'response_item' && payload?.type === 'function_call_output') {
-    return true;
-  }
-  if (event?.type !== 'event_msg') {
-    return false;
-  }
-  return payload?.type === 'task_started'
-    || payload?.type === 'exec_command_end'
-    || payload?.type === 'user_message';
 }

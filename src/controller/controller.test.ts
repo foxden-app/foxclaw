@@ -1098,6 +1098,11 @@ test('/status includes local Codex token history from session logs', async (t) =
         },
       },
     }),
+    JSON.stringify({
+      timestamp: '2026-05-26T00:00:06.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_complete', turn_id: 'turn-a' },
+    }),
   ].join('\n'));
   fs.writeFileSync(path.join(sessionDir, 'rollout-b.jsonl'), [
     JSON.stringify({
@@ -1129,6 +1134,11 @@ test('/status includes local Codex token history from session logs', async (t) =
         },
       },
     }),
+    JSON.stringify({
+      timestamp: '2026-05-26T00:01:06.000Z',
+      type: 'event_msg',
+      payload: { type: 'task_complete', turn_id: 'turn-b' },
+    }),
   ].join('\n'));
 
   await (rig.controller as any).refreshCodexLocalUsageStats();
@@ -1137,11 +1147,11 @@ test('/status includes local Codex token history from session logs', async (t) =
   assert.match(rig.sentMessages[0]!, /Codex local history: 2 sessions, 2 turns, 3 usage records/);
   assert.match(
     rig.sentMessages[0]!,
-    /Codex local tokens: total 147; input 130, output 17, cached input 24, reasoning output 7/,
+    /Codex local tokens: total 147; input 130, visible output 10, reasoning output 7, total output 17, cached input 24/,
   );
   assert.match(
     rig.sentMessages[0]!,
-    /Codex local output speed: avg 1\.7 token\/s, latest 2 token\/s \(3 samples\)/,
+    /Codex visible reply throughput \(end-to-end, excluding reasoning\): overall 0\.8 token\/s, last 2 completed turns 0\.8 token\/s \(2 completed turns sampled\)/,
   );
   assert.match(rig.sentMessages[0]!, /Codex local stats snapshot: /);
 });
