@@ -8,6 +8,7 @@ export interface AuthMirrorRuntime {
   label?: string;
   authDir: string;
   notify?: (message: string) => Promise<void>;
+  validate?: (context: AuthMirrorValidationContext) => Promise<AuthMirrorValidationResult | boolean>;
 }
 
 export interface AuthMirrorStatus {
@@ -15,6 +16,17 @@ export interface AuthMirrorStatus {
   sourceRuntimeId: string;
   sourceLabel: string;
   syncedAt: string;
+}
+
+export interface AuthMirrorValidationContext {
+  candidateName: string;
+  accountId: string;
+  lastRefreshMs: number;
+}
+
+export interface AuthMirrorValidationResult {
+  ok: boolean;
+  reason?: string | null;
 }
 
 interface AuthRecord {
@@ -120,6 +132,15 @@ export class AuthCandidateMirror {
     if (record.lastRefreshMs <= previousRefresh) {
       return false;
     }
+    const validation = await this.validateRuntimeCandidate(runtime, name, record);
+    if (!validation.ok) {
+      this.logger.warn('auth.mirror.validation_failed', {
+        runtimeId: runtime.id,
+        name,
+        reason: validation.reason ?? 'unknown',
+      });
+      return false;
+    }
     await atomicWrite(canonicalPath, record.raw);
     for (const target of this.runtimes) {
       if (target.id !== runtime.id) {
@@ -139,6 +160,29 @@ export class AuthCandidateMirror {
     const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
     await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
     return true;
+  }
+
+  private async validateRuntimeCandidate(
+    runtime: AuthMirrorRuntime,
+    name: string,
+    record: AuthRecord,
+  ): Promise<AuthMirrorValidationResult> {
+    if (!runtime.validate) {
+      return { ok: true };
+    }
+    try {
+      const result = await runtime.validate({
+        candidateName: name,
+        accountId: record.accountId,
+        lastRefreshMs: record.lastRefreshMs,
+      });
+      if (typeof result === 'boolean') {
+        return { ok: result };
+      }
+      return { ok: Boolean(result.ok), reason: result.reason ?? null };
+    } catch (error) {
+      return { ok: false, reason: formatError(error) };
+    }
   }
 
   private async withActivity<T>(operation: () => Promise<T>): Promise<T> {

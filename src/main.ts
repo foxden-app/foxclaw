@@ -277,6 +277,7 @@ async function runServeCli(): Promise<void> {
           id: runtime.id,
           label: runtime.bot.username ? `@${runtime.bot.username}` : runtime.id,
           authDir: runtime.home,
+          validate: async (context) => validateRefreshedAuthCandidate(runtime, context.candidateName),
           notify: async (message: string): Promise<void> => {
             const chatId = store!.getTelegramPrivateChatId(runtime.id);
             if (chatId) {
@@ -538,6 +539,30 @@ async function runServeCli(): Promise<void> {
     processLock.release();
     throw error;
   }
+}
+
+async function validateRefreshedAuthCandidate(
+  runtime: { id: string; home: string; app: { isConnected(): boolean; readAccount(): Promise<{ type: string; requiresOpenaiAuth: boolean } | null>; readAccountRateLimits(): Promise<unknown> } },
+  candidateName: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  const authPath = path.join(runtime.home, 'auth.json');
+  const candidatePath = path.join(runtime.home, candidateName);
+  const [currentTarget, candidateTarget] = await Promise.all([
+    fs.promises.realpath(authPath).catch(() => null),
+    fs.promises.realpath(candidatePath).catch(() => null),
+  ]);
+  if (!currentTarget || !candidateTarget || currentTarget !== candidateTarget) {
+    return { ok: false, reason: 'candidate is not the current auth target' };
+  }
+  if (!runtime.app.isConnected()) {
+    return { ok: false, reason: 'source app-server is not connected' };
+  }
+  const account = await runtime.app.readAccount();
+  if (!account || account.type !== 'chatgpt' || account.requiresOpenaiAuth) {
+    return { ok: false, reason: 'source app-server did not report an active ChatGPT account' };
+  }
+  await runtime.app.readAccountRateLimits();
+  return { ok: true };
 }
 
 async function initConfig(): Promise<void> {

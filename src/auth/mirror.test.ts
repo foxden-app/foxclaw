@@ -98,6 +98,38 @@ test('AuthCandidateMirror rejects a same-name candidate belonging to a different
   }
 });
 
+test('AuthCandidateMirror requires runtime validation before propagating a refreshed candidate', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-validate-'));
+  const canonical = path.join(root, 'canonical');
+  const runtime = path.join(root, 'bot1');
+  let validationContext: unknown = null;
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const original = auth('acct-1', '2026-05-01T00:00:00.000Z');
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), original);
+    const mirror = new AuthCandidateMirror(canonical, [{
+      id: 'bot1',
+      authDir: runtime,
+      validate: async (context) => {
+        validationContext = context;
+        return { ok: false, reason: 'backend rejected credentials' };
+      },
+    }], loggerStub as any);
+    await mirror.initialize();
+    await fs.writeFile(path.join(runtime, 'auth.json_work'), auth('acct-1', '2026-05-27T00:00:00.000Z'));
+
+    assert.equal(await mirror.syncRuntimeCandidate('bot1', 'auth.json_work'), false);
+    assert.deepEqual(validationContext, {
+      candidateName: 'auth.json_work',
+      accountId: 'acct-1',
+      lastRefreshMs: Date.parse('2026-05-27T00:00:00.000Z'),
+    });
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), original);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror ignores invalid runtime-only candidates during initialization', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-invalid-'));
   const canonical = path.join(root, 'canonical');
