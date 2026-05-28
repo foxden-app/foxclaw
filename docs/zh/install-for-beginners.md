@@ -160,6 +160,15 @@ TG_BOT_TOKENS=123456789:token_a,234567890:token_b,345678901:token_c
 
 FoxClaw 仍只安装一个服务，但每个 bot 会有独立 app-server、会话目录和当前 auth。服务启动后请分别私聊每个 bot 发送 `/help` 与 `/status`。
 
+如果你希望其中一个 bot 和终端 Codex 共享 session 与默认 auth，再把 `TG_BOT_TOKEN` 设置为同一个 token：
+
+```dotenv
+TG_BOT_TOKENS=123456789:token_a,234567890:token_b
+TG_BOT_TOKEN=123456789:token_a
+```
+
+只有匹配的 bot 使用默认/终端共享 runtime，其他 bot 仍然隔离。
+
 `DEFAULT_CWD` 必须是真实存在的目录，例如：
 
 ```dotenv

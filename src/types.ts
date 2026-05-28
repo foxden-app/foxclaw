@@ -363,6 +363,7 @@ export interface RuntimeStatus {
     username: string | null;
     connected: boolean;
     activeTurns: number;
+    runtimeKind?: 'default' | 'isolated';
     currentAuth?: string | null;
     codexAppServer?: RuntimeStatus['codexAppServer'];
   }>;

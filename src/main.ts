@@ -221,6 +221,8 @@ async function runServeCli(): Promise<void> {
       type RuntimeSeed = {
         id: string;
         home: string;
+        authDir: string;
+        sharedDefaultRuntime: boolean;
         config: typeof config;
         bot: InstanceType<typeof TelegramGateway>;
         app: InstanceType<typeof CodexAppClient>;
@@ -230,6 +232,7 @@ async function runServeCli(): Promise<void> {
         telegram: InstanceType<typeof TelegramChannelAdapter>;
       };
       const seeds: RuntimeSeed[] = [];
+      const canonicalAuthDir = config.codexAuthDir ?? config.codexHome ?? path.join(os.homedir(), '.codex');
       for (const token of config.tgBotTokens) {
         const bot = new TelegramGateway(
           token,
@@ -244,19 +247,32 @@ async function runServeCli(): Promise<void> {
         if (seeds.some((runtime) => runtime.id === id)) {
           throw new Error(`TG_BOT_TOKENS contains duplicate Telegram bot identity: ${id}`);
         }
-        const home = path.join(DEFAULT_CODEX_TELEGRAM_HOME, id, 'home');
-        fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+        const sharedDefaultRuntime = config.tgDefaultRuntimeBotToken === token;
+        const home = sharedDefaultRuntime
+          ? (config.codexHome ?? path.join(os.homedir(), '.codex'))
+          : path.join(DEFAULT_CODEX_TELEGRAM_HOME, id, 'home');
+        const authDir = sharedDefaultRuntime ? canonicalAuthDir : home;
+        if (!sharedDefaultRuntime) {
+          fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+        }
         const runtimeConfig = {
           ...config,
           tgBotToken: token,
           tgBotTokens: [token],
           tgScopeBotId: id,
-          codexAuthDir: home,
-          codexHome: home,
-          codexAppAutolaunch: false,
-          codexAppServerStatePath: path.join(APP_HOME, 'runtime', `codex-app-server-${id}.json`),
-          codexAppServerLogPath: path.join(APP_HOME, 'logs', `codex-app-server-${id}.log`),
+          codexAuthDir: sharedDefaultRuntime ? config.codexAuthDir : home,
+          codexHome: sharedDefaultRuntime ? config.codexHome : home,
+          codexAppAutolaunch: sharedDefaultRuntime ? config.codexAppAutolaunch : false,
+          codexAppServerStatePath: sharedDefaultRuntime
+            ? config.codexAppServerStatePath
+            : path.join(APP_HOME, 'runtime', `codex-app-server-${id}.json`),
+          codexAppServerLogPath: sharedDefaultRuntime
+            ? config.codexAppServerLogPath
+            : path.join(APP_HOME, 'logs', `codex-app-server-${id}.log`),
         };
+        const childEnv = sharedDefaultRuntime
+          ? (config.codexHome ? { CODEX_HOME: config.codexHome } : null)
+          : { CODEX_HOME: home };
         const app = new CodexAppClient(
           runtimeConfig.codexCliBin,
           runtimeConfig.codexAppLaunchCmd,
@@ -264,19 +280,18 @@ async function runServeCli(): Promise<void> {
           runtimeConfig.codexAppServerStatePath,
           runtimeConfig.codexAppServerLogPath,
           logger,
-          { CODEX_HOME: home },
-          ['cli_auth_credentials_store="file"'],
+          childEnv,
+          sharedDefaultRuntime ? [] : ['cli_auth_credentials_store="file"'],
         );
-        seeds.push({ id, home, config: runtimeConfig, bot, app });
+        seeds.push({ id, home, authDir, sharedDefaultRuntime, config: runtimeConfig, bot, app });
       }
 
-      const canonicalAuthDir = config.codexAuthDir ?? config.codexHome ?? path.join(os.homedir(), '.codex');
       const mirror = new AuthCandidateMirror(
         canonicalAuthDir,
         seeds.map((runtime) => ({
           id: runtime.id,
           label: runtime.bot.username ? `@${runtime.bot.username}` : runtime.id,
-          authDir: runtime.home,
+          authDir: runtime.authDir,
           validate: async (context) => validateRefreshedAuthCandidate(runtime, context.candidateName),
           notify: async (message: string): Promise<void> => {
             const chatId = store!.getTelegramPrivateChatId(runtime.id);
@@ -331,6 +346,7 @@ async function runServeCli(): Promise<void> {
             username: statuses[index]?.botUsername ?? runtime.bot.username,
             connected: running && Boolean(statuses[index]?.connected),
             activeTurns: running ? (statuses[index]?.activeTurns ?? 0) : 0,
+            runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
             ...(statuses[index]?.codexAppServer ? { codexAppServer: statuses[index].codexAppServer } : {}),
           })),
           ...(weixinStatus ? {
@@ -359,6 +375,7 @@ async function runServeCli(): Promise<void> {
               username: status.botUsername ?? runtime.bot.username,
               connected: status.connected,
               activeTurns: status.activeTurns,
+              runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
               currentAuth: await runtime.core.getCurrentAuthLabel().catch(() => null),
               ...(status.codexAppServer ? { codexAppServer: status.codexAppServer } : {}),
             };
@@ -542,11 +559,11 @@ async function runServeCli(): Promise<void> {
 }
 
 async function validateRefreshedAuthCandidate(
-  runtime: { id: string; home: string; app: { isConnected(): boolean; readAccount(): Promise<{ type: string; requiresOpenaiAuth: boolean } | null>; readAccountRateLimits(): Promise<unknown> } },
+  runtime: { id: string; authDir: string; app: { isConnected(): boolean; readAccount(): Promise<{ type: string; requiresOpenaiAuth: boolean } | null>; readAccountRateLimits(): Promise<unknown> } },
   candidateName: string,
 ): Promise<{ ok: boolean; reason?: string }> {
-  const authPath = path.join(runtime.home, 'auth.json');
-  const candidatePath = path.join(runtime.home, candidateName);
+  const authPath = path.join(runtime.authDir, 'auth.json');
+  const candidatePath = path.join(runtime.authDir, candidateName);
   const [currentTarget, candidateTarget] = await Promise.all([
     fs.promises.realpath(authPath).catch(() => null),
     fs.promises.realpath(candidatePath).catch(() => null),

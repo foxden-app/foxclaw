@@ -47,6 +47,7 @@ export interface AppConfig {
   tgBotToken: string;
   tgBotTokens: string[];
   tgMultiBotMode: boolean;
+  tgDefaultRuntimeBotToken: string | null;
   tgScopeBotId: string | null;
   tgRequireExplicitGroupAddressing: boolean;
   tgAllowedUserId: string;
@@ -87,6 +88,7 @@ export function loadConfig(): AppConfig {
   loadEnv();
   const configuredTokens = parseCommaSeparatedIds(process.env.TG_BOT_TOKENS);
   const legacyToken = optional('TG_BOT_TOKEN');
+  const tgDefaultRuntimeBotToken = selectDefaultRuntimeBotToken(configuredTokens, legacyToken);
   const tgBotTokens = configuredTokens.length > 0
     ? configuredTokens
     : legacyToken
@@ -99,6 +101,7 @@ export function loadConfig(): AppConfig {
     tgBotToken: tgBotTokens[0]!,
     tgBotTokens,
     tgMultiBotMode: configuredTokens.length > 0,
+    tgDefaultRuntimeBotToken,
     tgScopeBotId: null,
     tgRequireExplicitGroupAddressing: configuredTokens.length > 1,
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
@@ -133,6 +136,11 @@ export function loadConfig(): AppConfig {
   };
   ensureAppDirs(config);
   return config;
+}
+
+export function selectDefaultRuntimeBotToken(configuredTokens: string[], legacyToken: string | null): string | null {
+  if (configuredTokens.length === 0 || !legacyToken) return null;
+  return configuredTokens.includes(legacyToken) ? legacyToken : null;
 }
 
 export function ensureAppDirs(config: AppConfig): void {

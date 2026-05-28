@@ -23,6 +23,7 @@ function createConfig(tempDir: string): AppConfig {
     tgBotToken: 'token',
     tgBotTokens: ['token'],
     tgMultiBotMode: false,
+    tgDefaultRuntimeBotToken: null,
     tgScopeBotId: null,
     tgRequireExplicitGroupAddressing: false,
     tgAllowedUserId: '42',
@@ -961,7 +962,7 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.doesNotMatch(rig.sentMessages[0]!, /user@example\.com/);
 });
 
-test('/status in multi-bot mode reports isolated auth runtimes and recent coordination state', async (t) => {
+test('/status in multi-bot mode reports auth runtime types and recent coordination state', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     rig.store.close();
@@ -972,7 +973,7 @@ test('/status in multi-bot mode reports isolated auth runtimes and recent coordi
     getServiceStatus: async () => ({
       bots: [
         { id: 'bot1', username: 'bot_one', connected: true, activeTurns: 1, currentAuth: 'auth.json_a' },
-        { id: 'bot2', username: 'bot_two', connected: true, activeTurns: 0, currentAuth: 'auth.json_b' },
+        { id: 'bot2', username: 'bot_two', connected: true, activeTurns: 0, runtimeKind: 'default' as const, currentAuth: 'auth.json_b' },
       ],
       authMirror: {
         candidateName: 'auth.json_a',
@@ -996,7 +997,8 @@ test('/status in multi-bot mode reports isolated auth runtimes and recent coordi
   await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
 
   assert.match(rig.sentMessages[0]!, /Telegram bot runtimes:/);
-  assert.match(rig.sentMessages[0]!, /@bot_one: connected yes, auth auth\.json_a, active turns 1/);
+  assert.match(rig.sentMessages[0]!, /@bot_one: connected yes, runtime isolated, auth auth\.json_a, active turns 1/);
+  assert.match(rig.sentMessages[0]!, /@bot_two: connected yes, runtime default\/shared terminal, auth auth\.json_b, active turns 0/);
   assert.match(rig.sentMessages[0]!, /Last auth mirror: auth\.json_a from @bot_one/);
   assert.match(rig.sentMessages[0]!, /Last service update: 0\.3\.19 -> 0\.4\.0/);
   assert.match(rig.sentMessages[0]!, /Last Codex update: Codex CLI updated with pnpm\./);

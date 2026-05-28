@@ -162,6 +162,15 @@ TG_BOT_TOKENS=123456789:token_a,234567890:token_b,345678901:token_c
 
 FoxClaw still installs one service, but each bot receives its own app-server, session home, and current auth selection. After startup, privately send `/help` and `/status` to each bot.
 
+If you want one of those bots to share terminal Codex sessions and the default auth, also set `TG_BOT_TOKEN` to the exact same token:
+
+```dotenv
+TG_BOT_TOKENS=123456789:token_a,234567890:token_b
+TG_BOT_TOKEN=123456789:token_a
+```
+
+Only the matching bot uses the default/shared-terminal runtime; the others stay isolated.
+
 `DEFAULT_CWD` must be a real folder. Examples:
 
 ```dotenv

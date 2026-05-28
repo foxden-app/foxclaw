@@ -120,7 +120,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 Fields:
 
-- `TG_BOT_TOKENS`: one or more `@BotFather` tokens separated by commas. The legacy single-bot `TG_BOT_TOKEN` setting remains compatible.
+- `TG_BOT_TOKENS`: one or more `@BotFather` tokens separated by commas. The legacy single-bot `TG_BOT_TOKEN` setting remains compatible. In multi-bot mode, if the exact `TG_BOT_TOKEN` value also appears in `TG_BOT_TOKENS`, that bot uses the default/shared-terminal runtime.
 - `TG_ALLOWED_USER_ID`: your numeric Telegram user id.
 - `TG_ALLOWED_CHAT_ID`: leave empty for the first private-chat setup.
 - `TG_ALLOWED_TOPIC_ID`: leave empty unless binding a Telegram topic.
@@ -335,11 +335,13 @@ Watch mode mirrors live turn progress and approval requests. The watching chat i
 
 ## 6. Codex Login And Auth Rotation
 
-This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to. In `TG_BOT_TOKENS` mode, each bot has an isolated Codex home, app-server, and current candidate, so bots can run and switch accounts independently; isolated Telegram runtimes force file-backed credential storage. Validated login/refresh credentials are safely mirrored between bot homes, but sessions are never shared.
+This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to. In `TG_BOT_TOKENS` mode, each bot has an isolated Codex home, app-server, and current candidate by default, so bots can run and switch accounts independently; isolated Telegram runtimes force file-backed credential storage. Validated login/refresh credentials are safely mirrored between bot homes, but isolated sessions are never shared.
+
+To keep one Telegram bot interoperable with terminal Codex sessions, put the same token in both `TG_BOT_TOKENS` and `TG_BOT_TOKEN`. That bot uses the default `CODEX_HOME` and default auth, so `/threads` can see local terminal sessions; its `/auth` switches also affect the terminal default auth. Bots listed only in `TG_BOT_TOKENS` stay isolated.
 
 ### 6.1 File Format
 
-In single-bot compatibility mode, candidate files live in the Codex auth directory, usually `~/.codex/`. If `CODEX_AUTH_DIR` is set, FoxClaw uses that directory. Multi-bot mode treats that directory as its candidate source and stores isolated bot copies under `~/.foxclaw/codex/telegram/bot<id>/home/`.
+In single-bot compatibility mode, candidate files live in the Codex auth directory, usually `~/.codex/`. If `CODEX_AUTH_DIR` is set, FoxClaw uses that directory. Multi-bot mode treats that directory as its candidate source and stores isolated bot copies under `~/.foxclaw/codex/telegram/bot<id>/home/`. A default/shared-terminal bot does not get an isolated copy; it uses the default auth directory directly.
 
 Recommended layout:
 

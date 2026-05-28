@@ -783,6 +783,7 @@ export class BridgeSessionCore {
             lines.push(t(locale, 'status_runtime_bot', {
               bot: runtime.username ? `@${runtime.username}` : runtime.id,
               connected: t(locale, runtime.connected ? 'yes' : 'no'),
+              runtime: t(locale, runtime.runtimeKind === 'default' ? 'status_runtime_kind_default' : 'status_runtime_kind_isolated'),
               auth: runtime.currentAuth ?? t(locale, 'none'),
               turns: runtime.activeTurns,
             }));

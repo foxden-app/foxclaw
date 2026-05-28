@@ -184,7 +184,7 @@ tail -f ~/.foxclaw/logs/service.log
 
 ## Checking Multi-Bot Mode
 
-After configuring `TG_BOT_TOKENS`, `foxclaw status` should contain one bot id, connection status, and independent app-server for each token. Send `/status` privately to any bot to see the runtime summary; send `/auth` to confirm the panel names the current `@botname` and its auth directory.
+After configuring `TG_BOT_TOKENS`, `foxclaw status` should contain one bot id, connection status, and runtime type for each token. Send `/status` privately to any bot to see the runtime summary; send `/auth` to confirm the panel names the current `@botname` and its auth directory. If `TG_BOT_TOKEN` exactly matches one token in `TG_BOT_TOKENS`, that bot should appear as the default/shared-terminal runtime; the others should appear as isolated.
 
 Each isolated app-server log is stored at:
 

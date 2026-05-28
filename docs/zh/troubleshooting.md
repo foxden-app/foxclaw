@@ -185,7 +185,7 @@ tail -f ~/.foxclaw/logs/service.log
 
 ## 多 bot 模式核查
 
-配置 `TG_BOT_TOKENS` 后，`foxclaw status` 的 `bots` 列表应为每个 token 显示一个 bot id、连接状态和独立 app-server。私聊任一 bot 发送 `/status` 会显示全部 runtime 摘要；发送 `/auth` 应显示当前 `@botname` 和该 bot 的 auth 目录。
+配置 `TG_BOT_TOKENS` 后，`foxclaw status` 的 `bots` 列表应为每个 token 显示一个 bot id、连接状态和 runtime 类型。私聊任一 bot 发送 `/status` 会显示全部 runtime 摘要；发送 `/auth` 应显示当前 `@botname` 和该 bot 的 auth 目录。如果 `TG_BOT_TOKEN` 精确匹配 `TG_BOT_TOKENS` 中的一个 token，该 bot 应显示为默认/终端共享 runtime；其他 bot 应显示为隔离 runtime。
 
 每个隔离 app-server 的日志路径为：
 
