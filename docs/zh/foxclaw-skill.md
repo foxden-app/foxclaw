@@ -19,6 +19,7 @@
 ## 注意事项
 
 - 不要让 agent 把完整 bot token 打印到日志或提交到仓库。
+- FoxClaw 仓库收尾提交默认使用 `中文 | English` 的双语 subject，方便国内和国际协作者同时阅读。
 - 第一次请先用私聊模式跑通。
 - 多个 token 会在同一服务中建立多个独立 Codex home、session 与 auth 选择；群组中必须点名或回复目标 bot。
 - 同时启用微信时，微信仍使用默认 Codex runtime，不共享隔离 Telegram bot 的线程。

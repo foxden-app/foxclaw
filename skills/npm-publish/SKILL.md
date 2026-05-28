@@ -37,7 +37,7 @@ Use this skill to publish an npm package from a repo. Prefer CI trusted publishi
 5. Commit and push source changes before `npm publish` when the user asked to push or when this is a normal release:
    ```bash
    git add <changed-files>
-   git commit -m "<release message>"
+   git commit -m "<Chinese | English release message>"
    git push
    ```
 
@@ -56,7 +56,7 @@ Use this path when the repo has `.github/workflows/publish.yml` and npmjs.com ha
    ```bash
    npm version patch --no-git-tag-version
    git add package.json package-lock.json
-   git commit -m "<Chinese release message when appropriate>"
+   git commit -m "<Chinese | English release message when appropriate>"
    git push origin <branch>
    ```
 

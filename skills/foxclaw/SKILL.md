@@ -1,6 +1,6 @@
 ---
 name: foxclaw
-description: Deploy, configure, validate, develop, and release FoxClaw. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram values, write `.env`, enable launchd/systemd, guide first-message tests, or perform FoxClaw repo wrap-up actions such as Chinese commit messages, push, npm publish, and local install/service update.
+description: Deploy, configure, validate, develop, and release FoxClaw. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram values, write `.env`, enable launchd/systemd, guide first-message tests, or perform FoxClaw repo wrap-up actions such as bilingual Chinese | English commit messages, push, npm publish, and local install/service update.
 ---
 
 # FoxClaw
@@ -169,7 +169,7 @@ Do not describe the setup as "done" until this smoke test has either passed or b
 
 ## Development Wrap-Up
 
-Use this checklist when the user asks for standard closing actions, release wrap-up, local install updates, npm publish, or says things like "收尾动作", "中文 commit msg", "push", "npm publish", or "本地安装更新".
+Use this checklist when the user asks for standard closing actions, release wrap-up, local install updates, npm publish, or says things like "收尾动作", "中文 commit msg", "中英双语 commit msg", "push", "npm publish", or "本地安装更新".
 
 1. Inspect scope before staging:
    - `git status -sb`
@@ -183,7 +183,9 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - `npm run build`
 4. Commit intentionally:
    - Stage only the changed files that belong to the task.
-   - Use a Chinese commit message when the user asked in Chinese or explicitly said "中文 commit msg".
+   - For this repo, prefer a bilingual one-line subject in the form `中文 | English`.
+   - Put Chinese first, keep the English half semantically equivalent, and keep both halves concise.
+   - For release commits, use the same format, for example `发布 0.4.0：支持多机器人隔离 | Release 0.4.0: support multi-bot isolation`.
    - Never stage unrelated local changes.
 5. Push the current branch after a successful commit:
    - `git push origin <branch>`
