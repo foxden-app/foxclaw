@@ -138,6 +138,13 @@ function installTempAuthFiles(t: TestContext, tempDir: string): string {
   return authDir;
 }
 
+function writeChatGptAuthCandidate(authDir: string, name: string, accountId: string, lastRefresh = '2026-01-01T00:00:00.000Z'): void {
+  fs.writeFileSync(path.join(authDir, name), `${JSON.stringify({
+    tokens: { account_id: accountId },
+    last_refresh: lastRefresh,
+  })}\n`);
+}
+
 function installTempCodexHome(t: TestContext, tempDir: string): string {
   const codexHome = path.join(tempDir, '.codex-home');
   fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
@@ -1464,6 +1471,47 @@ test('/auth records and displays current candidate remaining quota without probi
   assert.equal(reads, 2);
   assert.match(rig.sentMessages[1]!, /20\|25\|auth\.json_a \[enabled\]/);
   assert.match(rig.sentMessages[1]!, /90\|95\|auth\.json_b \* \[enabled\]/);
+});
+
+test('/auth supplements quota snapshots from other runtimes by account id', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  fs.rmSync(path.join(authDir, 'auth.json'), { force: true });
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a');
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b');
+  fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
+  rig.store.setCodexAuthQuotaSnapshot('bot-other', 'auth.json_different_name', 'acct-b', {
+    capturedAtMs: 10_000,
+    primaryRemainingPercent: 70,
+    secondaryRemainingPercent: 65,
+  });
+  rig.store.setCodexAuthQuotaSnapshot('bot-conflict', 'auth.json_b', 'acct-c', {
+    capturedAtMs: 20_000,
+    primaryRemainingPercent: 5,
+    secondaryRemainingPercent: 4,
+  });
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 80, windowDurationMins: 300, resetsAt: null },
+      secondary: { usedPercent: 75, windowDurationMins: 10080, resetsAt: null },
+      credits: null,
+      planType: 'plus',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /20\|25\|auth\.json_a \* \[enabled\]/);
+  assert.match(rig.sentMessages[0]!, /70\|65\|auth\.json_b \[enabled\]/);
+  assert.doesNotMatch(rig.sentMessages[0]!, /5\|4\|auth\.json_b/);
 });
 
 test('/auth panel can start device login from an inline action', async (t) => {

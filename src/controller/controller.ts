@@ -5,7 +5,8 @@ import path from 'node:path';
 import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
-import type { BridgeStore, PendingUserInputStoredRecord } from '../store/database.js';
+import type { BridgeStore, CodexAuthQuotaSnapshotRecord, PendingUserInputStoredRecord } from '../store/database.js';
+import { readChatGptAuthMetadata } from '../auth/mirror.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -304,6 +305,7 @@ interface CodexAuthCandidate {
 
 interface CodexAuthQuotaSnapshot {
   capturedAtMs: number;
+  accountId?: string | null;
   primaryRemainingPercent: number | null;
   secondaryRemainingPercent: number | null;
 }
@@ -5443,9 +5445,15 @@ export class BridgeSessionCore {
       this.resolveAuthDir(),
     );
     const snapshots = await this.readCodexAuthQuotaSnapshots();
+    const candidateAccountIds = await this.readCodexAuthCandidateAccountIds(state.candidates);
     state.candidates.forEach((candidate) => {
-      candidate.quota = snapshots[candidate.name] ?? null;
+      const candidateAccountId = candidateAccountIds.get(candidate.name) ?? null;
+      const snapshot = snapshots[candidate.name] ?? null;
+      candidate.quota = this.codexAuthQuotaSnapshotMatchesAccount(snapshot, candidateAccountId)
+        ? snapshot
+        : null;
     });
+    await this.applySharedCodexAuthQuotaSnapshots(state, candidateAccountIds);
     return state;
   }
 
@@ -5702,17 +5710,80 @@ export class BridgeSessionCore {
       return;
     }
     try {
+      const metadata = await readChatGptAuthMetadata(candidate.path);
       const snapshot = selectCodexRateLimitSnapshot(await this.app.readAccountRateLimits());
       if (!snapshot) {
         return;
       }
-      const quota = authQuotaSnapshotFromRateLimit(snapshot);
+      const quota = authQuotaSnapshotFromRateLimit(snapshot, metadata?.accountId ?? null);
       candidate.quota = quota;
       this.authQuotaSnapshots[candidate.name] = quota;
+      if (metadata?.accountId) {
+        this.store.setCodexAuthQuotaSnapshot(this.authRuntimeId(), candidate.name, metadata.accountId, quota);
+      }
       await this.writeCodexAuthQuotaSnapshots();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
     } catch (error) {
       this.logger.warn('codex.auth_quota_refresh_failed', { error: formatUserError(error) });
     }
+  }
+
+  private async applySharedCodexAuthQuotaSnapshots(
+    state: CodexAuthState,
+    candidateAccountIds?: Map<string, string>,
+  ): Promise<void> {
+    const accountIds = candidateAccountIds ?? await this.readCodexAuthCandidateAccountIds(state.candidates);
+    const uniqueAccountIds = [...new Set(accountIds.values())];
+    if (uniqueAccountIds.length === 0) {
+      return;
+    }
+    const snapshotsByAccount = new Map<string, CodexAuthQuotaSnapshot>();
+    for (const record of this.store.listCodexAuthQuotaSnapshots(uniqueAccountIds)) {
+      if (!isFiniteCodexAuthQuotaSnapshotRecord(record)) {
+        continue;
+      }
+      snapshotsByAccount.set(
+        record.accountId,
+        mergeCodexAuthQuotaSnapshots(
+          snapshotsByAccount.get(record.accountId) ?? null,
+          codexAuthQuotaSnapshotFromRecord(record),
+        )!,
+      );
+    }
+    for (const candidate of state.candidates) {
+      const accountId = accountIds.get(candidate.name);
+      if (!accountId) {
+        continue;
+      }
+      candidate.quota = mergeCodexAuthQuotaSnapshots(candidate.quota, snapshotsByAccount.get(accountId) ?? null);
+    }
+  }
+
+  private async readCodexAuthCandidateAccountIds(candidates: CodexAuthCandidate[]): Promise<Map<string, string>> {
+    const entries = await Promise.all(candidates.map(async (candidate) => {
+      const metadata = await readChatGptAuthMetadata(candidate.path);
+      return [candidate.name, metadata?.accountId ?? null] as const;
+    }));
+    const accountIds = new Map<string, string>();
+    for (const [name, accountId] of entries) {
+      if (accountId) {
+        accountIds.set(name, accountId);
+      }
+    }
+    return accountIds;
+  }
+
+  private codexAuthQuotaSnapshotMatchesAccount(
+    snapshot: CodexAuthQuotaSnapshot | null,
+    accountId: string | null,
+  ): snapshot is CodexAuthQuotaSnapshot {
+    if (!snapshot) {
+      return false;
+    }
+    if (!snapshot.accountId) {
+      return accountId === null;
+    }
+    return accountId !== null && snapshot.accountId === accountId;
   }
 
   private async readCodexAuthQuotaSnapshots(): Promise<Record<string, CodexAuthQuotaSnapshot>> {
@@ -9357,12 +9428,71 @@ function formatRemainingUsagePercent(usedPercent: number): string {
   return remainingPercent === null ? '?' : formatUsagePercent(remainingPercent);
 }
 
-function authQuotaSnapshotFromRateLimit(snapshot: CodexRateLimitSnapshot): CodexAuthQuotaSnapshot {
+function authQuotaSnapshotFromRateLimit(snapshot: CodexRateLimitSnapshot, accountId: string | null = null): CodexAuthQuotaSnapshot {
   return {
     capturedAtMs: Date.now(),
+    accountId,
     primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
     secondaryRemainingPercent: snapshot.secondary ? remainingUsagePercent(snapshot.secondary.usedPercent) : null,
   };
+}
+
+function codexAuthQuotaSnapshotFromRecord(record: CodexAuthQuotaSnapshotRecord): CodexAuthQuotaSnapshot {
+  return {
+    capturedAtMs: record.capturedAtMs,
+    accountId: record.accountId,
+    primaryRemainingPercent: record.primaryRemainingPercent,
+    secondaryRemainingPercent: record.secondaryRemainingPercent,
+  };
+}
+
+function mergeCodexAuthQuotaSnapshots(
+  current: CodexAuthQuotaSnapshot | null,
+  incoming: CodexAuthQuotaSnapshot | null,
+): CodexAuthQuotaSnapshot | null {
+  if (!current) {
+    return incoming;
+  }
+  if (!incoming) {
+    return current;
+  }
+  return {
+    capturedAtMs: Math.max(current.capturedAtMs, incoming.capturedAtMs),
+    accountId: current.accountId ?? incoming.accountId ?? null,
+    primaryRemainingPercent: fresherNullableQuotaValue(
+      current.primaryRemainingPercent,
+      current.capturedAtMs,
+      incoming.primaryRemainingPercent,
+      incoming.capturedAtMs,
+    ),
+    secondaryRemainingPercent: fresherNullableQuotaValue(
+      current.secondaryRemainingPercent,
+      current.capturedAtMs,
+      incoming.secondaryRemainingPercent,
+      incoming.capturedAtMs,
+    ),
+  };
+}
+
+function fresherNullableQuotaValue(
+  currentValue: number | null,
+  currentCapturedAtMs: number,
+  incomingValue: number | null,
+  incomingCapturedAtMs: number,
+): number | null {
+  if (currentValue === null) {
+    return incomingValue;
+  }
+  if (incomingValue === null) {
+    return currentValue;
+  }
+  return incomingCapturedAtMs >= currentCapturedAtMs ? incomingValue : currentValue;
+}
+
+function isFiniteCodexAuthQuotaSnapshotRecord(record: CodexAuthQuotaSnapshotRecord): boolean {
+  return Number.isFinite(record.capturedAtMs)
+    && isNullableFiniteNumber(record.primaryRemainingPercent)
+    && isNullableFiniteNumber(record.secondaryRemainingPercent);
 }
 
 function remainingUsagePercent(usedPercent: number): number | null {
@@ -9388,6 +9518,7 @@ function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapsh
   const snapshot = value as Partial<CodexAuthQuotaSnapshot>;
   return typeof snapshot.capturedAtMs === 'number'
     && Number.isFinite(snapshot.capturedAtMs)
+    && (snapshot.accountId === undefined || snapshot.accountId === null || typeof snapshot.accountId === 'string')
     && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
     && isNullableFiniteNumber(snapshot.secondaryRemainingPercent);
 }

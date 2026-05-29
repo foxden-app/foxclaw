@@ -55,6 +55,42 @@ test('BridgeStore isolates disabled Codex auth candidates per runtime', () => {
   });
 });
 
+test('BridgeStore shares Codex auth quota snapshots by account id', () => {
+  withStore((store) => {
+    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
+      capturedAtMs: 100,
+      primaryRemainingPercent: 80,
+      secondaryRemainingPercent: null,
+    });
+    store.setCodexAuthQuotaSnapshot('bot2', 'auth.json_b', 'acct-b', {
+      capturedAtMs: 200,
+      primaryRemainingPercent: 30,
+      secondaryRemainingPercent: 25,
+    });
+    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
+      capturedAtMs: 300,
+      primaryRemainingPercent: 70,
+      secondaryRemainingPercent: 65,
+    });
+
+    assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-a']).map(record => ({
+      runtimeId: record.runtimeId,
+      candidateName: record.candidateName,
+      accountId: record.accountId,
+      capturedAtMs: record.capturedAtMs,
+      primaryRemainingPercent: record.primaryRemainingPercent,
+      secondaryRemainingPercent: record.secondaryRemainingPercent,
+    })), [{
+      runtimeId: 'bot1',
+      candidateName: 'auth.json_a',
+      accountId: 'acct-a',
+      capturedAtMs: 300,
+      primaryRemainingPercent: 70,
+      secondaryRemainingPercent: 65,
+    }]);
+  });
+});
+
 test('BridgeStore remembers a private chat for each bot notification route', () => {
   withStore((store) => {
     store.rememberTelegramPrivateScope('bot1', 'telegram:bot1:42::root', '42');

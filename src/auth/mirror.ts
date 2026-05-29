@@ -29,10 +29,13 @@ export interface AuthMirrorValidationResult {
   reason?: string | null;
 }
 
-interface AuthRecord {
-  raw: string;
+export interface ChatGptAuthMetadata {
   accountId: string;
   lastRefreshMs: number;
+}
+
+interface AuthRecord extends ChatGptAuthMetadata {
+  raw: string;
 }
 
 const AUTH_SCAN_INTERVAL_MS = 5_000;
@@ -261,6 +264,24 @@ async function listAuthCandidateNames(dir: string): Promise<string[]> {
 async function readChatGptAuthRecord(filePath: string): Promise<AuthRecord | null> {
   try {
     const raw = await fs.readFile(filePath, 'utf8');
+    const metadata = parseChatGptAuthMetadata(raw);
+    if (!metadata) return null;
+    return { raw, ...metadata };
+  } catch {
+    return null;
+  }
+}
+
+export async function readChatGptAuthMetadata(filePath: string): Promise<ChatGptAuthMetadata | null> {
+  try {
+    return parseChatGptAuthMetadata(await fs.readFile(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function parseChatGptAuthMetadata(raw: string): ChatGptAuthMetadata | null {
+  try {
     const parsed = JSON.parse(raw) as {
       tokens?: { account_id?: unknown };
       last_refresh?: unknown;
@@ -268,7 +289,7 @@ async function readChatGptAuthRecord(filePath: string): Promise<AuthRecord | nul
     const accountId = typeof parsed.tokens?.account_id === 'string' ? parsed.tokens.account_id : '';
     const lastRefreshMs = typeof parsed.last_refresh === 'string' ? Date.parse(parsed.last_refresh) : NaN;
     if (!accountId || !Number.isFinite(lastRefreshMs)) return null;
-    return { raw, accountId, lastRefreshMs };
+    return { accountId, lastRefreshMs };
   } catch {
     return null;
   }

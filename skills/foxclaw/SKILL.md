@@ -146,7 +146,7 @@ After either bootstrap path:
    - the bot is an admin in the group
    - the configured `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` match the target group/topic
 5. If group or topic mode is enabled, also verify that private chat still responds for the configured `TG_ALLOWED_USER_ID`.
-6. With multiple bots, send `/status` and `/auth` privately to each bot; verify the status lists each app-server and the auth panel names the intended bot runtime.
+6. With multiple bots, send `/status` and `/auth` privately to each bot; verify the status lists each app-server, the auth panel names the intended bot runtime, and `/auth` quota snapshots are combined only for matching ChatGPT account IDs.
 
 ## First Telegram Message Check
 

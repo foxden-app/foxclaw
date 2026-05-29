@@ -389,7 +389,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 ### 6.3 The `/auth` Panel
 
-`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota.
+`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
 
 Approximation:
 

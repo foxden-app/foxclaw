@@ -41,6 +41,16 @@ export interface PendingUserInputStoredRecord {
   resolvedAt: number | null;
 }
 
+export interface CodexAuthQuotaSnapshotRecord {
+  runtimeId: string;
+  candidateName: string;
+  accountId: string;
+  capturedAtMs: number;
+  primaryRemainingPercent: number | null;
+  secondaryRemainingPercent: number | null;
+  updatedAt: number;
+}
+
 export class BridgeStore {
   private db: DatabaseSync;
 
@@ -163,6 +173,18 @@ export class BridgeStore {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, name)
       );
+      CREATE TABLE IF NOT EXISTS codex_auth_quota_snapshots (
+        runtime_id TEXT NOT NULL,
+        candidate_name TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        captured_at_ms INTEGER NOT NULL,
+        primary_remaining_percent REAL,
+        secondary_remaining_percent REAL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (runtime_id, candidate_name)
+      );
+      CREATE INDEX IF NOT EXISTS codex_auth_quota_snapshots_account_idx
+        ON codex_auth_quota_snapshots(account_id);
     `);
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
@@ -702,6 +724,69 @@ export class BridgeStore {
     `).run(name, disabled ? 1 : 0, Date.now());
   }
 
+  setCodexAuthQuotaSnapshot(
+    runtimeId: string,
+    candidateName: string,
+    accountId: string,
+    snapshot: Pick<CodexAuthQuotaSnapshotRecord, 'capturedAtMs' | 'primaryRemainingPercent' | 'secondaryRemainingPercent'>,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO codex_auth_quota_snapshots (
+        runtime_id,
+        candidate_name,
+        account_id,
+        captured_at_ms,
+        primary_remaining_percent,
+        secondary_remaining_percent,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(runtime_id, candidate_name) DO UPDATE SET
+        account_id = excluded.account_id,
+        captured_at_ms = excluded.captured_at_ms,
+        primary_remaining_percent = excluded.primary_remaining_percent,
+        secondary_remaining_percent = excluded.secondary_remaining_percent,
+        updated_at = excluded.updated_at
+    `).run(
+      runtimeId,
+      candidateName,
+      accountId,
+      snapshot.capturedAtMs,
+      snapshot.primaryRemainingPercent,
+      snapshot.secondaryRemainingPercent,
+      Date.now(),
+    );
+  }
+
+  listCodexAuthQuotaSnapshots(accountIds: string[]): CodexAuthQuotaSnapshotRecord[] {
+    const uniqueAccountIds = [...new Set(accountIds.filter(Boolean))];
+    if (uniqueAccountIds.length === 0) {
+      return [];
+    }
+    const placeholders = uniqueAccountIds.map(() => '?').join(', ');
+    const rows = this.db.prepare(`
+      SELECT
+        runtime_id,
+        candidate_name,
+        account_id,
+        captured_at_ms,
+        primary_remaining_percent,
+        secondary_remaining_percent,
+        updated_at
+      FROM codex_auth_quota_snapshots
+      WHERE account_id IN (${placeholders})
+    `).all(...uniqueAccountIds) as Array<Record<string, unknown>>;
+    return rows.map(row => ({
+      runtimeId: String(row.runtime_id),
+      candidateName: String(row.candidate_name),
+      accountId: String(row.account_id),
+      capturedAtMs: Number(row.captured_at_ms),
+      primaryRemainingPercent: nullableNumber(row.primary_remaining_percent),
+      secondaryRemainingPercent: nullableNumber(row.secondary_remaining_percent),
+      updatedAt: Number(row.updated_at),
+    }));
+  }
+
   private ensureColumn(table: string, column: string, definition: string): void {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     if (columns.some(entry => entry.name === column)) {
@@ -709,6 +794,14 @@ export class BridgeStore {
     }
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+function nullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
 }
 
 function normalizeCollaborationMode(value: unknown): CollaborationModeValue | null {
