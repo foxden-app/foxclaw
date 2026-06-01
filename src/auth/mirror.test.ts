@@ -148,3 +148,58 @@ test('AuthCandidateMirror ignores invalid runtime-only candidates during initial
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('AuthCandidateMirror recovers a newer same-account credential before a runtime switches auth', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-recover-'));
+  const canonical = path.join(root, 'canonical');
+  const a = path.join(root, 'bot1');
+  const b = path.join(root, 'bot2');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), auth('acct-1', '2026-05-01T00:00:00.000Z'));
+    const mirror = new AuthCandidateMirror(canonical, [
+      { id: 'bot1', authDir: a },
+      { id: 'bot2', authDir: b },
+    ], loggerStub as any);
+    await mirror.initialize();
+    const refreshed = auth('acct-1', '2026-05-27T00:00:00.000Z');
+    await fs.writeFile(path.join(a, 'auth.json_personal'), refreshed);
+
+    assert.deepEqual(await mirror.recoverRuntimeCandidate('bot2', 'auth.json_work'), {
+      candidateName: 'auth.json_work',
+      sourceRuntimeId: 'bot1',
+      sourceCandidateName: 'auth.json_personal',
+      lastRefreshMs: Date.parse('2026-05-27T00:00:00.000Z'),
+    });
+    assert.equal(await fs.readFile(path.join(b, 'auth.json_work'), 'utf8'), refreshed);
+    assert.equal(
+      await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'),
+      auth('acct-1', '2026-05-01T00:00:00.000Z'),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('AuthCandidateMirror does not recover a newer credential from a different account', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-recover-conflict-'));
+  const canonical = path.join(root, 'canonical');
+  const a = path.join(root, 'bot1');
+  const b = path.join(root, 'bot2');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const original = auth('acct-1', '2026-05-01T00:00:00.000Z');
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), original);
+    const mirror = new AuthCandidateMirror(canonical, [
+      { id: 'bot1', authDir: a },
+      { id: 'bot2', authDir: b },
+    ], loggerStub as any);
+    await mirror.initialize();
+    await fs.writeFile(path.join(a, 'auth.json_work'), auth('acct-2', '2026-05-27T00:00:00.000Z'));
+
+    assert.equal(await mirror.recoverRuntimeCandidate('bot2', 'auth.json_work'), null);
+    assert.equal(await fs.readFile(path.join(b, 'auth.json_work'), 'utf8'), original);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

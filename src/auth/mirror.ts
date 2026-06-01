@@ -18,6 +18,13 @@ export interface AuthMirrorStatus {
   syncedAt: string;
 }
 
+export interface AuthMirrorRecovery {
+  candidateName: string;
+  sourceRuntimeId: string;
+  sourceCandidateName: string;
+  lastRefreshMs: number;
+}
+
 export interface AuthMirrorValidationContext {
   candidateName: string;
   accountId: string;
@@ -43,6 +50,7 @@ const AUTH_SCAN_INTERVAL_MS = 5_000;
 export class AuthCandidateMirror {
   private timer: NodeJS.Timeout | null = null;
   private readonly lastSyncedRefresh = new Map<string, number>();
+  private readonly lastValidationFailures = new Map<string, string>();
   private activeOperations = 0;
   private lastStatus: AuthMirrorStatus | null = null;
 
@@ -110,6 +118,39 @@ export class AuthCandidateMirror {
     return this.withActivity(() => this.propagateValidatedCandidate(runtime, candidateName));
   }
 
+  async recoverRuntimeCandidate(runtimeId: string, candidateName: string): Promise<AuthMirrorRecovery | null> {
+    if (!isAuthCandidateName(candidateName)) return null;
+    const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
+    if (!runtime) return null;
+    return this.withActivity(async () => {
+      const destinationPath = path.join(runtime.authDir, candidateName);
+      const destination = await readChatGptAuthRecord(destinationPath);
+      if (!destination) return null;
+      const sources = await this.collectAuthRecords();
+      const newest = sources
+        .filter(entry => entry.record.accountId === destination.accountId)
+        .reduce<(typeof sources)[number] | null>((current, entry) => (
+          !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
+        ), null);
+      if (!newest || newest.record.lastRefreshMs <= destination.lastRefreshMs) {
+        return null;
+      }
+      await atomicWrite(destinationPath, newest.record.raw);
+      this.logger.info('auth.mirror.recovered', {
+        runtimeId,
+        candidateName,
+        sourceRuntimeId: newest.runtimeId,
+        sourceCandidateName: newest.candidateName,
+      });
+      return {
+        candidateName,
+        sourceRuntimeId: newest.runtimeId,
+        sourceCandidateName: newest.candidateName,
+        lastRefreshMs: newest.record.lastRefreshMs,
+      };
+    });
+  }
+
   private async scan(): Promise<void> {
     await this.withActivity(async () => {
       for (const runtime of this.runtimes) {
@@ -137,13 +178,20 @@ export class AuthCandidateMirror {
     }
     const validation = await this.validateRuntimeCandidate(runtime, name, record);
     if (!validation.ok) {
-      this.logger.warn('auth.mirror.validation_failed', {
-        runtimeId: runtime.id,
-        name,
-        reason: validation.reason ?? 'unknown',
-      });
+      const reason = validation.reason ?? 'unknown';
+      const failureKey = `${runtime.id}:${name}`;
+      const failureValue = `${record.lastRefreshMs}:${reason}`;
+      if (this.lastValidationFailures.get(failureKey) !== failureValue) {
+        this.lastValidationFailures.set(failureKey, failureValue);
+        this.logger.warn('auth.mirror.validation_failed', {
+          runtimeId: runtime.id,
+          name,
+          reason,
+        });
+      }
       return false;
     }
+    this.lastValidationFailures.delete(`${runtime.id}:${name}`);
     await atomicWrite(canonicalPath, record.raw);
     for (const target of this.runtimes) {
       if (target.id !== runtime.id) {
@@ -215,6 +263,28 @@ export class AuthCandidateMirror {
       }
     }
     return [...all];
+  }
+
+  private async collectAuthRecords(): Promise<Array<{
+    runtimeId: string;
+    candidateName: string;
+    record: AuthRecord;
+  }>> {
+    const directories = [
+      { runtimeId: 'canonical', authDir: this.canonicalDir },
+      ...this.runtimes.map(runtime => ({ runtimeId: runtime.id, authDir: runtime.authDir })),
+    ];
+    const records: Array<{ runtimeId: string; candidateName: string; record: AuthRecord }> = [];
+    for (const directory of directories) {
+      const names = new Set(['auth.json', ...await listAuthCandidateNames(directory.authDir)]);
+      for (const candidateName of names) {
+        const record = await readChatGptAuthRecord(path.join(directory.authDir, candidateName));
+        if (record) {
+          records.push({ runtimeId: directory.runtimeId, candidateName, record });
+        }
+      }
+    }
+    return records;
   }
 
   private async reconcileCandidateAtStartup(name: string): Promise<void> {

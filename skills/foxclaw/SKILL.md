@@ -66,6 +66,7 @@ Telegram behavior:
 - `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID` choose the default group or topic scope; they do not disable private chat
 - when `TG_BOT_TOKENS` contains multiple bots, one FoxClaw service starts independent Codex app-servers and auth selections per bot
 - isolated Telegram runtimes use independent `CODEX_HOME` directories and file-backed credentials; they do not share Codex sessions
+- refreshed ChatGPT candidates are mirrored only after online usage-endpoint validation; before auth switch or reload, a runtime restores any newer same-account credential found in another Codex home
 - if `TG_BOT_TOKEN` is also set to one exact token from `TG_BOT_TOKENS`, that bot uses the default/shared-terminal runtime instead of an isolated Telegram home
 - if Weixin is enabled alongside multiple Telegram bots, it remains on the default Codex runtime instead of borrowing a Telegram bot runtime
 - in a group with multiple configured bots, address a bot by mention, reply, or suffixed command such as `/status@botname`

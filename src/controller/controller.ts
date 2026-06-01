@@ -122,6 +122,7 @@ import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
+  recoverAuthCandidate?: (runtimeId: string, candidateName: string) => Promise<boolean>;
   statusUpdated?: (status: RuntimeStatus) => void;
   getServiceStatus?: () => Promise<{
     bots: NonNullable<RuntimeStatus['bots']>;
@@ -4593,11 +4594,21 @@ export class BridgeSessionCore {
     }
 
     await this.sendMessage(scopeId, t(locale, 'auth_reload_restarting'));
+    const currentCandidate = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
+    const recovered = currentCandidate
+      ? await this.recoverCodexAuthCandidate(currentCandidate.name)
+      : false;
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
     await this.app.restart();
+    if (currentCandidate) {
+      await this.syncCodexAuthCandidate(currentCandidate.name);
+    }
 
     const lines = [t(locale, 'auth_reload_done')];
+    if (recovered) {
+      lines.push(t(locale, 'auth_recovered_newer_candidate', { value: currentCandidate!.name }));
+    }
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
   }
@@ -5485,19 +5496,52 @@ export class BridgeSessionCore {
     candidate: CodexAuthCandidate,
     automatic: boolean,
   ): Promise<void> {
+    const recovered = await this.recoverCodexAuthCandidate(candidate.name);
     const result = await switchCodexAuth(candidate.path, this.resolveAuthDir());
     this.authRotationFailedTargets.delete(candidate.path);
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
     await this.app.restart();
+    await this.syncCodexAuthCandidate(candidate.name);
 
     const lines = [t(
       locale,
       automatic ? 'auth_auto_done' : 'auth_switch_done',
       this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
     )];
+    if (recovered) {
+      lines.push(t(locale, 'auth_recovered_newer_candidate', { value: candidate.name }));
+    }
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
+  }
+
+  private async recoverCodexAuthCandidate(candidateName: string): Promise<boolean> {
+    if (!this.coordinator?.recoverAuthCandidate) {
+      return false;
+    }
+    try {
+      return await this.coordinator.recoverAuthCandidate(this.authRuntimeId(), candidateName);
+    } catch (error) {
+      this.logger.warn('codex.auth_candidate_recovery_failed', {
+        candidate: candidateName,
+        runtimeId: this.authRuntimeId(),
+        error: toErrorMeta(error),
+      });
+      return false;
+    }
+  }
+
+  private async syncCodexAuthCandidate(candidateName: string): Promise<void> {
+    try {
+      await this.coordinator?.authCandidateUpdated?.(this.authRuntimeId(), candidateName);
+    } catch (error) {
+      this.logger.warn('codex.auth_candidate_sync_failed', {
+        candidate: candidateName,
+        runtimeId: this.authRuntimeId(),
+        error: toErrorMeta(error),
+      });
+    }
   }
 
   private async buildNativeCollaborationMode(
@@ -5723,6 +5767,7 @@ export class BridgeSessionCore {
       }
       await this.writeCodexAuthQuotaSnapshots();
       await this.applySharedCodexAuthQuotaSnapshots(state);
+      await this.syncCodexAuthCandidate(candidate.name);
     } catch (error) {
       this.logger.warn('codex.auth_quota_refresh_failed', { error: formatUserError(error) });
     }

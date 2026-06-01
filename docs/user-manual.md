@@ -359,7 +359,7 @@ FoxClaw recognizes candidate names in these forms:
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity matches and its refresh timestamp is newer, preventing a same-name candidate from overwriting a different account.
+`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity matches, its refresh timestamp is newer, and the active app-server verifies it against the ChatGPT usage endpoint, preventing a same-name candidate from overwriting a different account. Before an auth switch or reload, FoxClaw also searches the other Codex homes for a newer credential with the same account ID, restores it into the requesting runtime, then verifies and mirrors it after restart.
 
 If you already have a working `auth.json`, you can save it as a candidate:
 

@@ -366,6 +366,8 @@ async function runServeCli(): Promise<void> {
           && mirror.isIdle(),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
+        recoverAuthCandidate: (runtimeId: string, candidateName: string): Promise<boolean> =>
+          mirror.recoverRuntimeCandidate(runtimeId, candidateName).then(recovery => recovery !== null),
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
           bots: await Promise.all(runtimes.map(async (runtime) => {
@@ -559,7 +561,7 @@ async function runServeCli(): Promise<void> {
 }
 
 async function validateRefreshedAuthCandidate(
-  runtime: { id: string; authDir: string; app: { isConnected(): boolean; readAccount(): Promise<{ type: string; requiresOpenaiAuth: boolean } | null>; readAccountRateLimits(): Promise<unknown> } },
+  runtime: { id: string; authDir: string; app: { isConnected(): boolean; readAccountRateLimits(): Promise<unknown> } },
   candidateName: string,
 ): Promise<{ ok: boolean; reason?: string }> {
   const authPath = path.join(runtime.authDir, 'auth.json');
@@ -574,11 +576,10 @@ async function validateRefreshedAuthCandidate(
   if (!runtime.app.isConnected()) {
     return { ok: false, reason: 'source app-server is not connected' };
   }
-  const account = await runtime.app.readAccount();
-  if (!account || account.type !== 'chatgpt' || account.requiresOpenaiAuth) {
-    return { ok: false, reason: 'source app-server did not report an active ChatGPT account' };
+  const rateLimits = await runtime.app.readAccountRateLimits();
+  if (!rateLimits) {
+    return { ok: false, reason: 'source app-server did not return ChatGPT rate limits' };
   }
-  await runtime.app.readAccountRateLimits();
   return { ok: true };
 }
 

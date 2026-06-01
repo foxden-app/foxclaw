@@ -359,7 +359,7 @@ FoxClaw 识别这些候选文件名：
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` 是 Codex 当前使用的文件。切换账号时，FoxClaw 会把 `auth.json` 指向某个候选文件。候选文件内容是 Codex CLI 生成的 JSON，不建议手写这些字段。多 bot 镜像只在能校验同一账号标识且刷新时间更新时复制候选，避免同名候选意外覆盖成另一个账号。
+`auth.json` 是 Codex 当前使用的文件。切换账号时，FoxClaw 会把 `auth.json` 指向某个候选文件。候选文件内容是 Codex CLI 生成的 JSON，不建议手写这些字段。多 bot 镜像只在账号标识一致、刷新时间更新，并且由当前 app-server 通过 ChatGPT 用量接口在线验证时复制候选，避免同名候选意外覆盖成另一个账号。切换或重载 auth 之前，FoxClaw 还会在其他 Codex home 中查找同账号 ID 的较新凭据，先恢复到发起操作的 runtime，再在重启后验证并镜像。
 
 如果你已经有一个可用的 `auth.json`，可以先备份成候选：
 

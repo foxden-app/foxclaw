@@ -10,6 +10,7 @@ import { BridgeStore } from '../store/database.js';
 import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
+import type { CoreCoordinator } from './controller.js';
 
 const loggerStub = {
   debug(): void {},
@@ -160,7 +161,7 @@ function installTempCodexHome(t: TestContext, tempDir: string): string {
   return codexHome;
 }
 
-function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null) {
+function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coordinator: CoreCoordinator | null = null) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-controller-'));
   const store = new BridgeStore(path.join(tempDir, 'bridge.sqlite'));
   const sentMessages: string[] = [];
@@ -354,7 +355,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null) {
     interruptTurn: async () => {},
   };
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
-  const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound, selfUpdater);
+  const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound, selfUpdater, coordinator);
   (controller as any).updateStatus = () => {};
   return {
     controller,
@@ -1324,6 +1325,40 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
   assert.match(rig.sentMessages.at(-1)!, /Codex auth switched: auth\.json_a -> auth\.json_b/);
+});
+
+test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    recoverAuthCandidate: async (runtimeId, candidateName) => {
+      events.push(`recover:${runtimeId}:${candidateName}`);
+      return true;
+    },
+    authCandidateUpdated: async (runtimeId, candidateName) => {
+      events.push(`sync:${runtimeId}:${candidateName}`);
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+  (rig.controller as any).app.restart = async () => {
+    events.push('restart');
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:1`, 1));
+
+  assert.deepEqual(events, [
+    'recover:default:auth.json_b',
+    'restart',
+    'sync:default:auth.json_b',
+  ]);
+  assert.match(rig.sentMessages.at(-1)!, /Recovered a newer same-account credential for auth\.json_b/);
 });
 
 test('/auth identifies the requesting bot runtime in multi-bot mode', async (t) => {

@@ -206,7 +206,7 @@ TG_BOT_TOKENS=123456:token_a,234567:token_b
 TG_BOT_TOKEN=123456:token_a
 ```
 
-FoxClaw 仍然只运行一个系统服务。默认情况下，它会为每个 bot 启动独立 `codex app-server` 和独立 `CODEX_HOME`。因此 A 私聊运行 turn 时，B 私聊仍可独立切换自己的 `/auth`。候选凭据由 FoxClaw 在登录或刷新验证后镜像同步，各 bot 的当前选择互不影响。每个 bot 首次私聊发送 `/help` 和 `/status`；`/auth` 会标明正在操作的 bot runtime，`/status` 会列出全部 bot 的连接、runtime 类型、当前 auth 和活动 turn 摘要。
+FoxClaw 仍然只运行一个系统服务。默认情况下，它会为每个 bot 启动独立 `codex app-server` 和独立 `CODEX_HOME`。因此 A 私聊运行 turn 时，B 私聊仍可独立切换自己的 `/auth`。候选凭据由 FoxClaw 在登录或刷新在线验证后镜像同步；切换或重载前还会从其他 Codex home 恢复同账号较新凭据。各 bot 的当前选择互不影响。每个 bot 首次私聊发送 `/help` 和 `/status`；`/auth` 会标明正在操作的 bot runtime，`/status` 会列出全部 bot 的连接、runtime 类型、当前 auth 和活动 turn 摘要。
 
 如果你需要一路 Telegram 与终端互通 session，把同一个 token 同时填入 `TG_BOT_TOKENS` 和 `TG_BOT_TOKEN`。这个 bot 使用默认 `CODEX_HOME`（未设置时通常是 `~/.codex`）和默认 auth，因此能看到终端 Codex 的本地线程；它不再享有隔离 runtime 的“互不影响”保证，切换 auth 会影响终端和其他默认 runtime。
 

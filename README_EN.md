@@ -206,7 +206,7 @@ TG_BOT_TOKENS=123456:token_a,234567:token_b
 TG_BOT_TOKEN=123456:token_a
 ```
 
-FoxClaw remains one system service. By default, it starts an independent `codex app-server` and `CODEX_HOME` for each bot. While bot A is running a turn, bot B can switch its own `/auth` selection. Candidate credentials are mirrored only after validated login or refresh; current selections remain independent. Send `/help` and `/status` in a private chat with each bot after installation; `/auth` names the runtime being managed, and `/status` summarizes every bot's connection, runtime type, selected auth, and active turns.
+FoxClaw remains one system service. By default, it starts an independent `codex app-server` and `CODEX_HOME` for each bot. While bot A is running a turn, bot B can switch its own `/auth` selection. Candidate credentials are mirrored only after online-validated login or refresh; before switching or reloading, FoxClaw also restores a newer same-account credential from another Codex home when available. Current selections remain independent. Send `/help` and `/status` in a private chat with each bot after installation; `/auth` names the runtime being managed, and `/status` summarizes every bot's connection, runtime type, selected auth, and active turns.
 
 To keep one Telegram bot interoperable with terminal Codex sessions, put the same token in both `TG_BOT_TOKENS` and `TG_BOT_TOKEN`. That bot uses the default `CODEX_HOME` (usually `~/.codex` when unset) and default auth, so it can see local terminal sessions. It no longer has the isolated runtime guarantee: `/auth` switches also affect the terminal and other default runtimes.
 
