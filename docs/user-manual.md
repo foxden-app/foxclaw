@@ -408,7 +408,7 @@ Quota remaining: 5h|7d|auth
 [🔄 Reload auth]
 ```
 
-The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. `--|--` means no quota snapshot has been observed for that candidate yet.
+The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--|--` means no quota snapshot has been observed for that candidate yet.
 
 Equivalent commands:
 

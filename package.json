@@ -1,6 +1,6 @@
 {
   "name": "@foxden-app/foxclaw",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Foxden local execution claw for controlling Codex from trusted chat interfaces.",
   "type": "module",
   "main": "dist/main.js",

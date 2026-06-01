@@ -1324,7 +1324,16 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
-  assert.match(rig.sentMessages.at(-1)!, /Codex auth switched: auth\.json_a -> auth\.json_b/);
+  assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_b/);
+  assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
+  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ --\|--\|auth\.json_b/);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:0`, 1));
+
+  assert.equal(restarts, 2);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_a/);
+  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ --\|--\|auth\.json_a/);
 });
 
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
@@ -1358,7 +1367,8 @@ test('/auth switch recovers a newer same-account credential before restart and s
     'restart',
     'sync:default:auth.json_b',
   ]);
-  assert.match(rig.sentMessages.at(-1)!, /Recovered a newer same-account credential for auth\.json_b/);
+  assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_b/);
+  assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
 });
 
 test('/auth identifies the requesting bot runtime in multi-bot mode', async (t) => {
@@ -1412,7 +1422,7 @@ test('/auth switch labels resolve symlink-backed auth files', async (t) => {
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: personal-real\.json -> work-real\.json/);
-  assert.match(rig.sentMessages.at(-1)!, /Codex auth switched: personal-real\.json -> work-real\.json/);
+  assert.match(rig.editedMessages.at(-1)!, /Current auth: work-real\.json/);
 });
 
 test('/auth panel can disable and enable candidates for auto rotation', async (t) => {

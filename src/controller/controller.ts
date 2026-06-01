@@ -5323,13 +5323,24 @@ export class BridgeSessionCore {
     }
 
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_recorded'));
-    this.pendingAuthChoiceLists.delete(localId);
     const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
     const switchingMessage = t(locale, 'auth_switching', this.codexAuthSwitchParams(locale, switchLabels.fromLabel, switchLabels.toLabel));
     if (record.messageId !== null) {
       await this.editMessage(event.scopeId, record.messageId, switchingMessage, []);
     }
-    await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false);
+    await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false, false);
+    const state = await this.listCodexAuthState();
+    await this.refreshCurrentCodexAuthQuota(state);
+    record.candidates = state.candidates;
+    record.createdAt = Date.now();
+    if (record.messageId !== null) {
+      await this.editMessage(
+        event.scopeId,
+        record.messageId,
+        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null),
+        authChoiceKeyboard(locale, record),
+      );
+    }
   }
 
   private async maybeRunPendingAuthRotation(): Promise<boolean> {
@@ -5495,6 +5506,7 @@ export class BridgeSessionCore {
     locale: AppLocale,
     candidate: CodexAuthCandidate,
     automatic: boolean,
+    sendResult = true,
   ): Promise<void> {
     const recovered = await this.recoverCodexAuthCandidate(candidate.name);
     const result = await switchCodexAuth(candidate.path, this.resolveAuthDir());
@@ -5504,6 +5516,9 @@ export class BridgeSessionCore {
     await this.app.restart();
     await this.syncCodexAuthCandidate(candidate.name);
 
+    if (!sendResult) {
+      return;
+    }
     const lines = [t(
       locale,
       automatic ? 'auth_auto_done' : 'auth_switch_done',
