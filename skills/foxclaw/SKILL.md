@@ -188,6 +188,7 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - For this repo, prefer a bilingual one-line subject in the form `中文 | English`.
    - Put Chinese first, keep the English half semantically equivalent, and keep both halves concise.
    - For release commits, use the same format, for example `发布 0.4.0：支持多机器人隔离 | Release 0.4.0: support multi-bot isolation`.
+   - Update `CHANGELOG.md` for any published version, using bilingual Chinese and English notes.
    - Never stage unrelated local changes.
 5. Push the current branch after a successful commit:
    - `git push origin <branch>`
@@ -202,12 +203,14 @@ Use this checklist when the user asks for standard closing actions, release wrap
    - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations and refuses to restart while any configured Telegram runtime, enabled Weixin default runtime, or auth mirror write is busy.
 7. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
+   - Ensure the matching changelog section exists before pushing the version tag; the publish workflow uses it to create or update the GitHub Release.
    - Treat `workflow_dispatch` only as a retry path from an existing matching release tag; do not manually run publishing from `main`.
    - Configure npmjs.com trusted publishing for `foxden-app/foxclaw` and workflow `publish.yml`; do not store npm tokens if OIDC trusted publishing is available.
    - Temporary fallback: store an npm automation/bypass-2FA token as the GitHub Actions secret `NPM_TOKEN`. Never print the token or commit it.
    - Check `npm whoami` and `npm view @foxden-app/foxclaw version`.
    - If the target version is already published, bump with `npm version patch --no-git-tag-version` before validation and commit.
    - If a workflow fails before `npm publish`, inspect that failed GitHub Actions step before attributing it to npm trusted publishing.
+   - After publishing, verify both `npm view @foxden-app/foxclaw version` and the GitHub Release page for the pushed tag.
    - Manual fallback only: run `BROWSER=true npm publish` in a TTY.
    - If npm returns `ENEEDAUTH`, report that npm publish is blocked by registry login and leave the package unreported as published.
    - Never print npm tokens or `.npmrc` auth values.

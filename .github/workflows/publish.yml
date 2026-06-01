@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -76,3 +76,28 @@ jobs:
       - name: Publish to npm
         if: steps.version.outputs.already_published != 'true'
         run: npm publish --access public
+      - name: Create GitHub release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          tag="${GITHUB_REF_NAME}"
+          notes_file="$(mktemp)"
+
+          awk -v exact="## ${version}" -v prefix="## ${version} " '
+            $0 == exact || index($0, prefix) == 1 { in_section = 1; next }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md > "${notes_file}"
+
+          if [[ ! -s "${notes_file}" ]]; then
+            printf 'See CHANGELOG.md for details.\n' > "${notes_file}"
+          fi
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${tag}" --notes-file "${notes_file}"
+          else
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" --title "${tag}" --notes-file "${notes_file}"
+          fi
