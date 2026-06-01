@@ -7,6 +7,8 @@ description: Publish npm packages safely, especially packages that require npm 2
 
 Use this skill to publish an npm package from a repo. Prefer CI trusted publishing when the repository has a publish workflow. Prefer the normal no-2FA publish path first only when CI publishing is not available. Fall back to npm web-auth only when npm explicitly prompts for it.
 
+If the user asks to release, publish, "收尾", "push publish", or otherwise finish a completed package change, proceed through verification, commit, push, publish, and post-publish verification without asking for a second confirmation. Pause only for real blockers: missing credentials, failed checks, unrelated changes that would be staged, merge conflicts, an already-published target version that needs a version choice, or npm/GitHub web-auth that requires the user to click/confirm an external page.
+
 ## Release Checklist
 
 1. Sync first when the user asks for it:

@@ -324,6 +324,12 @@ interface CodexAuthSwitchResult {
   toLabel: string;
 }
 
+interface CodexAuthRefreshAllResult {
+  refreshed: string[];
+  skipped: string[];
+  failed: Array<{ name: string; error: string }>;
+}
+
 interface CodexAuthSelection {
   candidate: CodexAuthCandidate;
   fromLabel: string | null;
@@ -480,6 +486,7 @@ export class BridgeSessionCore {
   private pendingApprovalMessages = new Map<string, Map<string, number>>();
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
+  private authRefreshAllInProgress = false;
   private authRotationFailedTargets = new Set<string>();
   private localUsageCache: CodexLocalUsageSnapshot | null = null;
   private localUsageCacheLoaded = false;
@@ -609,6 +616,7 @@ export class BridgeSessionCore {
     this.recentCommandUsageByScope.clear();
     this.commandUsageSequence = 0;
     this.pendingAuthRotation = null;
+    this.authRefreshAllInProgress = false;
     this.clearObservedThreadWatchers();
     this.releaseActiveTurnsForBridgeShutdown();
     this.bot.stop();
@@ -1419,12 +1427,12 @@ export class BridgeSessionCore {
       );
       return;
     }
-    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload)$/.exec(event.data);
+    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|refresh_all)$/.exec(event.data);
     if (authActionMatch) {
       await this.handleAuthPanelActionCallback(
         event,
         authActionMatch[1]!,
-        authActionMatch[2]! as 'login_device' | 'reload',
+        authActionMatch[2]! as 'login_device' | 'reload' | 'refresh_all',
         locale,
       );
       return;
@@ -3268,7 +3276,8 @@ export class BridgeSessionCore {
       && this.pendingUserInputs.size === 0
       && this.pendingMcpElicitations.size === 0
       && this.pendingLoginsByScope.size === 0
-      && !this.authRotationInProgress;
+      && !this.authRotationInProgress
+      && !this.authRefreshAllInProgress;
   }
 
   private hasLocalBlockingActivity(): boolean {
@@ -4613,6 +4622,13 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, lines.join('\n'));
   }
 
+  private canRunGlobalAuthRefresh(): boolean {
+    return this.isIdleForServiceUpdate()
+      && this.store.countPendingApprovals() === 0
+      && this.store.countPendingUserInputs() === 0
+      && (!this.coordinator?.canSelfUpdate || this.coordinator.canSelfUpdate());
+  }
+
   private async handleSelfUpdateCommand(scopeId: string, locale: AppLocale): Promise<void> {
     if (!this.selfUpdater) {
       await this.sendMessage(scopeId, t(locale, 'update_unavailable'));
@@ -4698,6 +4714,18 @@ export class BridgeSessionCore {
       await this.handleAuthReloadCommand(scopeId, locale);
       return;
     }
+    if (action === 'refresh') {
+      if (args[1]?.toLowerCase() === 'all') {
+        await this.handleAuthRefreshAllCommand(scopeId, locale);
+        return;
+      }
+      await this.sendMessage(scopeId, t(locale, 'usage_auth'));
+      return;
+    }
+    if (action === 'refresh_all') {
+      await this.handleAuthRefreshAllCommand(scopeId, locale);
+      return;
+    }
     if (action === 'use') {
       await this.handleAuthUseCommand(scopeId, locale, args.slice(1));
       return;
@@ -4728,6 +4756,31 @@ export class BridgeSessionCore {
     const messageId = await this.sendMessage(
       scopeId,
       renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null),
+      authChoiceKeyboard(locale, record),
+    );
+    record.messageId = messageId;
+  }
+
+  private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    if (!this.canRunGlobalAuthRefresh()) {
+      await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_blocked_active'));
+      return;
+    }
+    await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_starting'));
+    const result = await this.refreshAllCodexAuthCandidates();
+    const state = await this.listCodexAuthState();
+    await this.applySharedCodexAuthQuotaSnapshots(state);
+    const record: PendingAuthChoiceList = {
+      localId: crypto.randomBytes(8).toString('hex'),
+      chatId: scopeId,
+      messageId: null,
+      candidates: state.candidates,
+      createdAt: Date.now(),
+    };
+    this.pendingAuthChoiceLists.set(record.localId, record);
+    const messageId = await this.sendMessage(
+      scopeId,
+      `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null)}`,
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
@@ -5241,7 +5294,7 @@ export class BridgeSessionCore {
   private async handleAuthPanelActionCallback(
     event: TelegramCallbackEvent,
     localId: string,
-    action: 'login_device' | 'reload',
+    action: 'login_device' | 'reload' | 'refresh_all',
     locale: AppLocale,
   ): Promise<void> {
     const record = this.pendingAuthChoiceLists.get(localId);
@@ -5256,6 +5309,30 @@ export class BridgeSessionCore {
     if (action === 'login_device') {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'login_device_started'));
       await this.handleLoginDeviceCommand(event.scopeId, locale);
+      return;
+    }
+    if (action === 'refresh_all') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_blocked_active'));
+        return;
+      }
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_starting'));
+      if (record.messageId !== null) {
+        await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_refresh_all_starting'), []);
+      }
+      const result = await this.refreshAllCodexAuthCandidates();
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      if (record.messageId !== null) {
+        await this.editMessage(
+          event.scopeId,
+          record.messageId,
+          `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null)}`,
+          authChoiceKeyboard(locale, record),
+        );
+      }
       return;
     }
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_restarting'));
@@ -5559,6 +5636,70 @@ export class BridgeSessionCore {
     }
   }
 
+  private async refreshAllCodexAuthCandidates(): Promise<CodexAuthRefreshAllResult> {
+    if (this.authRefreshAllInProgress) {
+      throw new UserFacingError('Auth refresh all is already running.');
+    }
+    const initialState = await this.listCodexAuthState();
+    const result: CodexAuthRefreshAllResult = { refreshed: [], skipped: [], failed: [] };
+    if (initialState.candidates.length === 0) {
+      return result;
+    }
+
+    const authStat = await fs.lstat(initialState.authPath).catch(() => null);
+    const originalRegularAuth = authStat?.isFile()
+      ? await fs.readFile(initialState.authPath, 'utf8').catch(() => null)
+      : null;
+    let changedAuthTarget = false;
+    this.authRefreshAllInProgress = true;
+    try {
+      for (const candidate of initialState.candidates) {
+        const before = await readChatGptAuthMetadata(candidate.path);
+        if (!before) {
+          result.skipped.push(candidate.name);
+          continue;
+        }
+        try {
+          await pointCodexAuthAtTarget(initialState.authDir, initialState.authPath, candidate.path);
+          changedAuthTarget = true;
+          this.pendingTurnErrors.clear();
+          this.attachedThreads.clear();
+          await this.app.restart();
+          await this.app.readAccount(true);
+          const rateLimits = await this.app.readAccountRateLimits();
+          const snapshot = selectCodexRateLimitSnapshot(rateLimits);
+          if (!snapshot) {
+            throw new Error('Codex did not return ChatGPT rate limits after refresh');
+          }
+          const after = await readChatGptAuthMetadata(candidate.path);
+          if (!after || after.accountId !== before.accountId) {
+            throw new Error('refreshed auth account id did not match the original candidate');
+          }
+          if (after.lastRefreshMs <= before.lastRefreshMs) {
+            throw new Error('Codex did not advance last_refresh');
+          }
+          await this.recordCodexAuthQuotaSnapshot(candidate.name, after.accountId, snapshot);
+          await this.syncCodexAuthCandidate(candidate.name);
+          result.refreshed.push(candidate.name);
+        } catch (error) {
+          result.failed.push({ name: candidate.name, error: formatUserError(error) });
+        }
+      }
+    } finally {
+      try {
+        if (changedAuthTarget) {
+          await restoreCodexAuthTarget(initialState.authDir, initialState.authPath, initialState.currentTargetPath, originalRegularAuth);
+          this.pendingTurnErrors.clear();
+          this.attachedThreads.clear();
+          await this.app.restart();
+        }
+      } finally {
+        this.authRefreshAllInProgress = false;
+      }
+    }
+    return result;
+  }
+
   private async buildNativeCollaborationMode(
     settings: ChatSessionSettings | null,
     cwd: string,
@@ -5776,11 +5917,7 @@ export class BridgeSessionCore {
       }
       const quota = authQuotaSnapshotFromRateLimit(snapshot, metadata?.accountId ?? null);
       candidate.quota = quota;
-      this.authQuotaSnapshots[candidate.name] = quota;
-      if (metadata?.accountId) {
-        this.store.setCodexAuthQuotaSnapshot(this.authRuntimeId(), candidate.name, metadata.accountId, quota);
-      }
-      await this.writeCodexAuthQuotaSnapshots();
+      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata?.accountId ?? null, snapshot);
       await this.applySharedCodexAuthQuotaSnapshots(state);
       await this.syncCodexAuthCandidate(candidate.name);
     } catch (error) {
@@ -5817,6 +5954,19 @@ export class BridgeSessionCore {
       }
       candidate.quota = mergeCodexAuthQuotaSnapshots(candidate.quota, snapshotsByAccount.get(accountId) ?? null);
     }
+  }
+
+  private async recordCodexAuthQuotaSnapshot(
+    candidateName: string,
+    accountId: string | null,
+    snapshot: CodexRateLimitSnapshot,
+  ): Promise<void> {
+    const quota = authQuotaSnapshotFromRateLimit(snapshot, accountId);
+    this.authQuotaSnapshots[candidateName] = quota;
+    if (accountId) {
+      this.store.setCodexAuthQuotaSnapshot(this.authRuntimeId(), candidateName, accountId, quota);
+    }
+    await this.writeCodexAuthQuotaSnapshots();
   }
 
   private async readCodexAuthCandidateAccountIds(candidates: CodexAuthCandidate[]): Promise<Map<string, string>> {
@@ -8821,6 +8971,35 @@ async function pointCodexAuthAtTarget(authDir: string, authPath: string, targetP
   }
 }
 
+async function restoreCodexAuthTarget(
+  authDir: string,
+  authPath: string,
+  targetPath: string | null,
+  regularAuthContents: string | null,
+): Promise<void> {
+  if (regularAuthContents !== null) {
+    await fs.mkdir(authDir, { recursive: true });
+    const temporary = path.join(authDir, `.auth.json.${process.pid}.${Date.now()}.restore`);
+    try {
+      await fs.writeFile(temporary, regularAuthContents, { mode: 0o600 });
+      await fs.rename(temporary, authPath);
+    } catch (error) {
+      await fs.unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+    return;
+  }
+  if (targetPath) {
+    await pointCodexAuthAtTarget(authDir, authPath, targetPath);
+    return;
+  }
+  await fs.unlink(authPath).catch((error) => {
+    if (!isFileMissingError(error)) {
+      throw error;
+    }
+  });
+}
+
 async function switchCodexAuth(targetPath: string, explicitAuthDir: string | null = null): Promise<CodexAuthSwitchResult> {
   const state = await listCodexAuthState(new Set(), explicitAuthDir);
   const candidate = state.candidates.find(entry => entry.path === targetPath);
@@ -8905,8 +9084,33 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
     { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
     { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
   ]);
-  rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
+  rows.push([
+    { text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` },
+    { text: t(locale, 'button_auth_refresh_all'), callback_data: `auth:${record.localId}:refresh_all` },
+  ]);
   return rows;
+}
+
+function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshAllResult): string {
+  const lines = [t(locale, 'auth_refresh_all_done', {
+    refreshed: String(result.refreshed.length),
+    skipped: String(result.skipped.length),
+    failed: String(result.failed.length),
+  })];
+  if (result.refreshed.length > 0) {
+    lines.push(t(locale, 'auth_refresh_all_refreshed', { value: result.refreshed.join(', ') }));
+  }
+  if (result.skipped.length > 0) {
+    lines.push(t(locale, 'auth_refresh_all_skipped', { value: result.skipped.join(', ') }));
+  }
+  if (result.failed.length > 0) {
+    const details = result.failed
+      .slice(0, 5)
+      .map((failure) => `${failure.name}: ${failure.error}`)
+      .join('; ');
+    lines.push(t(locale, 'auth_refresh_all_failed', { value: details }));
+  }
+  return lines.join('\n');
 }
 
 function normalizeHelpUsageKey(name: string): string | null {

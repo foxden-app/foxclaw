@@ -7,6 +7,13 @@ import assert from 'node:assert/strict';
 
 const projectRoot = process.cwd();
 
+function stripProxychainsNoise(output: string): string {
+  return output
+    .split('\n')
+    .filter(line => !/^\[proxychains\] DLL init: proxychains-ng /.test(line))
+    .join('\n');
+}
+
 function runFoxclawCli(...args: string[]): { status: number | null; stdout: string; stderr: string } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-cli-'));
   try {
@@ -20,8 +27,8 @@ function runFoxclawCli(...args: string[]): { status: number | null; stdout: stri
     });
     return {
       status: result.status,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      stdout: stripProxychainsNoise(result.stdout),
+      stderr: stripProxychainsNoise(result.stderr),
     };
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

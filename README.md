@@ -258,7 +258,7 @@ FoxClaw 会把 `codex app-server` 作为 detached 子进程启动，记录其 pi
 - `/status`、`/account`、`/quota`、`/update`
 - `/quota_nudge <credits|usage_limit> confirm`
 - `/login_device`、`/login_cancel [id]`、`/logout confirm`
-- `/auth [list|use <n>|enable <n>|disable <n>|reload|add <name>]`
+- `/auth [list|use <n>|enable <n>|disable <n>|reload|refresh all|add <name>]`
 - `/threads [query]`、`/threads archived`、`/open <n>`
 - `/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]`
 - `/history [limit]`、`/files <query>`、`/remote`

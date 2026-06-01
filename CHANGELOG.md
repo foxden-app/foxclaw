@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.7 - 2026-06-02
+
+### 中文
+- `/auth` 面板新增“刷新全部”按钮，并支持 `/auth refresh all`。
+- 刷新全部仅在所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时执行。
+- 执行时逐个切换 ChatGPT 候选，调用 Codex `account/read refreshToken=true` 主动刷新，使用 usage 接口验证后再镜像同步，并在结束后恢复原当前 auth、刷新面板摘要。
+- 更新 FoxClaw/npm 发布 skill：用户要求收尾或发布时，校验通过后自动 commit、push、publish，只在真实外部阻塞时再等待用户。
+
+### English
+- Added a Refresh all button to the `/auth` panel and the `/auth refresh all` command.
+- Refresh all runs only when every Telegram runtime, the Weixin runtime, approvals, inputs, login flows, and auth mirror writes are idle.
+- It visits each ChatGPT candidate, calls Codex `account/read refreshToken=true`, validates through the usage endpoint before mirroring, restores the original current auth, and refreshes the panel summary.
+- Updated the FoxClaw/npm publish skills so release wrap-up proceeds through commit, push, and publish after validation, pausing only for real external blockers.
+
 ## 0.4.6 - 2026-06-01
 
 ### 中文

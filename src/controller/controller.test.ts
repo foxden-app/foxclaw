@@ -1589,6 +1589,105 @@ test('/auth panel can start device login from an inline action', async (t) => {
   assert.match(rig.sentMessages.at(-1)!, /PANEL-CODE/);
 });
 
+test('/auth panel can refresh all ChatGPT candidates and keep the panel', async (t) => {
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    canSelfUpdate: () => true,
+    authCandidateUpdated: async (runtimeId, candidateName) => {
+      events.push(`sync:${runtimeId}:${candidateName}`);
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', '2026-01-01T00:00:00.000Z');
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', '2026-01-01T00:00:00.000Z');
+  fs.writeFileSync(path.join(authDir, 'auth.json_api'), '{"openai_api_key":"sk-test"}\n');
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async (refreshToken = false) => {
+    assert.equal(refreshToken, true);
+    const currentName = path.basename(fs.realpathSync(path.join(authDir, 'auth.json')));
+    events.push(`refresh:${currentName}`);
+    writeChatGptAuthCandidate(
+      authDir,
+      currentName,
+      currentName === 'auth.json_a' ? 'acct-a' : 'acct-b',
+      currentName === 'auth.json_a' ? '2026-02-01T00:00:00.000Z' : '2026-02-02T00:00:00.000Z',
+    );
+    return {
+      type: 'chatgpt',
+      email: 'user@example.com',
+      planType: 'plus',
+      requiresOpenaiAuth: false,
+    };
+  };
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 1, windowDurationMins: 300, resetsAt: null },
+      secondary: { usedPercent: 2, windowDurationMins: 10080, resetsAt: null },
+      credits: null,
+      planType: 'plus',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
+    { text: '🔄 Reload auth', callback_data: `auth:${list.localId}:reload` },
+    { text: '🔁 Refresh all', callback_data: `auth:${list.localId}:refresh_all` },
+  ]);
+  events.length = 0;
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:refresh_all`, 1));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Refreshing all ChatGPT auth candidates. Every runtime must stay idle...');
+  assert.equal(restarts, 3);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.deepEqual(events, [
+    'refresh:auth.json_a',
+    'sync:default:auth.json_a',
+    'refresh:auth.json_b',
+    'sync:default:auth.json_b',
+  ]);
+  assert.match(rig.editedMessages[0]!, /Refreshing all ChatGPT auth candidates/);
+  assert.match(rig.editedMessages.at(-1)!, /Auth refresh all complete: 2 refreshed, 1 skipped, 0 failed/);
+  assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_a/);
+  assert.match(rig.editedKeyboards.at(-1)?.at(-1)?.[1]?.text, /Refresh all/);
+  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
+  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-02T00:00:00.000Z/);
+});
+
+test('/auth panel refresh all is blocked until every runtime is idle', async (t) => {
+  const rig = createControllerRig(null, {
+    canSelfUpdate: () => false,
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:refresh_all`, 1));
+
+  assert.match(rig.callbackAnswers.at(-1)!, /Cannot refresh all auth candidates/);
+  assert.equal(rig.editedMessages.length, 0);
+});
+
 test('/auth add prepares a new auth candidate and completes device login', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

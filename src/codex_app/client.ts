@@ -431,8 +431,8 @@ export class CodexAppClient extends EventEmitter {
     return models;
   }
 
-  async readAccount(): Promise<CodexAccountInfo | null> {
-    const result = await this.request('account/read', { refreshToken: false });
+  async readAccount(refreshToken = false): Promise<CodexAccountInfo | null> {
+    const result = await this.request('account/read', { refreshToken });
     const account = (result as any)?.account;
     if (!account || typeof account !== 'object') {
       return null;

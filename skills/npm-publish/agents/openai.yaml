@@ -1,4 +1,4 @@
 interface:
   display_name: "NPM Publish"
-  short_description: "Publish npm packages with 2FA web auth"
-  default_prompt: "Publish this npm package using the recorded web-auth flow."
+  short_description: "Verify, push, and publish npm packages"
+  default_prompt: "Publish this npm package: verify it, commit and push scoped release changes, run the configured publish flow, and only pause for real auth or failure blockers."

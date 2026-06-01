@@ -67,6 +67,7 @@ Telegram behavior:
 - when `TG_BOT_TOKENS` contains multiple bots, one FoxClaw service starts independent Codex app-servers and auth selections per bot
 - isolated Telegram runtimes use independent `CODEX_HOME` directories and file-backed credentials; they do not share Codex sessions
 - refreshed ChatGPT candidates are mirrored only after online usage-endpoint validation; before auth switch or reload, a runtime restores any newer same-account credential found in another Codex home
+- `/auth` includes a Refresh all panel button; it is a global-idle maintenance action that force-refreshes every ChatGPT candidate through Codex `account/read refreshToken=true`, validates usage, mirrors successful candidates, and restores the original current auth
 - if `TG_BOT_TOKEN` is also set to one exact token from `TG_BOT_TOKENS`, that bot uses the default/shared-terminal runtime instead of an isolated Telegram home
 - if Weixin is enabled alongside multiple Telegram bots, it remains on the default Codex runtime instead of borrowing a Telegram bot runtime
 - in a group with multiple configured bots, address a bot by mention, reply, or suffixed command such as `/status@botname`
@@ -172,6 +173,8 @@ Do not describe the setup as "done" until this smoke test has either passed or b
 ## Development Wrap-Up
 
 Use this checklist when the user asks for standard closing actions, release wrap-up, local install updates, npm publish, or says things like "收尾动作", "中文 commit msg", "中英双语 commit msg", "push", "npm publish", or "本地安装更新".
+
+When the user says development is complete, asks to "收尾", or asks to push/publish, treat that as authorization to finish the whole release path without asking for another confirmation. After validation passes, commit the scoped changes, push the branch, publish through the configured release flow, and verify the published result. Stop and ask only when a real external decision is required, such as npm/GitHub web auth, missing credentials, failed checks, merge conflicts, an already-published target version that requires choosing a new version, or unrelated local changes that would be staged.
 
 1. Inspect scope before staging:
    - `git status -sb`
