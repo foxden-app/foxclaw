@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.10 - 2026-06-02
+
+### 中文
+- 从 `/auth` 面板移除“刷新全部”按钮，避免高风险 refresh token 轮换操作被日常面板误触。
+- 保留 `/auth refresh all` 和 `/auth refresh all confirm` 命令入口，继续要求显式风险确认后才会执行刷新全部。
+
+### English
+- Removed the Refresh all button from the `/auth` panel to avoid accidental use of the high-risk refresh-token rotation maintenance action.
+- Kept `/auth refresh all` and `/auth refresh all confirm` as command entry points, still requiring explicit risk confirmation before refresh all runs.
+
 ## 0.4.9 - 2026-06-02
 
 ### 中文

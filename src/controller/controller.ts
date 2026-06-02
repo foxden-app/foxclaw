@@ -9135,10 +9135,7 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
     { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
     { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
   ]);
-  rows.push([
-    { text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` },
-    { text: t(locale, 'button_auth_refresh_all'), callback_data: `auth:${record.localId}:refresh_all` },
-  ]);
+  rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
   return rows;
 }
 

@@ -1589,7 +1589,7 @@ test('/auth panel can start device login from an inline action', async (t) => {
   assert.match(rig.sentMessages.at(-1)!, /PANEL-CODE/);
 });
 
-test('/auth panel can refresh all ChatGPT candidates and keep the panel', async (t) => {
+test('/auth refresh all command can refresh all ChatGPT candidates and keep an auth panel', async (t) => {
   const events: string[] = [];
   const rig = createControllerRig(null, {
     canSelfUpdate: () => true,
@@ -1645,22 +1645,22 @@ test('/auth panel can refresh all ChatGPT candidates and keep the panel', async 
   assert.ok(list);
   assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
     { text: '🔄 Reload auth', callback_data: `auth:${list.localId}:reload` },
-    { text: '🔁 Refresh all', callback_data: `auth:${list.localId}:refresh_all` },
   ]);
   events.length = 0;
 
-  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:refresh_all`, 1));
+  await (rig.controller as any).handleCommand(createEvent('/auth refresh all'), 'en', 'auth', ['refresh', 'all']);
+  const confirmationList = [...(rig.controller as any).pendingAuthChoiceLists.values()].at(-1);
+  assert.ok(confirmationList);
 
-  assert.equal(rig.callbackAnswers.at(-1), 'Review refresh all risk first.');
   assert.equal(restarts, 0);
   assert.deepEqual(events, []);
-  assert.match(rig.editedMessages.at(-1)!, /will rotate ChatGPT refresh tokens/);
-  assert.deepEqual(rig.editedKeyboards.at(-1), [
-    [{ text: '⚠️ Accept risk & refresh', callback_data: `auth:${list.localId}:refresh_all_confirm` }],
-    [{ text: '✖️ Cancel', callback_data: `auth:${list.localId}:refresh_all_cancel` }],
+  assert.match(rig.sentMessages.at(-1)!, /will rotate ChatGPT refresh tokens/);
+  assert.deepEqual(rig.sentKeyboards.at(-1), [
+    [{ text: '⚠️ Accept risk & refresh', callback_data: `auth:${confirmationList.localId}:refresh_all_confirm` }],
+    [{ text: '✖️ Cancel', callback_data: `auth:${confirmationList.localId}:refresh_all_cancel` }],
   ]);
 
-  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:refresh_all_confirm`, 1));
+  await (rig.controller as any).handleCallback(createCallback(`auth:${confirmationList.localId}:refresh_all_confirm`, rig.sentMessages.length));
 
   assert.equal(rig.callbackAnswers.at(-1), 'Refreshing all ChatGPT auth candidates. Every runtime must stay idle...');
   assert.equal(restarts, 3);
@@ -1671,10 +1671,12 @@ test('/auth panel can refresh all ChatGPT candidates and keep the panel', async 
     'refresh:auth.json_b',
     'sync:default:auth.json_b',
   ]);
-  assert.match(rig.editedMessages[1]!, /Refreshing all ChatGPT auth candidates/);
+  assert.match(rig.editedMessages[0]!, /Refreshing all ChatGPT auth candidates/);
   assert.match(rig.editedMessages.at(-1)!, /Auth refresh all complete: 2 refreshed, 1 skipped, 0 failed/);
   assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_a/);
-  assert.match(rig.editedKeyboards.at(-1)?.at(-1)?.[1]?.text, /Refresh all/);
+  assert.deepEqual(rig.editedKeyboards.at(-1)?.at(-1), [
+    { text: '🔄 Reload auth', callback_data: `auth:${confirmationList.localId}:reload` },
+  ]);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-02T00:00:00.000Z/);
 });

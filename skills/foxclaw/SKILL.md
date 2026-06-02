@@ -67,7 +67,7 @@ Telegram behavior:
 - when `TG_BOT_TOKENS` contains multiple bots, one FoxClaw service starts independent Codex app-servers and auth selections per bot
 - isolated Telegram runtimes use independent `CODEX_HOME` directories and file-backed credentials; they do not share Codex sessions
 - refreshed ChatGPT candidates are mirrored only after online usage-endpoint validation; before auth switch or reload, a runtime restores any newer same-account credential found in another Codex home
-- `/auth` includes a Refresh all panel button; it requires explicit token-rotation risk confirmation, then force-refreshes every ChatGPT candidate through Codex `account/read refreshToken=true`, validates usage, mirrors successful candidates, and restores the original current auth while every runtime is globally idle
+- `/auth refresh all` remains a command-only maintenance action, not a panel button; it requires explicit token-rotation risk confirmation, then force-refreshes every ChatGPT candidate through Codex `account/read refreshToken=true`, validates usage, mirrors successful candidates, and restores the original current auth while every runtime is globally idle
 - if `TG_BOT_TOKEN` is also set to one exact token from `TG_BOT_TOKENS`, that bot uses the default/shared-terminal runtime instead of an isolated Telegram home
 - if Weixin is enabled alongside multiple Telegram bots, it remains on the default Codex runtime instead of borrowing a Telegram bot runtime
 - in a group with multiple configured bots, address a bot by mention, reply, or suffixed command such as `/status@botname`

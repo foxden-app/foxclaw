@@ -389,7 +389,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 ### 6.3 The `/auth` Panel
 
-`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, reload, and Refresh all. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
+`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
 
 Approximation:
 
@@ -405,10 +405,12 @@ Quota remaining: 5h|7d|auth
 [✅ 20|25|auth.json_personal] [✅]
 [🔐 --|--|auth.json_team]     [✅]
 [🛡️ Access]             [🔑 Login]
-[🔄 Reload auth]        [🔁 Refresh all]
+[🔄 Reload auth]
 ```
 
-The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `Refresh all` is a maintenance action: it is allowed only when every Telegram runtime, the Weixin runtime, approvals, inputs, logins, and auth mirroring are idle. The first tap only shows a risk confirmation: ChatGPT refresh tokens are rotated, so if OpenAI/Codex consumes an old refresh token but the new token cannot be saved because of network, process, or disk failure, that candidate may require device login or phone verification again. After confirmation, FoxClaw visits every ChatGPT candidate in the panel, asks Codex to force-refresh tokens with `account/read refreshToken=true`, verifies the result through the usage endpoint, mirrors successful candidates, restores the original current auth, and refreshes the panel with a summary. `--|--` means no quota snapshot has been observed for that candidate yet.
+The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--|--` means no quota snapshot has been observed for that candidate yet.
+
+`/auth refresh all` is a command-only maintenance action because ChatGPT refresh tokens are rotated. It is allowed only when every Telegram runtime, the Weixin runtime, approvals, inputs, logins, and auth mirroring are idle. The command first shows a risk confirmation: if OpenAI/Codex consumes an old refresh token but the new token cannot be saved because of network, process, or disk failure, that candidate may require device login or phone verification again. After confirmation, FoxClaw visits every ChatGPT candidate, asks Codex to force-refresh tokens with `account/read refreshToken=true`, verifies the result through the usage endpoint, mirrors successful candidates, restores the original current auth, and shows a summary.
 
 Equivalent commands:
 
@@ -417,7 +419,7 @@ Equivalent commands:
 - `/auth enable <n>`: let candidate n participate in auto-rotation.
 - `/auth disable <n>`: skip candidate n during auto-rotation.
 - `/auth reload` or `/auth_reload`: restart app-server and reload the current `auth.json`.
-- `/auth refresh all`: show the same risk confirmation as the panel's Refresh all button.
+- `/auth refresh all`: show the refresh-token rotation risk confirmation.
 - `/auth refresh all confirm`: run Refresh all after accepting the token-rotation risk.
 
 If the requesting bot runtime has active turns, pending approvals, pending user inputs, or MCP elicitations, FoxClaw refuses manual auth switching to avoid changing accounts mid-request; another idle bot is unaffected.

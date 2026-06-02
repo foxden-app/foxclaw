@@ -389,7 +389,7 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 ### 6.3 `/auth` 面板
 
-`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录、重载和刷新全部。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。每个候选名前的 `5h|7d` 数字表示上次记录到的两个额度窗口剩余百分比；当前 auth 会在打开面板时刷新，其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
+`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。每个候选名前的 `5h|7d` 数字表示上次记录到的两个额度窗口剩余百分比；当前 auth 会在打开面板时刷新，其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
 
 示意：
 
@@ -405,10 +405,12 @@ Candidates: 2
 [✅ 20|25|auth.json_personal] [✅]
 [🔐 --|--|auth.json_team]     [✅]
 [🛡️ Access]             [🔑 设备登录]
-[🔄 Reload auth]        [🔁 刷新全部]
+[🔄 Reload auth]
 ```
 
-右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`刷新全部` 是维护操作：只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。第一次点击只会显示风险确认：ChatGPT refresh token 会被轮换，如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问面板里的 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并刷新面板摘要。`--|--` 表示该候选还没有额度历史快照。
+右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--|--` 表示该候选还没有额度历史快照。
+
+`/auth refresh all` 是仅命令入口的维护操作，因为 ChatGPT refresh token 会被轮换。只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。命令会先显示风险确认：如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并显示摘要。
 
 命令等价用法：
 
@@ -417,7 +419,7 @@ Candidates: 2
 - `/auth enable <n>`：让第 n 个候选参与自动轮转。
 - `/auth disable <n>`：禁用第 n 个候选，自动轮转会跳过它。
 - `/auth reload` 或 `/auth_reload`：重启 app-server，重新加载当前 `auth.json`。
-- `/auth refresh all`：显示与面板“刷新全部”相同的风险确认。
+- `/auth refresh all`：显示 refresh token 轮换风险确认。
 - `/auth refresh all confirm`：接受 token 轮换风险后执行刷新全部。
 
 切换 auth 时，如果当前 bot runtime 还有活跃 turn、待审批、待用户输入或 MCP elicitation，FoxClaw 会先拒绝切换，避免中途换号破坏正在进行的请求；另一个空闲 bot 不受影响。
