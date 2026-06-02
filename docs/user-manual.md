@@ -389,7 +389,9 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 ### 6.3 The `/auth` Panel
 
-`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The `5h|7d` numbers before each filename are the last recorded remaining percentages for the two quota windows; the current auth is refreshed when the panel opens, while other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
+`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The panel shows 8 candidates per page and supports paging, `All / Enabled / Attention` filters, and `/auth list <keyword>` filename search for large local inventories. `/auth use <n>` always uses the full-list candidate number, independent of panel paging.
+
+Each filename is prefixed with observed `window:remaining-percent` values. For example, a Plus account may show `5h:20|7d:25`, while an account with one monthly window may show `30d:97`. The current auth quota is refreshed when the panel opens; other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
 
 Approximation:
 
@@ -398,23 +400,28 @@ Codex auth
 Current: auth.json_personal
 Auth dir: /home/alice/.codex
 Candidates: 2
-Quota remaining: 5h|7d|auth
-1. 20|25|auth.json_personal * [enabled]
-2. --|--|auth.json_team [enabled]
+Quota remaining: window:percent|auth
+1. 5h:20|7d:25|auth.json_personal * [Plus · ready · refreshed 2h ago]
+2. --|auth.json_team [quota unknown]
 
-[✅ 20|25|auth.json_personal] [✅]
-[🔐 --|--|auth.json_team]     [✅]
+[✅ 5h:20|7d:25|auth.json_personal] [✅]
+[🔐 --|auth.json_team]              [✅]
+[☑️ All] [Enabled] [Attention]
 [🛡️ Access]             [🔑 Login]
 [🔄 Reload auth]
 ```
 
-The right-side `✅` / `⏸️` button shows the current state. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--|--` means no quota snapshot has been observed for that candidate yet.
+The right-side `✅` / `⏸️` button controls whether the candidate participates in auto-rotation. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--` means no quota snapshot has been observed for that candidate yet. Health summaries distinguish ready, low quota, quota exhausted, quota unknown, not recently refreshed, API key, and invalid auth file states.
 
 `/auth refresh all` is a command-only maintenance action because ChatGPT refresh tokens are rotated. It is allowed only when every Telegram runtime, the Weixin runtime, approvals, inputs, logins, and auth mirroring are idle. The command first shows a risk confirmation: if OpenAI/Codex consumes an old refresh token but the new token cannot be saved because of network, process, or disk failure, that candidate may require device login or phone verification again. After confirmation, FoxClaw visits every ChatGPT candidate, asks Codex to force-refresh tokens with `account/read refreshToken=true`, verifies the result through the usage endpoint, mirrors successful candidates, restores the original current auth, and shows a summary.
 
+OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token replay grace period. Codex refreshes automatically when an access token approaches expiry; when it cannot parse the access-token `exp`, current Codex uses a `last_refresh` fallback of about 8 days. The panel labels candidates without a refresh record in that interval as `not recently refreshed`, but this is only a maintenance hint. It does not prove expiry and does not trigger bulk keepalive refreshes. Do not use `/auth refresh all` as a routine keepalive command.
+
 Equivalent commands:
 
-- `/auth` or `/auth list`: show candidates.
+- `/auth` or `/auth list [keyword]`: show candidates, optionally filtered by filename.
+- `/auth filter <all|enabled|attention>`: show all, enabled, or attention-needed candidates.
+- `/auth page <n>`: open a specific page directly.
 - `/auth use <n>`: switch to candidate n and restart app-server.
 - `/auth enable <n>`: let candidate n participate in auto-rotation.
 - `/auth disable <n>`: skip candidate n during auto-rotation.

@@ -46,7 +46,10 @@ export interface CodexAuthQuotaSnapshotRecord {
   candidateName: string;
   accountId: string;
   capturedAtMs: number;
+  planType: string | null;
+  primaryWindowDurationMins: number | null;
   primaryRemainingPercent: number | null;
+  secondaryWindowDurationMins: number | null;
   secondaryRemainingPercent: number | null;
   updatedAt: number;
 }
@@ -178,7 +181,10 @@ export class BridgeStore {
         candidate_name TEXT NOT NULL,
         account_id TEXT NOT NULL,
         captured_at_ms INTEGER NOT NULL,
+        plan_type TEXT,
+        primary_window_duration_mins REAL,
         primary_remaining_percent REAL,
+        secondary_window_duration_mins REAL,
         secondary_remaining_percent REAL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, candidate_name)
@@ -198,6 +204,9 @@ export class BridgeStore {
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     this.ensureColumn('pending_user_inputs', 'status', "TEXT NOT NULL DEFAULT 'pending'");
     this.ensureColumn('pending_user_inputs', 'submitted_at', 'INTEGER');
+    this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
+    this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
+    this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
     migrateLegacyBridgeScopeIds(this.db);
   }
 
@@ -728,7 +737,15 @@ export class BridgeStore {
     runtimeId: string,
     candidateName: string,
     accountId: string,
-    snapshot: Pick<CodexAuthQuotaSnapshotRecord, 'capturedAtMs' | 'primaryRemainingPercent' | 'secondaryRemainingPercent'>,
+    snapshot: Pick<
+      CodexAuthQuotaSnapshotRecord,
+      | 'capturedAtMs'
+      | 'planType'
+      | 'primaryWindowDurationMins'
+      | 'primaryRemainingPercent'
+      | 'secondaryWindowDurationMins'
+      | 'secondaryRemainingPercent'
+    >,
   ): void {
     this.db.prepare(`
       INSERT INTO codex_auth_quota_snapshots (
@@ -736,15 +753,21 @@ export class BridgeStore {
         candidate_name,
         account_id,
         captured_at_ms,
+        plan_type,
+        primary_window_duration_mins,
         primary_remaining_percent,
+        secondary_window_duration_mins,
         secondary_remaining_percent,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(runtime_id, candidate_name) DO UPDATE SET
         account_id = excluded.account_id,
         captured_at_ms = excluded.captured_at_ms,
+        plan_type = excluded.plan_type,
+        primary_window_duration_mins = excluded.primary_window_duration_mins,
         primary_remaining_percent = excluded.primary_remaining_percent,
+        secondary_window_duration_mins = excluded.secondary_window_duration_mins,
         secondary_remaining_percent = excluded.secondary_remaining_percent,
         updated_at = excluded.updated_at
     `).run(
@@ -752,7 +775,10 @@ export class BridgeStore {
       candidateName,
       accountId,
       snapshot.capturedAtMs,
+      snapshot.planType,
+      snapshot.primaryWindowDurationMins,
       snapshot.primaryRemainingPercent,
+      snapshot.secondaryWindowDurationMins,
       snapshot.secondaryRemainingPercent,
       Date.now(),
     );
@@ -770,7 +796,10 @@ export class BridgeStore {
         candidate_name,
         account_id,
         captured_at_ms,
+        plan_type,
+        primary_window_duration_mins,
         primary_remaining_percent,
+        secondary_window_duration_mins,
         secondary_remaining_percent,
         updated_at
       FROM codex_auth_quota_snapshots
@@ -781,7 +810,10 @@ export class BridgeStore {
       candidateName: String(row.candidate_name),
       accountId: String(row.account_id),
       capturedAtMs: Number(row.captured_at_ms),
+      planType: nullableString(row.plan_type),
+      primaryWindowDurationMins: nullableNumber(row.primary_window_duration_mins),
       primaryRemainingPercent: nullableNumber(row.primary_remaining_percent),
+      secondaryWindowDurationMins: nullableNumber(row.secondary_window_duration_mins),
       secondaryRemainingPercent: nullableNumber(row.secondary_remaining_percent),
       updatedAt: Number(row.updated_at),
     }));
@@ -802,6 +834,10 @@ function nullableNumber(value: unknown): number | null {
   }
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
 }
 
 function normalizeCollaborationMode(value: unknown): CollaborationModeValue | null {

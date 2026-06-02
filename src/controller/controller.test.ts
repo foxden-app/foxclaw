@@ -1326,14 +1326,14 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
   assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_b/);
   assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
-  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ --\|--\|auth\.json_b/);
+  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ --\|auth\.json_b/);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:0`, 1));
 
   assert.equal(restarts, 2);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
   assert.match(rig.editedMessages.at(-1)!, /Current auth: auth\.json_a/);
-  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ --\|--\|auth\.json_a/);
+  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ --\|auth\.json_a/);
 });
 
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
@@ -1435,16 +1435,16 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
-  assert.match(rig.sentMessages[0]!, /auth\.json_b \[enabled\]/);
+  assert.match(rig.sentMessages[0]!, /auth\.json_b \[invalid auth file\]/);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
   assert.deepEqual(rig.sentKeyboards[0]?.slice(0, 2), [
     [
-      { text: '✅ --|--|auth.json_a', callback_data: `auth:${list.localId}:0` },
+      { text: '✅ --|auth.json_a', callback_data: `auth:${list.localId}:0` },
       { text: '✅', callback_data: `auth:${list.localId}:toggle:0` },
     ],
     [
-      { text: '🔐 --|--|auth.json_b', callback_data: `auth:${list.localId}:1` },
+      { text: '🔐 --|auth.json_b', callback_data: `auth:${list.localId}:1` },
       { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
     ],
   ]);
@@ -1455,7 +1455,7 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.equal(rig.callbackAnswers.at(-1), 'Auth disabled');
   assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[disabled\]/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
-    { text: '🔐 --|--|auth.json_b · off', callback_data: `auth:${list.localId}:1` },
+    { text: '🔐 --|auth.json_b · off', callback_data: `auth:${list.localId}:1` },
     { text: '⏸️', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
 
@@ -1463,9 +1463,9 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
 
   assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], []);
   assert.equal(rig.callbackAnswers.at(-1), 'Auth enabled');
-  assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[enabled\]/);
+  assert.match(rig.editedMessages.at(-1)!, /auth\.json_b \[invalid auth file\]/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
-    { text: '🔐 --|--|auth.json_b', callback_data: `auth:${list.localId}:1` },
+    { text: '🔐 --|auth.json_b', callback_data: `auth:${list.localId}:1` },
     { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
 });
@@ -1477,6 +1477,10 @@ test('/auth records and displays current candidate remaining quota without probi
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
+  fs.rmSync(path.join(authDir, 'auth.json'), { force: true });
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+  fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
   let reads = 0;
   (rig.controller as any).app.readAccountRateLimits = async () => {
     reads += 1;
@@ -1500,10 +1504,10 @@ test('/auth records and displays current candidate remaining quota without probi
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
   assert.equal(reads, 1);
-  assert.match(rig.sentMessages[0]!, /Quota remaining: 5h\|7d\|auth/);
-  assert.match(rig.sentMessages[0]!, /20\|25\|auth\.json_a \* \[enabled\]/);
-  assert.match(rig.sentMessages[0]!, /--\|--\|auth\.json_b \[enabled\]/);
-  assert.match(rig.sentKeyboards[0]?.[0]?.[0]?.text, /✅ 20\|25\|auth\.json_a/);
+  assert.match(rig.sentMessages[0]!, /Quota remaining: window:percent\|auth/);
+  assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|auth\.json_a \* \[Plus · ready · refreshed 0m ago\]/);
+  assert.match(rig.sentMessages[0]!, /--\|auth\.json_b \[quota unknown · refreshed 0m ago\]/);
+  assert.match(rig.sentKeyboards[0]?.[0]?.[0]?.text, /✅ 5h:20\|7d:25\|auth\.json_a/);
   assert.equal(
     fs.existsSync(path.join(rig.tempDir, 'codex-auth-quota.json')),
     true,
@@ -1514,8 +1518,8 @@ test('/auth records and displays current candidate remaining quota without probi
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
   assert.equal(reads, 2);
-  assert.match(rig.sentMessages[1]!, /20\|25\|auth\.json_a \[enabled\]/);
-  assert.match(rig.sentMessages[1]!, /90\|95\|auth\.json_b \* \[enabled\]/);
+  assert.match(rig.sentMessages[1]!, /5h:20\|7d:25\|auth\.json_a \[Plus · ready · refreshed 0m ago\]/);
+  assert.match(rig.sentMessages[1]!, /5h:90\|7d:95\|auth\.json_b \* \[Plus · ready · refreshed 0m ago\]/);
 });
 
 test('/auth supplements quota snapshots from other runtimes by account id', async (t) => {
@@ -1531,12 +1535,18 @@ test('/auth supplements quota snapshots from other runtimes by account id', asyn
   fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
   rig.store.setCodexAuthQuotaSnapshot('bot-other', 'auth.json_different_name', 'acct-b', {
     capturedAtMs: 10_000,
+    planType: 'plus',
+    primaryWindowDurationMins: 300,
     primaryRemainingPercent: 70,
+    secondaryWindowDurationMins: 10080,
     secondaryRemainingPercent: 65,
   });
   rig.store.setCodexAuthQuotaSnapshot('bot-conflict', 'auth.json_b', 'acct-c', {
     capturedAtMs: 20_000,
+    planType: 'plus',
+    primaryWindowDurationMins: 300,
     primaryRemainingPercent: 5,
+    secondaryWindowDurationMins: 10080,
     secondaryRemainingPercent: 4,
   });
   (rig.controller as any).app.readAccountRateLimits = async () => ({
@@ -1554,9 +1564,73 @@ test('/auth supplements quota snapshots from other runtimes by account id', asyn
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
-  assert.match(rig.sentMessages[0]!, /20\|25\|auth\.json_a \* \[enabled\]/);
-  assert.match(rig.sentMessages[0]!, /70\|65\|auth\.json_b \[enabled\]/);
-  assert.doesNotMatch(rig.sentMessages[0]!, /5\|4\|auth\.json_b/);
+  assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|auth\.json_a \* \[Plus · not recently refreshed · refreshed \d+d ago\]/);
+  assert.match(rig.sentMessages[0]!, /5h:70\|7d:65\|auth\.json_b \[Plus · not recently refreshed · refreshed \d+d ago\]/);
+  assert.doesNotMatch(rig.sentMessages[0]!, /5h:5\|7d:4\|auth\.json_b/);
+});
+
+test('/auth panel paginates large inventories, filters attention candidates, and searches by filename', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  fs.rmSync(path.join(authDir, 'auth.json'), { force: true });
+  fs.rmSync(path.join(authDir, 'auth.json_a'), { force: true });
+  fs.rmSync(path.join(authDir, 'auth.json_b'), { force: true });
+  const refreshedAt = new Date().toISOString();
+  for (let index = 0; index < 100; index += 1) {
+    writeChatGptAuthCandidate(
+      authDir,
+      `auth.json_free${String(index).padStart(3, '0')}`,
+      `acct-${index}`,
+      refreshedAt,
+    );
+  }
+  fs.symlinkSync(path.join(authDir, 'auth.json_free000'), path.join(authDir, 'auth.json'));
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 3, windowDurationMins: 43200, resetsAt: null },
+      secondary: null,
+      credits: null,
+      planType: 'free',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()].at(-1);
+  assert.ok(list);
+  assert.match(rig.sentMessages.at(-1)!, /Candidates: 100/);
+  assert.match(rig.sentMessages.at(-1)!, /Showing 1-8 of 100 matched candidates \(100 total\), page 1\/13/);
+  assert.match(rig.sentMessages.at(-1)!, /30d:97\|auth\.json_free000 \* \[Free · ready · refreshed 0m ago\]/);
+  assert.match(rig.sentMessages.at(-1)!, /auth\.json_free007/);
+  assert.doesNotMatch(rig.sentMessages.at(-1)!, /auth\.json_free008/);
+  assert.equal(rig.sentKeyboards.at(-1)?.filter((row: any[]) => row[1]?.callback_data?.includes(':toggle:')).length, 8);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:page:next`, 1));
+
+  assert.match(rig.editedMessages.at(-1)!, /Showing 9-16 of 100 matched candidates \(100 total\), page 2\/13/);
+  assert.match(rig.editedMessages.at(-1)!, /auth\.json_free008/);
+  assert.doesNotMatch(rig.editedMessages.at(-1)!, /auth\.json_free007/);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:filter:attention`, 1));
+
+  assert.match(rig.editedMessages.at(-1)!, /Filter: attention/);
+  assert.match(rig.editedMessages.at(-1)!, /Showing 1-8 of 99 matched candidates \(100 total\), page 1\/13/);
+  assert.doesNotMatch(rig.editedMessages.at(-1)!, /\d+\. .*auth\.json_free000/);
+  assert.match(rig.editedMessages.at(-1)!, /auth\.json_free001 \[quota unknown · refreshed 0m ago\]/);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth list free099'), 'en', 'auth', ['list', 'free099']);
+
+  assert.match(rig.sentMessages.at(-1)!, /Search: free099/);
+  assert.match(rig.sentMessages.at(-1)!, /auth\.json_free099/);
+  assert.doesNotMatch(rig.sentMessages.at(-1)!, /auth\.json_free098/);
 });
 
 test('/auth panel can start device login from an inline action', async (t) => {

@@ -389,7 +389,9 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 ### 6.3 `/auth` 面板
 
-`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。每个候选名前的 `5h|7d` 数字表示上次记录到的两个额度窗口剩余百分比；当前 auth 会在打开面板时刷新，其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
+`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。面板每页显示 8 个候选，支持翻页、`全部 / 已启用 / 需关注` 筛选和 `/auth list <关键词>` 文件名搜索，适合管理较大的本地候选清单。命令 `/auth use <n>` 的编号始终对应完整候选列表，不会因为分页变化。
+
+每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
 
 示意：
 
@@ -398,23 +400,28 @@ Codex auth
 Current: auth.json_personal
 Auth dir: /home/alice/.codex
 Candidates: 2
-额度剩余：5h|7d|auth
-1. 20|25|auth.json_personal * [enabled]
-2. --|--|auth.json_team [enabled]
+额度剩余：窗口:百分比|auth
+1. 5h:20|7d:25|auth.json_personal * [Plus · 正常 · 刷新于 2小时前]
+2. --|auth.json_team [额度未知]
 
-[✅ 20|25|auth.json_personal] [✅]
-[🔐 --|--|auth.json_team]     [✅]
+[✅ 5h:20|7d:25|auth.json_personal] [✅]
+[🔐 --|auth.json_team]              [✅]
+[☑️ 全部] [已启用] [需关注]
 [🛡️ Access]             [🔑 设备登录]
 [🔄 Reload auth]
 ```
 
-右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--|--` 表示该候选还没有额度历史快照。
+右侧 `✅` / `⏸️` 表示当前是否参与自动轮转。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--` 表示该候选还没有额度历史快照。健康摘要会区分正常、额度偏低、额度耗尽、额度未知、长期未刷新、API key 和无效 auth 文件。
 
 `/auth refresh all` 是仅命令入口的维护操作，因为 ChatGPT refresh token 会被轮换。只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。命令会先显示风险确认：如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并显示摘要。
 
+OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”，但这只是维护提醒，不代表 refresh token 已经过期，也不会触发批量保活刷新。不要把 `/auth refresh all` 当作日常保活命令。
+
 命令等价用法：
 
-- `/auth` 或 `/auth list`：查看候选。
+- `/auth` 或 `/auth list [关键词]`：查看候选，可按文件名搜索。
+- `/auth filter <all|enabled|attention>`：筛选全部、已启用或需关注候选。
+- `/auth page <页码>`：直接查看指定页。
 - `/auth use <n>`：切到第 n 个候选并重启 app-server。
 - `/auth enable <n>`：让第 n 个候选参与自动轮转。
 - `/auth disable <n>`：禁用第 n 个候选，自动轮转会跳过它。

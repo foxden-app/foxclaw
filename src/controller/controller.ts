@@ -301,13 +301,18 @@ interface CodexAuthCandidate {
   isCurrent: boolean;
   disabled: boolean;
   mtimeMs: number;
+  credentialKind: 'chatgpt' | 'api-key' | 'invalid';
+  credentialLastRefreshMs: number | null;
   quota: CodexAuthQuotaSnapshot | null;
 }
 
 interface CodexAuthQuotaSnapshot {
   capturedAtMs: number;
   accountId?: string | null;
+  planType: string | null;
+  primaryWindowDurationMins: number | null;
   primaryRemainingPercent: number | null;
+  secondaryWindowDurationMins: number | null;
   secondaryRemainingPercent: number | null;
 }
 
@@ -336,7 +341,17 @@ interface CodexAuthSelection {
   toLabel: string;
 }
 
-interface PendingAuthChoiceList {
+type CodexAuthCandidateHealth = 'disabled' | 'ready' | 'low' | 'exhausted' | 'stale' | 'unknown' | 'api-key' | 'invalid';
+type CodexAuthListFilter = 'all' | 'enabled' | 'attention';
+
+interface CodexAuthListView {
+  offset: number;
+  pageSize: number;
+  filter: CodexAuthListFilter;
+  searchTerm: string | null;
+}
+
+interface PendingAuthChoiceList extends CodexAuthListView {
   localId: string;
   chatId: string;
   messageId: number | null;
@@ -400,6 +415,9 @@ const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
 const CODEX_LOCAL_USAGE_REFRESH_MS = 30 * 60_000;
 const CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME = 'codex-local-usage.json';
 const CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME = 'codex-auth-quota.json';
+const CODEX_AUTH_LIST_PAGE_SIZE = 8;
+const CODEX_AUTH_LOW_QUOTA_PERCENT = 10;
+const CODEX_AUTH_STALE_CREDENTIAL_DAYS = 8;
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const SELF_UPDATE_STATUS_POLL_MS = 1000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
@@ -1425,6 +1443,31 @@ export class BridgeSessionCore {
         Number.parseInt(authToggleMatch[2]!, 10),
         locale,
       );
+      return;
+    }
+    const authPageMatch = /^auth:([a-f0-9]+):page:(prev|next)$/.exec(event.data);
+    if (authPageMatch) {
+      await this.handleAuthListViewCallback(
+        event,
+        authPageMatch[1]!,
+        authPageMatch[2]! as 'prev' | 'next',
+        locale,
+      );
+      return;
+    }
+    const authFilterMatch = /^auth:([a-f0-9]+):filter:(all|enabled|attention)$/.exec(event.data);
+    if (authFilterMatch) {
+      await this.handleAuthListViewCallback(
+        event,
+        authFilterMatch[1]!,
+        authFilterMatch[2]! as CodexAuthListFilter,
+        locale,
+      );
+      return;
+    }
+    const authClearSearchMatch = /^auth:([a-f0-9]+):clear_search$/.exec(event.data);
+    if (authClearSearchMatch) {
+      await this.handleAuthListViewCallback(event, authClearSearchMatch[1]!, 'clear_search', locale);
       return;
     }
     const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
@@ -4738,24 +4781,19 @@ export class BridgeSessionCore {
       await this.handleAuthToggleCommand(scopeId, locale, args.slice(1), action === 'disable');
       return;
     }
-    if (action !== 'list') {
+    const listRequest = parseCodexAuthListRequest(action, args);
+    if (!listRequest) {
       await this.sendMessage(scopeId, t(locale, 'usage_auth'));
       return;
     }
 
     const state = await this.listCodexAuthState();
     await this.refreshCurrentCodexAuthQuota(state);
-    const record: PendingAuthChoiceList = {
-      localId: crypto.randomBytes(8).toString('hex'),
-      chatId: scopeId,
-      messageId: null,
-      candidates: state.candidates,
-      createdAt: Date.now(),
-    };
+    const record = createPendingAuthChoiceList(scopeId, state.candidates, listRequest);
     this.pendingAuthChoiceLists.set(record.localId, record);
     const messageId = await this.sendMessage(
       scopeId,
-      renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null),
+      renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null, record),
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
@@ -4769,13 +4807,7 @@ export class BridgeSessionCore {
     if (!confirmed) {
       const state = await this.listCodexAuthState();
       await this.applySharedCodexAuthQuotaSnapshots(state);
-      const record: PendingAuthChoiceList = {
-        localId: crypto.randomBytes(8).toString('hex'),
-        chatId: scopeId,
-        messageId: null,
-        candidates: state.candidates,
-        createdAt: Date.now(),
-      };
+      const record = createPendingAuthChoiceList(scopeId, state.candidates);
       this.pendingAuthChoiceLists.set(record.localId, record);
       const messageId = await this.sendMessage(
         scopeId,
@@ -4789,17 +4821,11 @@ export class BridgeSessionCore {
     const result = await this.refreshAllCodexAuthCandidates();
     const state = await this.listCodexAuthState();
     await this.applySharedCodexAuthQuotaSnapshots(state);
-    const record: PendingAuthChoiceList = {
-      localId: crypto.randomBytes(8).toString('hex'),
-      chatId: scopeId,
-      messageId: null,
-      candidates: state.candidates,
-      createdAt: Date.now(),
-    };
+    const record = createPendingAuthChoiceList(scopeId, state.candidates);
     this.pendingAuthChoiceLists.set(record.localId, record);
     const messageId = await this.sendMessage(
       scopeId,
-      `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null)}`,
+      `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null, record)}`,
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
@@ -5356,7 +5382,7 @@ export class BridgeSessionCore {
         await this.editMessage(
           event.scopeId,
           record.messageId,
-          renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null),
+          renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
           authChoiceKeyboard(locale, record),
         );
       }
@@ -5380,7 +5406,7 @@ export class BridgeSessionCore {
         await this.editMessage(
           event.scopeId,
           record.messageId,
-          `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null)}`,
+          `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
           authChoiceKeyboard(locale, record),
         );
       }
@@ -5388,6 +5414,47 @@ export class BridgeSessionCore {
     }
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_restarting'));
     await this.handleAuthReloadCommand(event.scopeId, locale);
+  }
+
+  private async handleAuthListViewCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    action: 'prev' | 'next' | 'clear_search' | CodexAuthListFilter,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingAuthChoiceLists.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
+      return;
+    }
+    if (action === 'prev') {
+      record.offset = Math.max(0, record.offset - record.pageSize);
+    } else if (action === 'next') {
+      record.offset += record.pageSize;
+    } else if (action === 'clear_search') {
+      record.searchTerm = null;
+      record.offset = 0;
+    } else {
+      record.filter = action;
+      record.offset = 0;
+    }
+    const state = await this.listCodexAuthState();
+    record.candidates = state.candidates;
+    record.createdAt = Date.now();
+    clampCodexAuthListOffset(record);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+    if (record.messageId !== null) {
+      await this.editMessage(
+        event.scopeId,
+        record.messageId,
+        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        authChoiceKeyboard(locale, record),
+      );
+    }
   }
 
   private async handleAuthToggleCallback(
@@ -5414,12 +5481,13 @@ export class BridgeSessionCore {
     this.store.setCodexAuthCandidateDisabled(candidate.name, disabled, this.authRuntimeId());
     const state = await this.listCodexAuthState();
     record.candidates = state.candidates;
+    clampCodexAuthListOffset(record);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, disabled ? 'auth_candidate_disabled_short' : 'auth_candidate_enabled_short'));
     if (record.messageId !== null) {
       await this.editMessage(
         event.scopeId,
         record.messageId,
-        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null),
+        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
         authChoiceKeyboard(locale, record),
       );
     }
@@ -5461,11 +5529,12 @@ export class BridgeSessionCore {
     await this.refreshCurrentCodexAuthQuota(state);
     record.candidates = state.candidates;
     record.createdAt = Date.now();
+    clampCodexAuthListOffset(record);
     if (record.messageId !== null) {
       await this.editMessage(
         event.scopeId,
         record.messageId,
-        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null),
+        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
         authChoiceKeyboard(locale, record),
       );
     }
@@ -6023,6 +6092,12 @@ export class BridgeSessionCore {
   private async readCodexAuthCandidateAccountIds(candidates: CodexAuthCandidate[]): Promise<Map<string, string>> {
     const entries = await Promise.all(candidates.map(async (candidate) => {
       const metadata = await readChatGptAuthMetadata(candidate.path);
+      candidate.credentialKind = metadata
+        ? 'chatgpt'
+        : await isCodexApiKeyAuthCandidate(candidate.path)
+          ? 'api-key'
+          : 'invalid';
+      candidate.credentialLastRefreshMs = metadata?.lastRefreshMs ?? null;
       return [candidate.name, metadata?.accountId ?? null] as const;
     }));
     const accountIds = new Map<string, string>();
@@ -6057,7 +6132,7 @@ export class BridgeSessionCore {
       if (parsed && typeof parsed === 'object') {
         for (const [name, value] of Object.entries(parsed)) {
           if (isCodexAuthQuotaSnapshot(value)) {
-            this.authQuotaSnapshots[name] = value;
+            this.authQuotaSnapshots[name] = normalizeCodexAuthQuotaSnapshot(value);
           }
         }
       }
@@ -8940,6 +9015,8 @@ async function listCodexAuthState(
       isCurrent: currentTargetPath === candidatePath,
       disabled: disabledNames.has(entry.name),
       mtimeMs: stat.mtimeMs,
+      credentialKind: 'invalid',
+      credentialLastRefreshMs: null,
       quota: null,
     });
   }
@@ -8959,6 +9036,15 @@ function isCodexAuthCandidateName(name: string): boolean {
     return false;
   }
   return name.startsWith('auth.json_') || name.startsWith('auth.json.') || name.startsWith('auth.json-');
+}
+
+async function isCodexApiKeyAuthCandidate(candidatePath: string): Promise<boolean> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(candidatePath, 'utf8')) as { openai_api_key?: unknown };
+    return typeof parsed.openai_api_key === 'string' && parsed.openai_api_key.trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function codexAuthCandidateNameFromAddName(raw: string): string | null {
@@ -9064,11 +9150,103 @@ async function switchCodexAuth(targetPath: string, explicitAuthDir: string | nul
   };
 }
 
+function parseCodexAuthListRequest(action: string, args: string[]): Partial<CodexAuthListView> | null {
+  if (action === 'list') {
+    return { searchTerm: args.slice(1).join(' ').trim() || null };
+  }
+  if (action === 'filter') {
+    const filter = args[1]?.toLowerCase();
+    return filter === 'all' || filter === 'enabled' || filter === 'attention'
+      ? { filter }
+      : null;
+  }
+  if (action === 'page') {
+    const page = Number.parseInt(args[1] ?? '', 10);
+    return Number.isFinite(page) && page > 0
+      ? { offset: (page - 1) * CODEX_AUTH_LIST_PAGE_SIZE }
+      : null;
+  }
+  return null;
+}
+
+function createPendingAuthChoiceList(
+  chatId: string,
+  candidates: CodexAuthCandidate[],
+  view: Partial<CodexAuthListView> = {},
+): PendingAuthChoiceList {
+  const record: PendingAuthChoiceList = {
+    localId: crypto.randomBytes(8).toString('hex'),
+    chatId,
+    messageId: null,
+    candidates,
+    createdAt: Date.now(),
+    offset: Math.max(0, view.offset ?? 0),
+    pageSize: CODEX_AUTH_LIST_PAGE_SIZE,
+    filter: view.filter ?? 'all',
+    searchTerm: view.searchTerm?.trim() || null,
+  };
+  clampCodexAuthListOffset(record);
+  return record;
+}
+
+function clampCodexAuthListOffset(view: PendingAuthChoiceList): void {
+  const filteredCount = filterCodexAuthCandidates(view.candidates, view).length;
+  const finalOffset = filteredCount > 0
+    ? Math.floor((filteredCount - 1) / view.pageSize) * view.pageSize
+    : 0;
+  view.offset = Math.min(Math.max(0, view.offset), finalOffset);
+}
+
+function codexAuthListPage(
+  candidates: CodexAuthCandidate[],
+  view: CodexAuthListView | null,
+): {
+  visible: Array<{ candidate: CodexAuthCandidate; index: number }>;
+  filteredCount: number;
+  offset: number;
+  pageIndex: number;
+  pageCount: number;
+  filter: CodexAuthListFilter;
+  searchTerm: string | null;
+} {
+  const pageSize = Math.max(1, view?.pageSize ?? CODEX_AUTH_LIST_PAGE_SIZE);
+  const filter = view?.filter ?? 'all';
+  const searchTerm = view?.searchTerm?.trim() || null;
+  const indexed = filterCodexAuthCandidates(candidates, { filter, searchTerm });
+  const finalOffset = indexed.length > 0
+    ? Math.floor((indexed.length - 1) / pageSize) * pageSize
+    : 0;
+  const offset = Math.min(Math.max(0, view?.offset ?? 0), finalOffset);
+  return {
+    visible: indexed.slice(offset, offset + pageSize),
+    filteredCount: indexed.length,
+    offset,
+    pageIndex: Math.floor(offset / pageSize),
+    pageCount: Math.max(1, Math.ceil(indexed.length / pageSize)),
+    filter,
+    searchTerm,
+  };
+}
+
+function filterCodexAuthCandidates(
+  candidates: CodexAuthCandidate[],
+  view: Pick<CodexAuthListView, 'filter' | 'searchTerm'>,
+): Array<{ candidate: CodexAuthCandidate; index: number }> {
+  const searchTerm = view.searchTerm?.trim().toLowerCase() || null;
+  return candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => !searchTerm || candidate.name.toLowerCase().includes(searchTerm))
+    .filter(({ candidate }) => view.filter === 'all'
+      || (view.filter === 'enabled' && !candidate.disabled)
+      || (view.filter === 'attention' && codexAuthCandidateNeedsAttention(candidate)));
+}
+
 function renderAuthListMessage(
   locale: AppLocale,
   state: CodexAuthState,
   botLabel: string | null = null,
   includeWeixinCopyPaste = false,
+  view: CodexAuthListView | null = null,
 ): string {
   const lines = [
     t(locale, 'auth_list_title'),
@@ -9096,22 +9274,43 @@ function renderAuthListMessage(
   }
   lines.push(t(locale, 'auth_candidate_count', { value: state.candidates.length }));
   lines.push(t(locale, 'auth_quota_legend'));
-  state.candidates.forEach((candidate, index) => {
+  const page = codexAuthListPage(state.candidates, view);
+  if (page.searchTerm) {
+    lines.push(t(locale, 'auth_search', { value: page.searchTerm }));
+  }
+  if (page.filter !== 'all') {
+    lines.push(t(locale, 'auth_filter', { value: formatCodexAuthFilter(locale, page.filter) }));
+  }
+  if (page.filteredCount !== state.candidates.length || page.pageCount > 1) {
+    lines.push(t(locale, 'auth_page', {
+      from: page.filteredCount === 0 ? 0 : page.offset + 1,
+      to: page.offset + page.visible.length,
+      filtered: page.filteredCount,
+      total: state.candidates.length,
+      page: page.pageIndex + 1,
+      pages: page.pageCount,
+    }));
+  }
+  if (page.visible.length === 0) {
+    lines.push(t(locale, 'auth_no_matches'));
+  }
+  page.visible.forEach(({ candidate, index }) => {
     const marker = candidate.isCurrent ? ' *' : '';
-    const status = candidate.disabled
-      ? t(locale, 'auth_candidate_status_disabled')
-      : t(locale, 'auth_candidate_status_enabled');
-    lines.push(`${index + 1}. ${formatAuthQuotaPrefix(candidate.quota)}|${candidate.name}${marker} [${status}]`);
+    lines.push(`${index + 1}. ${formatAuthQuotaPrefix(locale, candidate.quota)}|${candidate.name}${marker} ${formatCodexAuthCandidateStatus(locale, candidate)}`);
   });
   if (includeWeixinCopyPaste) {
     lines.push(
-      '',
-      t(locale, 'weixin_copy_paste_divider'),
-      t(locale, 'weixin_copy_auth_title'),
-      ...state.candidates.map((_candidate, index) => `/auth use ${index + 1}`),
-      ...state.candidates.map((candidate, index) => candidate.disabled
+        '',
+        t(locale, 'weixin_copy_paste_divider'),
+        t(locale, 'weixin_copy_auth_title'),
+      ...page.visible.map(({ index }) => `/auth use ${index + 1}`),
+      ...page.visible.map(({ candidate, index }) => candidate.disabled
         ? `/auth enable ${index + 1}`
         : `/auth disable ${index + 1}`),
+      '/auth filter all',
+      '/auth filter enabled',
+      '/auth filter attention',
+      '/auth list <keyword>',
       '/login_device',
       '/auth reload',
       '/permissions',
@@ -9121,9 +9320,10 @@ function renderAuthListMessage(
 }
 
 function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
-  const rows = record.candidates.map((candidate, index) => [
+  const page = codexAuthListPage(record.candidates, record);
+  const rows = page.visible.map(({ candidate, index }) => [
     {
-      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaPrefix(candidate.quota)}|${candidate.name}${candidate.disabled ? ' · off' : ''}`),
+      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaPrefix(locale, candidate.quota)}|${candidate.name}${candidate.disabled ? ' · off' : ''}`),
       callback_data: `auth:${record.localId}:${index}`,
     },
     {
@@ -9131,12 +9331,109 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
       callback_data: `auth:${record.localId}:toggle:${index}`,
     },
   ]);
+  const navigationRow = [];
+  if (page.offset > 0) {
+    navigationRow.push({ text: t(locale, 'button_prev_page'), callback_data: `auth:${record.localId}:page:prev` });
+  }
+  if (page.offset + page.visible.length < page.filteredCount) {
+    navigationRow.push({ text: t(locale, 'button_next_page'), callback_data: `auth:${record.localId}:page:next` });
+  }
+  if (navigationRow.length > 0) {
+    rows.push(navigationRow);
+  }
+  rows.push([
+    authFilterButton(locale, record, 'all'),
+    authFilterButton(locale, record, 'enabled'),
+    authFilterButton(locale, record, 'attention'),
+  ]);
+  if (record.searchTerm) {
+    rows.push([{ text: t(locale, 'button_clear_filter'), callback_data: `auth:${record.localId}:clear_search` }]);
+  }
   rows.push([
     { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
     { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
   ]);
   rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
   return rows;
+}
+
+function authFilterButton(
+  locale: AppLocale,
+  record: PendingAuthChoiceList,
+  filter: CodexAuthListFilter,
+): { text: string; callback_data: string } {
+  const label = t(locale, `button_auth_filter_${filter}` as 'button_auth_filter_all' | 'button_auth_filter_enabled' | 'button_auth_filter_attention');
+  return {
+    text: record.filter === filter ? `☑️ ${label}` : label,
+    callback_data: `auth:${record.localId}:filter:${filter}`,
+  };
+}
+
+function codexAuthCandidateHealth(candidate: CodexAuthCandidate): CodexAuthCandidateHealth {
+  if (candidate.disabled) {
+    return 'disabled';
+  }
+  if (candidate.credentialKind === 'api-key') {
+    return 'api-key';
+  }
+  if (candidate.credentialKind === 'invalid') {
+    return 'invalid';
+  }
+  const remaining = [
+    candidate.quota?.primaryRemainingPercent,
+    candidate.quota?.secondaryRemainingPercent,
+  ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+  if (remaining.some(value => value <= 0)) {
+    return 'exhausted';
+  }
+  if (remaining.some(value => value <= CODEX_AUTH_LOW_QUOTA_PERCENT)) {
+    return 'low';
+  }
+  if (
+    candidate.credentialLastRefreshMs !== null
+    && candidate.credentialLastRefreshMs < Date.now() - CODEX_AUTH_STALE_CREDENTIAL_DAYS * 24 * 60 * 60_000
+  ) {
+    return 'stale';
+  }
+  if (remaining.length === 0) {
+    return 'unknown';
+  }
+  return 'ready';
+}
+
+function codexAuthCandidateNeedsAttention(candidate: CodexAuthCandidate): boolean {
+  const health = codexAuthCandidateHealth(candidate);
+  return health === 'stale'
+    || health === 'unknown'
+    || health === 'low'
+    || health === 'exhausted'
+    || health === 'invalid';
+}
+
+function formatCodexAuthCandidateStatus(locale: AppLocale, candidate: CodexAuthCandidate): string {
+  const details = [];
+  if (candidate.quota?.planType) {
+    details.push(formatPlanTypeLabel(candidate.quota.planType));
+  }
+  details.push(t(locale, `auth_candidate_health_${codexAuthCandidateHealth(candidate)}` as
+    | 'auth_candidate_health_disabled'
+    | 'auth_candidate_health_ready'
+    | 'auth_candidate_health_low'
+    | 'auth_candidate_health_exhausted'
+    | 'auth_candidate_health_stale'
+    | 'auth_candidate_health_unknown'
+    | 'auth_candidate_health_api-key'
+    | 'auth_candidate_health_invalid'));
+  if (candidate.credentialLastRefreshMs !== null) {
+    details.push(t(locale, 'auth_candidate_last_refresh', {
+      value: formatCompactAge(locale, Date.now() - candidate.credentialLastRefreshMs),
+    }));
+  }
+  return `[${details.join(' · ')}]`;
+}
+
+function formatCodexAuthFilter(locale: AppLocale, filter: CodexAuthListFilter): string {
+  return t(locale, `auth_filter_${filter}` as 'auth_filter_all' | 'auth_filter_enabled' | 'auth_filter_attention');
 }
 
 function authRefreshAllConfirmKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
@@ -9735,6 +10032,39 @@ function formatRateLimitWindowLabel(locale: AppLocale, window: CodexRateLimitWin
   return locale === 'zh' ? `${formatCompactNumber(minutes)}分钟` : `${formatCompactNumber(minutes)}m window`;
 }
 
+function formatCompactRateLimitWindowLabel(
+  locale: AppLocale,
+  minutes: number | null,
+  fallback: 'primary' | 'secondary',
+): string {
+  if (!minutes || minutes <= 0) {
+    return fallback === 'primary'
+      ? (locale === 'zh' ? '短' : 'P')
+      : (locale === 'zh' ? '长' : 'S');
+  }
+  if (minutes % 1440 === 0) {
+    return `${formatCompactNumber(minutes / 1440)}d`;
+  }
+  if (minutes % 60 === 0) {
+    return `${formatCompactNumber(minutes / 60)}h`;
+  }
+  return `${formatCompactNumber(minutes)}m`;
+}
+
+function formatCompactAge(locale: AppLocale, ageMs: number): string {
+  const minutes = Math.max(0, ageMs) / 60_000;
+  if (minutes >= 1440) {
+    const days = Math.floor(minutes / 1440);
+    return locale === 'zh' ? `${days}天前` : `${days}d ago`;
+  }
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    return locale === 'zh' ? `${hours}小时前` : `${hours}h ago`;
+  }
+  const roundedMinutes = Math.floor(minutes);
+  return locale === 'zh' ? `${roundedMinutes}分钟前` : `${roundedMinutes}m ago`;
+}
+
 function formatUsagePercent(value: number): string {
   if (!Number.isFinite(value)) {
     return '?';
@@ -9751,7 +10081,10 @@ function authQuotaSnapshotFromRateLimit(snapshot: CodexRateLimitSnapshot, accoun
   return {
     capturedAtMs: Date.now(),
     accountId,
+    planType: snapshot.planType,
+    primaryWindowDurationMins: snapshot.primary?.windowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
+    secondaryWindowDurationMins: snapshot.secondary?.windowDurationMins ?? null,
     secondaryRemainingPercent: snapshot.secondary ? remainingUsagePercent(snapshot.secondary.usedPercent) : null,
   };
 }
@@ -9760,7 +10093,10 @@ function codexAuthQuotaSnapshotFromRecord(record: CodexAuthQuotaSnapshotRecord):
   return {
     capturedAtMs: record.capturedAtMs,
     accountId: record.accountId,
+    planType: record.planType,
+    primaryWindowDurationMins: record.primaryWindowDurationMins,
     primaryRemainingPercent: record.primaryRemainingPercent,
+    secondaryWindowDurationMins: record.secondaryWindowDurationMins,
     secondaryRemainingPercent: record.secondaryRemainingPercent,
   };
 }
@@ -9775,42 +10111,20 @@ function mergeCodexAuthQuotaSnapshots(
   if (!incoming) {
     return current;
   }
+  const freshest = incoming.capturedAtMs >= current.capturedAtMs ? incoming : current;
+  const older = freshest === incoming ? current : incoming;
   return {
-    capturedAtMs: Math.max(current.capturedAtMs, incoming.capturedAtMs),
-    accountId: current.accountId ?? incoming.accountId ?? null,
-    primaryRemainingPercent: fresherNullableQuotaValue(
-      current.primaryRemainingPercent,
-      current.capturedAtMs,
-      incoming.primaryRemainingPercent,
-      incoming.capturedAtMs,
-    ),
-    secondaryRemainingPercent: fresherNullableQuotaValue(
-      current.secondaryRemainingPercent,
-      current.capturedAtMs,
-      incoming.secondaryRemainingPercent,
-      incoming.capturedAtMs,
-    ),
+    ...freshest,
+    accountId: freshest.accountId ?? older.accountId ?? null,
   };
-}
-
-function fresherNullableQuotaValue(
-  currentValue: number | null,
-  currentCapturedAtMs: number,
-  incomingValue: number | null,
-  incomingCapturedAtMs: number,
-): number | null {
-  if (currentValue === null) {
-    return incomingValue;
-  }
-  if (incomingValue === null) {
-    return currentValue;
-  }
-  return incomingCapturedAtMs >= currentCapturedAtMs ? incomingValue : currentValue;
 }
 
 function isFiniteCodexAuthQuotaSnapshotRecord(record: CodexAuthQuotaSnapshotRecord): boolean {
   return Number.isFinite(record.capturedAtMs)
+    && isNullableString(record.planType)
+    && isNullableFiniteNumber(record.primaryWindowDurationMins)
     && isNullableFiniteNumber(record.primaryRemainingPercent)
+    && isNullableFiniteNumber(record.secondaryWindowDurationMins)
     && isNullableFiniteNumber(record.secondaryRemainingPercent);
 }
 
@@ -9821,13 +10135,20 @@ function remainingUsagePercent(usedPercent: number): number | null {
   return Math.max(0, Math.min(100, 100 - usedPercent));
 }
 
-function formatAuthQuotaPrefix(snapshot: CodexAuthQuotaSnapshot | null): string {
+function formatAuthQuotaPrefix(locale: AppLocale, snapshot: CodexAuthQuotaSnapshot | null): string {
   if (!snapshot) {
-    return '--|--';
+    return '--';
   }
-  const primary = snapshot.primaryRemainingPercent === null ? '--' : formatUsagePercent(snapshot.primaryRemainingPercent);
-  const secondary = snapshot.secondaryRemainingPercent === null ? '--' : formatUsagePercent(snapshot.secondaryRemainingPercent);
-  return `${primary}|${secondary}`;
+  const windows = [
+    [snapshot.primaryWindowDurationMins, snapshot.primaryRemainingPercent, 'primary'],
+    [snapshot.secondaryWindowDurationMins, snapshot.secondaryRemainingPercent, 'secondary'],
+  ] as const;
+  const values = windows
+    .filter(([duration, remaining]) => duration !== null || remaining !== null)
+    .map(([duration, remaining, fallback]) => (
+      `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}`
+    ));
+  return values.length > 0 ? values.join('|') : '--';
 }
 
 function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapshot {
@@ -9838,12 +10159,31 @@ function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapsh
   return typeof snapshot.capturedAtMs === 'number'
     && Number.isFinite(snapshot.capturedAtMs)
     && (snapshot.accountId === undefined || snapshot.accountId === null || typeof snapshot.accountId === 'string')
+    && (snapshot.planType === undefined || isNullableString(snapshot.planType))
+    && (snapshot.primaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.primaryWindowDurationMins))
     && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
+    && (snapshot.secondaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.secondaryWindowDurationMins))
     && isNullableFiniteNumber(snapshot.secondaryRemainingPercent);
+}
+
+function normalizeCodexAuthQuotaSnapshot(snapshot: CodexAuthQuotaSnapshot): CodexAuthQuotaSnapshot {
+  return {
+    capturedAtMs: snapshot.capturedAtMs,
+    accountId: snapshot.accountId ?? null,
+    planType: snapshot.planType ?? null,
+    primaryWindowDurationMins: snapshot.primaryWindowDurationMins ?? null,
+    primaryRemainingPercent: snapshot.primaryRemainingPercent,
+    secondaryWindowDurationMins: snapshot.secondaryWindowDurationMins ?? null,
+    secondaryRemainingPercent: snapshot.secondaryRemainingPercent,
+  };
 }
 
 function isNullableFiniteNumber(value: unknown): value is number | null {
   return value === null || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string';
 }
 
 function formatCompactNumber(value: number): string {

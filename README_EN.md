@@ -16,7 +16,7 @@ No public server required. FoxClaw runs on your own computer, talks to `codex ap
 
 1. **Open source with complete APIs** — Codex is OpenAI's open-source CLI agent and ships `codex app-server`. FoxClaw does not scrape a terminal; it uses the app-server interface to read threads, switch models, handle approvals, and resume sessions.
 2. **Strong current coding experience** — FoxClaw reads the model list from your local Codex app-server. If your Codex environment has GPT-5.5 available, you can select and use it from your phone. For many heavy coding workflows, Codex/GPT-5.5 is already the reason to choose this stack.
-3. **Multi-account quota rotation** — Free quota, trial Plus/Team accounts, and small account-specific allowances can all live as local `auth.json_*` candidates. When one account hits a 5-hour usage limit, FoxClaw switches to the next available account, restarts app-server, and retries the failed request.
+3. **Multi-account quota rotation** — Free quota, trial Plus/Team accounts, and small account-specific allowances can all live as local `auth.json_*` candidates. When one account hits a usage limit, FoxClaw switches to the next available account, restarts app-server, and retries the failed request.
 
 **Built for these scenarios:**
 
@@ -102,7 +102,7 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 **Multi-account management:**
 - Codex account controls: `/account`, `/quota`, `/login_device`, `/auth add <name>`
 - Automatic auth rotation across local `auth.json_*` files when a usage limit is hit — seamless account switching
-- `/auth` panel to view, enable, disable, and switch between candidate accounts; in multi-bot mode it merges recent quota snapshots by account ID across runtimes
+- Paginated `/auth` panel to filter, enable, disable, search, and switch candidate accounts; quota uses observed window lengths, and multi-bot mode merges recent snapshots by account ID across runtimes
 
 **Threads and sessions:**
 - `/threads`, `/open`, `/new`, `/where`, `/interrupt` — sticky chat-to-thread binding
@@ -119,7 +119,7 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 
 ## Multi-Account Rotation
 
-A key FoxClaw feature is automatic multi-account switching. When one account's 5-hour usage limit is triggered, FoxClaw automatically switches to the next available account and continues working.
+A key FoxClaw feature is automatic multi-account switching. When one account's usage limit is triggered, FoxClaw automatically switches to the next available account and continues working.
 
 Setup:
 
@@ -127,6 +127,8 @@ Setup:
 2. Use `/auth add <name>` to add new accounts directly from Telegram.
 3. Use `/auth` to view all candidate account statuses.
 4. Use `/auth enable <n>` / `/auth disable <n>` to control which accounts participate in auto-rotation.
+
+For larger inventories, `/auth` shows 8 candidates per page with paging and `All / Enabled / Attention` filters. Use `/auth list <keyword>` to search filenames or `/auth page <n>` to jump directly. Quota windows use the values reported by Codex, for example `5h:20|7d:25` or a single monthly window such as `30d:97`.
 
 When Codex reports a usage-limit error, FoxClaw automatically:
 - Switches to the next non-failed candidate account
@@ -258,7 +260,7 @@ No static Codex app-server port is required in normal installs.
 - `/status`, `/account`, `/quota`, `/update`
 - `/quota_nudge <credits|usage_limit> confirm`
 - `/login_device`, `/login_cancel [id]`, `/logout confirm`
-- `/auth [list|use <n>|enable <n>|disable <n>|reload|refresh all [confirm]|add <name>]`
+- `/auth [list [keyword]|filter <all|enabled|attention>|page <n>|use <n>|enable <n>|disable <n>|reload|refresh all [confirm]|add <name>]`
 - `/threads [query]`, `/threads archived`, `/open <n>`
 - `/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]`
 - `/history [limit]`, `/files <query>`, `/remote`

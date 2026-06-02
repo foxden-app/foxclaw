@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.11 - 2026-06-02
+
+### 中文
+- `/auth` 面板改为每页 8 个候选，新增翻页、`全部 / 已启用 / 需关注` 筛选、文件名搜索和直接跳页命令，支持管理较大的本地候选清单。
+- 额度快照保存真实窗口时长与套餐类型，面板不再假定所有账号都有 5 小时和 7 天窗口；单一月额度账号可显示为 `30d:97`。
+- 候选摘要新增正常、额度偏低、额度耗尽、额度未知、长期未刷新、API key 和无效 auth 文件状态；超过约 8 天未刷新只作为维护提醒，不会触发批量保活刷新。
+
+### English
+- Paginated `/auth` at 8 candidates per page and added paging, `All / Enabled / Attention` filters, filename search, and direct page commands for larger local inventories.
+- Persisted observed quota-window lengths and plan types so the panel no longer assumes every account has 5-hour and 7-day windows; a single monthly allowance can render as `30d:97`.
+- Added ready, low-quota, exhausted, unknown, not-recently-refreshed, API-key, and invalid-auth-file summaries. The roughly 8-day stale hint remains informational and never triggers bulk keepalive refreshes.
+
 ## 0.4.10 - 2026-06-02
 
 ### 中文

@@ -59,17 +59,26 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
   withStore((store) => {
     store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
       capturedAtMs: 100,
+      planType: 'free',
+      primaryWindowDurationMins: 43200,
       primaryRemainingPercent: 80,
+      secondaryWindowDurationMins: null,
       secondaryRemainingPercent: null,
     });
     store.setCodexAuthQuotaSnapshot('bot2', 'auth.json_b', 'acct-b', {
       capturedAtMs: 200,
+      planType: 'plus',
+      primaryWindowDurationMins: 300,
       primaryRemainingPercent: 30,
+      secondaryWindowDurationMins: 10080,
       secondaryRemainingPercent: 25,
     });
     store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
       capturedAtMs: 300,
+      planType: 'plus',
+      primaryWindowDurationMins: 300,
       primaryRemainingPercent: 70,
+      secondaryWindowDurationMins: 10080,
       secondaryRemainingPercent: 65,
     });
 
@@ -78,14 +87,20 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       candidateName: record.candidateName,
       accountId: record.accountId,
       capturedAtMs: record.capturedAtMs,
+      planType: record.planType,
+      primaryWindowDurationMins: record.primaryWindowDurationMins,
       primaryRemainingPercent: record.primaryRemainingPercent,
+      secondaryWindowDurationMins: record.secondaryWindowDurationMins,
       secondaryRemainingPercent: record.secondaryRemainingPercent,
     })), [{
       runtimeId: 'bot1',
       candidateName: 'auth.json_a',
       accountId: 'acct-a',
       capturedAtMs: 300,
+      planType: 'plus',
+      primaryWindowDurationMins: 300,
       primaryRemainingPercent: 70,
+      secondaryWindowDurationMins: 10080,
       secondaryRemainingPercent: 65,
     }]);
   });
@@ -340,6 +355,52 @@ test('BridgeStore migrates old chat settings rows without service tier', () => {
     assert.equal(store.getChatSettings(S4)?.serviceTier, 'priority');
     store.setChatActiveTurnMessageMode(S4, 'steer');
     assert.equal(store.getChatSettings(S4)?.activeTurnMessageMode, 'steer');
+  } finally {
+    store.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('BridgeStore migrates old auth quota snapshots without plan and window metadata', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-old-auth-quota-'));
+  const dbPath = path.join(tmpDir, 'bridge.sqlite');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE codex_auth_quota_snapshots (
+      runtime_id TEXT NOT NULL,
+      candidate_name TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      captured_at_ms INTEGER NOT NULL,
+      primary_remaining_percent REAL,
+      secondary_remaining_percent REAL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (runtime_id, candidate_name)
+    );
+  `);
+  db.prepare(`
+    INSERT INTO codex_auth_quota_snapshots (
+      runtime_id, candidate_name, account_id, captured_at_ms,
+      primary_remaining_percent, secondary_remaining_percent, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run('bot-old', 'auth.json_old', 'acct-old', 100, 80, null, 200);
+  db.close();
+
+  const store = new BridgeStore(dbPath);
+  try {
+    assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-old']).map(record => ({
+      planType: record.planType,
+      primaryWindowDurationMins: record.primaryWindowDurationMins,
+      primaryRemainingPercent: record.primaryRemainingPercent,
+      secondaryWindowDurationMins: record.secondaryWindowDurationMins,
+      secondaryRemainingPercent: record.secondaryRemainingPercent,
+    })), [{
+      planType: null,
+      primaryWindowDurationMins: null,
+      primaryRemainingPercent: 80,
+      secondaryWindowDurationMins: null,
+      secondaryRemainingPercent: null,
+    }]);
   } finally {
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
