@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.8 - 2026-06-02
+
+### 中文
+- `/auth` 面板的“刷新全部”改为两段式确认：首次点击只显示 refresh token 轮换风险，只有点击“接受风险并刷新”才会真正执行。
+- `/auth refresh all` 同样只显示风险确认；需要 `/auth refresh all confirm` 或确认按钮才会开始刷新。
+- 本地 CLI 测试会过滤 proxychains 初始化噪音，避免发布前校验被环境 stdout 污染误伤。
+
+### English
+- Changed the `/auth` panel's Refresh all action to a two-step confirmation: the first tap only shows refresh-token rotation risk, and the refresh starts only after accepting the risk.
+- `/auth refresh all` now shows the same risk confirmation; `/auth refresh all confirm` or the confirmation button is required to run it.
+- Local CLI tests now filter proxychains initialization noise so release checks are not tripped by environment stdout injection.
+
 ## 0.4.7 - 2026-06-02
 
 ### 中文

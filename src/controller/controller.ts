@@ -1427,12 +1427,12 @@ export class BridgeSessionCore {
       );
       return;
     }
-    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|refresh_all)$/.exec(event.data);
+    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
     if (authActionMatch) {
       await this.handleAuthPanelActionCallback(
         event,
         authActionMatch[1]!,
-        authActionMatch[2]! as 'login_device' | 'reload' | 'refresh_all',
+        authActionMatch[2]! as 'login_device' | 'reload' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
         locale,
       );
       return;
@@ -4716,14 +4716,14 @@ export class BridgeSessionCore {
     }
     if (action === 'refresh') {
       if (args[1]?.toLowerCase() === 'all') {
-        await this.handleAuthRefreshAllCommand(scopeId, locale);
+        await this.handleAuthRefreshAllCommand(scopeId, locale, args[2]?.toLowerCase() === 'confirm');
         return;
       }
       await this.sendMessage(scopeId, t(locale, 'usage_auth'));
       return;
     }
     if (action === 'refresh_all') {
-      await this.handleAuthRefreshAllCommand(scopeId, locale);
+      await this.handleAuthRefreshAllCommand(scopeId, locale, args[1]?.toLowerCase() === 'confirm');
       return;
     }
     if (action === 'use') {
@@ -4761,9 +4761,28 @@ export class BridgeSessionCore {
     record.messageId = messageId;
   }
 
-  private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale): Promise<void> {
+  private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale, confirmed = false): Promise<void> {
     if (!this.canRunGlobalAuthRefresh()) {
       await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_blocked_active'));
+      return;
+    }
+    if (!confirmed) {
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      const record: PendingAuthChoiceList = {
+        localId: crypto.randomBytes(8).toString('hex'),
+        chatId: scopeId,
+        messageId: null,
+        candidates: state.candidates,
+        createdAt: Date.now(),
+      };
+      this.pendingAuthChoiceLists.set(record.localId, record);
+      const messageId = await this.sendMessage(
+        scopeId,
+        t(locale, 'auth_refresh_all_confirm_message'),
+        authRefreshAllConfirmKeyboard(locale, record),
+      );
+      record.messageId = messageId;
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_starting'));
@@ -5294,7 +5313,7 @@ export class BridgeSessionCore {
   private async handleAuthPanelActionCallback(
     event: TelegramCallbackEvent,
     localId: string,
-    action: 'login_device' | 'reload' | 'refresh_all',
+    action: 'login_device' | 'reload' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
     locale: AppLocale,
   ): Promise<void> {
     const record = this.pendingAuthChoiceLists.get(localId);
@@ -5312,6 +5331,38 @@ export class BridgeSessionCore {
       return;
     }
     if (action === 'refresh_all') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_blocked_active'));
+        return;
+      }
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_confirm_short'));
+      if (record.messageId !== null) {
+        await this.editMessage(
+          event.scopeId,
+          record.messageId,
+          t(locale, 'auth_refresh_all_confirm_message'),
+          authRefreshAllConfirmKeyboard(locale, record),
+        );
+      }
+      return;
+    }
+    if (action === 'refresh_all_cancel') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_cancelled'));
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      if (record.messageId !== null) {
+        await this.editMessage(
+          event.scopeId,
+          record.messageId,
+          renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null),
+          authChoiceKeyboard(locale, record),
+        );
+      }
+      return;
+    }
+    if (action === 'refresh_all_confirm') {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_blocked_active'));
         return;
@@ -9089,6 +9140,13 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
     { text: t(locale, 'button_auth_refresh_all'), callback_data: `auth:${record.localId}:refresh_all` },
   ]);
   return rows;
+}
+
+function authRefreshAllConfirmKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: t(locale, 'button_auth_refresh_all_confirm'), callback_data: `auth:${record.localId}:refresh_all_confirm` }],
+    [{ text: t(locale, 'button_cancel'), callback_data: `auth:${record.localId}:refresh_all_cancel` }],
+  ];
 }
 
 function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshAllResult): string {

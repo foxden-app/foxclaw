@@ -258,7 +258,7 @@ No static Codex app-server port is required in normal installs.
 - `/status`, `/account`, `/quota`, `/update`
 - `/quota_nudge <credits|usage_limit> confirm`
 - `/login_device`, `/login_cancel [id]`, `/logout confirm`
-- `/auth [list|use <n>|enable <n>|disable <n>|reload|refresh all|add <name>]`
+- `/auth [list|use <n>|enable <n>|disable <n>|reload|refresh all [confirm]|add <name>]`
 - `/threads [query]`, `/threads archived`, `/open <n>`
 - `/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]`
 - `/history [limit]`, `/files <query>`, `/remote`

@@ -408,7 +408,7 @@ Candidates: 2
 [🔄 Reload auth]        [🔁 刷新全部]
 ```
 
-右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`刷新全部` 是维护操作：只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。它会逐个访问面板里的 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并刷新面板摘要。`--|--` 表示该候选还没有额度历史快照。
+右侧 `✅` / `⏸️` 表示当前状态。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`刷新全部` 是维护操作：只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。第一次点击只会显示风险确认：ChatGPT refresh token 会被轮换，如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问面板里的 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并刷新面板摘要。`--|--` 表示该候选还没有额度历史快照。
 
 命令等价用法：
 
@@ -417,7 +417,8 @@ Candidates: 2
 - `/auth enable <n>`：让第 n 个候选参与自动轮转。
 - `/auth disable <n>`：禁用第 n 个候选，自动轮转会跳过它。
 - `/auth reload` 或 `/auth_reload`：重启 app-server，重新加载当前 `auth.json`。
-- `/auth refresh all`：等同于面板上的“刷新全部”按钮。
+- `/auth refresh all`：显示与面板“刷新全部”相同的风险确认。
+- `/auth refresh all confirm`：接受 token 轮换风险后执行刷新全部。
 
 切换 auth 时，如果当前 bot runtime 还有活跃 turn、待审批、待用户输入或 MCP elicitation，FoxClaw 会先拒绝切换，避免中途换号破坏正在进行的请求；另一个空闲 bot 不受影响。
 
