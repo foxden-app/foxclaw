@@ -51,6 +51,7 @@ export class AuthCandidateMirror {
   private timer: NodeJS.Timeout | null = null;
   private readonly lastSyncedRefresh = new Map<string, number>();
   private readonly lastValidationFailures = new Map<string, string>();
+  private readonly activeCandidateSyncs = new Set<string>();
   private activeOperations = 0;
   private lastStatus: AuthMirrorStatus | null = null;
 
@@ -163,54 +164,62 @@ export class AuthCandidateMirror {
   }
 
   private async propagateValidatedCandidate(runtime: AuthMirrorRuntime, name: string): Promise<boolean> {
-    const sourcePath = path.join(runtime.authDir, name);
-    const record = await readChatGptAuthRecord(sourcePath);
-    if (!record) return false;
-    const canonicalPath = path.join(this.canonicalDir, name);
-    const canonical = await readChatGptAuthRecord(canonicalPath);
-    if (canonical && canonical.accountId !== record.accountId) {
-      this.logger.warn('auth.mirror.account_conflict', { runtimeId: runtime.id, name });
+    if (this.activeCandidateSyncs.has(name)) {
       return false;
     }
-    const previousRefresh = Math.max(canonical?.lastRefreshMs ?? 0, this.lastSyncedRefresh.get(name) ?? 0);
-    if (record.lastRefreshMs <= previousRefresh) {
-      return false;
-    }
-    const validation = await this.validateRuntimeCandidate(runtime, name, record);
-    if (!validation.ok) {
-      const reason = validation.reason ?? 'unknown';
-      const failureKey = `${runtime.id}:${name}`;
-      const failureValue = `${record.lastRefreshMs}:${reason}`;
-      if (this.lastValidationFailures.get(failureKey) !== failureValue) {
-        this.lastValidationFailures.set(failureKey, failureValue);
-        this.logger.warn('auth.mirror.validation_failed', {
-          runtimeId: runtime.id,
-          name,
-          reason,
-        });
+    this.activeCandidateSyncs.add(name);
+    try {
+      const sourcePath = path.join(runtime.authDir, name);
+      const record = await readChatGptAuthRecord(sourcePath);
+      if (!record) return false;
+      const canonicalPath = path.join(this.canonicalDir, name);
+      const canonical = await readChatGptAuthRecord(canonicalPath);
+      if (canonical && canonical.accountId !== record.accountId) {
+        this.logger.warn('auth.mirror.account_conflict', { runtimeId: runtime.id, name });
+        return false;
       }
-      return false;
-    }
-    this.lastValidationFailures.delete(`${runtime.id}:${name}`);
-    await atomicWrite(canonicalPath, record.raw);
-    for (const target of this.runtimes) {
-      if (target.id !== runtime.id) {
-        await atomicWrite(path.join(target.authDir, name), record.raw);
+      const previousRefresh = Math.max(canonical?.lastRefreshMs ?? 0, this.lastSyncedRefresh.get(name) ?? 0);
+      if (record.lastRefreshMs <= previousRefresh) {
+        return false;
       }
+      const validation = await this.validateRuntimeCandidate(runtime, name, record);
+      if (!validation.ok) {
+        const reason = validation.reason ?? 'unknown';
+        const failureKey = `${runtime.id}:${name}`;
+        const failureValue = `${record.lastRefreshMs}:${reason}`;
+        if (this.lastValidationFailures.get(failureKey) !== failureValue) {
+          this.lastValidationFailures.set(failureKey, failureValue);
+          this.logger.warn('auth.mirror.validation_failed', {
+            runtimeId: runtime.id,
+            name,
+            reason,
+          });
+        }
+        return false;
+      }
+      this.lastValidationFailures.delete(`${runtime.id}:${name}`);
+      await atomicWrite(canonicalPath, record.raw);
+      for (const target of this.runtimes) {
+        if (target.id !== runtime.id) {
+          await atomicWrite(path.join(target.authDir, name), record.raw);
+        }
+      }
+      this.lastSyncedRefresh.set(name, record.lastRefreshMs);
+      const sourceLabel = runtime.label ?? runtime.id;
+      this.lastStatus = {
+        candidateName: name,
+        sourceRuntimeId: runtime.id,
+        sourceLabel,
+        syncedAt: new Date().toISOString(),
+      };
+      await writeMirrorStatus(this.statusPath, this.lastStatus);
+      this.logger.info('auth.mirror.synced', { sourceRuntimeId: runtime.id, name });
+      const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
+      await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+      return true;
+    } finally {
+      this.activeCandidateSyncs.delete(name);
     }
-    this.lastSyncedRefresh.set(name, record.lastRefreshMs);
-    const sourceLabel = runtime.label ?? runtime.id;
-    this.lastStatus = {
-      candidateName: name,
-      sourceRuntimeId: runtime.id,
-      sourceLabel,
-      syncedAt: new Date().toISOString(),
-    };
-    await writeMirrorStatus(this.statusPath, this.lastStatus);
-    this.logger.info('auth.mirror.synced', { sourceRuntimeId: runtime.id, name });
-    const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
-    await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
-    return true;
   }
 
   private async validateRuntimeCandidate(

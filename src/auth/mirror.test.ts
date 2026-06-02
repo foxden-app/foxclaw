@@ -98,6 +98,54 @@ test('AuthCandidateMirror rejects a same-name candidate belonging to a different
   }
 });
 
+test('AuthCandidateMirror suppresses duplicate concurrent syncs for the same candidate', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-mirror-duplicate-'));
+  const canonical = path.join(root, 'canonical');
+  const a = path.join(root, 'bot1');
+  const b = path.join(root, 'bot2');
+  const notifications: string[] = [];
+  let notifyStarted!: () => void;
+  const notificationStarted = new Promise<void>((resolve) => {
+    notifyStarted = resolve;
+  });
+  let releaseNotification!: () => void;
+  const notificationReleased = new Promise<void>((resolve) => {
+    releaseNotification = resolve;
+  });
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), auth('acct-1', '2026-05-01T00:00:00.000Z'));
+    const mirror = new AuthCandidateMirror(canonical, [
+      { id: 'bot1', label: '@botA', authDir: a },
+      {
+        id: 'bot2',
+        authDir: b,
+        notify: async (message) => {
+          notifications.push(message);
+          notifyStarted();
+          await notificationReleased;
+        },
+      },
+    ], loggerStub as any);
+    await mirror.initialize();
+
+    const refreshed = auth('acct-1', '2026-05-27T00:00:00.000Z');
+    await fs.writeFile(path.join(a, 'auth.json_work'), refreshed);
+    const first = mirror.syncRuntimeCandidate('bot1', 'auth.json_work');
+    await notificationStarted;
+    const second = await mirror.syncRuntimeCandidate('bot1', 'auth.json_work');
+    releaseNotification();
+
+    assert.equal(second, false);
+    assert.equal(await first, true);
+    assert.equal(notifications.length, 1);
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), refreshed);
+  } finally {
+    releaseNotification?.();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror requires runtime validation before propagating a refreshed candidate', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-validate-'));
   const canonical = path.join(root, 'canonical');

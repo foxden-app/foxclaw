@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.9 - 2026-06-02
+
+### 中文
+- 修复 ChatGPT auth 到期自动刷新后，主动同步和后台镜像扫描竞态导致同一候选重复发送镜像广播的问题。
+
+### English
+- Fixed duplicate auth mirror broadcasts when an automatic ChatGPT auth refresh was observed by both the direct sync path and the background mirror scan.
+
 ## 0.4.8 - 2026-06-02
 
 ### 中文
