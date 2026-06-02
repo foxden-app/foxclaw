@@ -389,7 +389,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 ### 6.3 The `/auth` Panel
 
-`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The panel shows 8 candidates per page and supports paging, `All / Enabled / Attention` filters, and `/auth list <keyword>` filename search for large local inventories. `/auth use <n>` always uses the full-list candidate number, independent of panel paging.
+`/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The panel shows 8 candidates per page and supports paging, `All / Enabled / Attention` filters, and `/auth list <keyword>` filename search for large local inventories. Panel text and buttons omit the repeated `auth.json_` prefix from standard candidate filenames, so `auth.json_personal` on disk renders as `personal`; files are not renamed, and search and commands still operate on the original candidates. `/auth use <n>` always uses the full-list candidate number, independent of panel paging.
 
 Each filename is prefixed with observed `window:remaining-percent` values. For example, a Plus account may show `5h:20|7d:25`, while an account with one monthly window may show `30d:97`. The current auth quota is refreshed when the panel opens; other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
 
@@ -397,15 +397,15 @@ Approximation:
 
 ```text
 Codex auth
-Current: auth.json_personal
+Current: personal
 Auth dir: /home/alice/.codex
 Candidates: 2
 Quota remaining: window:percent|auth
-1. 5h:20|7d:25|auth.json_personal * [Plus · ready · refreshed 2h ago]
-2. --|auth.json_team [quota unknown]
+1. 5h:20|7d:25|personal * [Plus · ready · refreshed 2h ago]
+2. --|team [quota unknown]
 
-[✅ 5h:20|7d:25|auth.json_personal] [✅]
-[🔐 --|auth.json_team]              [✅]
+[✅ 5h:20|7d:25|personal] [✅]
+[🔐 --|team]              [✅]
 [☑️ All] [Enabled] [Attention]
 [🛡️ Access]             [🔑 Login]
 [🔄 Reload auth]

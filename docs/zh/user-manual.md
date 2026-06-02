@@ -389,7 +389,7 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 ### 6.3 `/auth` 面板
 
-`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。面板每页显示 8 个候选，支持翻页、`全部 / 已启用 / 需关注` 筛选和 `/auth list <关键词>` 文件名搜索，适合管理较大的本地候选清单。命令 `/auth use <n>` 的编号始终对应完整候选列表，不会因为分页变化。
+`/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。面板每页显示 8 个候选，支持翻页、`全部 / 已启用 / 需关注` 筛选和 `/auth list <关键词>` 文件名搜索，适合管理较大的本地候选清单。面板文本和按钮会省略标准候选文件名中重复的 `auth.json_` 前缀，例如磁盘上的 `auth.json_personal` 显示为 `personal`；文件本身不会重命名，搜索和命令仍按原候选工作。命令 `/auth use <n>` 的编号始终对应完整候选列表，不会因为分页变化。
 
 每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
 
@@ -397,15 +397,15 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 ```text
 Codex auth
-Current: auth.json_personal
+Current: personal
 Auth dir: /home/alice/.codex
 Candidates: 2
 额度剩余：窗口:百分比|auth
-1. 5h:20|7d:25|auth.json_personal * [Plus · 正常 · 刷新于 2小时前]
-2. --|auth.json_team [额度未知]
+1. 5h:20|7d:25|personal * [Plus · 正常 · 刷新于 2小时前]
+2. --|team [额度未知]
 
-[✅ 5h:20|7d:25|auth.json_personal] [✅]
-[🔐 --|auth.json_team]              [✅]
+[✅ 5h:20|7d:25|personal] [✅]
+[🔐 --|team]              [✅]
 [☑️ 全部] [已启用] [需关注]
 [🛡️ Access]             [🔑 设备登录]
 [🔄 Reload auth]

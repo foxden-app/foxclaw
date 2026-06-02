@@ -9255,7 +9255,11 @@ function renderAuthListMessage(
     lines.push(t(locale, 'auth_bot', { value: botLabel }));
   }
   lines.push(
-    t(locale, 'auth_current', { value: state.currentLabel ?? t(locale, 'none') }),
+    t(locale, 'auth_current', {
+      value: state.currentLabel
+        ? formatCodexAuthCandidateDisplayName(state.currentLabel)
+        : t(locale, 'none'),
+    }),
     t(locale, 'auth_dir', { value: state.authDir }),
   );
   if (state.candidates.length === 0) {
@@ -9296,7 +9300,7 @@ function renderAuthListMessage(
   }
   page.visible.forEach(({ candidate, index }) => {
     const marker = candidate.isCurrent ? ' *' : '';
-    lines.push(`${index + 1}. ${formatAuthQuotaPrefix(locale, candidate.quota)}|${candidate.name}${marker} ${formatCodexAuthCandidateStatus(locale, candidate)}`);
+    lines.push(`${index + 1}. ${formatAuthQuotaPrefix(locale, candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${marker} ${formatCodexAuthCandidateStatus(locale, candidate)}`);
   });
   if (includeWeixinCopyPaste) {
     lines.push(
@@ -9323,7 +9327,7 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
   const page = codexAuthListPage(record.candidates, record);
   const rows = page.visible.map(({ candidate, index }) => [
     {
-      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaPrefix(locale, candidate.quota)}|${candidate.name}${candidate.disabled ? ' · off' : ''}`),
+      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaPrefix(locale, candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${candidate.disabled ? ' · off' : ''}`),
       callback_data: `auth:${record.localId}:${index}`,
     },
     {
@@ -9355,6 +9359,13 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
   ]);
   rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
   return rows;
+}
+
+function formatCodexAuthCandidateDisplayName(name: string): string {
+  const prefix = 'auth.json_';
+  return name.length > prefix.length && name.startsWith(prefix)
+    ? name.slice(prefix.length)
+    : name;
 }
 
 function authFilterButton(

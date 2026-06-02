@@ -128,7 +128,7 @@ Setup:
 3. Use `/auth` to view all candidate account statuses.
 4. Use `/auth enable <n>` / `/auth disable <n>` to control which accounts participate in auto-rotation.
 
-For larger inventories, `/auth` shows 8 candidates per page with paging and `All / Enabled / Attention` filters. Use `/auth list <keyword>` to search filenames or `/auth page <n>` to jump directly. Quota windows use the values reported by Codex, for example `5h:20|7d:25` or a single monthly window such as `30d:97`.
+For larger inventories, `/auth` shows 8 candidates per page with paging and `All / Enabled / Attention` filters. Use `/auth list <keyword>` to search filenames or `/auth page <n>` to jump directly. Quota windows use the values reported by Codex, for example `5h:20|7d:25` or a single monthly window such as `30d:97`. The panel omits the repeated `auth.json_` prefix from candidate labels without renaming files on disk.
 
 When Codex reports a usage-limit error, FoxClaw automatically:
 - Switches to the next non-failed candidate account

@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.12 - 2026-06-02
+
+### 中文
+- `/auth` 面板顶部、候选列表和切换按钮省略标准候选名中重复的 `auth.json_` 前缀，让额度与账号标识在窄屏 Telegram 客户端中更容易完整显示。
+- 磁盘文件名、文件名搜索、候选编号、切换和镜像同步行为保持不变；非标准候选名仍原样展示。
+
+### English
+- Omitted the repeated `auth.json_` prefix from the `/auth` panel header, candidate rows, and switch buttons so quota and account labels fit better in narrow Telegram clients.
+- Kept filenames on disk, filename search, candidate numbering, switching, and mirroring unchanged. Non-standard candidate names still render verbatim.
+
 ## 0.4.11 - 2026-06-02
 
 ### 中文
