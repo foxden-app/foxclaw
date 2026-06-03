@@ -85,7 +85,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 The default config file is `~/.foxclaw/.env`. Set `FOXCLAW_ENV=/path/to/.env` if you want to keep it somewhere else.
 
-`foxclaw start` runs checks and installs or restarts the background service. For later upgrades, run `foxclaw update`; it preserves the current npm/pnpm global-install method, attempts to update an npm/pnpm-managed Codex CLI, runs checks, and restarts the service.
+`foxclaw start` runs checks and installs or restarts the background service. For later upgrades, run `foxclaw update`; it preserves the current npm/pnpm global-install method, attempts to update an npm/pnpm-managed Codex CLI, runs checks, restarts the service, and reports both FoxClaw and Codex CLI version changes in chat.
 
 FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a group does not make it available to every group member.
 
@@ -128,7 +128,7 @@ Setup:
 3. Use `/auth` to view all candidate account statuses.
 4. Use `/auth enable <n>` / `/auth disable <n>` to control which accounts participate in auto-rotation.
 
-For larger inventories, `/auth` shows 8 candidates per page with paging and `All / Enabled / Attention` filters. Use `/auth list <keyword>` to search filenames or `/auth page <n>` to jump directly. Quota windows use the values reported by Codex, for example `5h:20|7d:25` or a single monthly window such as `30d:97`. The panel omits the repeated `auth.json_` prefix from candidate labels without renaming files on disk.
+For larger inventories, `/auth` shows 8 candidates per page with paging and `All / Enabled / Attention` filters. Use `/auth list <keyword>` to search filenames or `/auth page <n>` to jump directly. Candidate rows use the quota windows reported by Codex, for example `5h:20|7d:25` or a single monthly window such as `30d:97`; buttons use compact remaining numbers such as `20|25`, with `—` for unknown values. The panel omits the repeated `auth.json_` prefix from candidate labels without renaming files on disk.
 
 When Codex reports a usage-limit error, FoxClaw automatically:
 - Switches to the next non-failed candidate account

@@ -996,6 +996,8 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
         fromVersion: '0.3.19',
         toVersion: '0.4.0',
         codexUpdate: 'Codex CLI updated with pnpm.',
+        codexFromVersion: '0.135.0',
+        codexToVersion: '0.136.0',
         error: null,
         updatedAt: '2026-05-27T10:01:00.000Z',
       },
@@ -1009,7 +1011,7 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
   assert.match(rig.sentMessages[0]!, /@bot_two: connected yes, runtime default\/shared terminal, auth auth\.json_b, active turns 0/);
   assert.match(rig.sentMessages[0]!, /Last auth mirror: auth\.json_a from @bot_one/);
   assert.match(rig.sentMessages[0]!, /Last service update: 0\.3\.19 -> 0\.4\.0/);
-  assert.match(rig.sentMessages[0]!, /Last Codex update: Codex CLI updated with pnpm\./);
+  assert.match(rig.sentMessages[0]!, /Last Codex update: Codex CLI: 0\.135\.0 -> 0\.136\.0\./);
 });
 
 test('a Weixin-only default runtime does not own Telegram scopes', async (t) => {
@@ -1071,12 +1073,15 @@ test('/update launches a background self-update and reports the completed result
     locale: 'zh',
     fromVersion: '0.3.13',
     toVersion: '0.3.14',
+    codexFromVersion: '0.135.0',
+    codexToVersion: '0.136.0',
     error: null,
     updatedAt: new Date().toISOString(),
   };
   await (rig.controller as any).pollSelfUpdateStatus();
 
   assert.match(rig.sentMessages[1]!, /FoxClaw 已升级并重启：0\.3\.13 -> 0\.3\.14/);
+  assert.match(rig.sentMessages[1]!, /Codex CLI：0\.135\.0 -> 0\.136\.0/);
   assert.equal(status, null);
   assert.equal(completed.status?.toVersion, '0.3.14');
 });
@@ -1326,14 +1331,14 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
   assert.match(rig.editedMessages.at(-1)!, /Current auth: b/);
   assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
-  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ --\|b/);
+  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ —\|—\|b/);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:0`, 1));
 
   assert.equal(restarts, 2);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
   assert.match(rig.editedMessages.at(-1)!, /Current auth: a/);
-  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ --\|a/);
+  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ —\|—\|a/);
 });
 
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
@@ -1440,11 +1445,11 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.ok(list);
   assert.deepEqual(rig.sentKeyboards[0]?.slice(0, 2), [
     [
-      { text: '✅ --|a', callback_data: `auth:${list.localId}:0` },
+      { text: '✅ —|—|a', callback_data: `auth:${list.localId}:0` },
       { text: '✅', callback_data: `auth:${list.localId}:toggle:0` },
     ],
     [
-      { text: '🔐 --|b', callback_data: `auth:${list.localId}:1` },
+      { text: '🔐 —|—|b', callback_data: `auth:${list.localId}:1` },
       { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
     ],
   ]);
@@ -1455,7 +1460,7 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.equal(rig.callbackAnswers.at(-1), 'Auth disabled');
   assert.match(rig.editedMessages.at(-1)!, /\|b \[disabled\]/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
-    { text: '🔐 --|b · off', callback_data: `auth:${list.localId}:1` },
+    { text: '🔐 —|—|b · off', callback_data: `auth:${list.localId}:1` },
     { text: '⏸️', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
 
@@ -1465,7 +1470,7 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
   assert.equal(rig.callbackAnswers.at(-1), 'Auth enabled');
   assert.match(rig.editedMessages.at(-1)!, /\|b \[invalid auth file\]/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
-    { text: '🔐 --|b', callback_data: `auth:${list.localId}:1` },
+    { text: '🔐 —|—|b', callback_data: `auth:${list.localId}:1` },
     { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
 });
@@ -1507,7 +1512,7 @@ test('/auth records and displays current candidate remaining quota without probi
   assert.match(rig.sentMessages[0]!, /Quota remaining: window:percent\|auth/);
   assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \* \[Plus · ready · refreshed 0m ago\]/);
   assert.match(rig.sentMessages[0]!, /--\|b \[quota unknown · refreshed 0m ago\]/);
-  assert.match(rig.sentKeyboards[0]?.[0]?.[0]?.text, /✅ 5h:20\|7d:25\|a/);
+  assert.match(rig.sentKeyboards[0]?.[0]?.[0]?.text, /✅ 20\|25\|a/);
   assert.equal(
     fs.existsSync(path.join(rig.tempDir, 'codex-auth-quota.json')),
     true,

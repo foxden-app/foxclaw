@@ -85,7 +85,7 @@ DEFAULT_SANDBOX_MODE=workspace-write
 
 配置文件默认在 `~/.foxclaw/.env`。想放别处的话设 `FOXCLAW_ENV=/path/to/.env`。
 
-`foxclaw start` 会自动检查环境并安装/重启后台服务。后续升级直接运行 `foxclaw update`，它会沿用当前的 npm/pnpm 全局安装方式，尝试同步升级 npm/pnpm 安装的 Codex CLI，再完成安装、自检和服务重启。
+`foxclaw start` 会自动检查环境并安装/重启后台服务。后续升级直接运行 `foxclaw update`，它会沿用当前的 npm/pnpm 全局安装方式，尝试同步升级 npm/pnpm 安装的 Codex CLI，再完成安装、自检和服务重启，并在聊天回报 FoxClaw 与 Codex CLI 的版本变化。
 
 FoxClaw 只响应 `TG_ALLOWED_USER_ID` 的消息——把机器人拉进群不代表群里所有人都能用。
 
@@ -128,7 +128,7 @@ FoxClaw 的一大特色是自动多账号切换。当一个账号触发用量限
 3. 用 `/auth` 查看所有候选账号状态。
 4. 用 `/auth enable <n>` / `/auth disable <n>` 控制哪些账号参与自动轮换。
 
-候选较多时，`/auth` 每页显示 8 个账号，并提供翻页、`全部 / 已启用 / 需关注` 筛选。也可以用 `/auth list <关键词>` 搜索文件名，或用 `/auth page <页码>` 直接跳页。额度窗口按 Codex 实际返回值展示，例如 `5h:20|7d:25` 或单月窗口 `30d:97`。面板会省略候选名中重复的 `auth.json_` 前缀，磁盘文件名保持不变。
+候选较多时，`/auth` 每页显示 8 个账号，并提供翻页、`全部 / 已启用 / 需关注` 筛选。也可以用 `/auth list <关键词>` 搜索文件名，或用 `/auth page <页码>` 直接跳页。文本列表的额度窗口按 Codex 实际返回值展示，例如 `5h:20|7d:25` 或单月窗口 `30d:97`；按钮只显示紧凑的两个剩余数字，例如 `20|25`，未知值显示为 `—`。面板会省略候选名中重复的 `auth.json_` 前缀，磁盘文件名保持不变。
 
 当 Codex 报告用量限制错误时，FoxClaw 会自动：
 - 切换到下一个未失败的候选账号

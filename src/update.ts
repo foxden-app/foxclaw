@@ -17,6 +17,8 @@ export interface SelfUpdateStatus {
   fromVersion: string;
   toVersion: string | null;
   codexUpdate?: string | null;
+  codexFromVersion?: string | null;
+  codexToVersion?: string | null;
   error: string | null;
   updatedAt: string;
 }
@@ -58,6 +60,12 @@ export interface SelfUpdateOutcome {
   fromVersion: string;
   toVersion: string | null;
   error: string | null;
+}
+
+interface CodexCliUpdateResult {
+  message: string;
+  fromVersion: string | null;
+  toVersion: string | null;
 }
 
 export function selfUpdateStatusPath(statusPath: string): string {
@@ -210,6 +218,8 @@ export function readSelfUpdateStatus(statusFile: string): SelfUpdateStatus | nul
       fromVersion: parsed.fromVersion,
       toVersion: typeof parsed.toVersion === 'string' ? parsed.toVersion : null,
       ...(typeof parsed.codexUpdate === 'string' ? { codexUpdate: parsed.codexUpdate } : {}),
+      ...(typeof parsed.codexFromVersion === 'string' ? { codexFromVersion: parsed.codexFromVersion } : {}),
+      ...(typeof parsed.codexToVersion === 'string' ? { codexToVersion: parsed.codexToVersion } : {}),
       error: typeof parsed.error === 'string' ? parsed.error : null,
       updatedAt: parsed.updatedAt,
     };
@@ -240,6 +250,8 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
         fromVersion: options.version,
         toVersion: null,
         codexUpdate: null,
+        codexFromVersion: null,
+        codexToVersion: null,
         error: null,
         updatedAt: new Date().toISOString(),
       });
@@ -264,6 +276,8 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           fromVersion: options.version,
           toVersion: null,
           codexUpdate: null,
+          codexFromVersion: null,
+          codexToVersion: null,
           error: formatError(error),
           updatedAt: new Date().toISOString(),
         });
@@ -284,10 +298,10 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
 export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdateOutcome {
   const env = options.env ?? process.env;
   let toVersion: string | null = null;
-  let codexUpdate: string | null = null;
+  let codexUpdate: CodexCliUpdateResult | null = null;
   try {
     codexUpdate = updateManagedCodexCli(options.codexCliBin ?? env.CODEX_CLI_BIN ?? '', options.nodePath, env);
-    console.log(`[UPDATE] ${codexUpdate}`);
+    console.log(`[UPDATE] ${codexUpdate.message}`);
     const installer = resolveSelfUpdateInstaller(options.entryPoint, options.nodePath, fs.existsSync, env);
     const installerEnv = buildInstallerEnv(options.entryPoint, installer, env);
     console.log(`[UPDATE] Installing ${PACKAGE_SPEC} with ${installer.manager}...`);
@@ -317,21 +331,53 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
   }
 }
 
-function updateManagedCodexCli(codexCliBin: string, nodePath: string, env: NodeJS.ProcessEnv): string {
+function updateManagedCodexCli(codexCliBin: string, nodePath: string, env: NodeJS.ProcessEnv): CodexCliUpdateResult {
+  const fromVersion = readCodexCliVersion(codexCliBin, env);
   if (!codexCliBin) {
-    return 'Codex CLI update skipped: CODEX_CLI_BIN is not configured.';
+    return {
+      message: 'Codex CLI update skipped: CODEX_CLI_BIN is not configured.',
+      fromVersion,
+      toVersion: fromVersion,
+    };
   }
   const installer = resolveCodexUpdateInstaller(codexCliBin, nodePath, fs.existsSync, env);
   if (!installer) {
-    return 'Codex CLI update skipped: configured installation is not a recognized global npm/pnpm package.';
+    return {
+      message: 'Codex CLI update skipped: configured installation is not a recognized global npm/pnpm package.',
+      fromVersion,
+      toVersion: fromVersion,
+    };
   }
   try {
     const installerEnv = buildInstallerEnv(fs.realpathSync(codexCliBin), installer, env);
     runInherited(installer.command, installer.installArgs, installerEnv);
-    return `Codex CLI updated with ${installer.manager}.`;
+    return {
+      message: `Codex CLI updated with ${installer.manager}.`,
+      fromVersion,
+      toVersion: readCodexCliVersion(codexCliBin, installerEnv) ?? fromVersion,
+    };
   } catch (error) {
-    return `Codex CLI update failed without blocking FoxClaw update: ${formatError(error)}`;
+    return {
+      message: `Codex CLI update failed without blocking FoxClaw update: ${formatError(error)}`,
+      fromVersion,
+      toVersion: readCodexCliVersion(codexCliBin, env) ?? fromVersion,
+    };
   }
+}
+
+function readCodexCliVersion(codexCliBin: string, env: NodeJS.ProcessEnv): string | null {
+  if (!codexCliBin) {
+    return null;
+  }
+  const result = spawnSync(codexCliBin, ['--version'], { encoding: 'utf8', env });
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  return parseCodexCliVersion(`${result.stdout}\n${result.stderr}`);
+}
+
+function parseCodexCliVersion(output: string): string | null {
+  return output.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? null;
 }
 
 function executableCandidates(
@@ -416,7 +462,7 @@ function completeNotification(
   notificationFile: string | undefined,
   state: Extract<SelfUpdateState, 'succeeded' | 'failed'>,
   toVersion: string | null,
-  codexUpdate: string | null,
+  codexUpdate: CodexCliUpdateResult | null,
   error: string | null,
 ): void {
   if (!notificationFile) {
@@ -430,7 +476,9 @@ function completeNotification(
     ...pending,
     state,
     toVersion,
-    codexUpdate,
+    codexUpdate: codexUpdate?.message ?? null,
+    codexFromVersion: codexUpdate?.fromVersion ?? null,
+    codexToVersion: codexUpdate?.toVersion ?? null,
     error,
     updatedAt: new Date().toISOString(),
   });

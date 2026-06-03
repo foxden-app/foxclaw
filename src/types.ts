@@ -383,6 +383,8 @@ export interface RuntimeStatus {
     fromVersion: string;
     toVersion: string | null;
     codexUpdate?: string | null;
+    codexFromVersion?: string | null;
+    codexToVersion?: string | null;
     updatedAt: string;
   } | null;
 }

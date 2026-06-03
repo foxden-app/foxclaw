@@ -836,8 +836,9 @@ export class BridgeSessionCore {
               to: serviceStatus.lastUpdate.toVersion ?? t(locale, 'unknown'),
               time: serviceStatus.lastUpdate.updatedAt,
             }));
-            if (serviceStatus.lastUpdate.codexUpdate) {
-              lines.push(t(locale, 'status_last_codex_update', { value: serviceStatus.lastUpdate.codexUpdate }));
+            const codexUpdateLine = this.formatCodexUpdateResult(serviceStatus.lastUpdate);
+            if (codexUpdateLine) {
+              lines.push(t(locale, 'status_last_codex_update', { value: codexUpdateLine }));
             }
           } else {
             lines.push(t(locale, 'status_last_update_none'));
@@ -4740,15 +4741,26 @@ export class BridgeSessionCore {
   }
 
   private formatSelfUpdateResult(status: SelfUpdateStatus): string {
+    const codexUpdateLine = this.formatCodexUpdateResult(status);
     if (status.state === 'succeeded') {
       const result = t(status.locale, 'update_succeeded', {
         from: status.fromVersion,
         to: status.toVersion ?? t(status.locale, 'unknown'),
       });
-      return status.codexUpdate ? `${result}\n${status.codexUpdate}` : result;
+      return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
     }
     const result = t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
-    return status.codexUpdate ? `${result}\n${status.codexUpdate}` : result;
+    return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+  }
+
+  private formatCodexUpdateResult(status: SelfUpdateStatus): string | null {
+    if (status.codexFromVersion || status.codexToVersion) {
+      return t(status.locale, 'update_codex_result', {
+        from: status.codexFromVersion ?? t(status.locale, 'unknown'),
+        to: status.codexToVersion ?? t(status.locale, 'unknown'),
+      });
+    }
+    return status.codexUpdate ?? null;
   }
 
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -9327,7 +9339,7 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
   const page = codexAuthListPage(record.candidates, record);
   const rows = page.visible.map(({ candidate, index }) => [
     {
-      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaPrefix(locale, candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${candidate.disabled ? ' · off' : ''}`),
+      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaButtonPrefix(candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${candidate.disabled ? ' · off' : ''}`),
       callback_data: `auth:${record.localId}:${index}`,
     },
     {
@@ -10160,6 +10172,19 @@ function formatAuthQuotaPrefix(locale: AppLocale, snapshot: CodexAuthQuotaSnapsh
       `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}`
     ));
   return values.length > 0 ? values.join('|') : '--';
+}
+
+function formatAuthQuotaButtonPrefix(snapshot: CodexAuthQuotaSnapshot | null): string {
+  return [
+    snapshot?.primaryRemainingPercent ?? null,
+    snapshot?.secondaryRemainingPercent ?? null,
+  ].map(formatAuthQuotaButtonValue).join('|');
+}
+
+function formatAuthQuotaButtonValue(value: number | null): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? formatUsagePercent(value)
+    : '—';
 }
 
 function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapshot {

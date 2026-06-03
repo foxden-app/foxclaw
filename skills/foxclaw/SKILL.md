@@ -67,7 +67,7 @@ Telegram behavior:
 - when `TG_BOT_TOKENS` contains multiple bots, one FoxClaw service starts independent Codex app-servers and auth selections per bot
 - isolated Telegram runtimes use independent `CODEX_HOME` directories and file-backed credentials; they do not share Codex sessions
 - refreshed ChatGPT candidates are mirrored only after online usage-endpoint validation; before auth switch or reload, a runtime restores any newer same-account credential found in another Codex home
-- `/auth` paginates large candidate inventories at 8 rows per page, supports all/enabled/attention filters and filename search, renders the actual observed quota windows rather than assuming every account has 5-hour and 7-day windows, and omits the repeated `auth.json_` prefix from panel labels without renaming files
+- `/auth` paginates large candidate inventories at 8 rows per page, supports all/enabled/attention filters and filename search, renders actual observed quota windows in text rows, uses compact two-number remaining quota labels on buttons, and omits the repeated `auth.json_` prefix from panel labels without renaming files
 - treat the `/auth` `not recently refreshed` state as a maintenance hint only: OpenAI does not publish a fixed ChatGPT refresh-token lifetime or replay grace period, and FoxClaw must not add routine bulk keepalive refreshes
 - `/auth refresh all` remains a command-only maintenance action, not a panel button; it requires explicit token-rotation risk confirmation, then force-refreshes every ChatGPT candidate through Codex `account/read refreshToken=true`, validates usage, mirrors successful candidates, and restores the original current auth while every runtime is globally idle
 - if `TG_BOT_TOKEN` is also set to one exact token from `TG_BOT_TOKENS`, that bot uses the default/shared-terminal runtime instead of an isolated Telegram home
@@ -205,7 +205,7 @@ When the user says development is complete, asks to "收尾", or asks to push/pu
    - For macOS launchd, use the launchd install/start path from this skill and verify with `node dist/main.js status`.
    - Verify the running service reports the expected FoxClaw version in `status`.
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
-   - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations and refuses to restart while any configured Telegram runtime, enabled Weixin default runtime, or auth mirror write is busy.
+   - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations, reports FoxClaw and Codex CLI version changes, and refuses to restart while any configured Telegram runtime, enabled Weixin default runtime, or auth mirror write is busy.
 7. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
    - Ensure the matching changelog section exists before pushing the version tag; the publish workflow uses it to create or update the GitHub Release.

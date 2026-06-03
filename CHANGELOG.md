@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.13 - 2026-06-03
+
+### 中文
+- `/update` 完成回报新增 Codex CLI 版本变化，和 FoxClaw 版本变化并排行展示。
+- `/auth` 文本列表继续保留额度窗口详情，候选按钮改为只显示两个剩余百分比数字，未知值用 `—`，减少窄屏按钮截断。
+
+### English
+- Added Codex CLI from/to version reporting to completed `/update` messages alongside the FoxClaw version change.
+- Kept quota-window detail in `/auth` text rows, while compacting candidate buttons to two remaining-percent numbers with `—` for unknown values.
+
 ## 0.4.12 - 2026-06-02
 
 ### 中文

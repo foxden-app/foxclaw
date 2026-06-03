@@ -233,7 +233,7 @@ TG_ALLOWED_TOPIC_ID=42
 - `/status`：查看 FoxClaw、app-server、当前绑定线程、模型、权限和 Codex 用量摘要。多 bot 模式还会列出所有 bot 的连接、当前 auth、活动 turn，以及最近一次 auth 镜像和服务/Codex 升级结果。本地 session/Token/可见答复吞吐使用后台生成的历史快照，避免状态查询现场扫描大量日志；答复吞吐按完成轮次端到端耗时计算，排除推理 token，但包含等待与工具执行时间。
 - `/account`：查看当前 Codex 登录账号。
 - `/quota`：查看 Codex 用量和额度窗口。
-- `/update`：升级 FoxClaw，并尝试升级 npm/pnpm 安装的 Codex CLI，然后自检和重启服务；任意 Telegram bot、启用的微信默认 runtime 或 auth 镜像写入不空闲时都会拒绝执行，重启后通过发起命令的 bot 回报结果。
+- `/update`：升级 FoxClaw，并尝试升级 npm/pnpm 安装的 Codex CLI，然后自检和重启服务；任意 Telegram bot、启用的微信默认 runtime 或 auth 镜像写入不空闲时都会拒绝执行，重启后通过发起命令的 bot 回报 FoxClaw 与 Codex CLI 的版本变化。
 
 ### 3.3 `/config`、`/requirements`、`/provider`
 
@@ -391,7 +391,7 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 `/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。面板每页显示 8 个候选，支持翻页、`全部 / 已启用 / 需关注` 筛选和 `/auth list <关键词>` 文件名搜索，适合管理较大的本地候选清单。面板文本和按钮会省略标准候选文件名中重复的 `auth.json_` 前缀，例如磁盘上的 `auth.json_personal` 显示为 `personal`；文件本身不会重命名，搜索和命令仍按原候选工作。命令 `/auth use <n>` 的编号始终对应完整候选列表，不会因为分页变化。
 
-每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
+文本列表中每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。按钮为了适配窄屏，只显示两个剩余百分比数字，例如 `20|25`；未知值显示为 `—`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
 
 示意：
 
@@ -404,8 +404,8 @@ Candidates: 2
 1. 5h:20|7d:25|personal * [Plus · 正常 · 刷新于 2小时前]
 2. --|team [额度未知]
 
-[✅ 5h:20|7d:25|personal] [✅]
-[🔐 --|team]              [✅]
+[✅ 20|25|personal] [✅]
+[🔐 —|—|team]       [✅]
 [☑️ 全部] [已启用] [需关注]
 [🛡️ Access]             [🔑 设备登录]
 [🔄 Reload auth]

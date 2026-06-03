@@ -151,6 +151,8 @@ test('self-update statuses are stored alongside runtime status', () => {
       locale: 'zh',
       fromVersion: '0.3.13',
       toVersion: null,
+      codexFromVersion: '0.135.0',
+      codexToVersion: '0.136.0',
       error: null,
       updatedAt: '2026-05-26T08:00:00.000Z',
     });
@@ -161,6 +163,8 @@ test('self-update statuses are stored alongside runtime status', () => {
       locale: 'zh',
       fromVersion: '0.3.13',
       toVersion: null,
+      codexFromVersion: '0.135.0',
+      codexToVersion: '0.136.0',
       error: null,
       updatedAt: '2026-05-26T08:00:00.000Z',
     });
