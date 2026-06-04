@@ -212,7 +212,7 @@ TG_BOT_TOKEN=123456:token_a
 
 FoxClaw 仍然只运行一个系统服务。默认情况下，它会为每个 bot 启动独立 `codex app-server` 和独立 `CODEX_HOME`。因此 A 私聊运行 turn 时，B 私聊仍可独立切换自己的 `/auth`。候选凭据由 FoxClaw 在登录或刷新在线验证后镜像同步；切换或重载前还会从其他 Codex home 恢复同账号较新凭据。各 bot 的当前选择互不影响。每个 bot 首次私聊发送 `/help` 和 `/status`；`/auth` 会标明正在操作的 bot runtime，`/status` 会列出全部 bot 的连接、runtime 类型、当前 auth 和活动 turn 摘要。
 
-多台机器共享同一合法账号池时，可以启用可选跨节点 auth 同步：`AUTH_SYNC_ENABLED=true`、`AUTH_SYNC_KEY` 和 `AUTH_SYNC_PEERS=@peer_contact_bot`。推荐每台机器只选一个联系人 bot；同一节点内的其他 bot 继续走本机 auth 镜像。多 bot 模式下，默认用 `TG_BOT_TOKENS` 的第一个 token 作为联系人 bot。FoxClaw 会通过 Telegram Bot-to-Bot 私聊传输加密 auth 包；本机验证刷新后主动 push，发现本机候选失效时主动 pull peer 已持有的有效副本。跨节点恢复不会自动刷新 token，`/auth refresh all confirm` 会先申请跨节点刷新锁。完整配置、`@BotFather` 操作和验证步骤见 [跨节点 auth 同步配置指南](./docs/zh/cross-node-auth-sync.md)。
+多台机器共享同一合法账号池时，可以启用可选跨节点 auth 同步：`AUTH_SYNC_ENABLED=true`、`AUTH_SYNC_KEY` 和 `AUTH_SYNC_PEERS=@peer_contact_bot`。推荐每台机器只选一个联系人 bot；同一节点内的其他 bot 继续走本机 auth 镜像。多 bot 模式下，默认用 `TG_BOT_TOKENS` 的第一个 token 作为联系人 bot。FoxClaw 会通过 Telegram Bot-to-Bot 私聊传输加密 auth 包；本机验证刷新后主动 push，发现本机候选失效时主动 pull peer 已持有的有效副本，并在联系人 bot 私聊里报告发送、接收、排队、导入、失败和人工介入提示。跨节点恢复不会自动刷新 token，`/auth refresh all confirm` 会先申请跨节点刷新锁。完整配置、`@BotFather` 操作和验证步骤见 [跨节点 auth 同步配置指南](./docs/zh/cross-node-auth-sync.md)。
 
 如果你需要一路 Telegram 与终端互通 session，把同一个 token 同时填入 `TG_BOT_TOKENS` 和 `TG_BOT_TOKEN`。这个 bot 使用默认 `CODEX_HOME`（未设置时通常是 `~/.codex`）和默认 auth，因此能看到终端 Codex 的本地线程；它不再享有隔离 runtime 的“互不影响”保证，切换 auth 会影响终端和其他默认 runtime。
 

@@ -236,6 +236,14 @@ export class BridgeStore {
     return row ? String(row.chat_id) : null;
   }
 
+  getTelegramPrivateScope(botId: string): { scopeId: string; chatId: string } | null {
+    const row = this.db.prepare('SELECT scope_id, chat_id FROM telegram_private_scopes WHERE bot_id = ?').get(botId) as {
+      scope_id: string;
+      chat_id: string;
+    } | undefined;
+    return row ? { scopeId: String(row.scope_id), chatId: String(row.chat_id) } : null;
+  }
+
   getBinding(chatId: string): ThreadBinding | null {
     const row = this.db.prepare('SELECT chat_id, thread_id, cwd, updated_at FROM chat_bindings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
     if (!row) return null;

@@ -46,6 +46,29 @@ export interface AuthSyncValidationResult {
   reason?: string | null;
 }
 
+export type AuthSyncRemoteImportMode = 'push' | 'pull';
+
+export type AuthSyncPullResponseResult = 'sent' | 'candidate_not_found' | 'account_mismatch' | 'not_newer';
+
+export type AuthSyncNotification =
+  | { kind: 'candidate_publish_started'; candidateName: string; peers: string[] }
+  | { kind: 'candidate_publish_completed'; candidateName: string; peers: string[] }
+  | { kind: 'candidate_publish_failed'; candidateName: string; peers: string[]; reason: string }
+  | { kind: 'push_all_started'; candidateCount: number; peers: string[] }
+  | { kind: 'push_all_completed'; sent: number; skipped: number; peers: string[] }
+  | { kind: 'push_all_failed'; sent: number; skipped: number; peers: string[]; reason: string }
+  | { kind: 'remote_bundle_received'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; queued: boolean; queueLength: number }
+  | { kind: 'remote_import_imported'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode }
+  | { kind: 'remote_import_skipped'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode; reason: string }
+  | { kind: 'remote_import_failed'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode; reason: string }
+  | { kind: 'recovery_started'; candidateName: string; peers: string[] }
+  | { kind: 'recovery_peer_empty'; candidateName: string; peer: string; reason: string }
+  | { kind: 'recovery_peer_bundle_received'; candidateName: string; peer: string; sourceNodeId: string }
+  | { kind: 'recovery_failed'; candidateName: string; peers: string[]; reason: string }
+  | { kind: 'pull_request_received'; candidateName: string; peer: string; requesterNodeId: string }
+  | { kind: 'pull_response_sent'; candidateName: string; peer: string; result: AuthSyncPullResponseResult; reason: string | null }
+  | { kind: 'sync_error'; reason: string };
+
 export interface AuthSyncImportCallbacks {
   readLocalCandidate: (candidateName: string) => Promise<AuthMirrorCandidateRecord | null>;
   listLocalCandidates: () => Promise<AuthMirrorCandidateRecord[]>;
@@ -56,6 +79,7 @@ export interface AuthSyncImportCallbacks {
     source: { nodeId: string; label?: string | null },
   ) => Promise<AuthMirrorImportResult>;
   isIdle: () => boolean;
+  notify?: (event: AuthSyncNotification) => Promise<void>;
 }
 
 export interface AuthSyncTransport {
@@ -113,8 +137,16 @@ interface PendingRemoteImport {
   fromPeer: string;
 }
 
+interface AuthSyncImportOutcome {
+  ok: boolean;
+  imported: boolean;
+  reason: string | null;
+}
+
 interface PendingPull {
   candidateName: string;
+  peers: string[];
+  emptyReplies: Map<string, string>;
   resolve: (value: boolean) => void;
   timer: NodeJS.Timeout;
   finished: boolean;
@@ -169,6 +201,7 @@ export class CrossNodeAuthSync {
   private timer: NodeJS.Timeout | null = null;
   private activeRemoteLease: { leaseId: string; peer: string; expiresAt: number } | null = null;
   private activeLocalLease: { leaseId: string; expiresAt: number } | null = null;
+  private lastNotifiedError: string | null = null;
   private state: Required<Omit<AuthSyncStateFile, 'seenNonces' | 'nodeId'>> = {
     lastSentAt: null,
     lastReceivedAt: null,
@@ -261,10 +294,23 @@ export class CrossNodeAuthSync {
     if (!this.isReady()) return false;
     const record = await this.callbacks.readLocalCandidate(candidateName);
     if (!record) return false;
-    await this.sendToAll({
-      kind: 'push.bundle',
-      ...bundleFromRecord(record),
-    });
+    this.notify({ kind: 'candidate_publish_started', candidateName, peers: [...this.peers] });
+    try {
+      await this.sendToAll({
+        kind: 'push.bundle',
+        ...bundleFromRecord(record),
+      });
+      this.notify({ kind: 'candidate_publish_completed', candidateName, peers: [...this.peers] });
+    } catch (error) {
+      this.recordError(`candidate publish failed for ${candidateName}: ${formatError(error)}`, false);
+      this.notify({
+        kind: 'candidate_publish_failed',
+        candidateName,
+        peers: [...this.peers],
+        reason: formatError(error),
+      });
+      throw error;
+    }
     return true;
   }
 
@@ -272,18 +318,33 @@ export class CrossNodeAuthSync {
     if (!this.isReady()) return { sent: 0, skipped: 0 };
     let sent = 0;
     let skipped = 0;
-    for (const record of await this.callbacks.listLocalCandidates()) {
-      if (!isAuthCandidateName(record.candidateName)) {
-        skipped += 1;
-        continue;
+    const records = await this.callbacks.listLocalCandidates();
+    this.notify({ kind: 'push_all_started', candidateCount: records.length, peers: [...this.peers] });
+    try {
+      for (const record of records) {
+        if (!isAuthCandidateName(record.candidateName)) {
+          skipped += 1;
+          continue;
+        }
+        await this.sendToAll({
+          kind: 'push.bundle',
+          ...bundleFromRecord(record),
+        });
+        sent += 1;
       }
-      await this.sendToAll({
-        kind: 'push.bundle',
-        ...bundleFromRecord(record),
+      this.notify({ kind: 'push_all_completed', sent, skipped, peers: [...this.peers] });
+      return { sent, skipped };
+    } catch (error) {
+      this.recordError(`push all failed: ${formatError(error)}`, false);
+      this.notify({
+        kind: 'push_all_failed',
+        sent,
+        skipped,
+        peers: [...this.peers],
+        reason: formatError(error),
       });
-      sent += 1;
+      throw error;
     }
-    return { sent, skipped };
   }
 
   async publishDigest(): Promise<void> {
@@ -299,18 +360,28 @@ export class CrossNodeAuthSync {
   async requestRecovery(candidateName: string, current?: { accountId: string | null; lastRefreshMs: number | null }): Promise<boolean> {
     if (!this.isReady() || !isAuthCandidateName(candidateName)) return false;
     const requestId = crypto.randomUUID();
+    const peers = [...this.peers];
+    this.notify({ kind: 'recovery_started', candidateName, peers });
     const result = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         const pending = this.pendingPulls.get(requestId);
         if (pending) {
           pending.finished = true;
           this.pendingPulls.delete(requestId);
+          this.notify({
+            kind: 'recovery_failed',
+            candidateName,
+            peers,
+            reason: `timed out waiting for ${this.peers.length} auth sync peer response(s)`,
+          });
           resolve(false);
         }
       }, PULL_TIMEOUT_MS);
       timer.unref();
       this.pendingPulls.set(requestId, {
         candidateName,
+        peers,
+        emptyReplies: new Map(),
         resolve,
         timer,
         finished: false,
@@ -324,7 +395,13 @@ export class CrossNodeAuthSync {
       }).catch((error) => {
         clearTimeout(timer);
         this.pendingPulls.delete(requestId);
-        this.recordError(`pull request failed: ${formatError(error)}`);
+        this.recordError(`pull request failed: ${formatError(error)}`, false);
+        this.notify({
+          kind: 'recovery_failed',
+          candidateName,
+          peers: [...this.peers],
+          reason: formatError(error),
+        });
         resolve(false);
       });
     });
@@ -447,7 +524,7 @@ export class CrossNodeAuthSync {
         this.enqueueImport(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
         return;
       case 'pull.request':
-        await this.handlePullRequest(message, normalizePeerIdentity(peer));
+        await this.handlePullRequest(message, senderNodeId, normalizePeerIdentity(peer));
         return;
       case 'pull.response':
         await this.handlePullResponse(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
@@ -483,25 +560,59 @@ export class CrossNodeAuthSync {
     }
   }
 
-  private async handlePullRequest(message: Extract<AuthSyncPlainMessage, { kind: 'pull.request' }>, peer: string): Promise<void> {
+  private async handlePullRequest(message: Extract<AuthSyncPlainMessage, { kind: 'pull.request' }>, requesterNodeId: string, peer: string): Promise<void> {
     if (!isAuthCandidateName(message.candidateName)) return;
+    this.notify({
+      kind: 'pull_request_received',
+      candidateName: message.candidateName,
+      peer,
+      requesterNodeId,
+    });
     const record = await this.callbacks.readLocalCandidate(message.candidateName);
     if (!record) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'candidate not found' });
+      this.notify({
+        kind: 'pull_response_sent',
+        candidateName: message.candidateName,
+        peer,
+        result: 'candidate_not_found',
+        reason: 'candidate not found',
+      });
       return;
     }
     if (message.accountId && record.accountId !== message.accountId) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'account mismatch' });
+      this.notify({
+        kind: 'pull_response_sent',
+        candidateName: message.candidateName,
+        peer,
+        result: 'account_mismatch',
+        reason: 'account mismatch',
+      });
       return;
     }
     if (message.lastRefreshMs !== null && record.lastRefreshMs <= message.lastRefreshMs) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'not newer' });
+      this.notify({
+        kind: 'pull_response_sent',
+        candidateName: message.candidateName,
+        peer,
+        result: 'not_newer',
+        reason: 'not newer',
+      });
       return;
     }
     await this.sendToPeer(peer, {
       kind: 'pull.response',
       requestId: message.requestId,
       bundle: bundleFromRecord(record),
+    });
+    this.notify({
+      kind: 'pull_response_sent',
+      candidateName: message.candidateName,
+      peer,
+      result: 'sent',
+      reason: null,
     });
   }
 
@@ -513,15 +624,55 @@ export class CrossNodeAuthSync {
   ): Promise<void> {
     const pending = this.pendingPulls.get(message.requestId);
     if (!pending || pending.finished) return;
+    const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
     if (!message.bundle || message.bundle.candidateName !== pending.candidateName) {
+      const reason = message.reason ?? 'peer did not return a matching candidate';
+      this.notify({
+        kind: 'recovery_peer_empty',
+        candidateName: pending.candidateName,
+        peer,
+        reason,
+      });
+      this.markPullPeerUnavailable(message.requestId, matchedPeer, reason);
       return;
     }
-    const imported = await this.validateAndImport(message.bundle, senderNodeId, sourceLabel, peer);
-    if (!imported) return;
+    this.notify({
+      kind: 'recovery_peer_bundle_received',
+      candidateName: pending.candidateName,
+      peer,
+      sourceNodeId: senderNodeId,
+    });
+    const outcome = await this.validateAndImport(message.bundle, senderNodeId, sourceLabel, peer, 'pull');
+    if (!outcome.imported) {
+      this.markPullPeerUnavailable(message.requestId, matchedPeer, outcome.reason ?? 'peer candidate was not imported');
+      return;
+    }
     pending.finished = true;
     clearTimeout(pending.timer);
     this.pendingPulls.delete(message.requestId);
     pending.resolve(true);
+  }
+
+  private markPullPeerUnavailable(requestId: string, peer: string, reason: string): void {
+    const pending = this.pendingPulls.get(requestId);
+    if (!pending || pending.finished) return;
+    pending.emptyReplies.set(peer, reason);
+    if (!pending.peers.every(peerName => pending.emptyReplies.has(peerName))) {
+      return;
+    }
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingPulls.delete(requestId);
+    const details = pending.peers
+      .map(peerName => `${peerName}: ${pending.emptyReplies.get(peerName) ?? 'no usable candidate'}`)
+      .join('; ');
+    this.notify({
+      kind: 'recovery_failed',
+      candidateName: pending.candidateName,
+      peers: pending.peers,
+      reason: `all peers replied without an importable auth candidate${details ? ` (${details})` : ''}`,
+    });
+    pending.resolve(false);
   }
 
   private async handleDigest(message: Extract<AuthSyncPlainMessage, { kind: 'digest' }>, peer: string): Promise<void> {
@@ -582,12 +733,22 @@ export class CrossNodeAuthSync {
   }
 
   private enqueueImport(bundle: AuthSyncBundlePayload, sourceNodeId: string, sourceLabel: string | null, fromPeer: string): void {
+    const queued = !this.callbacks.isIdle() || this.pendingImports.length > 0;
     this.pendingImports.push({
       bundle,
       sourceNodeId,
       sourceLabel,
       receivedAt: Date.now(),
       fromPeer,
+    });
+    this.notify({
+      kind: 'remote_bundle_received',
+      candidateName: bundle.candidateName,
+      sourceNodeId,
+      sourceLabel: sourceLabel ?? fromPeer,
+      peer: fromPeer,
+      queued,
+      queueLength: this.pendingImports.length,
     });
     void this.processPendingImports().catch((error) => {
       this.recordError(`remote import failed: ${formatError(error)}`);
@@ -598,7 +759,7 @@ export class CrossNodeAuthSync {
     if (!this.callbacks.isIdle()) return;
     while (this.pendingImports.length > 0 && this.callbacks.isIdle()) {
       const pending = this.pendingImports.shift()!;
-      await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer);
+      await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, 'push');
     }
   }
 
@@ -607,37 +768,33 @@ export class CrossNodeAuthSync {
     sourceNodeId: string,
     sourceLabel: string | null,
     fromPeer: string,
-  ): Promise<boolean> {
+    mode: AuthSyncRemoteImportMode,
+  ): Promise<AuthSyncImportOutcome> {
+    const source = sourceLabel ?? fromPeer;
     if (!isValidBundle(bundle)) {
-      this.recordError('remote bundle shape is invalid');
-      return false;
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, 'remote bundle shape is invalid');
     }
     const metadata = parseChatGptAuthMetadata(bundle.rawAuth);
     if (!metadata || metadata.accountId !== bundle.accountId || metadata.lastRefreshMs !== bundle.lastRefreshMs) {
-      this.recordError(`remote bundle metadata mismatch for ${bundle.candidateName}`);
-      return false;
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle metadata mismatch for ${bundle.candidateName}`);
     }
     if (sha256(bundle.rawAuth) !== bundle.authSha256) {
-      this.recordError(`remote bundle hash mismatch for ${bundle.candidateName}`);
-      return false;
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle hash mismatch for ${bundle.candidateName}`);
     }
     const expiresAt = readAccessTokenExpiresAtMs(bundle.rawAuth);
     if (expiresAt === null || expiresAt <= Date.now() + REMOTE_ACCESS_TOKEN_MIN_TTL_MS) {
-      this.recordError(`remote access token is expired or missing exp for ${bundle.candidateName}`);
-      return false;
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote access token is expired or missing exp for ${bundle.candidateName}`);
     }
     const validation = await this.callbacks.validateCandidate(bundle.candidateName, bundle.rawAuth, bundle.accountId);
     if (!validation.ok) {
-      this.recordError(`remote candidate validation failed for ${bundle.candidateName}: ${validation.reason ?? 'unknown'}`);
-      return false;
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote candidate validation failed for ${bundle.candidateName}: ${validation.reason ?? 'unknown'}`);
     }
     const result = await this.callbacks.importCandidate(bundle.candidateName, bundle.rawAuth, {
       nodeId: sourceNodeId,
-      label: sourceLabel ?? fromPeer,
+      label: source,
     });
     if (!result.ok) {
-      this.recordError(`remote candidate import failed for ${bundle.candidateName}: ${result.reason ?? 'unknown'}`);
-      return false;
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote candidate import failed for ${bundle.candidateName}: ${result.reason ?? 'unknown'}`);
     }
     if (result.imported) {
       this.state.lastImportedAt = new Date().toISOString();
@@ -645,8 +802,26 @@ export class CrossNodeAuthSync {
       this.state.lastError = null;
       await this.writeState();
       this.logger.info('auth.sync.imported', { candidateName: bundle.candidateName, sourceNodeId });
+      this.notify({
+        kind: 'remote_import_imported',
+        candidateName: bundle.candidateName,
+        sourceNodeId,
+        sourceLabel: source,
+        peer: fromPeer,
+        mode,
+      });
+    } else {
+      this.notify({
+        kind: 'remote_import_skipped',
+        candidateName: bundle.candidateName,
+        sourceNodeId,
+        sourceLabel: source,
+        peer: fromPeer,
+        mode,
+        reason: result.reason ?? 'local candidate did not need an update',
+      });
     }
-    return result.imported;
+    return { ok: true, imported: result.imported, reason: result.reason ?? null };
   }
 
   private async sendToAll(message: AuthSyncPlainMessage): Promise<void> {
@@ -776,12 +951,49 @@ export class CrossNodeAuthSync {
     }
   }
 
-  private recordError(message: string): void {
+  private recordError(message: string, notify = true): void {
     this.state.lastError = message;
     this.logger.warn('auth.sync.error', { error: message });
     void this.writeState().catch((error) => {
       this.logger.warn('auth.sync.state_write_failed', { error: formatError(error) });
     });
+    if (notify) {
+      this.notifyError(message);
+    }
+  }
+
+  private rejectImport(
+    bundle: AuthSyncBundlePayload,
+    sourceNodeId: string,
+    sourceLabel: string,
+    fromPeer: string,
+    mode: AuthSyncRemoteImportMode,
+    reason: string,
+  ): AuthSyncImportOutcome {
+    this.recordError(reason, false);
+    this.notify({
+      kind: 'remote_import_failed',
+      candidateName: bundle.candidateName,
+      sourceNodeId,
+      sourceLabel,
+      peer: fromPeer,
+      mode,
+      reason,
+    });
+    return { ok: false, imported: false, reason };
+  }
+
+  private notify(event: AuthSyncNotification): void {
+    if (!this.callbacks.notify) return;
+    void this.callbacks.notify(event).catch((error) => {
+      this.logger.warn('auth.sync.notify_failed', { error: formatError(error) });
+    });
+  }
+
+  private notifyError(reason: string): void {
+    if (this.lastNotifiedError === reason) return;
+    this.lastNotifiedError = reason;
+    this.notify({ kind: 'sync_error', reason });
   }
 
   private async writeState(): Promise<void> {

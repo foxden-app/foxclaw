@@ -4,7 +4,12 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CrossNodeAuthSync, type AuthSyncConfig, type AuthSyncImportCallbacks } from './cross_node_sync.js';
+import {
+  CrossNodeAuthSync,
+  type AuthSyncConfig,
+  type AuthSyncImportCallbacks,
+  type AuthSyncNotification,
+} from './cross_node_sync.js';
 import type { AuthMirrorCandidateRecord } from './mirror.js';
 
 const loggerStub = {
@@ -57,6 +62,8 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
   try {
     const candidate = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
     let imported: { candidateName: string; raw: string; source: string } | null = null;
+    const notificationsA: AuthSyncNotification[] = [];
+    const notificationsB: AuthSyncNotification[] = [];
     const services: { b?: CrossNodeAuthSync } = {};
     const serviceB = new CrossNodeAuthSync(
       config(root, 'node-b', ['@botA']),
@@ -67,6 +74,9 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
         importCandidate: async (candidateName, raw, source) => {
           imported = { candidateName, raw, source: source.nodeId };
           return { ok: true, imported: true };
+        },
+        notify: async (event) => {
+          notificationsB.push(event);
         },
       }),
     );
@@ -79,18 +89,32 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
           await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
         },
       },
-      callbacks({ records: [candidate] }),
+      callbacks({
+        records: [candidate],
+        notify: async (event) => {
+          notificationsA.push(event);
+        },
+      }),
     );
     await serviceB.initialize();
     await serviceA.initialize();
 
     assert.equal(await serviceA.publishCandidate('auth.json_work'), true);
+    await waitFor(() => notificationsB.some(event => event.kind === 'remote_import_imported'));
     assert.deepEqual(imported, {
       candidateName: 'auth.json_work',
       raw: candidate.raw,
       source: 'node-a',
     });
     assert.equal(serviceB.getStatus().lastImportCandidate, 'auth.json_work');
+    assert.deepEqual(notificationsA.map(event => event.kind), [
+      'candidate_publish_started',
+      'candidate_publish_completed',
+    ]);
+    assert.deepEqual(notificationsB.map(event => event.kind), [
+      'remote_bundle_received',
+      'remote_import_imported',
+    ]);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -215,6 +239,50 @@ test('CrossNodeAuthSync queues remote imports while the local node is busy', asy
   }
 });
 
+test('CrossNodeAuthSync notifies when remote auth validation fails', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-validation-'));
+  try {
+    const candidate = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    const notificationsB: AuthSyncNotification[] = [];
+    const services: { b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records: [candidate] }),
+    );
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({
+        validate: async () => ({ ok: false, reason: 'codex account authentication required to read rate limits' }),
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    await serviceA.publishCandidate('auth.json_work');
+    await waitFor(() => notificationsB.some(event => event.kind === 'remote_import_failed'));
+
+    const failure = notificationsB.find((event): event is Extract<AuthSyncNotification, { kind: 'remote_import_failed' }> =>
+      event.kind === 'remote_import_failed');
+    assert.equal(failure?.candidateName, 'auth.json_work');
+    assert.match(failure?.reason ?? '', /authentication required/);
+    assert.match(serviceB.getStatus().lastError ?? '', /authentication required/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-'));
   try {
@@ -257,6 +325,58 @@ test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', asyn
       lastRefreshMs: Date.parse('2026-05-01T00:00:00.000Z'),
     }), true);
     assert.equal(imported, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CrossNodeAuthSync recovery notifies when all peers lack a usable candidate', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-empty-'));
+  try {
+    const notificationsB: AuthSyncNotification[] = [];
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records: [] }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' });
+        },
+      },
+      callbacks({
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    assert.equal(await serviceB.requestRecovery('auth.json_work', {
+      accountId: 'acct-1',
+      lastRefreshMs: Date.parse('2026-05-01T00:00:00.000Z'),
+    }), false);
+
+    assert.deepEqual(notificationsB.map(event => event.kind), [
+      'recovery_started',
+      'recovery_peer_empty',
+      'recovery_failed',
+    ]);
+    const failure = notificationsB.at(-1);
+    assert.equal(failure?.kind, 'recovery_failed');
+    assert.match(failure && 'reason' in failure ? failure.reason : '', /all peers replied/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -310,13 +430,27 @@ function callbacks(options: {
   isIdle?: () => boolean;
   validate?: AuthSyncImportCallbacks['validateCandidate'];
   importCandidate?: AuthSyncImportCallbacks['importCandidate'];
+  notify?: AuthSyncImportCallbacks['notify'];
 }): AuthSyncImportCallbacks {
   const records = options.records ?? [];
-  return {
+  const result: AuthSyncImportCallbacks = {
     readLocalCandidate: async (candidateName) => records.find(record => record.candidateName === candidateName) ?? null,
     listLocalCandidates: async () => records,
     validateCandidate: options.validate ?? (async () => ({ ok: true })),
     importCandidate: options.importCandidate ?? (async () => ({ ok: true, imported: true })),
     isIdle: options.isIdle ?? (() => true),
   };
+  if (options.notify) {
+    result.notify = options.notify;
+  }
+  return result;
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(predicate(), true);
 }

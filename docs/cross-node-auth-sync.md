@@ -166,6 +166,8 @@ Confirm that pending imports were processed, or that the candidate exists or has
 
 Note: `/auth sync push all` saying “sent” only means this node successfully handed encrypted packages to Telegram. It does not prove the peer wrote files. The peer imports only when it is globally idle, usage validation succeeds, same-name candidates belong to the same account id, and the remote `last_refresh` is newer than the local copy. If the local file is already equal or newer, it will not change and `Last import` may remain empty.
 
+When cross-node sync is enabled, the contact bot private chat receives node-level notifications: local auth updates and the peers being contacted, received remote bundles and whether they were queued or immediately validated, import success/skip/failure reasons, recovery peer queries and peer replies, and a manual-intervention notice when every peer lacks an importable copy. Notifications never include auth contents, tokens, or encrypted bundle payloads.
+
 5. Only test refresh-token rotation after you understand the risk:
 
 ```text

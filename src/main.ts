@@ -17,6 +17,8 @@ import {
   loadEnv,
   type AppConfig,
 } from './config.js';
+import type { AuthSyncNotification } from './auth/cross_node_sync.js';
+import type { AppLocale } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 import { refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
@@ -494,6 +496,7 @@ async function runServeCli(): Promise<void> {
             },
             importCandidate: (candidateName, raw, source) => mirror.importExternalCandidate(candidateName, raw, source),
             isIdle: authSyncLocalIdle,
+            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot),
           },
         );
         await authSync.initialize();
@@ -632,6 +635,7 @@ async function runServeCli(): Promise<void> {
     }
     core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater, singleCoordinator);
     if (config.authSyncEnabled && singleMirror) {
+      await bot.initializeIdentity();
       singleAuthSync = new CrossNodeAuthSync(
         buildAuthSyncConfig(config, bot.username ? `@${bot.username}` : 'default'),
         logger,
@@ -656,6 +660,7 @@ async function runServeCli(): Promise<void> {
           },
           importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
           isIdle: singleAuthSyncLocalIdle,
+          notify: createAuthSyncNotifier(store!, bot),
         },
       );
       await singleAuthSync.initialize();
@@ -727,6 +732,148 @@ async function runServeCli(): Promise<void> {
     throw error;
   }
 }
+
+interface AuthSyncNotifyBot {
+  identity: string | null;
+  sendMessage(chatId: string, text: string): Promise<number>;
+}
+
+interface AuthSyncNotifyStore {
+  getTelegramPrivateScope(botId: string): { scopeId: string; chatId: string } | null;
+  getChatSettings(scopeId: string): { locale: AppLocale | null } | null;
+}
+
+function createAuthSyncNotifier(store: AuthSyncNotifyStore, bot: AuthSyncNotifyBot): (event: AuthSyncNotification) => Promise<void> {
+  return async (event: AuthSyncNotification): Promise<void> => {
+    if (!bot.identity) return;
+    const privateScope = store.getTelegramPrivateScope(bot.identity);
+    if (!privateScope) return;
+    const locale = store.getChatSettings(privateScope.scopeId)?.locale ?? 'en';
+    await bot.sendMessage(privateScope.chatId, formatAuthSyncNotification(locale, event));
+  };
+}
+
+function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotification): string {
+  const peers = 'peers' in event ? formatPeerList(event.peers, locale) : '';
+  if (locale === 'zh') {
+    switch (event.kind) {
+      case 'candidate_publish_started':
+        return `本机 auth 已更新：${event.candidateName}\n处理：正在同步到跨节点 peer：${peers}`;
+      case 'candidate_publish_completed':
+        return `跨节点 auth 已发出：${event.candidateName}\nPeer：${peers}\n注意：这只代表发送成功，对端导入结果会在对端通知或 /auth sync status 中显示。`;
+      case 'candidate_publish_failed':
+        return `跨节点 auth 发送失败：${event.candidateName}\nPeer：${peers}\n原因：${event.reason}`;
+      case 'push_all_started':
+        return `开始手动推送全部 auth：候选 ${event.candidateCount} 个\nPeer：${peers}`;
+      case 'push_all_completed':
+        return `手动 auth 同步推送完成：已发送 ${event.sent}，已跳过 ${event.skipped}\nPeer：${peers}`;
+      case 'push_all_failed':
+        return `手动 auth 同步推送中断：已发送 ${event.sent}，已跳过 ${event.skipped}\nPeer：${peers}\n原因：${event.reason}`;
+      case 'remote_bundle_received':
+        return [
+          `收到跨节点 auth：${event.candidateName}`,
+          `来源：${formatSource(event.sourceLabel, event.sourceNodeId)}，peer ${event.peer}`,
+          `处理：${event.queued ? `本机忙，已排队等待空闲后验证导入；当前待导入 ${event.queueLength}` : '本机空闲，正在验证 usage 后导入'}`,
+        ].join('\n');
+      case 'remote_import_imported':
+        return `${event.mode === 'pull' ? '已拉取并导入跨节点 auth' : '已导入跨节点 auth'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n处理：已写入本机 auth 镜像，并同步到同节点 bot home。`;
+      case 'remote_import_skipped':
+        return `${event.mode === 'pull' ? '跨节点拉取未改动本机文件' : '收到跨节点 auth 但未写盘'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
+      case 'remote_import_failed':
+        return `${event.mode === 'pull' ? '跨节点拉取导入失败' : '跨节点 auth 导入失败'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}\n需要注意：如果其他候选也无法恢复，请人工介入重新登录或刷新这个 auth。`;
+      case 'recovery_started':
+        return `auth 恢复开始：${event.candidateName}\n处理：同节点没有可用较新副本，正在向跨节点 peer 查询：${peers}`;
+      case 'recovery_peer_empty':
+        return `auth 恢复收到 peer 回应但没有可用副本：${event.candidateName}\nPeer：${event.peer}\n原因：${event.reason}`;
+      case 'recovery_peer_bundle_received':
+        return `auth 恢复收到 peer 候选：${event.candidateName}\nPeer：${event.peer}，来源节点：${event.sourceNodeId}\n处理：正在验证 usage 后导入。`;
+      case 'recovery_failed':
+        return `auth 恢复已穷尽：${event.candidateName}\n已查询 peer：${peers}\n原因：${event.reason}\n请人工介入：使用 /auth add <name> 或设备登录重新生成可用 auth。`;
+      case 'pull_request_received':
+        return `收到 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}，请求节点：${event.requesterNodeId}`;
+      case 'pull_response_sent':
+        return `已回应 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}\n结果：${formatPullResponseResult(event.result, event.reason, locale)}`;
+      case 'sync_error':
+        return `auth sync 需要注意：\n${event.reason}`;
+    }
+  }
+  switch (event.kind) {
+    case 'candidate_publish_started':
+      return `Local auth updated: ${event.candidateName}\nAction: syncing to cross-node peers: ${peers}`;
+    case 'candidate_publish_completed':
+      return `Cross-node auth sent: ${event.candidateName}\nPeers: ${peers}\nNote: this confirms send success only; peer import is reported on the receiving node.`;
+    case 'candidate_publish_failed':
+      return `Cross-node auth send failed: ${event.candidateName}\nPeers: ${peers}\nReason: ${event.reason}`;
+    case 'push_all_started':
+      return `Manual auth sync push started: ${event.candidateCount} candidates\nPeers: ${peers}`;
+    case 'push_all_completed':
+      return `Manual auth sync push complete: sent ${event.sent}, skipped ${event.skipped}\nPeers: ${peers}`;
+    case 'push_all_failed':
+      return `Manual auth sync push stopped: sent ${event.sent}, skipped ${event.skipped}\nPeers: ${peers}\nReason: ${event.reason}`;
+    case 'remote_bundle_received':
+      return [
+        `Received cross-node auth: ${event.candidateName}`,
+        `Source: ${formatSource(event.sourceLabel, event.sourceNodeId)}, peer ${event.peer}`,
+        `Action: ${event.queued ? `queued until this node is idle; pending imports ${event.queueLength}` : 'validating usage before import'}`,
+      ].join('\n');
+    case 'remote_import_imported':
+      return `${event.mode === 'pull' ? 'Pulled and imported cross-node auth' : 'Imported cross-node auth'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nAction: written to the local auth mirror and same-node bot homes.`;
+    case 'remote_import_skipped':
+      return `${event.mode === 'pull' ? 'Cross-node pull did not change local files' : 'Received cross-node auth but did not write it'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
+    case 'remote_import_failed':
+      return `${event.mode === 'pull' ? 'Cross-node pull import failed' : 'Cross-node auth import failed'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}\nAttention: if no other candidate can recover this account, run device login or refresh this auth manually.`;
+    case 'recovery_started':
+      return `Auth recovery started: ${event.candidateName}\nAction: no newer same-node copy was available; querying cross-node peers: ${peers}`;
+    case 'recovery_peer_empty':
+      return `Auth recovery peer replied without usable auth: ${event.candidateName}\nPeer: ${event.peer}\nReason: ${event.reason}`;
+    case 'recovery_peer_bundle_received':
+      return `Auth recovery peer returned a candidate: ${event.candidateName}\nPeer: ${event.peer}, source node: ${event.sourceNodeId}\nAction: validating usage before import.`;
+    case 'recovery_failed':
+      return `Auth recovery exhausted: ${event.candidateName}\nPeers checked: ${peers}\nReason: ${event.reason}\nManual action: use /auth add <name> or device login to create a usable auth.`;
+    case 'pull_request_received':
+      return `Received peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}, requester node: ${event.requesterNodeId}`;
+    case 'pull_response_sent':
+      return `Replied to peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}\nResult: ${formatPullResponseResult(event.result, event.reason, locale)}`;
+    case 'sync_error':
+      return `Auth sync needs attention:\n${event.reason}`;
+  }
+}
+
+function formatPeerList(peers: string[], locale: AppLocale): string {
+  return peers.length > 0 ? peers.join(', ') : (locale === 'zh' ? '无' : 'none');
+}
+
+function formatSource(sourceLabel: string, sourceNodeId: string): string {
+  return sourceLabel === sourceNodeId ? sourceNodeId : `${sourceLabel} / ${sourceNodeId}`;
+}
+
+function formatPullResponseResult(result: AuthSyncPullResultAlias, reason: string | null, locale: AppLocale): string {
+  const suffix = reason ? ` (${reason})` : '';
+  if (locale === 'zh') {
+    switch (result) {
+      case 'sent':
+        return `已返回较新候选${suffix}`;
+      case 'candidate_not_found':
+        return `本机没有这个候选${suffix}`;
+      case 'account_mismatch':
+        return `账号不匹配，未返回${suffix}`;
+      case 'not_newer':
+        return `本机副本不更新，未返回${suffix}`;
+    }
+  }
+  switch (result) {
+    case 'sent':
+      return `sent newer candidate${suffix}`;
+    case 'candidate_not_found':
+      return `candidate not found${suffix}`;
+    case 'account_mismatch':
+      return `account mismatch; nothing sent${suffix}`;
+    case 'not_newer':
+      return `local copy is not newer; nothing sent${suffix}`;
+  }
+}
+
+type AuthSyncPullResultAlias = Extract<AuthSyncNotification, { kind: 'pull_response_sent' }>['result'];
 
 interface AuthSyncTelegramPeerDocumentEvent {
   userId: string;
