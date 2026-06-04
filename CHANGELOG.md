@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.15 - 2026-06-04
+
+### 中文
+- 更新 FoxClaw 收尾 skill：发布前固定检查设计文档、中文/英文使用手册和对外公开文档。
+- 涉及 Telegram 设置的变更，使用手册必须写清 `@BotFather` 操作步骤；npm 发布 skill 也会遵守该项目文档门槛。
+
+### English
+- Updated the FoxClaw wrap-up skill to require design docs, Chinese/English user manuals, and public-facing docs before release.
+- Telegram setup changes must document the exact `@BotFather` steps in the manuals; the npm publish skill now honors this project documentation gate too.
+
 ## 0.4.14 - 2026-06-04
 
 ### 中文

@@ -9,6 +9,8 @@ Use this skill to publish an npm package from a repo. Prefer CI trusted publishi
 
 If the user asks to release, publish, "收尾", "push publish", or otherwise finish a completed package change, proceed through verification, commit, push, publish, and post-publish verification without asking for a second confirmation. Pause only for real blockers: missing credentials, failed checks, unrelated changes that would be staged, merge conflicts, an already-published target version that needs a version choice, or npm/GitHub web-auth that requires the user to click/confirm an external page.
 
+Before publishing, honor any project-specific release documentation gate. For FoxClaw releases, verify design documentation, Chinese and English user manuals, `@BotFather` operation steps when Telegram setup changes, and external-facing README/CHANGELOG/release wording are updated or explicitly marked not applicable.
+
 ## Release Checklist
 
 1. Sync first when the user asks for it:

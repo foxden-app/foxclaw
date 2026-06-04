@@ -1,6 +1,6 @@
 ---
 name: foxclaw
-description: Deploy, configure, validate, develop, and release FoxClaw. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram values, write `.env`, enable launchd/systemd, guide first-message tests, or perform FoxClaw repo wrap-up actions such as bilingual Chinese | English commit messages, push, npm publish, and local install/service update.
+description: Deploy, configure, validate, develop, and release FoxClaw. Use when Codex needs to clone or update the FoxClaw repo, collect Telegram values, write `.env`, enable launchd/systemd, guide first-message tests, or perform FoxClaw repo wrap-up actions such as documentation gates, bilingual Chinese | English commit messages, push, npm publish, and local install/service update.
 ---
 
 # FoxClaw
@@ -184,22 +184,28 @@ When the user says development is complete, asks to "收尾", or asks to push/pu
    - `git status -sb`
    - `git diff --stat`
    - `git diff --name-status`
-2. Run the relevant verification with Node 24+. If the system `node` is older, prepend the known Node 24 bin path or use the repo's documented Node 24 shell.
+2. Apply the documentation gate before validation and release for user-visible behavior, setup, config, command, auth, Telegram, or release-flow changes:
+   - Update the design documentation for architecture, protocol, storage, locking, security, config, or rollout decisions. If there is no dedicated design file yet, create or extend the most appropriate `docs/` file instead of leaving the design only in chat.
+   - Update the user manual in Chinese and English for new commands, panels, environment variables, safety constraints, verification steps, and operator workflows.
+   - If Telegram-side setup is involved, include the exact `@BotFather` operation path in the manual, such as privacy mode, Bot-to-Bot Communication Mode, admin requirements, group/topic setup, or token creation as applicable.
+   - Update external-facing public docs: `README.md`, `README_EN.md`, `CHANGELOG.md`, and release-note wording with a clear user value statement suitable for GitHub/npm readers.
+   - For purely internal or test-only changes where one of these document classes truly does not apply, state that explicitly in the wrap-up summary.
+3. Run the relevant verification with Node 24+. If the system `node` is older, prepend the known Node 24 bin path or use the repo's documented Node 24 shell.
    - Code changes: `npm run typecheck`, `npm run lint`, `npm test`
    - Package/release changes: also run `npm pack --dry-run`
    - Skill-only changes: validate the skill folder, then run `npm pack --dry-run`
-3. Build before any local service restart:
+4. Build before any local service restart:
    - `npm run build`
-4. Commit intentionally:
+5. Commit intentionally:
    - Stage only the changed files that belong to the task.
    - For this repo, prefer a bilingual one-line subject in the form `中文 | English`.
    - Put Chinese first, keep the English half semantically equivalent, and keep both halves concise.
    - For release commits, use the same format, for example `发布 0.4.0：支持多机器人隔离 | Release 0.4.0: support multi-bot isolation`.
    - Update `CHANGELOG.md` for any published version, using bilingual Chinese and English notes.
    - Never stage unrelated local changes.
-5. Push the current branch after a successful commit:
+6. Push the current branch after a successful commit:
    - `git push origin <branch>`
-6. Refresh the local install when requested:
+7. Refresh the local install when requested:
    - If the user has a pnpm global FoxClaw install, prefer `pnpm add -g <repo-path>` so the global `foxclaw` points at the local repo.
    - Rebuild before restarting because local linked installs run `dist/main.js`.
    - Refresh systemd with the existing service env path, for example `FOXCLAW_ENV=<existing-env> <node24> dist/main.js install-systemd`. Do not run `install-systemd` from the repo without `FOXCLAW_ENV`, because it may rewrite the service to use the repo `.env`.
@@ -208,7 +214,7 @@ When the user says development is complete, asks to "收尾", or asks to push/pu
    - Verify the running service reports the expected FoxClaw version in `status`.
    - If `doctor` fails only because `DEFAULT_CWD` is missing, report that separately; do not treat it as evidence that the service update failed.
    - `/update` now attempts to update globally npm/pnpm-managed Codex CLI installations, reports FoxClaw and Codex CLI version changes, and refuses to restart while any configured Telegram runtime, enabled Weixin default runtime, or auth mirror write is busy.
-7. Publish to npm when requested:
+8. Publish to npm when requested:
    - Prefer GitHub Actions trusted publishing via `.github/workflows/publish.yml`: bump and commit the package version, push `main`, then push a matching `v<version>` tag. The tag version must match `package.json`.
    - Ensure the matching changelog section exists before pushing the version tag; the publish workflow uses it to create or update the GitHub Release.
    - Treat `workflow_dispatch` only as a retry path from an existing matching release tag; do not manually run publishing from `main`.

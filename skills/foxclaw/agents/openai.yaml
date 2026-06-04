@@ -1,4 +1,4 @@
 interface:
   display_name: "FoxClaw"
   short_description: "Install, validate, update, and release FoxClaw bridges"
-  default_prompt: "Use $foxclaw to clone or update FoxClaw, configure Telegram values, validate service health, or finish repo changes with commit, push, npm publish, and local install refresh."
+  default_prompt: "Use $foxclaw to clone or update FoxClaw, configure Telegram values, validate service health, or finish repo changes with required docs, commit, push, npm publish, and local install refresh."
