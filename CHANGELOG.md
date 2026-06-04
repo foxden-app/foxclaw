@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.1 - 2026-06-04
+
+### 中文
+- 串行化跨节点 auth 远端导入验证，避免多个同步包同时触发 usage 验证并反复重启同一个 Codex app-server，导致误报 `Codex app bridge stopped` 或 `SIGTERM`。
+
+### English
+- Serialized cross-node auth remote import validation so multiple incoming bundles no longer validate in parallel and repeatedly restart the same Codex app-server, avoiding false `Codex app bridge stopped` or `SIGTERM` failures.
+
 ## 0.5.0 - 2026-06-04
 
 ### 中文

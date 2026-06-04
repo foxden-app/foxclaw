@@ -283,6 +283,59 @@ test('CrossNodeAuthSync notifies when remote auth validation fails', async () =>
   }
 });
 
+test('CrossNodeAuthSync serializes concurrent remote import validation', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-serial-'));
+  try {
+    const records = [
+      record('auth.json_one', 'acct-1', '2026-06-01T00:00:00.000Z'),
+      record('auth.json_two', 'acct-2', '2026-06-01T00:00:01.000Z'),
+      record('auth.json_three', 'acct-3', '2026-06-01T00:00:02.000Z'),
+    ];
+    let activeValidations = 0;
+    let maxActiveValidations = 0;
+    let importedCount = 0;
+    const services: { b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records }),
+    );
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({
+        validate: async () => {
+          activeValidations += 1;
+          maxActiveValidations = Math.max(maxActiveValidations, activeValidations);
+          await new Promise(resolve => setTimeout(resolve, 20));
+          activeValidations -= 1;
+          return { ok: true };
+        },
+        importCandidate: async () => {
+          importedCount += 1;
+          return { ok: true, imported: true };
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    await serviceA.pushAll();
+    await waitFor(() => importedCount === records.length);
+
+    assert.equal(maxActiveValidations, 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-'));
   try {

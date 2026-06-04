@@ -199,6 +199,7 @@ export class CrossNodeAuthSync {
   private readonly pendingTests = new Map<string, PendingTest>();
   private seenNonces = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
+  private importProcessorActive = false;
   private activeRemoteLease: { leaseId: string; peer: string; expiresAt: number } | null = null;
   private activeLocalLease: { leaseId: string; expiresAt: number } | null = null;
   private lastNotifiedError: string | null = null;
@@ -285,6 +286,7 @@ export class CrossNodeAuthSync {
 
   isIdle(): boolean {
     return this.pendingImports.length === 0
+      && !this.importProcessorActive
       && this.pendingPulls.size === 0
       && this.pendingLeases.size === 0
       && this.pendingTests.size === 0;
@@ -733,7 +735,7 @@ export class CrossNodeAuthSync {
   }
 
   private enqueueImport(bundle: AuthSyncBundlePayload, sourceNodeId: string, sourceLabel: string | null, fromPeer: string): void {
-    const queued = !this.callbacks.isIdle() || this.pendingImports.length > 0;
+    const queued = this.importProcessorActive || !this.callbacks.isIdle() || this.pendingImports.length > 0;
     this.pendingImports.push({
       bundle,
       sourceNodeId,
@@ -756,10 +758,17 @@ export class CrossNodeAuthSync {
   }
 
   private async processPendingImports(): Promise<void> {
+    if (this.importProcessorActive) return;
     if (!this.callbacks.isIdle()) return;
-    while (this.pendingImports.length > 0 && this.callbacks.isIdle()) {
-      const pending = this.pendingImports.shift()!;
-      await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, 'push');
+    this.importProcessorActive = true;
+    try {
+      while (this.pendingImports.length > 0) {
+        if (!this.callbacks.isIdle()) return;
+        const pending = this.pendingImports.shift()!;
+        await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, 'push');
+      }
+    } finally {
+      this.importProcessorActive = false;
     }
   }
 
