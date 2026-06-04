@@ -116,7 +116,7 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
       'remote_import_imported',
     ]);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -151,7 +151,7 @@ test('CrossNodeAuthSync ignores envelopes from peers outside the allowlist', asy
     assert.equal(await serviceB.handleIncomingEnvelope(captured, { userId: '999', username: 'evil' }), false);
     assert.equal(imported, false);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -190,7 +190,7 @@ test('CrossNodeAuthSync testPeers waits for peer pong replies', async () => {
       missing: [],
     });
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -235,7 +235,7 @@ test('CrossNodeAuthSync queues remote imports while the local node is busy', asy
     await (serviceB as any).processPendingImports();
     assert.equal(imported, true);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -282,7 +282,7 @@ test('CrossNodeAuthSync notifies when remote auth validation fails', async () =>
     assert.equal(serviceB.getStatus().candidateFailures[0]?.candidateName, 'auth.json_work');
     assert.match(serviceB.getStatus().candidateFailures[0]?.reason ?? '', /authentication required/);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -326,7 +326,7 @@ test('CrossNodeAuthSync treats already-newer local candidate as a normal skip', 
       event.kind === 'remote_import_skipped');
     assert.equal(skipped?.reason, 'local candidate is already newer or equal');
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -379,7 +379,7 @@ test('CrossNodeAuthSync serializes concurrent remote import validation', async (
 
     assert.equal(maxActiveValidations, 1);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -426,7 +426,7 @@ test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', asyn
     }), true);
     assert.equal(imported, true);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -478,7 +478,7 @@ test('CrossNodeAuthSync recovery notifies when all peers lack a usable candidate
     assert.equal(failure?.kind, 'recovery_failed');
     assert.match(failure && 'reason' in failure ? failure.reason : '', /all peers replied/);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -521,7 +521,7 @@ test('CrossNodeAuthSync refresh lease requires peer grant', async () => {
     assert.equal(denied.ok, false);
     assert.match(denied.reason ?? '', /not idle/);
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    await removeTempTree(root);
   }
 });
 
@@ -553,4 +553,20 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   assert.equal(predicate(), true);
+}
+
+async function removeTempTree(root: string): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await fs.rm(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      if (code !== 'ENOTEMPTY' && code !== 'EBUSY') {
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
+    }
+  }
+  await fs.rm(root, { recursive: true, force: true });
 }
