@@ -228,7 +228,10 @@ test('AuthCandidateMirror recovers interrupted validation symlink on startup', a
     const mirror = new AuthCandidateMirror(canonical, [], logger as any, statusPath);
     await mirror.initialize();
 
-    assert.equal(await fs.realpath(path.join(canonical, 'auth.json')), path.join(canonical, 'auth.json_status'));
+    assert.equal(
+      await fs.realpath(path.join(canonical, 'auth.json')),
+      await fs.realpath(path.join(canonical, 'auth.json_status')),
+    );
     await assert.rejects(fs.stat(path.join(canonical, '.auth-sync-validate-test.json')));
     assert.equal(warnings.at(-1)?.event, 'codex.auth_temp_symlink_recovered');
     assert.equal(warnings.at(-1)?.data.newTarget, path.join(canonical, 'auth.json_status'));
@@ -257,7 +260,7 @@ test('AuthCandidateMirror falls back to newest parseable candidate for validatio
     const mirror = new AuthCandidateMirror(canonical, [{ id: 'bot1', authDir: runtime }], loggerStub as any);
     await mirror.initialize();
 
-    assert.equal(await fs.realpath(path.join(runtime, 'auth.json')), newCandidate);
+    assert.equal(await fs.realpath(path.join(runtime, 'auth.json')), await fs.realpath(newCandidate));
     await assert.rejects(fs.stat(path.join(runtime, '.auth-sync-validate-test.json')));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
