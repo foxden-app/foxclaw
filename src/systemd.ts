@@ -6,8 +6,47 @@ export interface SystemdDropInUpdate {
   replacements: number;
 }
 
+export interface FoxclawSystemdUnitTextOptions {
+  workingDirectory: string;
+  envPath: string;
+  home: string;
+  user: string;
+  logname: string;
+  pathValue: string;
+  execStart: string;
+}
+
 const FOXCLAW_MAIN_PATH_RE =
   /\S*(?:\.pnpm\/@foxden-app\+foxclaw@[^/\s]+\/node_modules\/@foxden-app\/foxclaw|node_modules\/@foxden-app\/foxclaw)\/dist\/main\.js/g;
+
+export function buildFoxclawSystemdUnitText(options: FoxclawSystemdUnitTextOptions): string {
+  return `[Unit]
+Description=FoxClaw local Codex execution bridge
+Documentation=https://github.com/foxden-app/foxclaw
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=${options.workingDirectory}
+EnvironmentFile=-${options.envPath}
+Environment=HOME=${options.home}
+Environment=USER=${options.user}
+Environment=LOGNAME=${options.logname}
+Environment=PATH=${options.pathValue}
+Environment=FOXCLAW_ENV=${options.envPath}
+ExecStart=${options.execStart}
+Restart=always
+RestartSec=10
+TimeoutStopSec=45
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
+`;
+}
 
 export function refreshFoxclawExecStartDropIns(
   userSystemdDir: string,

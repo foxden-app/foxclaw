@@ -168,6 +168,12 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 启用跨节点同步后，联系人 bot 的私聊会收到节点级通知：本机 auth 更新并开始发往哪些 peer、收到远端包后是排队还是立即验证、导入成功/跳过/失败原因、auth 恢复时正在查询哪些 peer、peer 回应了什么，以及所有 peer 都无法提供可用副本时的人工介入提示。通知不会包含 auth 内容、token 或同步密文。
 
+从 0.5.2 起，`/auth sync status` 会把同步系统级 `最近错误` 和单个 auth 的 `候选失败` 分开显示。比如某个远端候选返回 `token_invalidated` 或 access token 过期时，只会记录到该候选名下面；当前 `auth.json` 是否健康仍以当前 auth 的 usage 验证为准。`local candidate is already newer or equal` 属于正常跳过，不会记为错误。
+
+手动 `/auth` 切换和 `/auth reload` 只会尝试同节点本地 mirror 恢复，不会主动向跨节点 peer 发起 pull。只有 FoxClaw 检测到当前 auth 真的出现认证问题并进入自动恢复时，才会向 peer 查询可用副本。恢复超时通知会包含 request id、候选名、peer 列表和等待时长；如果等待期间收到过同 peer 的其他 auth sync 消息，通知会标明 peer 可达但该请求超时。
+
+如果升级或重启正好打断远端候选 usage 验证，旧版本可能留下 `auth.json -> .auth-sync-validate-*` 临时 symlink。0.5.2 起 FoxClaw 启动时会自动检测并恢复到 mirror 状态记录的候选，或同目录最近修改且可解析的真实 `auth.json_*` 候选，然后清理临时文件。
+
 5. 只有在完全理解 refresh token 轮换风险时，才测试：
 
 ```text

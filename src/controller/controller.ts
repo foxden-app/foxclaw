@@ -122,7 +122,7 @@ import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
-  recoverAuthCandidate?: (runtimeId: string, candidateName: string) => Promise<boolean>;
+  recoverAuthCandidate?: (runtimeId: string, candidateName: string, options?: { crossNode?: boolean }) => Promise<boolean>;
   acquireAuthRefreshLease?: (reason: string) => Promise<{ ok: boolean; leaseId: string | null; reason?: string | null }>;
   releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
   getAuthSyncStatus?: () => RuntimeStatus['authSync'];
@@ -845,6 +845,14 @@ export class BridgeSessionCore {
             }));
             if (serviceStatus.authSync.lastError) {
               lines.push(t(locale, 'status_auth_sync_error', { value: serviceStatus.authSync.lastError }));
+            }
+            if (serviceStatus.authSync.candidateFailures?.length) {
+              lines.push(t(locale, 'status_auth_sync_candidate_failures', {
+                value: serviceStatus.authSync.candidateFailures
+                  .slice(0, 3)
+                  .map((failure) => `${failure.candidateName}: ${failure.reason}`)
+                  .join('; '),
+              }));
             }
           }
           if (serviceStatus.lastUpdate) {
@@ -4718,7 +4726,7 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, t(locale, 'auth_reload_restarting'));
     const currentCandidate = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
     const recovered = currentCandidate
-      ? await this.recoverCodexAuthCandidate(currentCandidate.name)
+      ? await this.recoverCodexAuthCandidate(currentCandidate.name, { crossNode: false })
       : false;
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
@@ -5874,7 +5882,7 @@ export class BridgeSessionCore {
     automatic: boolean,
     sendResult = true,
   ): Promise<void> {
-    const recovered = await this.recoverCodexAuthCandidate(candidate.name);
+    const recovered = await this.recoverCodexAuthCandidate(candidate.name, { crossNode: automatic });
     const result = await switchCodexAuth(candidate.path, this.resolveAuthDir());
     this.authRotationFailedTargets.delete(candidate.path);
     this.pendingTurnErrors.clear();
@@ -5897,12 +5905,12 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, lines.join('\n'));
   }
 
-  private async recoverCodexAuthCandidate(candidateName: string): Promise<boolean> {
+  private async recoverCodexAuthCandidate(candidateName: string, options: { crossNode?: boolean } = { crossNode: true }): Promise<boolean> {
     if (!this.coordinator?.recoverAuthCandidate) {
       return false;
     }
     try {
-      return await this.coordinator.recoverAuthCandidate(this.authRuntimeId(), candidateName);
+      return await this.coordinator.recoverAuthCandidate(this.authRuntimeId(), candidateName, options);
     } catch (error) {
       this.logger.warn('codex.auth_candidate_recovery_failed', {
         candidate: candidateName,
@@ -9673,6 +9681,18 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
   }
   if (status.lastError) {
     lines.push(t(locale, 'auth_sync_status_error', { value: status.lastError }));
+  }
+  if (status.candidateFailures?.length) {
+    lines.push(t(locale, 'auth_sync_status_candidate_failures'));
+    for (const failure of status.candidateFailures.slice(0, 5)) {
+      lines.push(t(locale, 'auth_sync_status_candidate_failure', {
+        candidate: failure.candidateName,
+        reason: failure.reason,
+        source: failure.sourceLabel ?? failure.sourceNodeId ?? t(locale, 'unknown'),
+        peer: failure.peer ?? t(locale, 'unknown'),
+        time: failure.updatedAt,
+      }));
+    }
   }
   return lines.join('\n');
 }

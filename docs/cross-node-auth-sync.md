@@ -168,6 +168,12 @@ Note: `/auth sync push all` saying “sent” only means this node successfully 
 
 When cross-node sync is enabled, the contact bot private chat receives node-level notifications: local auth updates and the peers being contacted, received remote bundles and whether they were queued or immediately validated, import success/skip/failure reasons, recovery peer queries and peer replies, and a manual-intervention notice when every peer lacks an importable copy. Notifications never include auth contents, tokens, or encrypted bundle payloads.
 
+Starting in 0.5.2, `/auth sync status` separates sync-system `Last error` from per-auth `Candidate failures`. For example, a remote candidate that returns `token_invalidated` or has an expired access token is recorded under that candidate name only; current `auth.json` health is still determined by validating the current auth usage. `local candidate is already newer or equal` is a normal skip, not an error.
+
+Manual `/auth` switches and `/auth reload` recover from same-node local mirrors only and do not send cross-node pull requests. FoxClaw queries peers only during automatic recovery after it detects a real auth problem. Recovery timeout notifications include the request id, candidate name, peer list, and wait duration; if another auth sync message arrived from the same peer during that wait, the notification says the peer was reachable but this request timed out.
+
+If an upgrade or restart interrupts remote candidate usage validation, older versions could leave `auth.json -> .auth-sync-validate-*` behind. Starting in 0.5.2, FoxClaw checks for this at startup, restores `auth.json` to the mirror-status candidate or the newest parseable real `auth.json_*` candidate in the same directory, and removes stale validation temp files.
+
 5. Only test refresh-token rotation after you understand the risk:
 
 ```text

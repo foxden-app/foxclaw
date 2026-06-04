@@ -391,6 +391,15 @@ export interface RuntimeStatus {
     lastPullAt: string | null;
     lastPullCandidate: string | null;
     lastError: string | null;
+    candidateFailures?: Array<{
+      candidateName: string;
+      reason: string;
+      sourceNodeId: string | null;
+      sourceLabel: string | null;
+      peer: string | null;
+      mode: 'push' | 'pull';
+      updatedAt: string;
+    }>;
     activeLeaseId: string | null;
   } | null;
   lastUpdate?: {

@@ -38,7 +38,18 @@ export interface AuthSyncStatus {
   lastPullAt: string | null;
   lastPullCandidate: string | null;
   lastError: string | null;
+  candidateFailures: AuthSyncCandidateFailure[];
   activeLeaseId: string | null;
+}
+
+export interface AuthSyncCandidateFailure {
+  candidateName: string;
+  reason: string;
+  sourceNodeId: string | null;
+  sourceLabel: string | null;
+  peer: string | null;
+  mode: AuthSyncRemoteImportMode;
+  updatedAt: string;
 }
 
 export interface AuthSyncValidationResult {
@@ -61,10 +72,10 @@ export type AuthSyncNotification =
   | { kind: 'remote_import_imported'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode }
   | { kind: 'remote_import_skipped'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode; reason: string }
   | { kind: 'remote_import_failed'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode; reason: string }
-  | { kind: 'recovery_started'; candidateName: string; peers: string[] }
+  | { kind: 'recovery_started'; candidateName: string; requestId: string; peers: string[]; timeoutMs: number }
   | { kind: 'recovery_peer_empty'; candidateName: string; peer: string; reason: string }
   | { kind: 'recovery_peer_bundle_received'; candidateName: string; peer: string; sourceNodeId: string }
-  | { kind: 'recovery_failed'; candidateName: string; peers: string[]; reason: string }
+  | { kind: 'recovery_failed'; candidateName: string; requestId?: string; peers: string[]; reason: string; waitMs?: number; peerReachability?: AuthSyncPeerReachability[] }
   | { kind: 'pull_request_received'; candidateName: string; peer: string; requesterNodeId: string }
   | { kind: 'pull_response_sent'; candidateName: string; peer: string; result: AuthSyncPullResponseResult; reason: string | null }
   | { kind: 'sync_error'; reason: string };
@@ -82,6 +93,12 @@ export interface AuthSyncImportCallbacks {
   notify?: (event: AuthSyncNotification) => Promise<void>;
 }
 
+export interface AuthSyncPeerReachability {
+  peer: string;
+  reachableDuringRequest: boolean;
+  lastReceivedAt: string | null;
+}
+
 export interface AuthSyncTransport {
   send: (peer: string, envelope: string) => Promise<void>;
 }
@@ -96,6 +113,7 @@ interface AuthSyncStateFile {
   lastPullAt?: string | null;
   lastPullCandidate?: string | null;
   lastError?: string | null;
+  lastCandidateFailures?: Record<string, AuthSyncCandidateFailure>;
 }
 
 interface AuthSyncBundlePayload {
@@ -144,12 +162,14 @@ interface AuthSyncImportOutcome {
 }
 
 interface PendingPull {
+  requestId: string;
   candidateName: string;
   peers: string[];
   emptyReplies: Map<string, string>;
   resolve: (value: boolean) => void;
   timer: NodeJS.Timeout;
   finished: boolean;
+  startedAt: number;
 }
 
 interface PendingLease {
@@ -198,6 +218,7 @@ export class CrossNodeAuthSync {
   private readonly pendingLeases = new Map<string, PendingLease>();
   private readonly pendingTests = new Map<string, PendingTest>();
   private seenNonces = new Map<string, number>();
+  private lastPeerActivityAt = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private importProcessorActive = false;
   private activeRemoteLease: { leaseId: string; peer: string; expiresAt: number } | null = null;
@@ -211,6 +232,7 @@ export class CrossNodeAuthSync {
     lastPullAt: null,
     lastPullCandidate: null,
     lastError: null,
+    lastCandidateFailures: {},
   };
 
   constructor(
@@ -240,6 +262,7 @@ export class CrossNodeAuthSync {
       lastPullAt: stored.lastPullAt ?? null,
       lastPullCandidate: stored.lastPullCandidate ?? null,
       lastError: stored.lastError ?? null,
+      lastCandidateFailures: normalizeCandidateFailures(stored.lastCandidateFailures ?? {}),
     };
     await fs.mkdir(this.config.tempDir, { recursive: true, mode: 0o700 });
     await this.writeState();
@@ -280,6 +303,8 @@ export class CrossNodeAuthSync {
       lastPullAt: this.state.lastPullAt,
       lastPullCandidate: this.state.lastPullCandidate,
       lastError: this.state.lastError,
+      candidateFailures: Object.values(this.state.lastCandidateFailures)
+        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
       activeLeaseId: this.activeLocalLease?.leaseId ?? this.activeRemoteLease?.leaseId ?? null,
     };
   }
@@ -363,30 +388,46 @@ export class CrossNodeAuthSync {
     if (!this.isReady() || !isAuthCandidateName(candidateName)) return false;
     const requestId = crypto.randomUUID();
     const peers = [...this.peers];
-    this.notify({ kind: 'recovery_started', candidateName, peers });
+    const startedAt = Date.now();
+    this.notify({ kind: 'recovery_started', candidateName, requestId, peers, timeoutMs: PULL_TIMEOUT_MS });
     const result = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         const pending = this.pendingPulls.get(requestId);
         if (pending) {
           pending.finished = true;
           this.pendingPulls.delete(requestId);
+          const waitMs = Date.now() - pending.startedAt;
+          const peerReachability = this.describePeerReachability(pending.peers, pending.startedAt);
+          const reason = formatPullTimeoutReason(pending, waitMs, peerReachability);
+          this.logger.warn('auth.sync.pull_timeout', {
+            requestId,
+            candidateName,
+            peers: pending.peers,
+            waitMs,
+            peerReachability,
+          });
           this.notify({
             kind: 'recovery_failed',
             candidateName,
+            requestId,
             peers,
-            reason: `timed out waiting for ${this.peers.length} auth sync peer response(s)`,
+            reason,
+            waitMs,
+            peerReachability,
           });
           resolve(false);
         }
       }, PULL_TIMEOUT_MS);
       timer.unref();
       this.pendingPulls.set(requestId, {
+        requestId,
         candidateName,
         peers,
         emptyReplies: new Map(),
         resolve,
         timer,
         finished: false,
+        startedAt,
       });
       void this.sendToAll({
         kind: 'pull.request',
@@ -398,11 +439,15 @@ export class CrossNodeAuthSync {
         clearTimeout(timer);
         this.pendingPulls.delete(requestId);
         this.recordError(`pull request failed: ${formatError(error)}`, false);
+        const waitMs = Date.now() - startedAt;
         this.notify({
           kind: 'recovery_failed',
           candidateName,
+          requestId,
           peers: [...this.peers],
-          reason: formatError(error),
+          reason: `pull request send failed; requestId=${requestId}; candidate=${candidateName}; peers=${this.peers.join(', ') || 'none'}; waitMs=${waitMs}; error=${formatError(error)}`,
+          waitMs,
+          peerReachability: this.describePeerReachability(peers, startedAt),
         });
         resolve(false);
       });
@@ -515,6 +560,7 @@ export class CrossNodeAuthSync {
     this.seenNonces.set(nonceKey, Date.now());
     this.state.lastReceivedAt = new Date().toISOString();
     await this.writeState();
+    this.notePeerActivity(normalizePeerIdentity(peer));
     await this.handleMessage(opened.message, opened.sender, peer);
     return true;
   }
@@ -805,6 +851,7 @@ export class CrossNodeAuthSync {
     if (!result.ok) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote candidate import failed for ${bundle.candidateName}: ${result.reason ?? 'unknown'}`);
     }
+    const clearedFailure = this.clearCandidateFailure(bundle.candidateName);
     if (result.imported) {
       this.state.lastImportedAt = new Date().toISOString();
       this.state.lastImportCandidate = bundle.candidateName;
@@ -829,6 +876,9 @@ export class CrossNodeAuthSync {
         mode,
         reason: result.reason ?? 'local candidate did not need an update',
       });
+      if (clearedFailure) {
+        await this.writeState();
+      }
     }
     return { ok: true, imported: result.imported, reason: result.reason ?? null };
   }
@@ -971,15 +1021,15 @@ export class CrossNodeAuthSync {
     }
   }
 
-  private rejectImport(
+  private async rejectImport(
     bundle: AuthSyncBundlePayload,
     sourceNodeId: string,
     sourceLabel: string,
     fromPeer: string,
     mode: AuthSyncRemoteImportMode,
     reason: string,
-  ): AuthSyncImportOutcome {
-    this.recordError(reason, false);
+  ): Promise<AuthSyncImportOutcome> {
+    await this.recordCandidateFailure(bundle, sourceNodeId, sourceLabel, fromPeer, mode, reason);
     this.notify({
       kind: 'remote_import_failed',
       candidateName: bundle.candidateName,
@@ -990,6 +1040,62 @@ export class CrossNodeAuthSync {
       reason,
     });
     return { ok: false, imported: false, reason };
+  }
+
+  private async recordCandidateFailure(
+    bundle: AuthSyncBundlePayload,
+    sourceNodeId: string,
+    sourceLabel: string,
+    fromPeer: string,
+    mode: AuthSyncRemoteImportMode,
+    reason: string,
+  ): Promise<void> {
+    const candidateName = typeof bundle.candidateName === 'string' && bundle.candidateName.trim()
+      ? bundle.candidateName
+      : 'invalid-bundle';
+    this.state.lastCandidateFailures[candidateName] = {
+      candidateName,
+      reason,
+      sourceNodeId,
+      sourceLabel,
+      peer: fromPeer,
+      mode,
+      updatedAt: new Date().toISOString(),
+    };
+    this.state.lastCandidateFailures = pruneCandidateFailures(this.state.lastCandidateFailures);
+    this.logger.warn('auth.sync.candidate_failed', {
+      candidateName,
+      sourceNodeId,
+      sourceLabel,
+      peer: fromPeer,
+      mode,
+      reason,
+    });
+    await this.writeState();
+  }
+
+  private clearCandidateFailure(candidateName: string): boolean {
+    if (!this.state.lastCandidateFailures[candidateName]) {
+      return false;
+    }
+    delete this.state.lastCandidateFailures[candidateName];
+    return true;
+  }
+
+  private notePeerActivity(peer: string): void {
+    const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
+    this.lastPeerActivityAt.set(matchedPeer, Date.now());
+  }
+
+  private describePeerReachability(peers: string[], sinceMs: number): AuthSyncPeerReachability[] {
+    return peers.map((peer) => {
+      const lastActivityAt = this.lastPeerActivityAt.get(peer) ?? null;
+      return {
+        peer,
+        reachableDuringRequest: lastActivityAt !== null && lastActivityAt >= sinceMs,
+        lastReceivedAt: lastActivityAt === null ? null : new Date(lastActivityAt).toISOString(),
+      };
+    });
   }
 
   private notify(event: AuthSyncNotification): void {
@@ -1100,6 +1206,53 @@ function hashAccountId(accountId: string): string {
 
 function sha256(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function normalizeCandidateFailures(raw: Record<string, Partial<AuthSyncCandidateFailure>>): Record<string, AuthSyncCandidateFailure> {
+  const failures: Record<string, AuthSyncCandidateFailure> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const candidateName = typeof value.candidateName === 'string' && value.candidateName.trim()
+      ? value.candidateName
+      : key;
+    const reason = typeof value.reason === 'string' ? value.reason : '';
+    const mode = value.mode === 'pull' ? 'pull' : 'push';
+    const updatedAt = typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt))
+      ? value.updatedAt
+      : new Date().toISOString();
+    if (!candidateName || !reason) {
+      continue;
+    }
+    failures[candidateName] = {
+      candidateName,
+      reason,
+      sourceNodeId: typeof value.sourceNodeId === 'string' ? value.sourceNodeId : null,
+      sourceLabel: typeof value.sourceLabel === 'string' ? value.sourceLabel : null,
+      peer: typeof value.peer === 'string' ? value.peer : null,
+      mode,
+      updatedAt,
+    };
+  }
+  return pruneCandidateFailures(failures);
+}
+
+function pruneCandidateFailures(failures: Record<string, AuthSyncCandidateFailure>): Record<string, AuthSyncCandidateFailure> {
+  return Object.fromEntries(Object.entries(failures)
+    .sort(([, left], [, right]) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+    .slice(0, 20));
+}
+
+function formatPullTimeoutReason(
+  pending: PendingPull,
+  waitMs: number,
+  peerReachability: AuthSyncPeerReachability[],
+): string {
+  const reachable = peerReachability
+    .filter((entry) => entry.reachableDuringRequest)
+    .map((entry) => entry.peer);
+  const reachableSuffix = reachable.length > 0
+    ? `; peer reachable but this request timed out: ${reachable.join(', ')}`
+    : '';
+  return `timed out waiting for ${pending.peers.length} auth sync peer response(s); requestId=${pending.requestId}; candidate=${pending.candidateName}; peers=${pending.peers.join(', ') || 'none'}; waitMs=${waitMs}${reachableSuffix}`;
 }
 
 function normalizeConfiguredPeer(peer: string): string {

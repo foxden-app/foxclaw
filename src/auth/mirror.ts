@@ -92,7 +92,12 @@ export class AuthCandidateMirror {
   async initialize(): Promise<void> {
     this.lastStatus = await readMirrorStatus(this.statusPath);
     await fs.mkdir(this.canonicalDir, { recursive: true, mode: 0o700 });
+    await this.recoverInterruptedValidationSymlink(this.canonicalDir);
     await this.ensureCanonicalDefaultCandidate();
+    for (const runtime of this.runtimes) {
+      await fs.mkdir(runtime.authDir, { recursive: true, mode: 0o700 });
+      await this.recoverInterruptedValidationSymlink(runtime.authDir);
+    }
     const candidateNames = await this.collectCandidateNames();
     for (const name of candidateNames) {
       await this.reconcileCandidateAtStartup(name);
@@ -109,6 +114,7 @@ export class AuthCandidateMirror {
           await atomicCopy(path.join(this.canonicalDir, name), destination);
         }
       }
+      await this.recoverInterruptedValidationSymlink(runtime.authDir);
       if (defaultCandidate && !(await exists(path.join(runtime.authDir, 'auth.json')))) {
         await pointAuthSymlink(runtime.authDir, defaultCandidate);
       }
@@ -498,6 +504,57 @@ export class AuthCandidateMirror {
     const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
     return runtime?.label ?? runtimeId;
   }
+
+  private async recoverInterruptedValidationSymlink(authDir: string): Promise<void> {
+    const authPath = path.join(authDir, 'auth.json');
+    const oldTarget = await fs.readlink(authPath).catch(() => null);
+    if (!oldTarget) return;
+    const oldTargetPath = path.resolve(authDir, oldTarget);
+    if (!path.basename(oldTargetPath).startsWith('.auth-sync-validate-')) return;
+
+    const candidateName = await this.selectValidationRecoveryCandidate(authDir);
+    if (!candidateName) {
+      this.logger.warn('codex.auth_temp_symlink_recovery_failed', {
+        authDir,
+        oldTarget: oldTargetPath,
+        reason: 'no parseable auth candidate found',
+      });
+      return;
+    }
+
+    await pointAuthSymlink(authDir, candidateName);
+    await removeValidationTempFiles(authDir);
+    const newTarget = path.join(authDir, candidateName);
+    this.logger.warn('codex.auth_temp_symlink_recovered', {
+      authDir,
+      oldTarget: oldTargetPath,
+      newTarget,
+    });
+  }
+
+  private async selectValidationRecoveryCandidate(authDir: string): Promise<string | null> {
+    const statusCandidate = this.lastStatus?.candidateName ?? null;
+    if (statusCandidate && isAuthCandidateName(statusCandidate)) {
+      const record = await readChatGptAuthRecord(path.join(authDir, statusCandidate));
+      if (record) {
+        return statusCandidate;
+      }
+    }
+
+    const candidates: Array<{ name: string; mtimeMs: number }> = [];
+    for (const name of await listAuthCandidateNames(authDir)) {
+      const candidatePath = path.join(authDir, name);
+      const [record, stat] = await Promise.all([
+        readChatGptAuthRecord(candidatePath),
+        fs.stat(candidatePath).catch(() => null),
+      ]);
+      if (record && stat?.isFile()) {
+        candidates.push({ name, mtimeMs: stat.mtimeMs });
+      }
+    }
+    candidates.sort((left, right) => right.mtimeMs - left.mtimeMs || left.name.localeCompare(right.name));
+    return candidates[0]?.name ?? null;
+  }
 }
 
 export function isAuthCandidateName(name: string): boolean {
@@ -562,6 +619,13 @@ async function pointAuthSymlink(dir: string, candidateName: string): Promise<voi
   const temporary = path.join(dir, `.auth.json.${process.pid}.${Date.now()}.link`);
   await fs.symlink(path.join(dir, candidateName), temporary);
   await fs.rename(temporary, path.join(dir, 'auth.json'));
+}
+
+async function removeValidationTempFiles(dir: string): Promise<void> {
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && entry.name.startsWith('.auth-sync-validate-'))
+    .map((entry) => fs.rm(path.join(dir, entry.name), { force: true }).catch(() => undefined)));
 }
 
 async function resolveFinalPath(sourcePath: string): Promise<string> {

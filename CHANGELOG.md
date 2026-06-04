@@ -2,6 +2,22 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.2 - 2026-06-04
+
+### 中文
+- Linux systemd unit 改为停止整个 control group，避免升级或重启 FoxClaw 后旧的 `codex app-server --listen` 子进程残留。
+- 启动时自动修复 `auth.json -> .auth-sync-validate-*` 临时验证 symlink 残留，恢复到 mirror 状态候选或同目录最近修改且可解析的真实 `auth.json_*` 候选，并清理临时文件。
+- 跨节点 auth 同步把单候选验证/导入失败记录为“候选失败”，不再污染全局 `lastError`；`/status` 和 `/auth sync status` 会分开展示同步系统错误与候选失败。
+- 手动 `/auth` 切换和 `/auth reload` 只做同节点本地镜像恢复，不再主动向跨节点 peer 查询；只有自动 auth 故障恢复才会跨节点 pull。
+- auth 恢复超时通知补充 request id、候选名、peer、等待时长，并标明等待期间可达但本请求超时的 peer。
+
+### English
+- Changed the Linux systemd unit to stop the whole service control group so FoxClaw upgrades or restarts no longer leave old `codex app-server --listen` children behind.
+- Added startup recovery for `auth.json -> .auth-sync-validate-*` validation symlink leftovers, restoring to the mirror-status candidate or the newest parseable real `auth.json_*` candidate in the same directory and removing stale temp files.
+- Cross-node auth sync now records per-candidate validation/import failures as candidate failures instead of global `lastError`; `/status` and `/auth sync status` show sync-system errors separately from candidate failures.
+- Manual `/auth` switching and `/auth reload` now recover from same-node local mirrors only and no longer query cross-node peers; cross-node pull is reserved for automatic auth-failure recovery.
+- Auth recovery timeout notifications now include request id, candidate name, peers, wait duration, and whether a peer was reachable during the timed-out request.
+
 ## 0.5.1 - 2026-06-04
 
 ### 中文

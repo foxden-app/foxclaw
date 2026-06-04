@@ -277,7 +277,54 @@ test('CrossNodeAuthSync notifies when remote auth validation fails', async () =>
       event.kind === 'remote_import_failed');
     assert.equal(failure?.candidateName, 'auth.json_work');
     assert.match(failure?.reason ?? '', /authentication required/);
-    assert.match(serviceB.getStatus().lastError ?? '', /authentication required/);
+    assert.equal(serviceB.getStatus().lastError, null);
+    assert.equal(serviceB.getStatus().candidateFailures.length, 1);
+    assert.equal(serviceB.getStatus().candidateFailures[0]?.candidateName, 'auth.json_work');
+    assert.match(serviceB.getStatus().candidateFailures[0]?.reason ?? '', /authentication required/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('CrossNodeAuthSync treats already-newer local candidate as a normal skip', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-not-newer-'));
+  try {
+    const candidate = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    const notificationsB: AuthSyncNotification[] = [];
+    const services: { b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records: [candidate] }),
+    );
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({
+        importCandidate: async () => ({ ok: true, imported: false, reason: 'local candidate is already newer or equal' }),
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    await serviceA.publishCandidate('auth.json_work');
+    await waitFor(() => notificationsB.some(event => event.kind === 'remote_import_skipped'));
+
+    assert.equal(serviceB.getStatus().lastError, null);
+    assert.deepEqual(serviceB.getStatus().candidateFailures, []);
+    const skipped = notificationsB.find((event): event is Extract<AuthSyncNotification, { kind: 'remote_import_skipped' }> =>
+      event.kind === 'remote_import_skipped');
+    assert.equal(skipped?.reason, 'local candidate is already newer or equal');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

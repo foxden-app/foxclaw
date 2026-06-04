@@ -1384,6 +1384,15 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
       lastPullAt: null,
       lastPullCandidate: null,
       lastError: null,
+      candidateFailures: [{
+        candidateName: 'auth.json_bad',
+        reason: 'token invalidated',
+        sourceNodeId: 'node-b',
+        sourceLabel: '@botB',
+        peer: '@botB',
+        mode: 'push',
+        updatedAt: '2026-06-01T00:01:00.000Z',
+      }],
       activeLeaseId: null,
     }),
     authSyncPushAll: async () => {
@@ -1406,6 +1415,8 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
 
   assert.match(rig.sentMessages[0]!, /Cross-node auth sync:/);
   assert.match(rig.sentMessages[0]!, /Node: node-a/);
+  assert.match(rig.sentMessages[0]!, /Candidate failures:/);
+  assert.match(rig.sentMessages[0]!, /auth\.json_bad: token invalidated/);
   assert.equal(rig.sentMessages[1], 'Auth sync test complete: sent 1, replies 0.\nMissing replies: @botB');
   assert.equal(rig.sentMessages[2], 'Auth sync push complete: sent 2, skipped 1.');
   assert.equal(tested, true);
@@ -1415,8 +1426,8 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
   const events: string[] = [];
   const rig = createControllerRig(null, {
-    recoverAuthCandidate: async (runtimeId, candidateName) => {
-      events.push(`recover:${runtimeId}:${candidateName}`);
+    recoverAuthCandidate: async (runtimeId, candidateName, options) => {
+      events.push(`recover:${runtimeId}:${candidateName}:crossNode=${String(options?.crossNode)}`);
       return true;
     },
     authCandidateUpdated: async (runtimeId, candidateName) => {
@@ -1439,7 +1450,7 @@ test('/auth switch recovers a newer same-account credential before restart and s
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:1`, 1));
 
   assert.deepEqual(events, [
-    'recover:default:auth.json_b',
+    'recover:default:auth.json_b:crossNode=false',
     'restart',
     'sync:default:auth.json_b',
   ]);
@@ -1969,8 +1980,8 @@ test('/auth add cancel restores previous auth', async (t) => {
 test('auth auto-rotation first tries to recover the current candidate', async (t) => {
   const events: string[] = [];
   const rig = createControllerRig(null, {
-    recoverAuthCandidate: async (runtimeId, candidateName) => {
-      events.push(`recover:${runtimeId}:${candidateName}`);
+    recoverAuthCandidate: async (runtimeId, candidateName, options) => {
+      events.push(`recover:${runtimeId}:${candidateName}:crossNode=${String(options?.crossNode)}`);
       return true;
     },
     authCandidateUpdated: async (runtimeId, candidateName) => {
@@ -2019,7 +2030,7 @@ test('auth auto-rotation first tries to recover the current candidate', async (t
     },
   });
 
-  assert.deepEqual(events, ['recover:default:auth.json_a', 'sync:default:auth.json_a']);
+  assert.deepEqual(events, ['recover:default:auth.json_a:crossNode=true', 'sync:default:auth.json_a']);
   assert.equal(restarts, 1);
   assert.equal(retryStarts.length, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));

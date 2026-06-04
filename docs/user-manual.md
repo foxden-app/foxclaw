@@ -419,7 +419,7 @@ OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token r
 
 ### 6.4 Cross-Node Auth Sync
 
-Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`. The contact bot private chat reports send, receive, queue, import, failure, recovery-query, and manual-intervention states.
+Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`. The contact bot private chat reports send, receive, queue, import, failure, recovery-query, and manual-intervention states; per-candidate validation failures are shown as candidate failures instead of overwriting the sync-system last error.
 
 For the full design, safety boundaries, `.env` examples, and troubleshooting, read the [Cross-Node Auth Sync Setup Guide](./cross-node-auth-sync.md).
 
@@ -460,7 +460,7 @@ Dual-active behavior:
 
 Commands:
 
-- `/auth sync status`: show node id, peers, recent sends/receives/imports, pending imports, and the latest error.
+- `/auth sync status`: show node id, peers, recent sends/receives/imports, pending imports, the sync-system latest error, and per-candidate failures.
 - `/auth sync test`: send an encrypted ping and wait for peer pong replies to verify peer config, shared key, and Bot-to-Bot private messages.
 - `/auth sync push all`: manually broadcast all locally verified candidates without refreshing tokens. “Sent” does not mean the peer imported files; check `/auth sync status` and `/auth` on the peer.
 

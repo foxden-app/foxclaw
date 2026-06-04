@@ -4,11 +4,27 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildFoxclawSystemdUnitText,
   refreshFoxclawExecStartDropIns,
   refreshFoxclawExecStartText,
   removeFoxclawExecStartDropIns,
   removeFoxclawExecStartText,
 } from './systemd.js';
+
+test('buildFoxclawSystemdUnitText stops the full service control group', () => {
+  const unit = buildFoxclawSystemdUnitText({
+    workingDirectory: '/home/wuya/.foxclaw',
+    envPath: '/home/wuya/.foxclaw/.env',
+    home: '/home/wuya',
+    user: 'wuya',
+    logname: 'wuya',
+    pathValue: '/usr/bin',
+    execStart: '/usr/bin/node /foxclaw/dist/main.js serve',
+  });
+
+  assert.match(unit, /^KillMode=control-group$/m);
+  assert.doesNotMatch(unit, /^KillMode=process$/m);
+});
 
 test('refreshFoxclawExecStartText updates proxychains drop-in ExecStart', () => {
   const before = [

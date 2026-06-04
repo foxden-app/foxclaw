@@ -21,7 +21,7 @@ import type { AuthSyncNotification } from './auth/cross_node_sync.js';
 import type { AppLocale } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
-import { refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
+import { buildFoxclawSystemdUnitText, refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
 import {
   createSelfUpdateRuntime,
   inferPnpmHomeFromEntryPoint,
@@ -380,9 +380,10 @@ async function runServeCli(): Promise<void> {
           && (!authSync || authSync.isIdle()),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
-        recoverAuthCandidate: async (runtimeId: string, candidateName: string): Promise<boolean> => {
+        recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
           const local = await mirror.recoverRuntimeCandidate(runtimeId, candidateName);
           if (local) return true;
+          if (options.crossNode === false) return false;
           const current = await mirror.readRuntimeCandidate(runtimeId, candidateName)
             ?? await mirror.readNewestCandidate(candidateName);
           return await authSync?.requestRecovery(candidateName, {
@@ -583,9 +584,10 @@ async function runServeCli(): Promise<void> {
         && (!singleAuthSync || singleAuthSync.isIdle()),
       authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
         singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
-      recoverAuthCandidate: async (runtimeId: string, candidateName: string): Promise<boolean> => {
+      recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
         const local = await singleMirror?.recoverRuntimeCandidate(runtimeId, candidateName) ?? null;
         if (local) return true;
+        if (options.crossNode === false) return false;
         const current = await singleMirror?.readRuntimeCandidate(runtimeId, candidateName)
           ?? await singleMirror?.readNewestCandidate(candidateName)
           ?? null;
@@ -782,13 +784,21 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
       case 'remote_import_failed':
         return `${event.mode === 'pull' ? '跨节点拉取导入失败' : '跨节点 auth 导入失败'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}\n需要注意：如果其他候选也无法恢复，请人工介入重新登录或刷新这个 auth。`;
       case 'recovery_started':
-        return `auth 恢复开始：${event.candidateName}\n处理：同节点没有可用较新副本，正在向跨节点 peer 查询：${peers}`;
+        return `auth 恢复开始：${event.candidateName}\nRequest：${event.requestId}\n处理：同节点没有可用较新副本，正在向跨节点 peer 查询：${peers}，最长等待 ${event.timeoutMs}ms`;
       case 'recovery_peer_empty':
         return `auth 恢复收到 peer 回应但没有可用副本：${event.candidateName}\nPeer：${event.peer}\n原因：${event.reason}`;
       case 'recovery_peer_bundle_received':
         return `auth 恢复收到 peer 候选：${event.candidateName}\nPeer：${event.peer}，来源节点：${event.sourceNodeId}\n处理：正在验证 usage 后导入。`;
       case 'recovery_failed':
-        return `auth 恢复已穷尽：${event.candidateName}\n已查询 peer：${peers}\n原因：${event.reason}\n请人工介入：使用 /auth add <name> 或设备登录重新生成可用 auth。`;
+        return [
+          `auth 恢复已穷尽：${event.candidateName}`,
+          event.requestId ? `Request：${event.requestId}` : null,
+          `已查询 peer：${peers}`,
+          event.waitMs !== undefined ? `等待：${event.waitMs}ms` : null,
+          formatPeerReachability(event.peerReachability, 'zh'),
+          `原因：${event.reason}`,
+          '请人工介入：使用 /auth add <name> 或设备登录重新生成可用 auth。',
+        ].filter(Boolean).join('\n');
       case 'pull_request_received':
         return `收到 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}，请求节点：${event.requesterNodeId}`;
       case 'pull_response_sent':
@@ -823,13 +833,21 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
     case 'remote_import_failed':
       return `${event.mode === 'pull' ? 'Cross-node pull import failed' : 'Cross-node auth import failed'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}\nAttention: if no other candidate can recover this account, run device login or refresh this auth manually.`;
     case 'recovery_started':
-      return `Auth recovery started: ${event.candidateName}\nAction: no newer same-node copy was available; querying cross-node peers: ${peers}`;
+      return `Auth recovery started: ${event.candidateName}\nRequest: ${event.requestId}\nAction: no newer same-node copy was available; querying cross-node peers: ${peers}; timeout ${event.timeoutMs}ms`;
     case 'recovery_peer_empty':
       return `Auth recovery peer replied without usable auth: ${event.candidateName}\nPeer: ${event.peer}\nReason: ${event.reason}`;
     case 'recovery_peer_bundle_received':
       return `Auth recovery peer returned a candidate: ${event.candidateName}\nPeer: ${event.peer}, source node: ${event.sourceNodeId}\nAction: validating usage before import.`;
     case 'recovery_failed':
-      return `Auth recovery exhausted: ${event.candidateName}\nPeers checked: ${peers}\nReason: ${event.reason}\nManual action: use /auth add <name> or device login to create a usable auth.`;
+      return [
+        `Auth recovery exhausted: ${event.candidateName}`,
+        event.requestId ? `Request: ${event.requestId}` : null,
+        `Peers checked: ${peers}`,
+        event.waitMs !== undefined ? `Wait: ${event.waitMs}ms` : null,
+        formatPeerReachability(event.peerReachability, 'en'),
+        `Reason: ${event.reason}`,
+        'Manual action: use /auth add <name> or device login to create a usable auth.',
+      ].filter(Boolean).join('\n');
     case 'pull_request_received':
       return `Received peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}, requester node: ${event.requesterNodeId}`;
     case 'pull_response_sent':
@@ -841,6 +859,20 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
 
 function formatPeerList(peers: string[], locale: AppLocale): string {
   return peers.length > 0 ? peers.join(', ') : (locale === 'zh' ? '无' : 'none');
+}
+
+function formatPeerReachability(
+  reachability: Array<{ peer: string; reachableDuringRequest: boolean; lastReceivedAt: string | null }> | undefined,
+  locale: AppLocale,
+): string | null {
+  const reachable = (reachability ?? []).filter((entry) => entry.reachableDuringRequest);
+  if (reachable.length === 0) return null;
+  const details = reachable
+    .map((entry) => `${entry.peer}${entry.lastReceivedAt ? ` @ ${entry.lastReceivedAt}` : ''}`)
+    .join(', ');
+  return locale === 'zh'
+    ? `注意：这些 peer 在本次等待期间有其他 auth sync 消息，说明 peer 可达但这个请求超时：${details}`
+    : `Note: these peers sent other auth sync messages during this wait, so the peer was reachable but this request timed out: ${details}`;
 }
 
 function formatSource(sourceLabel: string, sourceNodeId: string): string {
@@ -1405,35 +1437,15 @@ function installSystemd(): void {
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
   const escapedEntryPoint = systemdEscape(entryPoint);
-  fs.writeFileSync(
-    unitPath,
-    `[Unit]
-Description=FoxClaw local Codex execution bridge
-Documentation=https://github.com/foxden-app/foxclaw
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-[Service]
-Type=simple
-WorkingDirectory=${systemdEscape(configDir)}
-EnvironmentFile=-${systemdEscape(envPath)}
-Environment=HOME=${systemdEscape(process.env.HOME || '')}
-Environment=USER=${systemdEscape(process.env.USER || '')}
-Environment=LOGNAME=${systemdEscape(process.env.LOGNAME || process.env.USER || '')}
-Environment=PATH=${systemdEscape(pathValue)}
-Environment=FOXCLAW_ENV=${systemdEscape(envPath)}
-ExecStart=${execStart}
-Restart=always
-RestartSec=10
-TimeoutStopSec=45
-KillMode=process
-
-[Install]
-WantedBy=default.target
-`,
-  );
+  fs.writeFileSync(unitPath, buildFoxclawSystemdUnitText({
+    workingDirectory: systemdEscape(configDir),
+    envPath: systemdEscape(envPath),
+    home: systemdEscape(process.env.HOME || ''),
+    user: systemdEscape(process.env.USER || ''),
+    logname: systemdEscape(process.env.LOGNAME || process.env.USER || ''),
+    pathValue: systemdEscape(pathValue),
+    execStart,
+  }));
   if (proxychainsConf) {
     console.log(`[OK] systemd proxychains enabled: ${proxychainsConf}`);
   } else if (nodeProxyArgs) {

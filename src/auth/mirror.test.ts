@@ -197,6 +197,73 @@ test('AuthCandidateMirror ignores invalid runtime-only candidates during initial
   }
 });
 
+test('AuthCandidateMirror recovers interrupted validation symlink on startup', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-temp-symlink-'));
+  const canonical = path.join(root, 'canonical');
+  const statusPath = path.join(root, 'runtime', 'auth-mirror.json');
+  const warnings: Array<{ event: string; data: Record<string, unknown> }> = [];
+  const logger = {
+    ...loggerStub,
+    warn(event: string, data: Record<string, unknown>): void {
+      warnings.push({ event, data });
+    },
+  };
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    await fs.mkdir(path.dirname(statusPath), { recursive: true });
+    await fs.writeFile(path.join(canonical, 'auth.json_newer'), auth('acct-1', '2026-05-27T00:00:00.000Z'));
+    await fs.writeFile(path.join(canonical, 'auth.json_status'), auth('acct-1', '2026-05-01T00:00:00.000Z'));
+    await fs.writeFile(
+      statusPath,
+      `${JSON.stringify({
+        candidateName: 'auth.json_status',
+        sourceRuntimeId: 'bot1',
+        sourceLabel: '@botA',
+        syncedAt: '2026-06-01T00:00:00.000Z',
+      })}\n`,
+    );
+    await fs.writeFile(path.join(canonical, '.auth-sync-validate-test.json'), auth('acct-temp', '2026-06-01T00:00:00.000Z'));
+    await fs.symlink(path.join(canonical, '.auth-sync-validate-test.json'), path.join(canonical, 'auth.json'));
+
+    const mirror = new AuthCandidateMirror(canonical, [], logger as any, statusPath);
+    await mirror.initialize();
+
+    assert.equal(await fs.realpath(path.join(canonical, 'auth.json')), path.join(canonical, 'auth.json_status'));
+    await assert.rejects(fs.stat(path.join(canonical, '.auth-sync-validate-test.json')));
+    assert.equal(warnings.at(-1)?.event, 'codex.auth_temp_symlink_recovered');
+    assert.equal(warnings.at(-1)?.data.newTarget, path.join(canonical, 'auth.json_status'));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('AuthCandidateMirror falls back to newest parseable candidate for validation symlink recovery', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-temp-runtime-'));
+  const canonical = path.join(root, 'canonical');
+  const runtime = path.join(root, 'bot1');
+  try {
+    await fs.mkdir(runtime, { recursive: true });
+    const oldCandidate = path.join(runtime, 'auth.json_old');
+    const newCandidate = path.join(runtime, 'auth.json_new');
+    await fs.writeFile(oldCandidate, auth('acct-1', '2026-05-01T00:00:00.000Z'));
+    await fs.writeFile(newCandidate, auth('acct-1', '2026-05-27T00:00:00.000Z'));
+    const oldTime = new Date('2026-05-01T00:00:00.000Z');
+    const newTime = new Date('2026-05-27T00:00:00.000Z');
+    await fs.utimes(oldCandidate, oldTime, oldTime);
+    await fs.utimes(newCandidate, newTime, newTime);
+    await fs.writeFile(path.join(runtime, '.auth-sync-validate-test.json'), auth('acct-temp', '2026-06-01T00:00:00.000Z'));
+    await fs.symlink(path.join(runtime, '.auth-sync-validate-test.json'), path.join(runtime, 'auth.json'));
+
+    const mirror = new AuthCandidateMirror(canonical, [{ id: 'bot1', authDir: runtime }], loggerStub as any);
+    await mirror.initialize();
+
+    assert.equal(await fs.realpath(path.join(runtime, 'auth.json')), newCandidate);
+    await assert.rejects(fs.stat(path.join(runtime, '.auth-sync-validate-test.json')));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror recovers a newer same-account credential before a runtime switches auth', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-recover-'));
   const canonical = path.join(root, 'canonical');
