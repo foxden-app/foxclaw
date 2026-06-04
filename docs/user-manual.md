@@ -419,7 +419,7 @@ The right-side `✅` / `⏸️` button controls whether the candidate participat
 
 `/auth refresh all` is a command-only maintenance action because ChatGPT refresh tokens are rotated. It is allowed only when every Telegram runtime, the Weixin runtime, approvals, inputs, logins, and auth mirroring are idle. The command first shows a risk confirmation: if OpenAI/Codex consumes an old refresh token but the new token cannot be saved because of network, process, or disk failure, that candidate may require device login or phone verification again. After confirmation, FoxClaw visits every ChatGPT candidate, asks Codex to force-refresh tokens with `account/read refreshToken=true`, verifies the result through the usage endpoint, mirrors successful candidates, restores the original current auth, and shows a summary.
 
-OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token replay grace period. Codex refreshes automatically when an access token approaches expiry; when it cannot parse the access-token `exp`, current Codex uses a `last_refresh` fallback of about 8 days. The panel labels candidates without a refresh record in that interval as `not recently refreshed`, but this is only a maintenance hint. It does not prove expiry and does not trigger bulk keepalive refreshes. Do not use `/auth refresh all` as a routine keepalive command.
+OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token replay grace period. Codex refreshes automatically when an access token approaches expiry; when it cannot parse the access-token `exp`, current Codex uses a `last_refresh` fallback of about 8 days. The panel labels candidates without a refresh record in that interval as `not recently refreshed`. FoxClaw also checks once per hour in the background: if an enabled ChatGPT candidate has a `last_refresh` older than 9 days, FoxClaw proactively refreshes that batch only when every runtime is idle, no approvals/inputs/logins/auth mirror writes are active, and the node holds the cross-node refresh lease. The private bot chat reports the proactive refresh result, and newer candidates continue through same-node mirroring and cross-node sync.
 
 ### 6.4 Cross-Node Auth Sync
 
@@ -454,13 +454,13 @@ Safety boundaries:
 - FoxClaw only accepts sync files from bots listed in `AUTH_SYNC_PEERS`; wrong key, cluster, nonce, or payload validation never writes files.
 - Remote imports wait for global local idleness, temporarily switch to the candidate for app-server usage validation, and only then write the candidate.
 - A same-name candidate known to belong to a different account id is never overwritten.
-- Cross-node recovery only pulls an already-held valid peer copy. It does not automatically rotate refresh tokens; if no peer has a usable copy, it stops and asks you to maintain auth on one node manually.
+- Cross-node recovery only pulls an already-held valid peer copy and does not rotate refresh tokens during recovery. If no peer has a usable copy, it stops and asks you to maintain auth manually. The background 9-day proactive refresh separately requests the cross-node refresh lease and skips that cycle if the lease is not granted.
 
 Dual-active behavior:
 
 - Push: after local login, Codex automatic refresh, or `/auth refresh all` succeeds and passes local mirror validation, the newer candidate is encrypted and pushed to peers.
 - Pull: before auth switch or reload, FoxClaw first searches local runtimes for a newer same-account candidate; if none is found, it asks peers for a newer same-name same-account copy.
-- Lease: `/auth refresh all confirm` requests a cross-node refresh lease before rotating tokens. Any busy, denying, or non-responsive peer blocks the refresh.
+- Lease: `/auth refresh all confirm` and the background 9-day proactive refresh request a cross-node refresh lease before rotating tokens. Any busy, denying, or non-responsive peer blocks the refresh.
 
 Commands:
 

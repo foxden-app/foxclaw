@@ -419,7 +419,7 @@ Candidates: 2
 
 `/auth refresh all` 是仅命令入口的维护操作，因为 ChatGPT refresh token 会被轮换。只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。命令会先显示风险确认：如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并显示摘要。
 
-OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”，但这只是维护提醒，不代表 refresh token 已经过期，也不会触发批量保活刷新。不要把 `/auth refresh all` 当作日常保活命令。
+OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 超过 9 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。主动刷新完成后会私聊通知，并把较新的候选继续镜像和跨节点同步。
 
 ### 6.4 跨节点 auth 同步
 
@@ -454,13 +454,13 @@ AUTH_SYNC_NODE_ID=workstation-a
 - 只接收 `AUTH_SYNC_PEERS` 中 peer bot 发来的同步文件；密钥、cluster、nonce 或 payload 校验失败时不会写盘。
 - 远端导入必须等本机全局空闲，再临时切换到待验证 auth、重启 app-server、读取 usage 验证成功后才写入候选。
 - 同名候选如果已知属于不同 account id，永远拒绝覆盖。
-- 跨节点恢复只拉取 peer 已持有的有效副本，不会自动触发 refresh token 轮换；找不到有效副本时会停止，提示你在一个节点手动维护授权。
+- 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 9 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
 
 双主动流程：
 
 - push：本节点登录、Codex 自动刷新或 `/auth refresh all` 成功并通过本机镜像验证后，会主动把较新的候选加密推送给 peer。
 - pull：本节点切换或重载 auth 前如果发现本地候选不是最新，会先查本机其他 runtime；仍找不到时，再向 peer 拉取同名同账号的较新副本。
-- lease：执行会旋转 refresh token 的 `/auth refresh all confirm` 前，会向 peer 申请跨节点刷新锁。任一 peer 忙碌、拒绝或无响应都会阻止刷新。
+- lease：执行会旋转 refresh token 的 `/auth refresh all confirm` 或后台 9 天主动刷新前，会向 peer 申请跨节点刷新锁。任一 peer 忙碌、拒绝或无响应都会阻止刷新。
 
 命令：
 

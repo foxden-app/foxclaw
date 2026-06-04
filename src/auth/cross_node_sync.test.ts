@@ -514,7 +514,14 @@ test('CrossNodeAuthSync refresh lease requires peer grant', async () => {
 
     const granted = await serviceA.acquireRefreshLease('test');
     assert.equal(granted.ok, true);
+    assert.equal(serviceA.isIdle(), false);
+    assert.equal(serviceB.isIdle(), false);
+    const duplicate = await serviceA.acquireRefreshLease('test-again');
+    assert.equal(duplicate.ok, false);
+    assert.match(duplicate.reason ?? '', /another refresh lease is active/);
     await serviceA.releaseRefreshLease(granted.leaseId);
+    assert.equal(serviceA.isIdle(), true);
+    assert.equal(serviceB.isIdle(), true);
 
     peerIdle = false;
     const denied = await serviceA.acquireRefreshLease('test');

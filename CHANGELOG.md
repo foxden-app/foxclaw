@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.6 - 2026-06-04
+
+### 中文
+- 新增后台主动 auth 刷新：已启用的 ChatGPT 候选 `last_refresh` 超过 9 天时，FoxClaw 每小时检查并在全局空闲后只刷新这批候选。
+- 主动刷新会先申请跨节点刷新锁；没有启用跨节点同步时使用同进程本地锁，避免同节点多个 bot 并发轮换 refresh token。
+- 跨节点刷新锁持有窗口延长到 10 分钟，刷新中会让 auth sync 处于非空闲状态，重复申请会被拒绝；完成后会私聊报告刷新、跳过和失败数量。
+- 中文/英文用户手册和跨节点同步文档补充 9 天主动刷新策略，明确 `/auth refresh all confirm` 仍是人工维护命令。
+
+### English
+- Added background proactive auth refresh: every hour FoxClaw checks enabled ChatGPT candidates whose `last_refresh` is older than 9 days and refreshes only that due batch after the node is globally idle.
+- Proactive refresh first requests the cross-node refresh lease; when cross-node sync is disabled, an in-process local lease prevents same-node bot runtimes from rotating refresh tokens concurrently.
+- Extended the cross-node refresh lease window to 10 minutes, marks auth sync non-idle while a lease is active, rejects duplicate lease requests, and reports refreshed/skipped/failed counts in private chat.
+- Updated the Chinese and English user manuals plus cross-node sync docs with the 9-day proactive policy, while keeping `/auth refresh all confirm` as a manual maintenance command.
+
 ## 0.5.5 - 2026-06-04
 
 ### 中文

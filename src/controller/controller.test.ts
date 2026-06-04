@@ -183,6 +183,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
   const callbackAnswers: string[] = [];
   const deletedMessageIds: number[] = [];
   const bot = {
+    identity: 'bot1',
     stop: () => {},
     sendMessage: async (_chatId: string, text: string, keyboard?: any) => {
       sentMessages.push(text);
@@ -1841,6 +1842,76 @@ test('/auth refresh all command can refresh all ChatGPT candidates and keep an a
   ]);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-02T00:00:00.000Z/);
+});
+
+test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT candidates only', async (t) => {
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    acquireAuthRefreshLease: async (reason) => {
+      events.push(`lease:${reason}`);
+      return { ok: true, leaseId: 'lease-proactive' };
+    },
+    releaseAuthRefreshLease: async (leaseId) => {
+      events.push(`release:${leaseId}`);
+    },
+    authCandidateUpdated: async (runtimeId, candidateName) => {
+      events.push(`sync:${runtimeId}:${candidateName}`);
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.store.rememberTelegramPrivateScope('bot1', 'telegram:99::root', '99');
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', '2026-01-01T00:00:00.000Z');
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_c', 'acct-c', '2026-01-01T00:00:00.000Z');
+  rig.store.setCodexAuthCandidateDisabled('auth.json_c', true, 'default');
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async (refreshToken = false) => {
+    assert.equal(refreshToken, true);
+    const currentName = path.basename(fs.realpathSync(path.join(authDir, 'auth.json')));
+    events.push(`refresh:${currentName}`);
+    writeChatGptAuthCandidate(authDir, currentName, 'acct-a', '2026-02-01T00:00:00.000Z');
+    return {
+      type: 'chatgpt',
+      email: 'user@example.com',
+      planType: 'plus',
+      requiresOpenaiAuth: false,
+    };
+  };
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 1, windowDurationMins: 300, resetsAt: null },
+      secondary: null,
+      credits: null,
+      planType: 'plus',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).runProactiveAuthRefresh();
+
+  assert.equal(restarts, 2);
+  assert.deepEqual(events, [
+    'lease:proactive auth refresh: auth.json_a',
+    'refresh:auth.json_a',
+    'sync:default:auth.json_a',
+    'release:lease-proactive',
+  ]);
+  assert.match(rig.sentMessages[0]!, /Proactive auth refresh started/);
+  assert.match(rig.sentMessages.at(-1)!, /Proactive auth refresh complete: 1 refreshed, 0 skipped, 0 failed/);
+  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
+  assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-01T00:00:00.000Z/);
+  assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_c'), 'utf8'), /2026-02-01T00:00:00.000Z/);
 });
 
 test('/auth panel refresh all is blocked until every runtime is idle', async (t) => {

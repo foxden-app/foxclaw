@@ -205,7 +205,7 @@ const NONCE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const PULL_TIMEOUT_MS = 12_000;
 const TEST_TIMEOUT_MS = 8_000;
 const LEASE_TIMEOUT_MS = 8_000;
-const LEASE_TTL_MS = 60_000;
+const LEASE_TTL_MS = 10 * 60_000;
 const REMOTE_ACCESS_TOKEN_MIN_TTL_MS = 60_000;
 
 export class CrossNodeAuthSync {
@@ -314,7 +314,9 @@ export class CrossNodeAuthSync {
       && !this.importProcessorActive
       && this.pendingPulls.size === 0
       && this.pendingLeases.size === 0
-      && this.pendingTests.size === 0;
+      && this.pendingTests.size === 0
+      && this.activeLocalLease === null
+      && this.activeRemoteLease === null;
   }
 
   async publishCandidate(candidateName: string): Promise<boolean> {
@@ -459,6 +461,10 @@ export class CrossNodeAuthSync {
   }
 
   async acquireRefreshLease(reason: string): Promise<AuthSyncLeaseResult> {
+    this.expireLeases();
+    if (this.activeLocalLease || this.activeRemoteLease) {
+      return { ok: false, leaseId: null, reason: 'another refresh lease is active' };
+    }
     if (!this.isReady() || this.peers.length === 0) {
       const leaseId = crypto.randomUUID();
       this.activeLocalLease = { leaseId, expiresAt: Date.now() + LEASE_TTL_MS };

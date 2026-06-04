@@ -424,6 +424,9 @@ const CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME = 'codex-auth-quota.json';
 const CODEX_AUTH_LIST_PAGE_SIZE = 8;
 const CODEX_AUTH_LOW_QUOTA_PERCENT = 10;
 const CODEX_AUTH_STALE_CREDENTIAL_DAYS = 8;
+const CODEX_AUTH_PROACTIVE_REFRESH_DAYS = 9;
+const CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS = 60 * 60_000;
+const CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS = 5 * 60_000;
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const SELF_UPDATE_STATUS_POLL_MS = 1000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
@@ -526,6 +529,8 @@ export class BridgeSessionCore {
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
   private selfUpdatePollTimer: NodeJS.Timeout | null = null;
+  private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
+  private proactiveAuthRefreshInProgress = false;
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -607,6 +612,7 @@ export class BridgeSessionCore {
     });
     this.updateStatus();
     this.scheduleSelfUpdateStatusPoll(0);
+    this.scheduleProactiveAuthRefresh(CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS);
   }
 
   /** Begin Telegram Bot API long-polling after handlers and Codex are ready. */
@@ -653,6 +659,7 @@ export class BridgeSessionCore {
     }
     this.submittedUserInputTimers.clear();
     this.clearSelfUpdateStatusPoll();
+    this.clearProactiveAuthRefreshTimer();
     await this.app.stop({ terminateServer: false });
     this.updateStatus();
   }
@@ -4840,6 +4847,85 @@ export class BridgeSessionCore {
     return status.codexUpdate ?? null;
   }
 
+  private scheduleProactiveAuthRefresh(delayMs = CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS): void {
+    if (this.proactiveAuthRefreshTimer) {
+      return;
+    }
+    this.proactiveAuthRefreshTimer = setTimeout(() => {
+      this.proactiveAuthRefreshTimer = null;
+      void this.runProactiveAuthRefresh().catch((error) => {
+        this.logger.warn('codex.auth_proactive_refresh_failed', { error: toErrorMeta(error) });
+      }).finally(() => {
+        this.scheduleProactiveAuthRefresh();
+      });
+    }, delayMs);
+    this.proactiveAuthRefreshTimer.unref();
+  }
+
+  private clearProactiveAuthRefreshTimer(): void {
+    if (!this.proactiveAuthRefreshTimer) {
+      return;
+    }
+    clearTimeout(this.proactiveAuthRefreshTimer);
+    this.proactiveAuthRefreshTimer = null;
+  }
+
+  private async runProactiveAuthRefresh(): Promise<void> {
+    if (this.proactiveAuthRefreshInProgress || !this.canRunGlobalAuthRefresh()) {
+      return;
+    }
+    const state = await this.listCodexAuthState();
+    const dueCandidates = state.candidates.filter(candidate =>
+      !candidate.disabled
+      && candidate.credentialKind === 'chatgpt'
+      && candidate.credentialLastRefreshMs !== null
+      && candidate.credentialLastRefreshMs <= Date.now() - CODEX_AUTH_PROACTIVE_REFRESH_DAYS * 24 * 60 * 60_000
+    );
+    if (dueCandidates.length === 0) {
+      return;
+    }
+
+    this.proactiveAuthRefreshInProgress = true;
+    const locale = this.proactiveAuthRefreshLocale();
+    await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_starting', {
+      value: dueCandidates.map(candidate => candidate.name).join(', '),
+    }));
+    let lease: { ok: boolean; leaseId: string | null; reason?: string | null } | undefined;
+    try {
+      lease = await this.coordinator?.acquireAuthRefreshLease?.(`proactive auth refresh: ${dueCandidates.map(candidate => candidate.name).join(', ')}`);
+      if (lease && !lease.ok) {
+        this.logger.warn('codex.auth_proactive_refresh_lease_failed', { reason: lease.reason });
+        await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_lease_failed', {
+          error: lease.reason ?? t(locale, 'unknown'),
+        }));
+        return;
+      }
+      const result = await this.refreshCodexAuthCandidates(new Set(dueCandidates.map(candidate => candidate.name)));
+      await this.notifyProactiveAuthRefresh(locale, formatAuthRefreshAllResult(locale, result, 'proactive'));
+    } finally {
+      await this.coordinator?.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
+      this.proactiveAuthRefreshInProgress = false;
+    }
+  }
+
+  private proactiveAuthRefreshLocale(): AppLocale {
+    const identity = this.bot.identity;
+    if (!identity) return 'en';
+    const privateScope = this.store.getTelegramPrivateScope(identity);
+    if (!privateScope) return 'en';
+    return this.localeForChat(privateScope.scopeId);
+  }
+
+  private async notifyProactiveAuthRefresh(locale: AppLocale, message: string): Promise<void> {
+    const identity = this.bot.identity;
+    if (!identity) return;
+    const privateScope = this.store.getTelegramPrivateScope(identity);
+    if (!privateScope) return;
+    await this.bot.sendMessage(privateScope.chatId, message).catch((error) => {
+      this.logger.warn('codex.auth_proactive_refresh_notify_failed', { error: toErrorMeta(error) });
+    });
+  }
+
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase() ?? 'list';
     if (action === 'sync') {
@@ -5936,12 +6022,19 @@ export class BridgeSessionCore {
   }
 
   private async refreshAllCodexAuthCandidates(): Promise<CodexAuthRefreshAllResult> {
+    return this.refreshCodexAuthCandidates();
+  }
+
+  private async refreshCodexAuthCandidates(candidateNames: Set<string> | null = null): Promise<CodexAuthRefreshAllResult> {
     if (this.authRefreshAllInProgress) {
       throw new UserFacingError('Auth refresh all is already running.');
     }
     const initialState = await this.listCodexAuthState();
     const result: CodexAuthRefreshAllResult = { refreshed: [], skipped: [], failed: [] };
-    if (initialState.candidates.length === 0) {
+    const candidates = candidateNames
+      ? initialState.candidates.filter(candidate => candidateNames.has(candidate.name))
+      : initialState.candidates;
+    if (candidates.length === 0) {
       return result;
     }
 
@@ -5952,7 +6045,7 @@ export class BridgeSessionCore {
     let changedAuthTarget = false;
     this.authRefreshAllInProgress = true;
     try {
-      for (const candidate of initialState.candidates) {
+      for (const candidate of candidates) {
         const before = await readChatGptAuthMetadata(candidate.path);
         if (!before) {
           result.skipped.push(candidate.name);
@@ -9633,8 +9726,8 @@ function authRefreshAllConfirmKeyboard(locale: AppLocale, record: PendingAuthCho
   ];
 }
 
-function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshAllResult): string {
-  const lines = [t(locale, 'auth_refresh_all_done', {
+function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshAllResult, mode: 'manual' | 'proactive' = 'manual'): string {
+  const lines = [t(locale, mode === 'proactive' ? 'auth_proactive_refresh_done' : 'auth_refresh_all_done', {
     refreshed: String(result.refreshed.length),
     skipped: String(result.skipped.length),
     failed: String(result.failed.length),

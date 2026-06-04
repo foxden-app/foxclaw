@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -46,6 +47,46 @@ const PROXY_ENV_KEYS = [
   'no_proxy',
 ] as const;
 const STANDARD_NODE_PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const;
+const LOCAL_AUTH_REFRESH_LEASE_TTL_MS = 10 * 60_000;
+
+type LocalAuthRefreshLeaseResult = { ok: boolean; leaseId: string | null; reason?: string | null };
+
+function createLocalAuthRefreshLease(): {
+  isIdle: () => boolean;
+  acquire: (reason: string) => Promise<LocalAuthRefreshLeaseResult>;
+  release: (leaseId: string | null) => Promise<void>;
+} {
+  let active: { leaseId: string; reason: string; expiresAt: number } | null = null;
+  const expire = (): void => {
+    if (active && active.expiresAt <= Date.now()) {
+      active = null;
+    }
+  };
+  return {
+    isIdle: (): boolean => {
+      expire();
+      return active === null;
+    },
+    acquire: async (reason: string): Promise<LocalAuthRefreshLeaseResult> => {
+      expire();
+      if (active) {
+        return {
+          ok: false,
+          leaseId: null,
+          reason: `another local auth refresh lease is active: ${active.reason}`,
+        };
+      }
+      const leaseId = crypto.randomUUID();
+      active = { leaseId, reason, expiresAt: Date.now() + LOCAL_AUTH_REFRESH_LEASE_TTL_MS };
+      return { ok: true, leaseId };
+    },
+    release: async (leaseId: string | null): Promise<void> => {
+      if (leaseId && active?.leaseId === leaseId) {
+        active = null;
+      }
+    },
+  };
+}
 
 async function main(): Promise<void> {
   if (isVersionCommand(command)) {
@@ -330,6 +371,7 @@ async function runServeCli(): Promise<void> {
       const lastSelfUpdatePath = path.join(APP_HOME, 'runtime', 'last-self-update.json');
       let lastSelfUpdate = readSelfUpdateStatus(lastSelfUpdatePath);
       const runtimes: Runtime[] = [];
+      const localAuthRefreshLease = createLocalAuthRefreshLease();
       const writeAggregateStatus = (running = true): void => {
         const statuses = runtimes.map((runtime) => runtime.core.getRuntimeStatus());
         const weixinStatus = activeWeixinCore?.getRuntimeStatus() ?? null;
@@ -377,7 +419,7 @@ async function runServeCli(): Promise<void> {
           && mirror.isIdle();
       const coordinator = {
         canSelfUpdate: (): boolean => authSyncLocalIdle()
-          && (!authSync || authSync.isIdle()),
+          && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
         recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
@@ -392,9 +434,9 @@ async function runServeCli(): Promise<void> {
           }) ?? false;
         },
         acquireAuthRefreshLease: (reason: string) => authSync?.acquireRefreshLease(reason)
-          ?? Promise.resolve({ ok: true, leaseId: null }),
+          ?? localAuthRefreshLease.acquire(reason),
         releaseAuthRefreshLease: (leaseId: string | null) => authSync?.releaseRefreshLease(leaseId)
-          ?? Promise.resolve(),
+          ?? localAuthRefreshLease.release(leaseId),
         getAuthSyncStatus: () => authSync?.getStatus() ?? null,
         authSyncPushAll: () => authSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
         authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
@@ -577,11 +619,12 @@ async function runServeCli(): Promise<void> {
     let singleMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
     let core: InstanceType<typeof BridgeSessionCore> | null = null;
     const singleAuthDir = config.codexAuthDir ?? config.codexHome ?? process.env.CODEX_AUTH_DIR ?? path.join(os.homedir(), '.codex');
+    const singleLocalAuthRefreshLease = createLocalAuthRefreshLease();
     const singleAuthSyncLocalIdle = (): boolean => Boolean(core?.isIdleForServiceUpdate())
       && (!singleMirror || singleMirror.isIdle());
     const singleCoordinator = config.authSyncEnabled ? {
       canSelfUpdate: (): boolean => singleAuthSyncLocalIdle()
-        && (!singleAuthSync || singleAuthSync.isIdle()),
+        && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
       authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
         singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
       recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
@@ -597,9 +640,9 @@ async function runServeCli(): Promise<void> {
         }) ?? false;
       },
       acquireAuthRefreshLease: (reason: string) => singleAuthSync?.acquireRefreshLease(reason)
-        ?? Promise.resolve({ ok: true, leaseId: null }),
+        ?? singleLocalAuthRefreshLease.acquire(reason),
       releaseAuthRefreshLease: (leaseId: string | null) => singleAuthSync?.releaseRefreshLease(leaseId)
-        ?? Promise.resolve(),
+        ?? singleLocalAuthRefreshLease.release(leaseId),
       getAuthSyncStatus: () => singleAuthSync?.getStatus() ?? null,
       authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
       authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),

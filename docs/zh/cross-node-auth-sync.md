@@ -10,13 +10,13 @@
 
 - 这些 ChatGPT 账号和 auth 文件都由你合法拥有和维护。
 - 多台机器都运行 FoxClaw，并且每台机器至少有一个 Telegram bot。
-- 你希望 auth 文件在节点间自动保持较新，但不希望日常主动旋转 refresh token。
+- 你希望 auth 文件在节点间自动保持较新，并允许 FoxClaw 在已启用 ChatGPT 候选 `last_refresh` 超过 9 天时，持有跨节点刷新锁后主动刷新。
 - 默认推荐每台机器只选择一个“联系人 bot”参与跨节点同步；同一节点内其他 bot 继续使用原本的本机 auth 镜像。
 
 不适合：
 
 - 同步来源不可信、账号来源不合法，或你无法确认每台机器的管理员。
-- 希望用 `/auth refresh all` 当作 refresh token 保活工具。
+- 希望在没有跨节点锁、节点忙碌或候选被禁用时仍强制做 refresh token 保活。
 - 同一个 bot token 被多台机器同时 polling；这会破坏 Telegram update 分发和 FoxClaw 的运行假设。
 
 ## 设计与安全模型
@@ -25,7 +25,7 @@
 
 - **Push**：本节点登录、Codex 自动刷新或 `/auth refresh all confirm` 成功并通过本机 usage 验证后，把较新的候选加密发送给 peer。
 - **Pull**：本节点切换或重载 auth 前，如果本机其他 runtime 没有更新副本，会向 peer 请求同名、同账号的较新候选。
-- **Lease**：执行会旋转 refresh token 的 `/auth refresh all confirm` 前，先向 peer 申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止刷新。
+- **Lease**：执行会旋转 refresh token 的 `/auth refresh all confirm` 或后台 9 天主动刷新前，先向 peer 申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止刷新。
 
 安全边界：
 
@@ -200,4 +200,4 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 **要不要定期 `/auth refresh all confirm` 保活**
 
-不要。Codex 会按 access token 到期自动刷新。FoxClaw 的跨节点同步会同步“已经成功刷新的新 auth”，不应该把 refresh all 当作日常保活。
+不要手动定期强刷。Codex 会按 access token 到期自动刷新；FoxClaw 也会在已启用 ChatGPT 候选 `last_refresh` 超过 9 天时，等全局空闲并拿到跨节点刷新锁后主动刷新。`/auth refresh all confirm` 仍然是人工维护命令，用于你明确接受 refresh token 轮换风险的场景。

@@ -10,13 +10,13 @@ Use it when:
 
 - You legally own and maintain the ChatGPT accounts and auth files.
 - Multiple machines run FoxClaw, and each machine has at least one Telegram bot.
-- You want auth files to stay fresh across nodes without routinely rotating refresh tokens.
+- You want auth files to stay fresh across nodes, and you allow FoxClaw to proactively refresh enabled ChatGPT candidates whose `last_refresh` is older than 9 days after it obtains the cross-node refresh lease.
 - The recommended default is one contact bot per node for cross-node sync. Other bots on the same node continue to use local auth mirroring.
 
 Do not use it when:
 
 - The auth source is untrusted, account ownership is unclear, or you do not control every machine administrator.
-- You plan to use `/auth refresh all` as a refresh-token keepalive.
+- You want to force refresh-token keepalive without a cross-node lease, while nodes are busy, or for disabled candidates.
 - The same bot token is being polled by multiple machines at the same time. That breaks Telegram update delivery and FoxClaw's assumptions.
 
 ## Design And Safety Model
@@ -25,7 +25,7 @@ Cross-node sync combines three active paths:
 
 - **Push**: after local login, Codex automatic refresh, or `/auth refresh all confirm` succeeds and passes usage validation, FoxClaw sends the newer candidate to peers.
 - **Pull**: before auth switch or reload, FoxClaw first searches local runtimes for a newer candidate. If none exists, it asks peers for a newer same-name, same-account candidate.
-- **Lease**: before `/auth refresh all confirm` rotates refresh tokens, FoxClaw requests a cross-node refresh lease. Any busy, denying, or non-responsive peer blocks the refresh.
+- **Lease**: before `/auth refresh all confirm` or the background 9-day proactive refresh rotates refresh tokens, FoxClaw requests a cross-node refresh lease. Any busy, denying, or non-responsive peer blocks the refresh.
 
 Safety boundaries:
 
@@ -200,4 +200,4 @@ With cross-node sync enabled, this command first requests a cross-node refresh l
 
 **Should I periodically run `/auth refresh all confirm` as keepalive?**
 
-No. Codex refreshes automatically when access tokens expire. Cross-node auth sync propagates auth files that have already refreshed successfully; Refresh all should remain a maintenance command, not a routine keepalive.
+Do not force it manually on a schedule. Codex refreshes automatically when access tokens expire, and FoxClaw now proactively refreshes enabled ChatGPT candidates whose `last_refresh` is older than 9 days after the node is globally idle and obtains the cross-node refresh lease. `/auth refresh all confirm` remains a manual maintenance command for cases where you explicitly accept refresh-token rotation risk.
