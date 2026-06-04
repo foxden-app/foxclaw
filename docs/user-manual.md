@@ -417,6 +417,41 @@ The right-side `✅` / `⏸️` button controls whether the candidate participat
 
 OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token replay grace period. Codex refreshes automatically when an access token approaches expiry; when it cannot parse the access-token `exp`, current Codex uses a `last_refresh` fallback of about 8 days. The panel labels candidates without a refresh record in that interval as `not recently refreshed`, but this is only a maintenance hint. It does not prove expiry and does not trigger bulk keepalive refreshes. Do not use `/auth refresh all` as a routine keepalive command.
 
+### 6.4 Cross-Node Auth Sync
+
+Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. Enable Bot-to-Bot Communication Mode for the participating bots in BotFather first.
+
+Example:
+
+```dotenv
+AUTH_SYNC_ENABLED=true
+AUTH_SYNC_KEY=<shared key with at least 32 bytes>
+AUTH_SYNC_PEERS=@other_node_bot,@third_node_bot
+AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
+# Optional; FoxClaw generates and persists a local node id when omitted.
+AUTH_SYNC_NODE_ID=workstation-a
+```
+
+Safety boundaries:
+
+- Telegram only carries ciphertext. Auth contents, candidate names, account ids, and `last_refresh` live inside the AES-256-GCM encrypted payload.
+- FoxClaw only accepts sync files from bots listed in `AUTH_SYNC_PEERS`; wrong key, cluster, nonce, or payload validation never writes files.
+- Remote imports wait for global local idleness, temporarily switch to the candidate for app-server usage validation, and only then write the candidate.
+- A same-name candidate known to belong to a different account id is never overwritten.
+- Cross-node recovery only pulls an already-held valid peer copy. It does not automatically rotate refresh tokens; if no peer has a usable copy, it stops and asks you to maintain auth on one node manually.
+
+Dual-active behavior:
+
+- Push: after local login, Codex automatic refresh, or `/auth refresh all` succeeds and passes local mirror validation, the newer candidate is encrypted and pushed to peers.
+- Pull: before auth switch or reload, FoxClaw first searches local runtimes for a newer same-account candidate; if none is found, it asks peers for a newer same-name same-account copy.
+- Lease: `/auth refresh all confirm` requests a cross-node refresh lease before rotating tokens. Any busy, denying, or non-responsive peer blocks the refresh.
+
+Commands:
+
+- `/auth sync status`: show node id, peers, recent sends/receives/imports, pending imports, and the latest error.
+- `/auth sync test`: send an encrypted ping to verify peer config, shared key, and Bot-to-Bot private messages.
+- `/auth sync push all`: manually broadcast all locally verified candidates without refreshing tokens.
+
 Equivalent commands:
 
 - `/auth` or `/auth list [keyword]`: show candidates, optionally filtered by filename.
@@ -428,6 +463,7 @@ Equivalent commands:
 - `/auth reload` or `/auth_reload`: restart app-server and reload the current `auth.json`.
 - `/auth refresh all`: show the refresh-token rotation risk confirmation.
 - `/auth refresh all confirm`: run Refresh all after accepting the token-rotation risk.
+- `/auth sync status|test|push all`: inspect, test, or manually push cross-node auth sync.
 
 If the requesting bot runtime has active turns, pending approvals, pending user inputs, or MCP elicitations, FoxClaw refuses manual auth switching to avoid changing accounts mid-request; another idle bot is unaffected.
 

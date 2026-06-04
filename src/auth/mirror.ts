@@ -18,6 +18,10 @@ export interface AuthMirrorStatus {
   syncedAt: string;
 }
 
+export interface AuthMirrorExternalStatus extends AuthMirrorStatus {
+  remoteNodeId?: string | null;
+}
+
 export interface AuthMirrorRecovery {
   candidateName: string;
   sourceRuntimeId: string;
@@ -41,8 +45,30 @@ export interface ChatGptAuthMetadata {
   lastRefreshMs: number;
 }
 
-interface AuthRecord extends ChatGptAuthMetadata {
+export interface ChatGptAuthRecord extends ChatGptAuthMetadata {
   raw: string;
+}
+
+export interface AuthMirrorCandidateRecord extends ChatGptAuthRecord {
+  candidateName: string;
+  sourceRuntimeId: string;
+  sourceLabel: string;
+}
+
+export interface AuthMirrorImportResult {
+  ok: boolean;
+  imported: boolean;
+  reason?: string | null;
+  record?: AuthMirrorCandidateRecord;
+}
+
+export interface AuthMirrorSyncedEvent {
+  status: AuthMirrorStatus;
+  record: AuthMirrorCandidateRecord;
+}
+
+export interface AuthMirrorHooks {
+  onSynced?: (event: AuthMirrorSyncedEvent) => Promise<void> | void;
 }
 
 const AUTH_SCAN_INTERVAL_MS = 5_000;
@@ -60,6 +86,7 @@ export class AuthCandidateMirror {
     private readonly runtimes: AuthMirrorRuntime[],
     private readonly logger: Logger,
     private readonly statusPath: string | null = null,
+    private readonly hooks: AuthMirrorHooks = {},
   ) {}
 
   async initialize(): Promise<void> {
@@ -112,6 +139,51 @@ export class AuthCandidateMirror {
     return this.lastStatus;
   }
 
+  async readNewestCandidate(candidateName: string): Promise<AuthMirrorCandidateRecord | null> {
+    if (!isAuthCandidateName(candidateName)) return null;
+    return this.withActivity(async () => this.findNewestRecord(
+      (entry) => entry.candidateName === candidateName,
+    ));
+  }
+
+  async readRuntimeCandidate(runtimeId: string, candidateName: string): Promise<AuthMirrorCandidateRecord | null> {
+    if (!isAuthCandidateName(candidateName)) return null;
+    return this.withActivity(async () => {
+      const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
+      const authDir = runtimeId === 'canonical' ? this.canonicalDir : runtime?.authDir;
+      if (!authDir) return null;
+      const record = await readChatGptAuthRecord(path.join(authDir, candidateName));
+      if (!record) return null;
+      return {
+        ...record,
+        candidateName,
+        sourceRuntimeId: runtimeId,
+        sourceLabel: runtime?.label ?? runtimeId,
+      };
+    });
+  }
+
+  async listNewestCandidates(): Promise<AuthMirrorCandidateRecord[]> {
+    return this.withActivity(async () => {
+      const byName = new Map<string, AuthMirrorCandidateRecord>();
+      for (const entry of await this.collectAuthRecords()) {
+        if (!isAuthCandidateName(entry.candidateName)) continue;
+        const sourceLabel = this.runtimeLabel(entry.runtimeId);
+        const candidate: AuthMirrorCandidateRecord = {
+          ...entry.record,
+          candidateName: entry.candidateName,
+          sourceRuntimeId: entry.runtimeId,
+          sourceLabel,
+        };
+        const current = byName.get(entry.candidateName);
+        if (!current || candidate.lastRefreshMs > current.lastRefreshMs) {
+          byName.set(entry.candidateName, candidate);
+        }
+      }
+      return [...byName.values()].sort((a, b) => a.candidateName.localeCompare(b.candidateName));
+    });
+  }
+
   async syncRuntimeCandidate(runtimeId: string, candidateName: string): Promise<boolean> {
     if (!isAuthCandidateName(candidateName)) return false;
     const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
@@ -159,6 +231,71 @@ export class AuthCandidateMirror {
         for (const name of names) {
           await this.propagateValidatedCandidate(runtime, name);
         }
+      }
+    });
+  }
+
+  async importExternalCandidate(
+    candidateName: string,
+    raw: string,
+    source: { nodeId: string; label?: string | null },
+  ): Promise<AuthMirrorImportResult> {
+    if (!isAuthCandidateName(candidateName)) {
+      return { ok: false, imported: false, reason: 'invalid candidate name' };
+    }
+    return this.withActivity(async () => {
+      if (this.activeCandidateSyncs.has(candidateName)) {
+        return { ok: false, imported: false, reason: 'candidate sync already active' };
+      }
+      this.activeCandidateSyncs.add(candidateName);
+      try {
+        const metadata = parseChatGptAuthMetadata(raw);
+        if (!metadata) {
+          return { ok: false, imported: false, reason: 'invalid ChatGPT auth payload' };
+        }
+        const existing = (await this.collectAuthRecords())
+          .filter(entry => entry.candidateName === candidateName);
+        const conflicting = existing.find(entry => entry.record.accountId !== metadata.accountId);
+        if (conflicting) {
+          return { ok: false, imported: false, reason: 'same candidate belongs to a different account' };
+        }
+        const newest = existing.reduce<(typeof existing)[number] | null>((current, entry) => (
+          !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
+        ), null);
+        const previousRefresh = Math.max(newest?.record.lastRefreshMs ?? 0, this.lastSyncedRefresh.get(candidateName) ?? 0);
+        if (metadata.lastRefreshMs <= previousRefresh) {
+          return { ok: true, imported: false, reason: 'local candidate is already newer or equal' };
+        }
+
+        await atomicWrite(path.join(this.canonicalDir, candidateName), raw);
+        for (const target of this.runtimes) {
+          await atomicWrite(path.join(target.authDir, candidateName), raw);
+        }
+        this.lastSyncedRefresh.set(candidateName, metadata.lastRefreshMs);
+        const sourceLabel = source.label?.trim() || source.nodeId;
+        this.lastStatus = {
+          candidateName,
+          sourceRuntimeId: `remote:${source.nodeId}`,
+          sourceLabel,
+          syncedAt: new Date().toISOString(),
+        };
+        await writeMirrorStatus(this.statusPath, this.lastStatus);
+        this.logger.info('auth.mirror.remote_imported', { candidateName, sourceNodeId: source.nodeId });
+        const message = `${candidateName} has been synchronized from remote node ${sourceLabel}.`;
+        await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+        return {
+          ok: true,
+          imported: true,
+          record: {
+            raw,
+            ...metadata,
+            candidateName,
+            sourceRuntimeId: `remote:${source.nodeId}`,
+            sourceLabel,
+          },
+        };
+      } finally {
+        this.activeCandidateSyncs.delete(candidateName);
       }
     });
   }
@@ -216,6 +353,15 @@ export class AuthCandidateMirror {
       this.logger.info('auth.mirror.synced', { sourceRuntimeId: runtime.id, name });
       const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
       await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+      await this.hooks.onSynced?.({
+        status: this.lastStatus,
+        record: {
+          ...record,
+          candidateName: name,
+          sourceRuntimeId: runtime.id,
+          sourceLabel,
+        },
+      });
       return true;
     } finally {
       this.activeCandidateSyncs.delete(name);
@@ -225,7 +371,7 @@ export class AuthCandidateMirror {
   private async validateRuntimeCandidate(
     runtime: AuthMirrorRuntime,
     name: string,
-    record: AuthRecord,
+    record: ChatGptAuthRecord,
   ): Promise<AuthMirrorValidationResult> {
     if (!runtime.validate) {
       return { ok: true };
@@ -277,13 +423,13 @@ export class AuthCandidateMirror {
   private async collectAuthRecords(): Promise<Array<{
     runtimeId: string;
     candidateName: string;
-    record: AuthRecord;
+    record: ChatGptAuthRecord;
   }>> {
     const directories = [
       { runtimeId: 'canonical', authDir: this.canonicalDir },
       ...this.runtimes.map(runtime => ({ runtimeId: runtime.id, authDir: runtime.authDir })),
     ];
-    const records: Array<{ runtimeId: string; candidateName: string; record: AuthRecord }> = [];
+    const records: Array<{ runtimeId: string; candidateName: string; record: ChatGptAuthRecord }> = [];
     for (const directory of directories) {
       const names = new Set(['auth.json', ...await listAuthCandidateNames(directory.authDir)]);
       for (const candidateName of names) {
@@ -304,7 +450,7 @@ export class AuthCandidateMirror {
     const records = (await Promise.all(paths.map(async (sourcePath) => ({
       sourcePath,
       record: await readChatGptAuthRecord(sourcePath),
-    })))).filter((entry): entry is { sourcePath: string; record: AuthRecord } => entry.record !== null);
+    })))).filter((entry): entry is { sourcePath: string; record: ChatGptAuthRecord } => entry.record !== null);
     if (records.length === 0) return;
     const accountIds = new Set(records.map((entry) => entry.record.accountId));
     if (accountIds.size !== 1) {
@@ -325,6 +471,33 @@ export class AuthCandidateMirror {
     const name = path.basename(finalPath);
     return isAuthCandidateName(name) ? name : null;
   }
+
+  private async findNewestRecord(
+    predicate: (entry: { runtimeId: string; candidateName: string; record: ChatGptAuthRecord }) => boolean,
+  ): Promise<AuthMirrorCandidateRecord | null> {
+    const newest = (await this.collectAuthRecords())
+      .filter(predicate)
+      .reduce<{
+        runtimeId: string;
+        candidateName: string;
+        record: ChatGptAuthRecord;
+      } | null>((current, entry) => (
+        !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
+      ), null);
+    if (!newest) return null;
+    return {
+      ...newest.record,
+      candidateName: newest.candidateName,
+      sourceRuntimeId: newest.runtimeId,
+      sourceLabel: this.runtimeLabel(newest.runtimeId),
+    };
+  }
+
+  private runtimeLabel(runtimeId: string): string {
+    if (runtimeId === 'canonical') return 'canonical';
+    const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
+    return runtime?.label ?? runtimeId;
+  }
 }
 
 export function isAuthCandidateName(name: string): boolean {
@@ -340,7 +513,7 @@ async function listAuthCandidateNames(dir: string): Promise<string[]> {
     .map((entry) => entry.name);
 }
 
-async function readChatGptAuthRecord(filePath: string): Promise<AuthRecord | null> {
+export async function readChatGptAuthRecord(filePath: string): Promise<ChatGptAuthRecord | null> {
   try {
     const raw = await fs.readFile(filePath, 'utf8');
     const metadata = parseChatGptAuthMetadata(raw);
@@ -359,7 +532,7 @@ export async function readChatGptAuthMetadata(filePath: string): Promise<ChatGpt
   }
 }
 
-function parseChatGptAuthMetadata(raw: string): ChatGptAuthMetadata | null {
+export function parseChatGptAuthMetadata(raw: string): ChatGptAuthMetadata | null {
   try {
     const parsed = JSON.parse(raw) as {
       tokens?: { account_id?: unknown };

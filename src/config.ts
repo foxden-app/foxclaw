@@ -14,6 +14,8 @@ export const DEFAULT_LOCK_PATH = path.join(APP_HOME, 'runtime', 'bridge.lock');
 export const DEFAULT_CODEX_APP_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'codex-app-server.json');
 export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'codex-app-server.log');
 export const DEFAULT_CODEX_TELEGRAM_HOME = path.join(APP_HOME, 'codex', 'telegram');
+export const DEFAULT_AUTH_SYNC_STATE_PATH = path.join(APP_HOME, 'runtime', 'auth-sync.json');
+export const DEFAULT_AUTH_SYNC_TEMP_DIR = path.join(APP_HOME, 'runtime', 'auth-sync');
 export const DEFAULT_ENV_PATH = path.join(APP_HOME, '.env');
 
 let envLoaded = false;
@@ -82,6 +84,14 @@ export interface AppConfig {
   weixinMediaDir: string;
   /** Optional `SKRouteTag` header for some IDC deployments. */
   wxIlinkRouteTag: string | null;
+  authSyncEnabled: boolean;
+  authSyncTransport: 'telegram-private';
+  authSyncKey: string | null;
+  authSyncPeers: string[];
+  authSyncNodeId: string | null;
+  authSyncClusterId: string;
+  authSyncStatePath: string;
+  authSyncTempDir: string;
 }
 
 export function loadConfig(): AppConfig {
@@ -133,6 +143,14 @@ export function loadConfig(): AppConfig {
     weixinSyncBufDir: process.env.WEIXIN_SYNC_BUF_DIR || path.join(APP_HOME, 'weixin', 'sync-buf'),
     weixinMediaDir: process.env.WEIXIN_MEDIA_DIR || path.join(APP_HOME, 'weixin', 'media'),
     wxIlinkRouteTag: optional('WX_ILINK_ROUTE_TAG'),
+    authSyncEnabled: boolEnv('AUTH_SYNC_ENABLED', false),
+    authSyncTransport: 'telegram-private',
+    authSyncKey: optional('AUTH_SYNC_KEY'),
+    authSyncPeers: parseCommaSeparatedIds(process.env.AUTH_SYNC_PEERS),
+    authSyncNodeId: optional('AUTH_SYNC_NODE_ID'),
+    authSyncClusterId: process.env.AUTH_SYNC_CLUSTER_ID?.trim() || 'default',
+    authSyncStatePath: process.env.AUTH_SYNC_STATE_PATH || DEFAULT_AUTH_SYNC_STATE_PATH,
+    authSyncTempDir: process.env.AUTH_SYNC_TEMP_DIR || DEFAULT_AUTH_SYNC_TEMP_DIR,
   };
   ensureAppDirs(config);
   return config;
@@ -151,7 +169,11 @@ export function ensureAppDirs(config: AppConfig): void {
     path.dirname(config.lockPath),
     path.dirname(config.codexAppServerStatePath),
     path.dirname(config.codexAppServerLogPath),
+    path.dirname(config.authSyncStatePath),
   ];
+  if (config.authSyncEnabled) {
+    dirs.push(config.authSyncTempDir);
+  }
   if (config.wxEnabled) {
     dirs.push(config.weixinAccountsDir, config.weixinSyncBufDir, config.weixinMediaDir);
   }

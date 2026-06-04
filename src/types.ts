@@ -378,6 +378,20 @@ export interface RuntimeStatus {
     sourceLabel: string;
     syncedAt: string;
   } | null;
+  authSync?: {
+    enabled: boolean;
+    nodeId: string | null;
+    peers: string[];
+    pendingImports: number;
+    lastSentAt: string | null;
+    lastReceivedAt: string | null;
+    lastImportedAt: string | null;
+    lastImportCandidate: string | null;
+    lastPullAt: string | null;
+    lastPullCandidate: string | null;
+    lastError: string | null;
+    activeLeaseId: string | null;
+  } | null;
   lastUpdate?: {
     state: string;
     fromVersion: string;

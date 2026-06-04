@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
-import { callTelegramApi, downloadTelegramFile, getTelegramFile, type TelegramRemoteFile } from './api.js';
+import { callTelegramApi, callTelegramMultipartApi, downloadTelegramFile, getTelegramFile, type TelegramRemoteFile } from './api.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
 import { getTelegramCommands } from '../i18n.js';
@@ -11,6 +11,7 @@ import type { TelegramInboundAttachment } from './media.js';
 
 interface TelegramUser {
   id: number;
+  is_bot?: boolean;
   username?: string;
   first_name?: string;
   language_code?: string;
@@ -78,6 +79,15 @@ export interface TelegramTextEvent {
   entities: TelegramMessageEntity[];
   replyToBot: boolean;
   languageCode?: string;
+}
+
+export interface TelegramPeerDocumentEvent {
+  chatId: string;
+  userId: string;
+  username: string | null;
+  messageId: number;
+  text: string;
+  attachment: TelegramInboundAttachment;
 }
 
 export interface TelegramCallbackEvent {
@@ -153,6 +163,27 @@ export class TelegramGateway extends EventEmitter {
     messageThreadId?: number | null,
   ): Promise<number> {
     return this.sendMessageWithOptions(chatId, text, inlineKeyboard, 'HTML', messageThreadId);
+  }
+
+  async sendDocument(chatId: string, filename: string, contents: Buffer, caption?: string): Promise<number> {
+    const result = await callTelegramMultipartApi<SendMessageResult>(
+      this.botToken,
+      'sendDocument',
+      {
+        chat_id: chatId,
+        ...(caption ? { caption } : {}),
+      },
+      [{
+        fieldName: 'document',
+        filename,
+        contents,
+        contentType: 'application/json',
+      }],
+    );
+    if (!result.ok || !result.result) {
+      throw new Error(result.description || 'Failed to send Telegram document');
+    }
+    return result.result.message_id;
   }
 
   async sendMessageDraft(
@@ -327,7 +358,24 @@ export class TelegramGateway extends EventEmitter {
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
     if (update.message && update.message.from && this.isAllowedChat(update.message.chat)) {
-      if (String(update.message.from.id) !== this.allowedUserId) return;
+      if (String(update.message.from.id) !== this.allowedUserId) {
+        if (update.message.chat.type === 'private') {
+          const text = update.message.text ?? update.message.caption ?? '';
+          const attachments = extractAttachments(update.message);
+          const document = attachments.find((attachment) => attachment.kind === 'document');
+          if (document) {
+            this.emit('peerDocument', {
+              chatId: String(update.message.chat.id),
+              userId: String(update.message.from.id),
+              username: update.message.from.username ?? null,
+              text,
+              messageId: update.message.message_id,
+              attachment: document,
+            } satisfies TelegramPeerDocumentEvent);
+          }
+        }
+        return;
+      }
       const attachments = extractAttachments(update.message);
       const text = update.message.text ?? update.message.caption ?? '';
       const topicId = update.message.message_thread_id ?? null;

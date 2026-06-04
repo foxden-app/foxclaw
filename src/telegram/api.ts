@@ -55,6 +55,64 @@ export async function callTelegramApi<T>(botToken: string, method: string, body:
   });
 }
 
+export async function callTelegramMultipartApi<T>(
+  botToken: string,
+  method: string,
+  fields: Record<string, string>,
+  files: Array<{ fieldName: string; filename: string; contents: Buffer; contentType: string }>,
+): Promise<TelegramApiResult<T>> {
+  const boundary = `foxclaw-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const parts: Buffer[] = [];
+  for (const [name, value] of Object.entries(fields)) {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${escapeMultipartName(name)}"\r\n\r\n${value}\r\n`,
+      'utf8',
+    ));
+  }
+  for (const file of files) {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${escapeMultipartName(file.fieldName)}"; filename="${escapeMultipartName(file.filename)}"\r\nContent-Type: ${file.contentType}\r\n\r\n`,
+      'utf8',
+    ));
+    parts.push(file.contents);
+    parts.push(Buffer.from('\r\n', 'utf8'));
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  const payload = Buffer.concat(parts);
+  return new Promise<TelegramApiResult<T>>((resolve, reject) => {
+    const request = https.request({
+      host: API_HOST,
+      port: 443,
+      path: `/bot${botToken}/${method}`,
+      method: 'POST',
+      family: 4,
+      headers: {
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+        'content-length': payload.length,
+      },
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      });
+      response.on('end', () => {
+        try {
+          const text = Buffer.concat(chunks).toString('utf8');
+          resolve(JSON.parse(text) as TelegramApiResult<T>);
+        } catch (error) {
+          reject(new Error(`Failed to parse Telegram response: ${String(error)}`));
+        }
+      });
+    });
+    request.on('error', reject);
+    request.setTimeout(20_000, () => {
+      request.destroy(new Error(`Telegram API request timed out for ${method}`));
+    });
+    request.write(payload);
+    request.end();
+  });
+}
+
 export async function getTelegramFile(botToken: string, fileId: string): Promise<TelegramRemoteFile> {
   const result = await callTelegramApi<TelegramRemoteFile>(botToken, 'getFile', { file_id: fileId });
   if (!result.ok || !result.result) {
@@ -102,4 +160,8 @@ export async function downloadTelegramFile(botToken: string, remoteFilePath: str
   } finally {
     response?.destroy();
   }
+}
+
+function escapeMultipartName(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\r', '').replaceAll('\n', '');
 }

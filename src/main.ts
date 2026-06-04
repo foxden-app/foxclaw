@@ -15,6 +15,7 @@ import {
   getLoadedEnvPath,
   loadConfig,
   loadEnv,
+  type AppConfig,
 } from './config.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
@@ -190,6 +191,7 @@ async function runServeCli(): Promise<void> {
     { BridgeSessionCore },
     { TelegramChannelAdapter },
     { AuthCandidateMirror },
+    { CrossNodeAuthSync },
   ] = await Promise.all([
     import('./channels/bridge_messaging_router.js'),
     import('./channels/telegram/telegram_messaging_port.js'),
@@ -204,6 +206,7 @@ async function runServeCli(): Promise<void> {
     import('./controller/controller.js'),
     import('./channels/telegram/telegram_channel_adapter.js'),
     import('./auth/mirror.js'),
+    import('./auth/cross_node_sync.js'),
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
@@ -215,6 +218,7 @@ async function runServeCli(): Promise<void> {
   let activeTelegramAdapters: Array<InstanceType<typeof TelegramChannelAdapter>> = [];
   let managedApps: Array<InstanceType<typeof CodexAppClient>> = [];
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
+  let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   try {
     store = new BridgeStore(config.storePath);
     if (config.tgMultiBotMode) {
@@ -286,6 +290,7 @@ async function runServeCli(): Promise<void> {
         seeds.push({ id, home, authDir, sharedDefaultRuntime, config: runtimeConfig, bot, app });
       }
 
+      let authSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
       const mirror = new AuthCandidateMirror(
         canonicalAuthDir,
         seeds.map((runtime) => ({
@@ -302,9 +307,13 @@ async function runServeCli(): Promise<void> {
         })),
         logger,
         path.join(APP_HOME, 'runtime', 'auth-mirror.json'),
+        {
+          onSynced: async (event): Promise<void> => {
+            await authSync?.publishCandidate(event.record.candidateName);
+          },
+        },
       );
       await mirror.initialize();
-      mirror.start();
       activeAuthMirror = mirror;
       managedApps = seeds.map((runtime) => runtime.app);
 
@@ -357,17 +366,35 @@ async function runServeCli(): Promise<void> {
             },
           } : {}),
           authMirror: mirror.getStatus(),
+          authSync: authSync?.getStatus() ?? null,
           lastUpdate: lastSelfUpdate,
         });
       };
-      const coordinator = {
-        canSelfUpdate: (): boolean => runtimes.every((runtime) => runtime.core.isIdleForServiceUpdate())
+      const authSyncLocalIdle = (): boolean => runtimes.every((runtime) => runtime.core.isIdleForServiceUpdate())
           && (!activeWeixinCore || activeWeixinCore.isIdleForServiceUpdate())
-          && mirror.isIdle(),
+          && mirror.isIdle();
+      const coordinator = {
+        canSelfUpdate: (): boolean => authSyncLocalIdle()
+          && (!authSync || authSync.isIdle()),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
-        recoverAuthCandidate: (runtimeId: string, candidateName: string): Promise<boolean> =>
-          mirror.recoverRuntimeCandidate(runtimeId, candidateName).then(recovery => recovery !== null),
+        recoverAuthCandidate: async (runtimeId: string, candidateName: string): Promise<boolean> => {
+          const local = await mirror.recoverRuntimeCandidate(runtimeId, candidateName);
+          if (local) return true;
+          const current = await mirror.readRuntimeCandidate(runtimeId, candidateName)
+            ?? await mirror.readNewestCandidate(candidateName);
+          return await authSync?.requestRecovery(candidateName, {
+            accountId: current?.accountId ?? null,
+            lastRefreshMs: current?.lastRefreshMs ?? null,
+          }) ?? false;
+        },
+        acquireAuthRefreshLease: (reason: string) => authSync?.acquireRefreshLease(reason)
+          ?? Promise.resolve({ ok: true, leaseId: null }),
+        releaseAuthRefreshLease: (leaseId: string | null) => authSync?.releaseRefreshLease(leaseId)
+          ?? Promise.resolve(),
+        getAuthSyncStatus: () => authSync?.getStatus() ?? null,
+        authSyncPushAll: () => authSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
+        authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0 }),
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
           bots: await Promise.all(runtimes.map(async (runtime) => {
@@ -390,6 +417,7 @@ async function runServeCli(): Promise<void> {
             },
           } : {}),
           authMirror: mirror.getStatus(),
+          authSync: authSync?.getStatus() ?? null,
           lastUpdate: lastSelfUpdate,
         }),
         selfUpdateCompleted: (status: import('./update.js').SelfUpdateStatus): void => {
@@ -433,6 +461,44 @@ async function runServeCli(): Promise<void> {
       }
       activeTelegramAdapters = runtimes.map((runtime) => runtime.telegram);
 
+      if (config.authSyncEnabled) {
+        authSync = new CrossNodeAuthSync(
+          buildAuthSyncConfig(config),
+          logger,
+          {
+            send: async (peer: string, envelope: string): Promise<void> => {
+              await seeds[0]!.bot.sendDocument(
+                peer,
+                `foxclaw-auth-sync-${Date.now()}.json`,
+                Buffer.from(envelope, 'utf8'),
+                'FOXCLAW_AUTH_SYNC_V1',
+              );
+            },
+          },
+          {
+            readLocalCandidate: (candidateName: string) => mirror.readNewestCandidate(candidateName),
+            listLocalCandidates: () => mirror.listNewestCandidates(),
+            validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
+              if (!authSyncLocalIdle()) {
+                return { ok: false, reason: 'runtime is not idle' };
+              }
+              const runtime = runtimes.find((entry) => entry.core.isIdleForServiceUpdate()) ?? runtimes[0] ?? null;
+              if (!runtime) {
+                return { ok: false, reason: 'no validation runtime is available' };
+              }
+              return runtime.core.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
+            },
+            importCandidate: (candidateName, raw, source) => mirror.importExternalCandidate(candidateName, raw, source),
+            isIdle: authSyncLocalIdle,
+          },
+        );
+        await authSync.initialize();
+        activeAuthSync = authSync;
+        attachTelegramAuthSync(seeds[0]!.bot, authSync, config, logger);
+        authSync.start();
+      }
+      mirror.start();
+
       process.on('unhandledRejection', (error) => {
         logger.error('process.unhandled_rejection', { error: serializeError(error) });
       });
@@ -452,6 +518,7 @@ async function runServeCli(): Promise<void> {
 
       const shutdown = async (signal: string): Promise<void> => {
         logger.info('bridge.shutting_down', { signal });
+        authSync?.stop();
         mirror.stop();
         await weixinAdapter?.stop();
         await activeWeixinCore?.stop();
@@ -498,7 +565,101 @@ async function runServeCli(): Promise<void> {
       logPath: path.join(APP_HOME, 'logs', 'update.log'),
       codexCliBin: config.codexCliBin,
     });
-    const core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater);
+    let singleAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
+    let singleMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
+    let core: InstanceType<typeof BridgeSessionCore> | null = null;
+    const singleAuthDir = config.codexAuthDir ?? config.codexHome ?? process.env.CODEX_AUTH_DIR ?? path.join(os.homedir(), '.codex');
+    const singleAuthSyncLocalIdle = (): boolean => Boolean(core?.isIdleForServiceUpdate())
+      && (!singleMirror || singleMirror.isIdle());
+    const singleCoordinator = config.authSyncEnabled ? {
+      canSelfUpdate: (): boolean => singleAuthSyncLocalIdle()
+        && (!singleAuthSync || singleAuthSync.isIdle()),
+      authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
+        singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
+      recoverAuthCandidate: async (runtimeId: string, candidateName: string): Promise<boolean> => {
+        const local = await singleMirror?.recoverRuntimeCandidate(runtimeId, candidateName) ?? null;
+        if (local) return true;
+        const current = await singleMirror?.readRuntimeCandidate(runtimeId, candidateName)
+          ?? await singleMirror?.readNewestCandidate(candidateName)
+          ?? null;
+        return await singleAuthSync?.requestRecovery(candidateName, {
+          accountId: current?.accountId ?? null,
+          lastRefreshMs: current?.lastRefreshMs ?? null,
+        }) ?? false;
+      },
+      acquireAuthRefreshLease: (reason: string) => singleAuthSync?.acquireRefreshLease(reason)
+        ?? Promise.resolve({ ok: true, leaseId: null }),
+      releaseAuthRefreshLease: (leaseId: string | null) => singleAuthSync?.releaseRefreshLease(leaseId)
+        ?? Promise.resolve(),
+      getAuthSyncStatus: () => singleAuthSync?.getStatus() ?? null,
+      authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
+      authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0 }),
+      statusUpdated: (status: import('./types.js').RuntimeStatus): void => {
+        writeRuntimeStatus(config.statusPath, {
+          ...status,
+          authMirror: singleMirror?.getStatus() ?? null,
+          authSync: singleAuthSync?.getStatus() ?? null,
+        });
+      },
+    } : null;
+    if (config.authSyncEnabled) {
+      singleMirror = new AuthCandidateMirror(
+        singleAuthDir,
+        [{
+          id: 'default',
+          label: bot.username ? `@${bot.username}` : 'default',
+          authDir: singleAuthDir,
+          validate: async (context) => validateRefreshedAuthCandidate({
+            id: 'default',
+            authDir: singleAuthDir,
+            app,
+          }, context.candidateName),
+        }],
+        logger,
+        path.join(APP_HOME, 'runtime', 'auth-mirror.json'),
+        {
+          onSynced: async (event): Promise<void> => {
+            await singleAuthSync?.publishCandidate(event.record.candidateName);
+          },
+        },
+      );
+      await singleMirror.initialize();
+      activeAuthMirror = singleMirror;
+    }
+    core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater, singleCoordinator);
+    if (config.authSyncEnabled && singleMirror) {
+      singleAuthSync = new CrossNodeAuthSync(
+        buildAuthSyncConfig(config),
+        logger,
+        {
+          send: async (peer: string, envelope: string): Promise<void> => {
+            await bot.sendDocument(
+              peer,
+              `foxclaw-auth-sync-${Date.now()}.json`,
+              Buffer.from(envelope, 'utf8'),
+              'FOXCLAW_AUTH_SYNC_V1',
+            );
+          },
+        },
+        {
+          readLocalCandidate: (candidateName: string) => singleMirror!.readNewestCandidate(candidateName),
+          listLocalCandidates: () => singleMirror!.listNewestCandidates(),
+          validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
+            if (!singleAuthSyncLocalIdle()) {
+              return { ok: false, reason: 'runtime is not idle' };
+            }
+            return core!.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
+          },
+          importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
+          isIdle: singleAuthSyncLocalIdle,
+        },
+      );
+      await singleAuthSync.initialize();
+      activeAuthSync = singleAuthSync;
+      attachTelegramAuthSync(bot, singleAuthSync, config, logger);
+      singleAuthSync.start();
+      singleMirror.start();
+    }
     const telegram = new TelegramChannelAdapter(core);
     managedApps = [app];
     activeTelegramAdapters = [telegram];
@@ -522,6 +683,8 @@ async function runServeCli(): Promise<void> {
 
     const shutdown = async (signal: string): Promise<void> => {
       logger.info('bridge.shutting_down', { signal });
+      singleAuthSync?.stop();
+      singleMirror?.stop();
       await weixinAdapter?.stop();
       await telegram.stop();
       writeRuntimeStatus(config.statusPath, {
@@ -549,6 +712,7 @@ async function runServeCli(): Promise<void> {
     process.on('SIGINT', () => void shutdown('SIGINT'));
     process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
+    activeAuthSync?.stop();
     activeAuthMirror?.stop();
     await weixinAdapter?.stop().catch(() => {});
     await activeWeixinCore?.stop().catch(() => {});
@@ -557,6 +721,94 @@ async function runServeCli(): Promise<void> {
     store?.close();
     processLock.release();
     throw error;
+  }
+}
+
+interface AuthSyncTelegramPeerDocumentEvent {
+  userId: string;
+  username: string | null;
+  messageId: number;
+  text: string;
+  attachment: {
+    fileId: string;
+    fileName: string | null;
+  };
+}
+
+interface AuthSyncTelegramBot {
+  on(event: 'peerDocument', listener: (event: AuthSyncTelegramPeerDocumentEvent) => void): unknown;
+  getFile(fileId: string): Promise<{ file_path?: string }>;
+  downloadResolvedFile(remoteFilePath: string, destinationPath: string): Promise<number>;
+}
+
+interface AuthSyncHandler {
+  handleIncomingEnvelope(rawEnvelope: string, peer: { userId: string; username: string | null }): Promise<boolean>;
+}
+
+interface AuthSyncLogger {
+  warn(message: string, meta?: unknown): void;
+  info(message: string, meta?: unknown): void;
+}
+
+const AUTH_SYNC_TELEGRAM_CAPTION = 'FOXCLAW_AUTH_SYNC_V1';
+
+function buildAuthSyncConfig(config: AppConfig) {
+  return {
+    enabled: config.authSyncEnabled,
+    transport: config.authSyncTransport,
+    key: config.authSyncKey,
+    peers: config.authSyncPeers,
+    nodeId: config.authSyncNodeId,
+    clusterId: config.authSyncClusterId,
+    statePath: config.authSyncStatePath,
+    tempDir: config.authSyncTempDir,
+  };
+}
+
+function attachTelegramAuthSync(
+  bot: AuthSyncTelegramBot,
+  sync: AuthSyncHandler,
+  config: AppConfig,
+  logger: AuthSyncLogger,
+): void {
+  bot.on('peerDocument', (event) => {
+    void handleTelegramAuthSyncDocument(bot, sync, config, logger, event).catch((error) => {
+      logger.warn('auth.sync.telegram_document_failed', { error: serializeError(error) });
+    });
+  });
+}
+
+async function handleTelegramAuthSyncDocument(
+  bot: AuthSyncTelegramBot,
+  sync: AuthSyncHandler,
+  config: AppConfig,
+  logger: AuthSyncLogger,
+  event: AuthSyncTelegramPeerDocumentEvent,
+): Promise<void> {
+  const fileName = event.attachment.fileName ?? '';
+  if (event.text.trim() !== AUTH_SYNC_TELEGRAM_CAPTION && !fileName.startsWith('foxclaw-auth-sync-')) {
+    return;
+  }
+  const remoteFile = await bot.getFile(event.attachment.fileId);
+  if (!remoteFile.file_path) {
+    throw new Error('Telegram did not return file_path for auth sync document');
+  }
+  await fs.promises.mkdir(config.authSyncTempDir, { recursive: true, mode: 0o700 });
+  const destination = path.join(config.authSyncTempDir, `inbound-${process.pid}-${Date.now()}-${event.messageId}.json`);
+  try {
+    await bot.downloadResolvedFile(remoteFile.file_path, destination);
+    const raw = await fs.promises.readFile(destination, 'utf8');
+    const handled = await sync.handleIncomingEnvelope(raw, {
+      userId: event.userId,
+      username: event.username,
+    });
+    if (handled) {
+      logger.info('auth.sync.telegram_document_handled', {
+        peer: event.username ? `@${event.username}` : event.userId,
+      });
+    }
+  } finally {
+    await fs.promises.rm(destination, { force: true }).catch(() => undefined);
   }
 }
 

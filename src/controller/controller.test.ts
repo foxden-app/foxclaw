@@ -56,6 +56,14 @@ function createConfig(tempDir: string): AppConfig {
     weixinSyncBufDir: path.join(tempDir, 'weixin', 'sync-buf'),
     weixinMediaDir: path.join(tempDir, 'weixin', 'media'),
     wxIlinkRouteTag: null,
+    authSyncEnabled: false,
+    authSyncTransport: 'telegram-private',
+    authSyncKey: null,
+    authSyncPeers: [],
+    authSyncNodeId: null,
+    authSyncClusterId: 'default',
+    authSyncStatePath: path.join(tempDir, 'auth-sync.json'),
+    authSyncTempDir: path.join(tempDir, 'auth-sync'),
   };
 }
 
@@ -989,6 +997,20 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
         sourceLabel: '@bot_one',
         syncedAt: '2026-05-27T10:00:00.000Z',
       },
+      authSync: {
+        enabled: true,
+        nodeId: 'node-a',
+        peers: ['@botB'],
+        pendingImports: 1,
+        lastSentAt: '2026-05-27T10:00:01.000Z',
+        lastReceivedAt: null,
+        lastImportedAt: null,
+        lastImportCandidate: null,
+        lastPullAt: null,
+        lastPullCandidate: null,
+        lastError: 'peer offline',
+        activeLeaseId: null,
+      },
       lastUpdate: {
         state: 'succeeded',
         scopeId: 'telegram:bot1:99::root',
@@ -1010,6 +1032,8 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
   assert.match(rig.sentMessages[0]!, /@bot_one: connected yes, runtime isolated, auth auth\.json_a, active turns 1/);
   assert.match(rig.sentMessages[0]!, /@bot_two: connected yes, runtime default\/shared terminal, auth auth\.json_b, active turns 0/);
   assert.match(rig.sentMessages[0]!, /Last auth mirror: auth\.json_a from @bot_one/);
+  assert.match(rig.sentMessages[0]!, /Cross-node auth sync: node node-a, peers 1, pending imports 1/);
+  assert.match(rig.sentMessages[0]!, /Cross-node auth sync error: peer offline/);
   assert.match(rig.sentMessages[0]!, /Last service update: 0\.3\.19 -> 0\.4\.0/);
   assert.match(rig.sentMessages[0]!, /Last Codex update: Codex CLI: 0\.135\.0 -> 0\.136\.0\./);
 });
@@ -1339,6 +1363,51 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
   assert.match(rig.editedMessages.at(-1)!, /Current auth: a/);
   assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ —\|—\|a/);
+});
+
+test('/auth sync commands report status, test peers, and push all', async (t) => {
+  let pushed = false;
+  let tested = false;
+  const rig = createControllerRig(null, {
+    canSelfUpdate: () => true,
+    getAuthSyncStatus: () => ({
+      enabled: true,
+      nodeId: 'node-a',
+      peers: ['@botB'],
+      pendingImports: 0,
+      lastSentAt: '2026-06-01T00:00:00.000Z',
+      lastReceivedAt: null,
+      lastImportedAt: null,
+      lastImportCandidate: null,
+      lastPullAt: null,
+      lastPullCandidate: null,
+      lastError: null,
+      activeLeaseId: null,
+    }),
+    authSyncPushAll: async () => {
+      pushed = true;
+      return { sent: 2, skipped: 1 };
+    },
+    authSyncTest: async () => {
+      tested = true;
+      return { sent: 1 };
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth sync status'), 'en', 'auth', ['sync', 'status']);
+  await (rig.controller as any).handleCommand(createEvent('/auth sync test'), 'en', 'auth', ['sync', 'test']);
+  await (rig.controller as any).handleCommand(createEvent('/auth sync push all'), 'en', 'auth', ['sync', 'push', 'all']);
+
+  assert.match(rig.sentMessages[0]!, /Cross-node auth sync:/);
+  assert.match(rig.sentMessages[0]!, /Node: node-a/);
+  assert.equal(rig.sentMessages[1], 'Auth sync test ping sent to 1 peer(s).');
+  assert.equal(rig.sentMessages[2], 'Auth sync push complete: sent 2, skipped 1.');
+  assert.equal(tested, true);
+  assert.equal(pushed, true);
 });
 
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
@@ -1893,6 +1962,67 @@ test('/auth add cancel restores previous auth', async (t) => {
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
   assert.equal(fs.existsSync(path.join(authDir, 'auth.json_temp')), false);
   assert.match(rig.sentMessages.at(-1)!, /New auth login cancelled\. Restored previous auth\./);
+});
+
+test('auth auto-rotation first tries to recover the current candidate', async (t) => {
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    recoverAuthCandidate: async (runtimeId, candidateName) => {
+      events.push(`recover:${runtimeId}:${candidateName}`);
+      return true;
+    },
+    authCandidateUpdated: async (runtimeId, candidateName) => {
+      events.push(`sync:${runtimeId}:${candidateName}`);
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+
+  let restarts = 0;
+  const retryStarts: any[] = [];
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[]) => {
+    retryStarts.push({ binding, input });
+    return { threadId: binding.threadId, turnId: 'turn-2' };
+  };
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+
+  assert.deepEqual(events, ['recover:default:auth.json_a', 'sync:default:auth.json_a']);
+  assert.equal(restarts, 1);
+  assert.equal(retryStarts.length, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.ok(rig.sentMessages.some(message => /Recovered a newer same-account credential for auth\.json_a/.test(message)));
+  assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
 });
 
 test('usage limit errors auto-rotate auth after a final auth error', async (t) => {

@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.14 - 2026-06-04
+
+### 中文
+- 新增可选跨节点 auth 同步：通过 Telegram Bot-to-Bot 私聊传输 AES-GCM 加密 auth 包，无需公网 IP 或 FRP。
+- 跨节点同步支持双主动：本机验证刷新后主动 push，切换/重载前本机恢复失败时主动 pull peer 已持有的有效副本。
+- `/auth sync status|test|push all` 可查看状态、测试 peer/密钥、手动推送全部已验证候选；远端导入必须等全局空闲并通过 usage 验证后才写盘。
+- `/auth refresh all confirm` 在启用跨节点同步时会先申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止 refresh token 轮换。
+
+### English
+- Added optional cross-node auth sync using AES-GCM encrypted auth bundles over Telegram Bot-to-Bot private messages, with no public IP or FRP required.
+- Added dual-active sync behavior: locally validated refreshes are pushed, and auth switch/reload recovery can pull an already-held valid peer copy when local recovery fails.
+- Added `/auth sync status|test|push all` for status, peer/key testing, and manual broadcast of verified candidates. Remote imports wait for global idleness and usage validation before writing files.
+- When cross-node sync is enabled, `/auth refresh all confirm` requests a cross-node refresh lease first; any busy, denying, or non-responsive peer blocks refresh-token rotation.
+
 ## 0.4.13 - 2026-06-03
 
 ### 中文

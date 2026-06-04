@@ -6,7 +6,7 @@ import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore, CodexAuthQuotaSnapshotRecord, PendingUserInputStoredRecord } from '../store/database.js';
-import { readChatGptAuthMetadata } from '../auth/mirror.js';
+import { parseChatGptAuthMetadata, readChatGptAuthMetadata } from '../auth/mirror.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -123,11 +123,17 @@ export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
   recoverAuthCandidate?: (runtimeId: string, candidateName: string) => Promise<boolean>;
+  acquireAuthRefreshLease?: (reason: string) => Promise<{ ok: boolean; leaseId: string | null; reason?: string | null }>;
+  releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
+  getAuthSyncStatus?: () => RuntimeStatus['authSync'];
+  authSyncPushAll?: () => Promise<{ sent: number; skipped: number }>;
+  authSyncTest?: () => Promise<{ sent: number }>;
   statusUpdated?: (status: RuntimeStatus) => void;
   getServiceStatus?: () => Promise<{
     bots: NonNullable<RuntimeStatus['bots']>;
     weixinRuntime?: RuntimeStatus['weixinRuntime'];
     authMirror?: RuntimeStatus['authMirror'];
+    authSync?: RuntimeStatus['authSync'];
     lastUpdate?: SelfUpdateStatus | null;
   }>;
   selfUpdateCompleted?: (status: SelfUpdateStatus) => void;
@@ -830,6 +836,16 @@ export class BridgeSessionCore {
               time: serviceStatus.authMirror.syncedAt,
             })
             : t(locale, 'status_auth_mirror_none'));
+          if (serviceStatus.authSync?.enabled) {
+            lines.push(t(locale, 'status_auth_sync', {
+              node: serviceStatus.authSync.nodeId ?? t(locale, 'unknown'),
+              peers: serviceStatus.authSync.peers.length,
+              pending: serviceStatus.authSync.pendingImports,
+            }));
+            if (serviceStatus.authSync.lastError) {
+              lines.push(t(locale, 'status_auth_sync_error', { value: serviceStatus.authSync.lastError }));
+            }
+          }
           if (serviceStatus.lastUpdate) {
             lines.push(t(locale, 'status_last_update', {
               from: serviceStatus.lastUpdate.fromVersion,
@@ -3314,6 +3330,58 @@ export class BridgeSessionCore {
     return (await this.listCodexAuthState()).currentLabel;
   }
 
+  async validateExternalCodexAuthCandidate(
+    candidateName: string,
+    rawAuth: string,
+    expectedAccountId: string,
+  ): Promise<{ ok: boolean; reason?: string | null }> {
+    if (!this.isIdleForServiceUpdate()) {
+      return { ok: false, reason: 'runtime is not idle' };
+    }
+    const metadata = parseChatGptAuthMetadata(rawAuth);
+    if (!metadata || metadata.accountId !== expectedAccountId) {
+      return { ok: false, reason: 'remote auth account id mismatch' };
+    }
+    const state = await this.listCodexAuthState();
+    const existing = state.candidates.find(candidate => candidate.name === candidateName) ?? null;
+    if (existing) {
+      const existingMetadata = await readChatGptAuthMetadata(existing.path);
+      if (existingMetadata && existingMetadata.accountId !== expectedAccountId) {
+        return { ok: false, reason: 'same candidate belongs to a different account' };
+      }
+    }
+    const authStat = await fs.lstat(state.authPath).catch(() => null);
+    const originalRegularAuth = authStat?.isFile()
+      ? await fs.readFile(state.authPath, 'utf8').catch(() => null)
+      : null;
+    const tempPath = path.join(state.authDir, `.auth-sync-validate-${process.pid}-${Date.now()}.json`);
+    try {
+      await fs.writeFile(tempPath, rawAuth, { encoding: 'utf8', mode: 0o600 });
+      await pointCodexAuthAtTarget(state.authDir, state.authPath, tempPath);
+      this.pendingTurnErrors.clear();
+      this.attachedThreads.clear();
+      await this.app.restart();
+      const account = await this.app.readAccount(false);
+      const rateLimits = await this.app.readAccountRateLimits();
+      if (!account || !rateLimits || !selectCodexRateLimitSnapshot(rateLimits)) {
+        return { ok: false, reason: 'Codex did not validate ChatGPT usage for remote auth' };
+      }
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: formatUserError(error) };
+    } finally {
+      await restoreCodexAuthTarget(state.authDir, state.authPath, state.currentTargetPath, originalRegularAuth).catch((error) => {
+        this.logger.warn('codex.auth_sync_restore_failed', { error: toErrorMeta(error) });
+      });
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
+      this.pendingTurnErrors.clear();
+      this.attachedThreads.clear();
+      await this.app.restart().catch((error) => {
+        this.logger.warn('codex.auth_sync_restart_restore_failed', { error: toErrorMeta(error) });
+      });
+    }
+  }
+
   isIdleForServiceUpdate(): boolean {
     return this.activeTurns.size === 0
       && this.pendingApprovalMessages.size === 0
@@ -4765,6 +4833,10 @@ export class BridgeSessionCore {
 
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase() ?? 'list';
+    if (action === 'sync') {
+      await this.handleAuthSyncCommand(scopeId, locale, args.slice(1));
+      return;
+    }
     if (action === 'reload' || action === 'restart') {
       await this.handleAuthReloadCommand(scopeId, locale);
       return;
@@ -4811,6 +4883,40 @@ export class BridgeSessionCore {
     record.messageId = messageId;
   }
 
+  private async handleAuthSyncCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const action = args[0]?.toLowerCase() ?? 'status';
+    if (action === 'status') {
+      await this.sendMessage(scopeId, formatAuthSyncStatus(locale, this.coordinator?.getAuthSyncStatus?.() ?? null));
+      return;
+    }
+    if (action === 'test') {
+      const result = await this.coordinator?.authSyncTest?.();
+      if (!result) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
+        return;
+      }
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_test_sent', { count: result.sent }));
+      return;
+    }
+    if (action === 'push' && args[1]?.toLowerCase() === 'all') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_push_blocked_active'));
+        return;
+      }
+      const result = await this.coordinator?.authSyncPushAll?.();
+      if (!result) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
+        return;
+      }
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_push_done', {
+        sent: result.sent,
+        skipped: result.skipped,
+      }));
+      return;
+    }
+    await this.sendMessage(scopeId, t(locale, 'usage_auth_sync'));
+  }
+
   private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale, confirmed = false): Promise<void> {
     if (!this.canRunGlobalAuthRefresh()) {
       await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_blocked_active'));
@@ -4830,7 +4936,17 @@ export class BridgeSessionCore {
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_starting'));
-    const result = await this.refreshAllCodexAuthCandidates();
+    const lease = await this.coordinator?.acquireAuthRefreshLease?.('auth refresh all');
+    if (lease && !lease.ok) {
+      await this.sendMessage(scopeId, t(locale, 'auth_refresh_all_lease_failed', { error: lease.reason ?? t(locale, 'unknown') }));
+      return;
+    }
+    let result: CodexAuthRefreshAllResult;
+    try {
+      result = await this.refreshAllCodexAuthCandidates();
+    } finally {
+      await this.coordinator?.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
+    }
     const state = await this.listCodexAuthState();
     await this.applySharedCodexAuthQuotaSnapshots(state);
     const record = createPendingAuthChoiceList(scopeId, state.candidates);
@@ -5409,7 +5525,24 @@ export class BridgeSessionCore {
       if (record.messageId !== null) {
         await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_refresh_all_starting'), []);
       }
-      const result = await this.refreshAllCodexAuthCandidates();
+      const lease = await this.coordinator?.acquireAuthRefreshLease?.('auth refresh all');
+      if (lease && !lease.ok) {
+        if (record.messageId !== null) {
+          await this.editMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_refresh_all_lease_failed', { error: lease.reason ?? t(locale, 'unknown') }),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      let result: CodexAuthRefreshAllResult;
+      try {
+        result = await this.refreshAllCodexAuthCandidates();
+      } finally {
+        await this.coordinator?.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
+      }
       const state = await this.listCodexAuthState();
       await this.applySharedCodexAuthQuotaSnapshots(state);
       record.candidates = state.candidates;
@@ -5565,8 +5698,27 @@ export class BridgeSessionCore {
     this.authRotationInProgress = true;
     try {
       const failedTargets = rotation.retry?.failedAuthTargets ?? this.authRotationFailedTargets;
-      const selection = await this.selectNextCodexAuthCandidate(failedTargets);
       const locale = this.localeForChat(rotation.scopeId);
+      const current = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
+      if (current) {
+        const recoveredCurrent = await this.recoverCodexAuthCandidate(current.name);
+        if (recoveredCurrent) {
+          await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_recovered_current', {
+            value: current.name,
+            error: formatShortStatusError(rotation.reason),
+          }));
+          this.pendingTurnErrors.clear();
+          this.attachedThreads.clear();
+          await this.app.restart();
+          await this.syncCodexAuthCandidate(current.name);
+          if (rotation.retry) {
+            await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
+            return true;
+          }
+          return false;
+        }
+      }
+      const selection = await this.selectNextCodexAuthCandidate(failedTargets);
       if (!selection) {
         await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_no_candidate', {
           error: formatShortStatusError(rotation.reason),
@@ -9484,6 +9636,37 @@ function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshA
       .map((failure) => `${failure.name}: ${failure.error}`)
       .join('; ');
     lines.push(t(locale, 'auth_refresh_all_failed', { value: details }));
+  }
+  return lines.join('\n');
+}
+
+function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync']): string {
+  if (!status?.enabled) {
+    return t(locale, 'auth_sync_disabled');
+  }
+  const lines = [
+    t(locale, 'auth_sync_status_title'),
+    t(locale, 'auth_sync_status_node', { value: status.nodeId ?? t(locale, 'unknown') }),
+    t(locale, 'auth_sync_status_peers', { value: status.peers.length === 0 ? t(locale, 'none') : status.peers.join(', ') }),
+    t(locale, 'auth_sync_status_pending', { value: status.pendingImports }),
+    t(locale, 'auth_sync_status_sent', { value: status.lastSentAt ?? t(locale, 'none') }),
+    t(locale, 'auth_sync_status_received', { value: status.lastReceivedAt ?? t(locale, 'none') }),
+    t(locale, 'auth_sync_status_imported', {
+      value: status.lastImportedAt
+        ? `${status.lastImportCandidate ?? t(locale, 'unknown')} @ ${status.lastImportedAt}`
+        : t(locale, 'none'),
+    }),
+    t(locale, 'auth_sync_status_pull', {
+      value: status.lastPullAt
+        ? `${status.lastPullCandidate ?? t(locale, 'unknown')} @ ${status.lastPullAt}`
+        : t(locale, 'none'),
+    }),
+  ];
+  if (status.activeLeaseId) {
+    lines.push(t(locale, 'auth_sync_status_lease', { value: status.activeLeaseId }));
+  }
+  if (status.lastError) {
+    lines.push(t(locale, 'auth_sync_status_error', { value: status.lastError }));
   }
   return lines.join('\n');
 }
