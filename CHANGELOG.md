@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.16 - 2026-06-04
+
+### 中文
+- 新增独立的跨节点 auth 同步中文/英文配置指南，覆盖设计模型、`.env` 配置、`@BotFather` Bot-to-Bot Communication Mode 操作、验证步骤和故障排查。
+- 在 README、README_EN 和用户手册中加入可发现入口，让新用户能从 GitHub/npm 首页一路点到多节点 auth 同步配置说明。
+
+### English
+- Added standalone Chinese and English cross-node auth sync setup guides covering the design model, `.env` config, `@BotFather` Bot-to-Bot Communication Mode steps, verification, and troubleshooting.
+- Linked the guides from README, README_EN, and the user manuals so new users can find multi-node auth sync setup from the GitHub/npm landing page.
+
 ## 0.4.15 - 2026-06-04
 
 ### 中文

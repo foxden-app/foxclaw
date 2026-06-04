@@ -421,6 +421,17 @@ OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token r
 
 Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. Enable Bot-to-Bot Communication Mode for the participating bots in BotFather first.
 
+For the full design, safety boundaries, `.env` examples, and troubleshooting, read the [Cross-Node Auth Sync Setup Guide](./cross-node-auth-sync.md).
+
+In `@BotFather`, repeat this for every participating bot:
+
+1. Open `@BotFather`.
+2. Send `/mybots`.
+3. Select the bot that will participate in sync.
+4. Open the bot settings / Mini App settings interface.
+5. Find and enable **Bot-to-Bot Communication Mode**.
+6. Repeat for every peer bot; private sync requires this mode on both sender and recipient.
+
 Example:
 
 ```dotenv
@@ -467,7 +478,7 @@ Equivalent commands:
 
 If the requesting bot runtime has active turns, pending approvals, pending user inputs, or MCP elicitations, FoxClaw refuses manual auth switching to avoid changing accounts mid-request; another idle bot is unaffected.
 
-### 6.4 How Auto-Rotation Works
+### 6.5 How Auto-Rotation Works
 
 When Codex reports a usage limit, missing login, expired auth, or similar auth error, FoxClaw tries to rotate automatically:
 
@@ -511,4 +522,5 @@ auth.json_backup       # backup account, enable or disable as needed
 
 - [Beginner Install Guide](./install-for-beginners.md)
 - [Agent-Assisted Install](./agent-assisted-install.md)
+- [Cross-Node Auth Sync Setup Guide](./cross-node-auth-sync.md)
 - [Troubleshooting](./troubleshooting.md)

@@ -1,0 +1,177 @@
+# Cross-Node Auth Sync Setup Guide
+
+This guide is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool. It extends same-host auth mirroring across machines: when Codex refreshes a token on one node, FoxClaw can send an encrypted auth bundle to peer nodes through Telegram Bot-to-Bot private messages; when one node finds a local candidate unusable, it can pull an already-held valid peer copy.
+
+The feature is disabled by default. It does not require a public IP, FRP, or reverse proxy, but it requires Telegram Bot-to-Bot Communication Mode.
+
+## Scope
+
+Use it when:
+
+- You legally own and maintain the ChatGPT accounts and auth files.
+- Multiple machines run FoxClaw, and each machine has at least one Telegram bot.
+- You want auth files to stay fresh across nodes without routinely rotating refresh tokens.
+
+Do not use it when:
+
+- The auth source is untrusted, account ownership is unclear, or you do not control every machine administrator.
+- You plan to use `/auth refresh all` as a refresh-token keepalive.
+- The same bot token is being polled by multiple machines at the same time. That breaks Telegram update delivery and FoxClaw's assumptions.
+
+## Design And Safety Model
+
+Cross-node sync combines three active paths:
+
+- **Push**: after local login, Codex automatic refresh, or `/auth refresh all confirm` succeeds and passes usage validation, FoxClaw sends the newer candidate to peers.
+- **Pull**: before auth switch or reload, FoxClaw first searches local runtimes for a newer candidate. If none exists, it asks peers for a newer same-name, same-account candidate.
+- **Lease**: before `/auth refresh all confirm` rotates refresh tokens, FoxClaw requests a cross-node refresh lease. Any busy, denying, or non-responsive peer blocks the refresh.
+
+Safety boundaries:
+
+- Telegram only carries ciphertext. Candidate contents, candidate names, account ids, and `last_refresh` are inside an AES-256-GCM payload.
+- FoxClaw only accepts sync files from bots listed in `AUTH_SYNC_PEERS`.
+- Wrong `AUTH_SYNC_KEY`, cluster, nonce, or payload validation never writes files.
+- Remote imports wait for global local idleness, then run temporary usage validation before writing a candidate.
+- A same-name candidate known to belong to a different account id is never overwritten.
+- Sync packets do not create reply chains. FoxClaw filters by packet type, nonce, and peer allowlist to avoid bot-to-bot loops.
+
+Telegram's official Bot Features documentation says private bot-to-bot messaging requires Bot-to-Bot Communication Mode on both sender and recipient, and it calls out loop-prevention requirements. See https://core.telegram.org/bots/features#bot-to-bot-communication
+
+## Before You Configure
+
+Assume two machines:
+
+- Node A: bot `@foxclaw_node_a_bot`
+- Node B: bot `@foxclaw_node_b_bot`
+
+Each node should already work independently:
+
+```bash
+foxclaw doctor
+foxclaw start
+```
+
+In a private Telegram chat with each bot, verify:
+
+```text
+/status
+/auth
+```
+
+## Enable Bot-to-Bot In @BotFather
+
+Repeat this for every participating bot:
+
+1. Open Telegram and enter `@BotFather`.
+2. Send `/mybots`.
+3. Select the bot that will participate in auth sync.
+4. Open the bot settings / Mini App settings interface.
+5. Find **Bot-to-Bot Communication Mode**.
+6. Enable it.
+7. Repeat for every peer bot.
+
+Private cross-node sync requires this mode on both bots. Enabling it on only one side is usually not enough for two bots to exchange private sync packets.
+
+## .env Configuration
+
+Use the same `AUTH_SYNC_KEY` and `AUTH_SYNC_CLUSTER_ID` on all nodes, but give each node a different `AUTH_SYNC_NODE_ID`.
+
+Node A:
+
+```dotenv
+AUTH_SYNC_ENABLED=true
+AUTH_SYNC_KEY=<shared key with at least 32 bytes>
+AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
+AUTH_SYNC_NODE_ID=workstation-a
+AUTH_SYNC_PEERS=@foxclaw_node_b_bot
+```
+
+Node B:
+
+```dotenv
+AUTH_SYNC_ENABLED=true
+AUTH_SYNC_KEY=<shared key with at least 32 bytes>
+AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
+AUTH_SYNC_NODE_ID=workstation-b
+AUTH_SYNC_PEERS=@foxclaw_node_a_bot
+```
+
+For more peers, separate bot usernames with commas:
+
+```dotenv
+AUTH_SYNC_PEERS=@foxclaw_node_a_bot,@foxclaw_node_b_bot,@foxclaw_node_c_bot
+```
+
+Generate a shared key with a password manager or `openssl`:
+
+```bash
+openssl rand -base64 32
+```
+
+Restart FoxClaw on every node after editing config:
+
+```bash
+foxclaw restart
+```
+
+## Verification
+
+1. In each node's bot private chat, run:
+
+```text
+/auth sync status
+```
+
+You should see the node id, peer list, and pending imports.
+
+2. On node A, run:
+
+```text
+/auth sync test
+```
+
+Node A should report that it sent a test ping. Node B's `/auth sync status` should show a recent receive or test-state change.
+
+3. Use a low-risk candidate for the first broadcast. Make sure every runtime is idle, then run on node A:
+
+```text
+/auth sync push all
+```
+
+4. On node B, run:
+
+```text
+/auth sync status
+/auth
+```
+
+Confirm that pending imports were processed, or that the candidate exists or has a newer timestamp.
+
+5. Only test refresh-token rotation after you understand the risk:
+
+```text
+/auth refresh all
+/auth refresh all confirm
+```
+
+With cross-node sync enabled, this command first requests a cross-node refresh lease. Any busy, denying, or timed-out peer blocks refresh.
+
+## Troubleshooting
+
+**`/auth sync test` does nothing**
+
+- Confirm both bots have Bot-to-Bot Communication Mode enabled in `@BotFather`.
+- Confirm `AUTH_SYNC_PEERS` contains peer `@username` values, not tokens.
+- Confirm `AUTH_SYNC_KEY` and `AUTH_SYNC_CLUSTER_ID` match exactly on both sides.
+- Confirm both nodes were restarted after config changes.
+
+**A sync packet arrived but no candidate was written**
+
+- The local node may not be globally idle. Active turns, approvals, inputs, login flows, and mirror writes make imports wait.
+- Usage validation failure rejects the write.
+- Same-name candidates from different account ids are refused.
+
+**Should I periodically run `/auth refresh all confirm` as keepalive?**
+
+No. Codex refreshes automatically when access tokens expire. Cross-node auth sync propagates auth files that have already refreshed successfully; Refresh all should remain a maintenance command, not a routine keepalive.
+
