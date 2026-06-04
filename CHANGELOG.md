@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.3 - 2026-06-04
+
+### 中文
+- 修复 0.5.2 中 `/update` 完成回报丢失的问题：Linux 自升级子进程现在通过独立的 user systemd transient service 运行，不再留在 `foxclaw.service` control group 里，因此 `KillMode=control-group` 重启服务时不会提前杀掉 updater。
+- 保留 `KillMode=control-group` 的 app-server 清理能力，同时让升级进程能在服务重启后继续写入完成状态，由新服务启动后的轮询发送 Telegram 成功/失败回报。
+
+### English
+- Fixed missing `/update` completion reports in 0.5.2: on Linux the self-update worker now runs in a separate user systemd transient service instead of the `foxclaw.service` control group, so `KillMode=control-group` no longer kills the updater during service restart.
+- Kept `KillMode=control-group` app-server cleanup while allowing the updater to write its final status after restart; the newly started service polls that status and sends the Telegram success/failure report.
+
 ## 0.5.2 - 2026-06-04
 
 ### 中文

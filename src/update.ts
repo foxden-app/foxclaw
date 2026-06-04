@@ -55,6 +55,13 @@ interface PerformSelfUpdateOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface SelfUpdateLaunchCommand {
+  command: string;
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  viaSystemdRun: boolean;
+}
+
 export interface SelfUpdateOutcome {
   ok: boolean;
   fromVersion: string;
@@ -258,16 +265,36 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
       fs.mkdirSync(path.dirname(options.logPath), { recursive: true });
       const logFd = fs.openSync(options.logPath, 'a', 0o600);
       try {
-        const child = spawn(
-          options.nodePath,
-          [options.entryPoint, 'update', '--notification-file', statusFile],
-          {
-            detached: true,
+        const launch = buildSelfUpdateLaunchCommand({
+          entryPoint: options.entryPoint,
+          nodePath: options.nodePath,
+          statusFile,
+          logPath: options.logPath,
+          ...(options.codexCliBin ? { codexCliBin: options.codexCliBin } : {}),
+        });
+        if (launch.viaSystemdRun) {
+          const result = spawnSync(launch.command, launch.args, {
             stdio: ['ignore', logFd, logFd],
-            env: options.codexCliBin ? { ...process.env, CODEX_CLI_BIN: options.codexCliBin } : process.env,
-          },
-        );
-        child.unref();
+            env: launch.env,
+          });
+          if (result.error) {
+            throw result.error;
+          }
+          if (result.status !== 0) {
+            throw new Error(`${launch.command} ${launch.args.join(' ')} exited with status ${result.status ?? 'unknown'}.`);
+          }
+        } else {
+          const child = spawn(
+            launch.command,
+            launch.args,
+            {
+              detached: true,
+              stdio: ['ignore', logFd, logFd],
+              env: launch.env,
+            },
+          );
+          child.unref();
+        }
       } catch (error) {
         writeSelfUpdateStatus(statusFile, {
           state: 'failed',
@@ -292,6 +319,51 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
     async clearStatus(): Promise<void> {
       fs.rmSync(statusFile, { force: true });
     },
+  };
+}
+
+export function buildSelfUpdateLaunchCommand(options: {
+  entryPoint: string;
+  nodePath: string;
+  statusFile: string;
+  logPath: string;
+  codexCliBin?: string;
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  systemdRunPath?: string | null;
+  unitName?: string;
+}): SelfUpdateLaunchCommand {
+  const env = options.codexCliBin
+    ? { ...(options.env ?? process.env), CODEX_CLI_BIN: options.codexCliBin }
+    : { ...(options.env ?? process.env) };
+  const updateArgs = [options.entryPoint, 'update', '--notification-file', options.statusFile];
+  const platform = options.platform ?? process.platform;
+  const systemdRunPath = options.systemdRunPath === undefined
+    ? resolveCommand('systemd-run', env)
+    : options.systemdRunPath;
+  if (platform === 'linux' && systemdRunPath) {
+    const unitName = options.unitName ?? `foxclaw-update-${process.pid}-${Date.now()}`;
+    return {
+      command: systemdRunPath,
+      args: [
+        '--user',
+        '--collect',
+        `--unit=${unitName}`,
+        `--property=StandardOutput=append:${options.logPath}`,
+        `--property=StandardError=append:${options.logPath}`,
+        ...systemdSetEnvArgs(env),
+        options.nodePath,
+        ...updateArgs,
+      ],
+      env,
+      viaSystemdRun: true,
+    };
+  }
+  return {
+    command: options.nodePath,
+    args: updateArgs,
+    env,
+    viaSystemdRun: false,
   };
 }
 
@@ -391,6 +463,33 @@ function executableCandidates(
     path.join(path.dirname(nodePath), commandName),
     ...(env.PATH || '').split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, commandName)),
   ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+}
+
+function resolveCommand(commandName: string, env: NodeJS.ProcessEnv): string | null {
+  for (const directory of (env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(directory, commandName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  for (const fallback of ['/usr/bin', '/bin', '/usr/local/bin']) {
+    const candidate = path.join(fallback, commandName);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function systemdSetEnvArgs(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
+    .filter((entry): entry is [string, string] => {
+      const [key, value] = entry;
+      return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+        && typeof value === 'string'
+        && !value.includes('\0');
+    })
+    .map(([key, value]) => `--setenv=${key}=${value}`);
 }
 
 function buildInstallerEnv(

@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildSelfUpdateLaunchCommand,
   readSelfUpdateStatus,
   resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
@@ -93,6 +94,59 @@ test('resolveSelfUpdateInstaller uses the npm beside Node for npm installations'
 
   assert.equal(installer.manager, 'npm');
   assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/npm');
+});
+
+test('buildSelfUpdateLaunchCommand uses a transient user systemd service on Linux', () => {
+  const launch = buildSelfUpdateLaunchCommand({
+    entryPoint: '/opt/foxclaw/dist/main.js',
+    nodePath: '/opt/node/bin/node',
+    statusFile: '/home/user/.foxclaw/runtime/self-update.json',
+    logPath: '/home/user/.foxclaw/logs/update.log',
+    codexCliBin: '/home/user/bin/codex',
+    env: {
+      HOME: '/home/user',
+      PATH: '/usr/bin:/bin',
+      TG_BOT_TOKEN: 'secret-token',
+    },
+    platform: 'linux',
+    systemdRunPath: '/usr/bin/systemd-run',
+    unitName: 'foxclaw-update-test',
+  });
+
+  assert.equal(launch.command, '/usr/bin/systemd-run');
+  assert.equal(launch.viaSystemdRun, true);
+  assert.deepEqual(launch.args.slice(0, 5), [
+    '--user',
+    '--collect',
+    '--unit=foxclaw-update-test',
+    '--property=StandardOutput=append:/home/user/.foxclaw/logs/update.log',
+    '--property=StandardError=append:/home/user/.foxclaw/logs/update.log',
+  ]);
+  assert.ok(launch.args.includes('--setenv=CODEX_CLI_BIN=/home/user/bin/codex'));
+  assert.ok(launch.args.includes('--setenv=TG_BOT_TOKEN=secret-token'));
+  assert.deepEqual(launch.args.slice(-5), [
+    '/opt/node/bin/node',
+    '/opt/foxclaw/dist/main.js',
+    'update',
+    '--notification-file',
+    '/home/user/.foxclaw/runtime/self-update.json',
+  ]);
+});
+
+test('buildSelfUpdateLaunchCommand falls back to detached node launch without systemd-run', () => {
+  const launch = buildSelfUpdateLaunchCommand({
+    entryPoint: '/opt/foxclaw/dist/main.js',
+    nodePath: '/opt/node/bin/node',
+    statusFile: '/tmp/self-update.json',
+    logPath: '/tmp/update.log',
+    env: { PATH: '/usr/bin' },
+    platform: 'linux',
+    systemdRunPath: null,
+  });
+
+  assert.equal(launch.command, '/opt/node/bin/node');
+  assert.equal(launch.viaSystemdRun, false);
+  assert.deepEqual(launch.args, ['/opt/foxclaw/dist/main.js', 'update', '--notification-file', '/tmp/self-update.json']);
 });
 
 test('resolveCodexUpdateInstaller upgrades a pnpm-managed Codex package', () => {
