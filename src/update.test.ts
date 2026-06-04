@@ -5,6 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildSelfUpdateLaunchCommand,
+  createSelfUpdateRuntime,
   readSelfUpdateStatus,
   resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
@@ -147,6 +148,40 @@ test('buildSelfUpdateLaunchCommand falls back to detached node launch without sy
   assert.equal(launch.command, '/opt/node/bin/node');
   assert.equal(launch.viaSystemdRun, false);
   assert.deepEqual(launch.args, ['/opt/foxclaw/dist/main.js', 'update', '--notification-file', '/tmp/self-update.json']);
+});
+
+test('createSelfUpdateRuntime expires stale pending status', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'self-update-stale-'));
+  try {
+    const statusPath = path.join(tempDir, 'status.json');
+    const statusFile = selfUpdateStatusPath(statusPath);
+    writeSelfUpdateStatus(statusFile, {
+      state: 'pending',
+      scopeId: 'telegram:99::root',
+      locale: 'zh',
+      fromVersion: '0.5.2',
+      toVersion: null,
+      error: null,
+      updatedAt: '2026-06-04T08:17:33.000Z',
+    });
+    const runtime = createSelfUpdateRuntime({
+      entryPoint: '/opt/foxclaw/dist/main.js',
+      nodePath: '/opt/node/bin/node',
+      version: '0.5.3',
+      statusPath,
+      logPath: path.join(tempDir, 'update.log'),
+      pendingTimeoutMs: 1_000,
+      now: () => new Date('2026-06-04T08:17:35.000Z'),
+    });
+
+    const status = await runtime.readStatus();
+
+    assert.equal(status?.state, 'failed');
+    assert.match(status?.error ?? '', /self-update timed out/);
+    assert.equal(readSelfUpdateStatus(statusFile)?.state, 'failed');
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('resolveCodexUpdateInstaller upgrades a pnpm-managed Codex package', () => {

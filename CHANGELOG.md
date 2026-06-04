@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.4 - 2026-06-04
+
+### 中文
+- 修复 `/update` 遗留 `self-update.json` pending 后永久显示“升级已经在进行中”的问题：pending 超过 15 分钟会自动转为失败状态，Telegram 会回报失败，下一次 `/update` 可以重新发起。
+- 这个补丁专门兜底 0.5.2 在 `KillMode=control-group` 下被杀掉的旧 updater，以及任何未来被外部中断、没有写完成状态的升级进程。
+
+### English
+- Fixed `/update` getting permanently stuck on "update already running" after a leftover `self-update.json` pending state: pending updates now expire as failed after 15 minutes, Telegram reports the failure, and the next `/update` can start again.
+- This specifically recovers from the 0.5.2 updater killed by `KillMode=control-group`, and from any future updater interruption that fails to write a terminal status.
+
 ## 0.5.3 - 2026-06-04
 
 ### 中文

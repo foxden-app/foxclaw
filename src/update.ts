@@ -7,6 +7,7 @@ import type { AppLocale } from './types.js';
 const PACKAGE_SPEC = '@foxden-app/foxclaw@latest';
 const CODEX_PACKAGE_SPEC = '@openai/codex@latest';
 const UPDATE_STATUS_FILENAME = 'self-update.json';
+export const SELF_UPDATE_PENDING_TIMEOUT_MS = 15 * 60_000;
 
 export type SelfUpdateState = 'pending' | 'succeeded' | 'failed';
 
@@ -44,6 +45,8 @@ interface CreateSelfUpdateRuntimeOptions {
   statusPath: string;
   logPath: string;
   codexCliBin?: string;
+  pendingTimeoutMs?: number;
+  now?: () => Date;
 }
 
 interface PerformSelfUpdateOptions {
@@ -242,11 +245,38 @@ export function writeSelfUpdateStatus(statusFile: string, status: SelfUpdateStat
   fs.renameSync(temporaryFile, statusFile);
 }
 
+function readNormalizedSelfUpdateStatus(
+  statusFile: string,
+  pendingTimeoutMs: number,
+  now: () => Date,
+): SelfUpdateStatus | null {
+  const status = readSelfUpdateStatus(statusFile);
+  if (!status || status.state !== 'pending' || pendingTimeoutMs <= 0) {
+    return status;
+  }
+  const updatedAtMs = Date.parse(status.updatedAt);
+  const nowMs = now().getTime();
+  const isStale = Number.isNaN(updatedAtMs) || nowMs - updatedAtMs > pendingTimeoutMs;
+  if (!isStale) {
+    return status;
+  }
+  const failed: SelfUpdateStatus = {
+    ...status,
+    state: 'failed',
+    error: `self-update timed out after ${Math.round(pendingTimeoutMs / 60_000)} minute(s) without writing a completion status; the previous updater may have been interrupted`,
+    updatedAt: new Date(nowMs).toISOString(),
+  };
+  writeSelfUpdateStatus(statusFile, failed);
+  return failed;
+}
+
 export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions): SelfUpdateRuntime {
   const statusFile = selfUpdateStatusPath(options.statusPath);
+  const pendingTimeoutMs = options.pendingTimeoutMs ?? SELF_UPDATE_PENDING_TIMEOUT_MS;
+  const now = options.now ?? (() => new Date());
   return {
     async launch(scopeId: string, locale: AppLocale): Promise<void> {
-      const current = readSelfUpdateStatus(statusFile);
+      const current = readNormalizedSelfUpdateStatus(statusFile, pendingTimeoutMs, now);
       if (current?.state === 'pending') {
         throw new Error('A FoxClaw update is already running.');
       }
@@ -314,7 +344,7 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
       }
     },
     async readStatus(): Promise<SelfUpdateStatus | null> {
-      return readSelfUpdateStatus(statusFile);
+      return readNormalizedSelfUpdateStatus(statusFile, pendingTimeoutMs, now);
     },
     async clearStatus(): Promise<void> {
       fs.rmSync(statusFile, { force: true });
