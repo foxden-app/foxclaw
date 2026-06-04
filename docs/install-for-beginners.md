@@ -71,6 +71,8 @@ Log in:
 codex login
 ```
 
+If you are logging in from a headless host, remote SSH session, WSL setup, or any environment where browser callback login is unreliable, you may use Codex device-code login later through FoxClaw's `/login_device`, `/auth add <name>`, or the Login button in the `/auth` panel. First open `https://chatgpt.com/`, click your username in the lower-left corner, go to Settings > Security, and enable device code authorization for Codex. Workspace accounts may require an admin to allow device-code login. Never share the device code or paste it into an untrusted page.
+
 Check the CLI exists:
 
 ```bash

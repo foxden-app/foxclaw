@@ -376,6 +376,10 @@ The safer path is adding candidates from the phone with `/auth add <name>`.
 - `/logout confirm`: logs out the current Codex account.
 - `/auth add <name>`: adds a candidate account. For example, `/auth add work` creates `auth.json_work` and starts device login.
 
+Device-code login is the Codex login path for headless hosts. Your ChatGPT account may not allow it by default. Before using `/login_device`, `/auth add <name>`, or the Login button in the `/auth` panel, open `https://chatgpt.com/`, click your username in the lower-left corner, go to Settings > Security, and enable device code authorization for Codex. Workspace or enterprise accounts may require a workspace admin to allow device-code login.
+
+Use this carefully: a device code can be stolen by phishing and acts as a login grant. Enter the code only on the ChatGPT/Codex login page you trust. Never send the device code to another person or paste it into an untrusted page.
+
 `/auth add <name>` flow:
 
 1. FoxClaw prepares `auth.json_<name>`.

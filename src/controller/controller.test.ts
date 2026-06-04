@@ -1747,6 +1747,7 @@ test('/auth panel can start device login from an inline action', async (t) => {
 
   assert.deepEqual(calls, ['start']);
   assert.equal(rig.callbackAnswers.at(-1), 'Device login started.');
+  assert.match(rig.sentMessages.at(-1)!, /enable device code authorization for Codex/);
   assert.match(rig.sentMessages.at(-1)!, /PANEL-CODE/);
 });
 
@@ -1922,6 +1923,7 @@ test('/auth add prepares a new auth candidate and completes device login', async
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), targetPath);
   assert.equal(fs.existsSync(targetPath), false);
   assert.match(rig.sentMessages[0]!, /Preparing new Codex auth candidate auth\.json_work/);
+  assert.match(rig.sentMessages[1]!, /enable device code authorization for Codex/);
   assert.match(rig.sentMessages[1]!, /NEW-CODE/);
   assert.equal((rig.controller as any).pendingAuthAddsByLoginId.has('login-add'), true);
 
@@ -2975,6 +2977,7 @@ test('device login, cancel, and logout commands call app-server auth APIs', asyn
   await (rig.controller as any).handleCommand(createEvent('/logout confirm'), 'en', 'logout', ['confirm']);
 
   assert.deepEqual(calls, ['start', 'cancel:login-1', 'logout']);
+  assert.match(rig.sentMessages[0]!, /enable device code authorization for Codex/);
   assert.match(rig.sentMessages[0]!, /CODE-1/);
 });
 

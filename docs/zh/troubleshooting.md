@@ -157,6 +157,8 @@ codex --version
 codex login
 ```
 
+如果你通过 FoxClaw 的 `/login_device`、`/auth add <name>` 或 `/auth` 面板“设备登录”拿到了设备码，但登录页面提示没有权限、退回普通浏览器流程，或无头环境无法完成登录，先检查 ChatGPT 安全设置：打开 `https://chatgpt.com/`，左下角点用户名，进入“设置 > 安全”，启用“为 Codex 启用设备代码授权”。Workspace 账号可能需要管理员在 workspace 权限里允许设备码登录。设备代码等同于登录授权，切勿分享给他人。
+
 `codex --version` 只证明命令存在。要验证认证真的可用，运行：
 
 ```bash

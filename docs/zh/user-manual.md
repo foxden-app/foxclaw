@@ -376,6 +376,10 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 - `/logout confirm`：退出当前 Codex 登录。
 - `/auth add <name>`：新增一个候选账号，例如 `/auth add work` 会创建 `auth.json_work` 并发起设备码登录。
 
+设备码登录是无头主机上的 Codex 登录流程。默认情况下 ChatGPT 账号可能没有打开这个权限。使用 `/login_device`、`/auth add <name>` 或 `/auth` 面板里的“设备登录”按钮前，先在浏览器打开 `https://chatgpt.com/`，左下角点用户名，进入“设置 > 安全”，启用“为 Codex 启用设备代码授权”。如果是 workspace/企业账号，可能需要管理员在 workspace 权限里允许设备码登录。
+
+开启后仍要谨慎：设备代码可以被钓鱼页面窃取，等同于一次登录授权。只在你确认的 ChatGPT/Codex 登录页面输入设备代码，不要把设备代码发给别人，也不要粘贴到不可信网页。
+
 `/auth add <name>` 的流程：
 
 1. FoxClaw 准备 `auth.json_<name>`。

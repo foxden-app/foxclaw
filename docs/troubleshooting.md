@@ -156,6 +156,8 @@ If Codex is not logged in:
 codex login
 ```
 
+If FoxClaw's `/login_device`, `/auth add <name>`, or `/auth` panel Login button gives you a device code but the login page says it is not allowed, falls back to the regular browser flow, or cannot complete on a headless host, check ChatGPT security settings first: open `https://chatgpt.com/`, click your username in the lower-left corner, go to Settings > Security, and enable device code authorization for Codex. Workspace accounts may require an admin to allow device-code login. Treat the device code as a login grant and never share it.
+
 `codex --version` only verifies the command exists. To verify auth, run:
 
 ```bash

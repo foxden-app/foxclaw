@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.5 - 2026-06-04
+
+### 中文
+- 在 `/login_device`、`/auth add <name>` 和 `/auth` 面板设备登录返回内容中加入 ChatGPT 设备代码授权前置条件：在 ChatGPT 左下角用户名菜单进入“设置 > 安全”，启用“为 Codex 启用设备代码授权”。
+- README、安装指南、用户手册和故障排查补充同一指引，并强调 workspace 账号可能需要管理员允许设备码登录，以及设备代码不要分享给他人或粘贴到不可信页面。
+
+### English
+- Added a device-code authorization prerequisite to `/login_device`, `/auth add <name>`, and the `/auth` panel Login response: in ChatGPT, open the lower-left username menu, then Settings > Security, and enable device code authorization for Codex.
+- Added the same guidance to the README, install guide, user manual, and troubleshooting docs, including workspace-admin requirements and the warning not to share device codes or paste them into untrusted pages.
+
 ## 0.5.4 - 2026-06-04
 
 ### 中文

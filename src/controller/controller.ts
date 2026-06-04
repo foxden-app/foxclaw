@@ -5081,6 +5081,7 @@ export class BridgeSessionCore {
       });
       await this.sendMessage(scopeId, [
         t(locale, 'auth_add_started', { value: candidateName }),
+        t(locale, 'login_device_prereq'),
         t(locale, 'login_url', { value: login.verificationUrl }),
         t(locale, 'login_code', { value: login.userCode }),
         t(locale, 'login_id', { value: login.loginId }),
@@ -5136,6 +5137,7 @@ export class BridgeSessionCore {
     this.pendingLoginScopesById.set(login.loginId, scopeId);
     await this.sendMessage(scopeId, [
       t(locale, 'login_device_started'),
+      t(locale, 'login_device_prereq'),
       t(locale, 'login_url', { value: login.verificationUrl }),
       t(locale, 'login_code', { value: login.userCode }),
       t(locale, 'login_id', { value: login.loginId }),

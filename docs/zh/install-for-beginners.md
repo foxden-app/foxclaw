@@ -69,6 +69,8 @@ npm install -g @openai/codex
 codex login
 ```
 
+如果你是在无头主机、远程 SSH、WSL 或没有可用浏览器回调的环境里登录，后续可能会使用 Codex 的设备码登录，包括 FoxClaw 的 `/login_device`、`/auth add <name>` 和 `/auth` 面板里的“设备登录”。先在浏览器打开 `https://chatgpt.com/`，左下角点用户名，进入“设置 > 安全”，启用“为 Codex 启用设备代码授权”。Workspace 账号可能需要管理员允许设备码登录。设备代码不要分享给任何人，也不要粘贴到不可信页面。
+
 检查命令是否存在：
 
 ```bash

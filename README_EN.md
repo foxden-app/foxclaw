@@ -50,6 +50,7 @@ The minimum install needs one or more Telegram bot tokens, your numeric Telegram
 
 - macOS or Linux with a working `codex` CLI
 - Codex authenticated on the host machine
+- If you want to start device-code login from Telegram with `/auth add` or `/login_device`, first open the username menu in the lower-left corner of ChatGPT, then Settings > Security, and enable device code authorization for Codex
 - Node.js 24+
 - A Telegram bot token from `@BotFather`
 - Your Telegram numeric user id
@@ -128,6 +129,8 @@ Setup:
 2. Use `/auth add <name>` to add new accounts directly from Telegram.
 3. Use `/auth` to view all candidate account statuses.
 4. Use `/auth enable <n>` / `/auth disable <n>` to control which accounts participate in auto-rotation.
+
+Before using `/auth add <name>` or `/login_device` for device-code login, open ChatGPT, click the username menu in the lower-left corner, go to Settings > Security, and enable device code authorization for Codex. Treat the device code as a login grant: never forward it or paste it into an untrusted page.
 
 For larger inventories, `/auth` shows 8 candidates per page with paging and `All / Enabled / Attention` filters. Use `/auth list <keyword>` to search filenames or `/auth page <n>` to jump directly. Candidate rows use the quota windows reported by Codex, for example `5h:20|7d:25` or a single monthly window such as `30d:97`; buttons use compact remaining numbers such as `20|25`, with `—` for unknown values. The panel omits the repeated `auth.json_` prefix from candidate labels without renaming files on disk.
 
