@@ -127,7 +127,7 @@ export interface CoreCoordinator {
   releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
   getAuthSyncStatus?: () => RuntimeStatus['authSync'];
   authSyncPushAll?: () => Promise<{ sent: number; skipped: number }>;
-  authSyncTest?: () => Promise<{ sent: number }>;
+  authSyncTest?: () => Promise<{ sent: number; replied: number; missing: string[] }>;
   statusUpdated?: (status: RuntimeStatus) => void;
   getServiceStatus?: () => Promise<{
     bots: NonNullable<RuntimeStatus['bots']>;
@@ -839,6 +839,7 @@ export class BridgeSessionCore {
           if (serviceStatus.authSync?.enabled) {
             lines.push(t(locale, 'status_auth_sync', {
               node: serviceStatus.authSync.nodeId ?? t(locale, 'unknown'),
+              contact: serviceStatus.authSync.transportLabel ?? t(locale, 'unknown'),
               peers: serviceStatus.authSync.peers.length,
               pending: serviceStatus.authSync.pendingImports,
             }));
@@ -4895,7 +4896,11 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
         return;
       }
-      await this.sendMessage(scopeId, t(locale, 'auth_sync_test_sent', { count: result.sent }));
+      const message = [
+        t(locale, 'auth_sync_test_sent', { sent: result.sent, replied: result.replied }),
+        ...(result.missing.length > 0 ? [t(locale, 'auth_sync_test_missing', { value: result.missing.join(', ') })] : []),
+      ].join('\n');
+      await this.sendMessage(scopeId, message);
       return;
     }
     if (action === 'push' && args[1]?.toLowerCase() === 'all') {
@@ -9647,6 +9652,7 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
   const lines = [
     t(locale, 'auth_sync_status_title'),
     t(locale, 'auth_sync_status_node', { value: status.nodeId ?? t(locale, 'unknown') }),
+    t(locale, 'auth_sync_status_transport', { value: status.transportLabel ?? t(locale, 'unknown') }),
     t(locale, 'auth_sync_status_peers', { value: status.peers.length === 0 ? t(locale, 'none') : status.peers.join(', ') }),
     t(locale, 'auth_sync_status_pending', { value: status.pendingImports }),
     t(locale, 'auth_sync_status_sent', { value: status.lastSentAt ?? t(locale, 'none') }),

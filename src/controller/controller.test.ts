@@ -1000,6 +1000,7 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
       authSync: {
         enabled: true,
         nodeId: 'node-a',
+        transportLabel: '@bot_one',
         peers: ['@botB'],
         pendingImports: 1,
         lastSentAt: '2026-05-27T10:00:01.000Z',
@@ -1032,7 +1033,7 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
   assert.match(rig.sentMessages[0]!, /@bot_one: connected yes, runtime isolated, auth auth\.json_a, active turns 1/);
   assert.match(rig.sentMessages[0]!, /@bot_two: connected yes, runtime default\/shared terminal, auth auth\.json_b, active turns 0/);
   assert.match(rig.sentMessages[0]!, /Last auth mirror: auth\.json_a from @bot_one/);
-  assert.match(rig.sentMessages[0]!, /Cross-node auth sync: node node-a, peers 1, pending imports 1/);
+  assert.match(rig.sentMessages[0]!, /Cross-node auth sync: node node-a, contact @bot_one, peers 1, pending imports 1/);
   assert.match(rig.sentMessages[0]!, /Cross-node auth sync error: peer offline/);
   assert.match(rig.sentMessages[0]!, /Last service update: 0\.3\.19 -> 0\.4\.0/);
   assert.match(rig.sentMessages[0]!, /Last Codex update: Codex CLI: 0\.135\.0 -> 0\.136\.0\./);
@@ -1373,6 +1374,7 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
     getAuthSyncStatus: () => ({
       enabled: true,
       nodeId: 'node-a',
+      transportLabel: '@botA',
       peers: ['@botB'],
       pendingImports: 0,
       lastSentAt: '2026-06-01T00:00:00.000Z',
@@ -1390,7 +1392,7 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
     },
     authSyncTest: async () => {
       tested = true;
-      return { sent: 1 };
+      return { sent: 1, replied: 0, missing: ['@botB'] };
     },
   });
   t.after(() => {
@@ -1404,7 +1406,7 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
 
   assert.match(rig.sentMessages[0]!, /Cross-node auth sync:/);
   assert.match(rig.sentMessages[0]!, /Node: node-a/);
-  assert.equal(rig.sentMessages[1], 'Auth sync test ping sent to 1 peer(s).');
+  assert.equal(rig.sentMessages[1], 'Auth sync test complete: sent 1, replies 0.\nMissing replies: @botB');
   assert.equal(rig.sentMessages[2], 'Auth sync push complete: sent 2, skipped 1.');
   assert.equal(tested, true);
   assert.equal(pushed, true);

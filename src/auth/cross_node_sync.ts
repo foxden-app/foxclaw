@@ -10,6 +10,7 @@ import { isAuthCandidateName, parseChatGptAuthMetadata } from './mirror.js';
 export interface AuthSyncConfig {
   enabled: boolean;
   transport: 'telegram-private';
+  transportLabel?: string | null;
   key: string | null;
   peers: string[];
   nodeId: string | null;
@@ -27,6 +28,7 @@ export interface AuthSyncStatus {
   enabled: boolean;
   nodeId: string | null;
   transport: 'telegram-private';
+  transportLabel: string | null;
   peers: string[];
   pendingImports: number;
   lastSentAt: string | null;
@@ -126,15 +128,30 @@ interface PendingLease {
   timer: NodeJS.Timeout;
 }
 
+interface PendingTest {
+  peers: string[];
+  replies: Set<string>;
+  resolve: (value: AuthSyncTestResult) => void;
+  timer: NodeJS.Timeout;
+  finished: boolean;
+}
+
 export interface AuthSyncLeaseResult {
   ok: boolean;
   leaseId: string | null;
   reason?: string | null;
 }
 
+export interface AuthSyncTestResult {
+  sent: number;
+  replied: number;
+  missing: string[];
+}
+
 const ENVELOPE_MAGIC = 'foxclaw-auth-sync';
 const NONCE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const PULL_TIMEOUT_MS = 12_000;
+const TEST_TIMEOUT_MS = 8_000;
 const LEASE_TIMEOUT_MS = 8_000;
 const LEASE_TTL_MS = 60_000;
 const REMOTE_ACCESS_TOKEN_MIN_TTL_MS = 60_000;
@@ -147,6 +164,7 @@ export class CrossNodeAuthSync {
   private readonly pendingImports: PendingRemoteImport[] = [];
   private readonly pendingPulls = new Map<string, PendingPull>();
   private readonly pendingLeases = new Map<string, PendingLease>();
+  private readonly pendingTests = new Map<string, PendingTest>();
   private seenNonces = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private activeRemoteLease: { leaseId: string; peer: string; expiresAt: number } | null = null;
@@ -218,6 +236,7 @@ export class CrossNodeAuthSync {
       enabled: this.config.enabled,
       nodeId: this.nodeId,
       transport: this.config.transport,
+      transportLabel: this.config.transportLabel?.trim() || null,
       peers: this.peers,
       pendingImports: this.pendingImports.length,
       lastSentAt: this.state.lastSentAt,
@@ -234,7 +253,8 @@ export class CrossNodeAuthSync {
   isIdle(): boolean {
     return this.pendingImports.length === 0
       && this.pendingPulls.size === 0
-      && this.pendingLeases.size === 0;
+      && this.pendingLeases.size === 0
+      && this.pendingTests.size === 0;
   }
 
   async publishCandidate(candidateName: string): Promise<boolean> {
@@ -368,10 +388,37 @@ export class CrossNodeAuthSync {
     }
   }
 
-  async testPeers(): Promise<{ sent: number }> {
-    if (!this.isReady()) return { sent: 0 };
-    await this.sendToAll({ kind: 'test.ping', requestId: crypto.randomUUID() });
-    return { sent: this.peers.length };
+  async testPeers(): Promise<AuthSyncTestResult> {
+    if (!this.isReady()) return { sent: 0, replied: 0, missing: [] };
+    const requestId = crypto.randomUUID();
+    const peers = [...this.peers];
+    const resultPromise = new Promise<AuthSyncTestResult>((resolve) => {
+      const timer = setTimeout(() => {
+        this.finishPendingTest(requestId);
+      }, TEST_TIMEOUT_MS);
+      timer.unref();
+      this.pendingTests.set(requestId, {
+        peers,
+        replies: new Set(),
+        resolve,
+        timer,
+        finished: false,
+      });
+    });
+    try {
+      await this.sendToAll({ kind: 'test.ping', requestId });
+    } catch (error) {
+      const pending = this.pendingTests.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingTests.delete(requestId);
+      }
+      throw error;
+    }
+    if (peers.length === 0) {
+      this.finishPendingTest(requestId);
+    }
+    return resultPromise;
   }
 
   async handleIncomingEnvelope(rawEnvelope: string, peer: AuthSyncPeerIdentity): Promise<boolean> {
@@ -416,6 +463,7 @@ export class CrossNodeAuthSync {
         });
         return;
       case 'test.pong':
+        this.handleTestPong(message.requestId, normalizePeerIdentity(peer));
         this.logger.info('auth.sync.test_pong', { peer: normalizePeerIdentity(peer), nodeId: message.nodeId });
         return;
       case 'lease.request':
@@ -609,7 +657,34 @@ export class CrossNodeAuthSync {
     const envelope = this.sealEnvelope(message);
     await this.transport.send(peer, envelope);
     this.state.lastSentAt = new Date().toISOString();
+    if (this.state.lastError?.includes('USER_BOT_TO_BOT_DISABLED')) {
+      this.state.lastError = null;
+    }
     await this.writeState();
+  }
+
+  private handleTestPong(requestId: string, peer: string): void {
+    const pending = this.pendingTests.get(requestId);
+    if (!pending || pending.finished) return;
+    const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
+    pending.replies.add(matchedPeer);
+    if (pending.peers.every(peerName => pending.replies.has(peerName))) {
+      this.finishPendingTest(requestId);
+    }
+  }
+
+  private finishPendingTest(requestId: string): void {
+    const pending = this.pendingTests.get(requestId);
+    if (!pending || pending.finished) return;
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingTests.delete(requestId);
+    const missing = pending.peers.filter(peer => !pending.replies.has(peer));
+    pending.resolve({
+      sent: pending.peers.length,
+      replied: pending.replies.size,
+      missing,
+    });
   }
 
   private sealEnvelope(message: AuthSyncPlainMessage): string {
@@ -684,6 +759,11 @@ export class CrossNodeAuthSync {
       ...(peer.username ? expandPeerKeys(`@${peer.username}`) : []),
     ];
     return keys.some(key => this.peerKeys.has(key));
+  }
+
+  private matchConfiguredPeer(peer: string): string | null {
+    const keys = new Set(expandPeerKeys(peer));
+    return this.peers.find(configuredPeer => expandPeerKeys(configuredPeer).some(key => keys.has(key))) ?? null;
   }
 
   private expireLeases(): void {

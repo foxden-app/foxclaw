@@ -11,6 +11,7 @@ Use it when:
 - You legally own and maintain the ChatGPT accounts and auth files.
 - Multiple machines run FoxClaw, and each machine has at least one Telegram bot.
 - You want auth files to stay fresh across nodes without routinely rotating refresh tokens.
+- The recommended default is one contact bot per node for cross-node sync. Other bots on the same node continue to use local auth mirroring.
 
 Do not use it when:
 
@@ -44,6 +45,8 @@ Assume two machines:
 - Node A: bot `@foxclaw_node_a_bot`
 - Node B: bot `@foxclaw_node_b_bot`
 
+These are the two node contact bots. `AUTH_SYNC_PEERS` only needs peer node contact bots; you do not need to list every bot running on the same machine. In multi-bot mode, FoxClaw uses the first token in `TG_BOT_TOKENS` as the local contact bot by default. If you want bot 5 to be the contact, put bot 5's token first, or enable Bot-to-Bot for every local bot as a temporary fallback.
+
 Each node should already work independently:
 
 ```bash
@@ -62,15 +65,19 @@ In a private Telegram chat with each bot, verify:
 
 Repeat this for every participating bot:
 
-1. Open Telegram and enter `@BotFather`.
-2. Send `/mybots`.
-3. Select the bot that will participate in auth sync.
-4. Open the bot settings / Mini App settings interface.
+1. Prefer the latest Telegram mobile client; some desktop or older clients do not show the setting.
+2. Open `https://t.me/BotFather?startapp`, or open the `@BotFather` profile and tap **Open App**.
+3. In the BotFather MiniApp, select the contact bot that will participate in auth sync.
+4. Open Settings / Bot Settings.
 5. Find **Bot-to-Bot Communication Mode**.
 6. Enable it.
-7. Repeat for every peer bot.
+7. Repeat for every node contact bot.
+
+Do not use `/mybots` → Bot Settings → **Configure Mini App**. That configures your bot's Mini App URL, not Bot-to-Bot Communication Mode.
 
 Private cross-node sync requires this mode on both bots. Enabling it on only one side is usually not enough for two bots to exchange private sync packets.
+
+If you see `Bad Request: USER_BOT_TO_BOT_DISABLED`, first confirm that both the sender contact bot and recipient contact bot have Bot-to-Bot enabled. In multi-bot mode, the sender contact is the first token in `TG_BOT_TOKENS` by default; it may not be the bot where you typed the command.
 
 ## .env Configuration
 
@@ -79,6 +86,7 @@ Use the same `AUTH_SYNC_KEY` and `AUTH_SYNC_CLUSTER_ID` on all nodes, but give e
 Node A:
 
 ```dotenv
+TG_BOT_TOKENS=<node-a-contact-token>,<node-a-other-bot-token>
 AUTH_SYNC_ENABLED=true
 AUTH_SYNC_KEY=<shared key with at least 32 bytes>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
@@ -89,6 +97,7 @@ AUTH_SYNC_PEERS=@foxclaw_node_b_bot
 Node B:
 
 ```dotenv
+TG_BOT_TOKENS=<node-b-contact-token>,<node-b-other-bot-token>
 AUTH_SYNC_ENABLED=true
 AUTH_SYNC_KEY=<shared key with at least 32 bytes>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
@@ -132,6 +141,14 @@ You should see the node id, peer list, and pending imports.
 
 Node A should report that it sent a test ping. Node B's `/auth sync status` should show a recent receive or test-state change.
 
+Starting in 0.4.17, `/auth sync test` waits for an encrypted pong from peers. A healthy result looks like:
+
+```text
+Auth sync test complete: sent 1, replies 1.
+```
+
+If it shows `Missing replies: @peer_bot`, Telegram delivery may have succeeded, but the peer did not receive, decrypt, pass allowlist validation, or run the same auth sync configuration.
+
 3. Use a low-risk candidate for the first broadcast. Make sure every runtime is idle, then run on node A:
 
 ```text
@@ -146,6 +163,8 @@ Node A should report that it sent a test ping. Node B's `/auth sync status` shou
 ```
 
 Confirm that pending imports were processed, or that the candidate exists or has a newer timestamp.
+
+Note: `/auth sync push all` saying “sent” only means this node successfully handed encrypted packages to Telegram. It does not prove the peer wrote files. The peer imports only when it is globally idle, usage validation succeeds, same-name candidates belong to the same account id, and the remote `last_refresh` is newer than the local copy. If the local file is already equal or newer, it will not change and `Last import` may remain empty.
 
 5. Only test refresh-token rotation after you understand the risk:
 
@@ -174,4 +193,3 @@ With cross-node sync enabled, this command first requests a cross-node refresh l
 **Should I periodically run `/auth refresh all confirm` as keepalive?**
 
 No. Codex refreshes automatically when access tokens expire. Cross-node auth sync propagates auth files that have already refreshed successfully; Refresh all should remain a maintenance command, not a routine keepalive.
-

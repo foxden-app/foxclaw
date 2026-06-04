@@ -381,6 +381,7 @@ export interface RuntimeStatus {
   authSync?: {
     enabled: boolean;
     nodeId: string | null;
+    transportLabel: string | null;
     peers: string[];
     pendingImports: number;
     lastSentAt: string | null;

@@ -419,18 +419,19 @@ OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token r
 
 ### 6.4 Cross-Node Auth Sync
 
-Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. Enable Bot-to-Bot Communication Mode for the participating bots in BotFather first.
+Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`.
 
 For the full design, safety boundaries, `.env` examples, and troubleshooting, read the [Cross-Node Auth Sync Setup Guide](./cross-node-auth-sync.md).
 
 In `@BotFather`, repeat this for every participating bot:
 
-1. Open `@BotFather`.
-2. Send `/mybots`.
-3. Select the bot that will participate in sync.
-4. Open the bot settings / Mini App settings interface.
-5. Find and enable **Bot-to-Bot Communication Mode**.
-6. Repeat for every peer bot; private sync requires this mode on both sender and recipient.
+1. Use the latest Telegram mobile client to open `https://t.me/BotFather?startapp`, or open the `@BotFather` profile and tap **Open App**.
+2. In the BotFather MiniApp, select the contact bot that will participate in sync.
+3. Open Settings / Bot Settings.
+4. Find and enable **Bot-to-Bot Communication Mode**.
+5. Repeat for every node contact bot; private sync requires this mode on both sender and recipient.
+
+Do not use `/mybots` → Bot Settings → **Configure Mini App**. That configures your bot's Mini App URL, not Bot-to-Bot Communication Mode.
 
 Example:
 
@@ -460,8 +461,8 @@ Dual-active behavior:
 Commands:
 
 - `/auth sync status`: show node id, peers, recent sends/receives/imports, pending imports, and the latest error.
-- `/auth sync test`: send an encrypted ping to verify peer config, shared key, and Bot-to-Bot private messages.
-- `/auth sync push all`: manually broadcast all locally verified candidates without refreshing tokens.
+- `/auth sync test`: send an encrypted ping and wait for peer pong replies to verify peer config, shared key, and Bot-to-Bot private messages.
+- `/auth sync push all`: manually broadcast all locally verified candidates without refreshing tokens. “Sent” does not mean the peer imported files; check `/auth sync status` and `/auth` on the peer.
 
 Equivalent commands:
 

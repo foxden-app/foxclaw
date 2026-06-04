@@ -394,7 +394,7 @@ async function runServeCli(): Promise<void> {
           ?? Promise.resolve(),
         getAuthSyncStatus: () => authSync?.getStatus() ?? null,
         authSyncPushAll: () => authSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
-        authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0 }),
+        authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
           bots: await Promise.all(runtimes.map(async (runtime) => {
@@ -462,12 +462,16 @@ async function runServeCli(): Promise<void> {
       activeTelegramAdapters = runtimes.map((runtime) => runtime.telegram);
 
       if (config.authSyncEnabled) {
+        const authSyncTransportBot = seeds[0]!;
+        const authSyncTransportLabel = authSyncTransportBot.bot.username
+          ? `@${authSyncTransportBot.bot.username}`
+          : authSyncTransportBot.id;
         authSync = new CrossNodeAuthSync(
-          buildAuthSyncConfig(config),
+          buildAuthSyncConfig(config, authSyncTransportLabel),
           logger,
           {
             send: async (peer: string, envelope: string): Promise<void> => {
-              await seeds[0]!.bot.sendDocument(
+              await authSyncTransportBot.bot.sendDocument(
                 peer,
                 `foxclaw-auth-sync-${Date.now()}.json`,
                 Buffer.from(envelope, 'utf8'),
@@ -494,7 +498,7 @@ async function runServeCli(): Promise<void> {
         );
         await authSync.initialize();
         activeAuthSync = authSync;
-        attachTelegramAuthSync(seeds[0]!.bot, authSync, config, logger);
+        attachTelegramAuthSync(authSyncTransportBot.bot, authSync, config, logger);
         authSync.start();
       }
       mirror.start();
@@ -593,7 +597,7 @@ async function runServeCli(): Promise<void> {
         ?? Promise.resolve(),
       getAuthSyncStatus: () => singleAuthSync?.getStatus() ?? null,
       authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
-      authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0 }),
+      authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
       statusUpdated: (status: import('./types.js').RuntimeStatus): void => {
         writeRuntimeStatus(config.statusPath, {
           ...status,
@@ -629,7 +633,7 @@ async function runServeCli(): Promise<void> {
     core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater, singleCoordinator);
     if (config.authSyncEnabled && singleMirror) {
       singleAuthSync = new CrossNodeAuthSync(
-        buildAuthSyncConfig(config),
+        buildAuthSyncConfig(config, bot.username ? `@${bot.username}` : 'default'),
         logger,
         {
           send: async (peer: string, envelope: string): Promise<void> => {
@@ -752,10 +756,11 @@ interface AuthSyncLogger {
 
 const AUTH_SYNC_TELEGRAM_CAPTION = 'FOXCLAW_AUTH_SYNC_V1';
 
-function buildAuthSyncConfig(config: AppConfig) {
+function buildAuthSyncConfig(config: AppConfig, transportLabel: string | null = null) {
   return {
     enabled: config.authSyncEnabled,
     transport: config.authSyncTransport,
+    transportLabel,
     key: config.authSyncKey,
     peers: config.authSyncPeers,
     nodeId: config.authSyncNodeId,

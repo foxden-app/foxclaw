@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.4.17 - 2026-06-04
+
+### 中文
+- 明确跨节点 auth 同步推荐架构：每节点一个联系人 bot；多 bot 模式默认使用 `TG_BOT_TOKENS` 的第一个 token 作为联系人，同节点其他 bot 继续走本机 auth 镜像。
+- `/auth sync status` 和 `/status` 现在显示联系人 bot，避免在非联系人 bot 上执行命令时误判实际发包身份。
+- `/auth sync test` 升级为等待 peer 加密 pong 的真实握手，并显示未回应 peer；同时文档补充 BotFather MiniApp 入口、不要误进 Configure Mini App，以及 `push all` 只代表发送成功、不代表对端已导入。
+
+### English
+- Clarified the recommended cross-node auth sync topology: one contact bot per node. In multi-bot mode, the first `TG_BOT_TOKENS` entry is the default contact while other same-node bots keep using local auth mirroring.
+- `/auth sync status` and `/status` now show the contact bot so commands run from a non-contact bot no longer obscure the actual sender identity.
+- `/auth sync test` now waits for encrypted peer pong replies and reports missing peers. Documentation now covers the BotFather MiniApp entry point, avoids the Configure Mini App confusion, and explains that `push all` only proves send success, not peer import.
+
 ## 0.4.16 - 2026-06-04
 
 ### 中文

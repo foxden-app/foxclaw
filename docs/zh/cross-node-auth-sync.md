@@ -11,6 +11,7 @@
 - 这些 ChatGPT 账号和 auth 文件都由你合法拥有和维护。
 - 多台机器都运行 FoxClaw，并且每台机器至少有一个 Telegram bot。
 - 你希望 auth 文件在节点间自动保持较新，但不希望日常主动旋转 refresh token。
+- 默认推荐每台机器只选择一个“联系人 bot”参与跨节点同步；同一节点内其他 bot 继续使用原本的本机 auth 镜像。
 
 不适合：
 
@@ -44,6 +45,8 @@ Telegram 官方 Bot Features 文档说明：私聊 bot-to-bot 需要发送方和
 - 节点 A：bot `@foxclaw_node_a_bot`
 - 节点 B：bot `@foxclaw_node_b_bot`
 
+这两个 bot 就是两个节点的联系人。`AUTH_SYNC_PEERS` 只需要写 peer 节点的联系人 bot，不需要把同一台机器上的所有 bot 都互相列进去。多 bot 模式下，FoxClaw 默认使用 `TG_BOT_TOKENS` 里的第一个 token 作为本节点联系人；如果你希望 5 号 bot 当联系人，就把 5 号 token 放到 `TG_BOT_TOKENS` 第一位，或者给全部 bot 都开启 Bot-to-Bot 作为临时兜底。
+
 每个节点都应该先能独立使用 FoxClaw：
 
 ```bash
@@ -62,15 +65,19 @@ foxclaw start
 
 对参与同步的每一个 bot 都做一遍：
 
-1. 打开 Telegram，进入 `@BotFather`。
-2. 发送 `/mybots`。
-3. 选择要参与同步的 bot。
-4. 打开 BotFather 的 bot settings / Mini App 设置界面。
+1. 建议使用最新版 Telegram 手机客户端；部分桌面端或旧客户端看不到这个开关。
+2. 打开 `https://t.me/BotFather?startapp`，或进入 `@BotFather` 资料页后点击 **Open App / 打开应用**。
+3. 在 BotFather MiniApp 中选择要参与同步的联系人 bot。
+4. 进入 Settings / Bot Settings。
 5. 找到 **Bot-to-Bot Communication Mode**。
 6. 启用该开关。
-7. 对所有 peer bot 重复以上步骤。
+7. 对所有节点的联系人 bot 重复以上步骤。
+
+不要走 `/mybots` → Bot Settings → **Configure Mini App**。那是配置你自己 bot 的 Mini App URL，不是 Bot-to-Bot Communication Mode。
 
 私聊跨节点同步要求双方都开启这个模式。只开一个通常不足以让两个 bot 互相私聊传输同步包。
+
+如果你看到 `Bad Request: USER_BOT_TO_BOT_DISABLED`，优先确认两件事：发送方联系人 bot 和接收方联系人 bot 都已经开启 Bot-to-Bot；多 bot 模式下，发送方联系人默认是 `TG_BOT_TOKENS` 的第一个 token，不一定是你当前输入命令的 bot。
 
 ## .env 配置
 
@@ -79,6 +86,7 @@ foxclaw start
 节点 A：
 
 ```dotenv
+TG_BOT_TOKENS=<node-a-contact-token>,<node-a-other-bot-token>
 AUTH_SYNC_ENABLED=true
 AUTH_SYNC_KEY=<至少32字节的共享密钥>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
@@ -89,6 +97,7 @@ AUTH_SYNC_PEERS=@foxclaw_node_b_bot
 节点 B：
 
 ```dotenv
+TG_BOT_TOKENS=<node-b-contact-token>,<node-b-other-bot-token>
 AUTH_SYNC_ENABLED=true
 AUTH_SYNC_KEY=<至少32字节的共享密钥>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
@@ -132,6 +141,14 @@ foxclaw restart
 
 节点 A 应提示已向 peer 发送测试 ping。节点 B 的 `/auth sync status` 应能看到最近收到的同步事件或测试状态变化。
 
+从 0.4.17 起，`/auth sync test` 会等待 peer 返回加密 pong。正常结果应该类似：
+
+```text
+auth sync 测试完成：已发送 1，收到回应 1。
+```
+
+如果显示 `未回应：@peer_bot`，说明 Telegram 发送可能成功，但对方没有成功接收、解密、通过 allowlist，或没有运行同一组 auth sync 配置。
+
 3. 用低风险候选做第一次广播。先确认所有 bot runtime 空闲，然后在节点 A 执行：
 
 ```text
@@ -146,6 +163,8 @@ foxclaw restart
 ```
 
 确认待导入清单被处理，或候选已经出现/更新时间变新。
+
+注意：`/auth sync push all` 的“已发送”只代表本节点把加密包发给 Telegram 成功，不代表对端已经写盘。对端只有在全局空闲、usage 验证通过、同名候选 account id 一致，并且远端 `last_refresh` 比本地更新时才会覆盖文件。如果本地已经是相同或更新版本，文件不会变化，`最近导入` 也可能保持为空。
 
 5. 只有在完全理解 refresh token 轮换风险时，才测试：
 
@@ -174,4 +193,3 @@ foxclaw restart
 **要不要定期 `/auth refresh all confirm` 保活**
 
 不要。Codex 会按 access token 到期自动刷新。FoxClaw 的跨节点同步会同步“已经成功刷新的新 auth”，不应该把 refresh all 当作日常保活。
-
