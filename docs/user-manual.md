@@ -423,7 +423,7 @@ OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token r
 
 ### 6.4 Cross-Node Auth Sync
 
-Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`. The contact bot private chat reports send, receive, queue, import, failure, recovery-query, and manual-intervention states; per-candidate validation failures are shown as candidate failures instead of overwriting the sync-system last error.
+Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`. The contact bot private chat reports send, receive, queue, import, failure, recovery-query, and manual-intervention states; per-candidate validation failures are shown as candidate failures instead of overwriting the sync-system last error. Recent bot-to-bot traffic is also kept in an event ring so `/auth sync events [filter]` and `/auth sync trace <requestId>` can explain a specific candidate, peer, or request.
 
 For the full design, safety boundaries, `.env` examples, and troubleshooting, read the [Cross-Node Auth Sync Setup Guide](./cross-node-auth-sync.md).
 
@@ -464,7 +464,9 @@ Dual-active behavior:
 
 Commands:
 
-- `/auth sync status`: show node id, peers, recent sends/receives/imports, pending imports, the sync-system latest error, and per-candidate failures.
+- `/auth sync status`: show node id, peers, peer activity, recent sync events, pending imports, the sync-system latest error, and per-candidate failures.
+- `/auth sync events [filter]`: show recent sync event records, optionally filtered by candidate, peer, request id, kind, stage, or detail.
+- `/auth sync trace <requestId>`: show recent records for one request id or event id.
 - `/auth sync test`: send an encrypted ping and wait for peer pong replies to verify peer config, shared key, and Bot-to-Bot private messages.
 - `/auth sync push all`: manually broadcast all locally verified candidates without refreshing tokens. “Sent” does not mean the peer imported files; check `/auth sync status` and `/auth` on the peer.
 
@@ -479,7 +481,7 @@ Equivalent commands:
 - `/auth reload` or `/auth_reload`: restart app-server and reload the current `auth.json`.
 - `/auth refresh all`: show the refresh-token rotation risk confirmation.
 - `/auth refresh all confirm`: run Refresh all after accepting the token-rotation risk.
-- `/auth sync status|test|push all`: inspect, test, or manually push cross-node auth sync.
+- `/auth sync status|events|trace|test|push all`: inspect, trace, test, or manually push cross-node auth sync.
 
 If the requesting bot runtime has active turns, pending approvals, pending user inputs, or MCP elicitations, FoxClaw refuses manual auth switching to avoid changing accounts mid-request; another idle bot is unaffected.
 

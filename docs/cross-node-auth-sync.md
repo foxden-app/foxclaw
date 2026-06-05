@@ -172,6 +172,8 @@ Starting in 0.5.2, `/auth sync status` separates sync-system `Last error` from p
 
 Manual `/auth` switches and `/auth reload` recover from same-node local mirrors only and do not send cross-node pull requests. FoxClaw queries peers only during automatic recovery after it detects a real auth problem. Recovery timeout notifications include the request id, candidate name, peer list, and wait duration; if another auth sync message arrived from the same peer during that wait, the notification says the peer was reachable but this request timed out.
 
+Starting in 0.5.8, `/auth sync status` also shows peer activity and the latest sync events. Use `/auth sync events [filter]` to search recent event records by candidate, peer, request id, kind, stage, or detail. Use `/auth sync trace <requestId>` when a notification includes a request id and you want the recent send/receive/result records for that request.
+
 If an upgrade or restart interrupts remote candidate usage validation, older versions could leave `auth.json -> .auth-sync-validate-*` behind. Starting in 0.5.2, FoxClaw checks for this at startup, restores `auth.json` to the mirror-status candidate or the newest parseable real `auth.json_*` candidate in the same directory, and removes stale validation temp files.
 
 5. Only test refresh-token rotation after you understand the risk:
@@ -197,6 +199,7 @@ With cross-node sync enabled, this command first requests a cross-node refresh l
 - The local node may not be globally idle. Active turns, approvals, inputs, login flows, and mirror writes make imports wait.
 - Usage validation failure rejects the write.
 - Same-name candidates from different account ids are refused.
+- Run `/auth sync events <candidate>` or `/auth sync trace <requestId>` to see the receive, validation, skip, or failure records kept by FoxClaw.
 
 **Should I periodically run `/auth refresh all confirm` as keepalive?**
 

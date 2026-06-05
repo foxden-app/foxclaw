@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.8 - 2026-06-05
+
+### 中文
+- 为跨节点 auth 同步新增持久化事件环，记录 push、pull、lease、test 和远端导入的发送、接收、超时、跳过、导入、失败等阶段。
+- `/auth sync status` 现在展示 peer 最近活跃时间和最近事件，让“peer 在线但某次请求超时”“候选失败但同步系统正常”更容易判断。
+- 新增 `/auth sync events [过滤]` 和 `/auth sync trace <requestId>`，可按候选名、peer、事件类型或请求 ID 查看 bot_to_bot 通讯流水。
+- 事件记录包含 requestId、peer、candidateName 和阶段详情，同时保留既有加密协议兼容性。
+
+### English
+- Added a persisted event ring for cross-node auth sync, recording send, receive, timeout, skip, import, and failure stages for push, pull, lease, test, and remote-import flows.
+- `/auth sync status` now includes peer recent activity and recent events, making it easier to distinguish "peer reachable but this request timed out" from candidate-specific failures.
+- Added `/auth sync events [filter]` and `/auth sync trace <requestId>` to inspect bot-to-bot traffic by candidate name, peer, event kind, or request ID.
+- Event records include requestId, peer, candidateName, and stage details while keeping the existing encrypted protocol backward-compatible.
+
 ## 0.5.7 - 2026-06-05
 
 ### 中文

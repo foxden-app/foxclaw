@@ -4990,6 +4990,23 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, formatAuthSyncStatus(locale, this.coordinator?.getAuthSyncStatus?.() ?? null));
       return;
     }
+    if (action === 'events') {
+      await this.sendMessage(scopeId, formatAuthSyncEvents(
+        locale,
+        this.coordinator?.getAuthSyncStatus?.() ?? null,
+        args.slice(1).join(' ').trim() || null,
+      ));
+      return;
+    }
+    if (action === 'trace') {
+      const requestId = args[1]?.trim() || null;
+      if (!requestId) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_trace_missing'));
+        return;
+      }
+      await this.sendMessage(scopeId, formatAuthSyncTrace(locale, this.coordinator?.getAuthSyncStatus?.() ?? null, requestId));
+      return;
+    }
     if (action === 'test') {
       const result = await this.coordinator?.authSyncTest?.();
       if (!result) {
@@ -9783,6 +9800,15 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
   if (status.lastError) {
     lines.push(t(locale, 'auth_sync_status_error', { value: status.lastError }));
   }
+  if (status.peerStatuses?.length) {
+    lines.push(t(locale, 'auth_sync_status_peer_activity'));
+    for (const peer of status.peerStatuses.slice(0, 5)) {
+      lines.push(t(locale, 'auth_sync_status_peer_activity_item', {
+        peer: peer.peer,
+        time: peer.lastReceivedAt ?? t(locale, 'none'),
+      }));
+    }
+  }
   if (status.candidateFailures?.length) {
     lines.push(t(locale, 'auth_sync_status_candidate_failures'));
     for (const failure of status.candidateFailures.slice(0, 5)) {
@@ -9795,7 +9821,83 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
       }));
     }
   }
+  const recentEvents = [...(status.recentEvents ?? [])].slice(-5);
+  if (recentEvents.length > 0) {
+    lines.push(t(locale, 'auth_sync_status_recent_events'));
+    for (const event of recentEvents) {
+      lines.push(formatAuthSyncEventLine(event));
+    }
+  }
   return lines.join('\n');
+}
+
+type AuthSyncRuntimeStatus = NonNullable<RuntimeStatus['authSync']>;
+type AuthSyncRuntimeEvent = NonNullable<AuthSyncRuntimeStatus['recentEvents']>[number];
+
+function formatAuthSyncEvents(locale: AppLocale, status: RuntimeStatus['authSync'], filter: string | null): string {
+  if (!status?.enabled) {
+    return t(locale, 'auth_sync_disabled');
+  }
+  const events = filterAuthSyncEvents(status.recentEvents ?? [], filter).slice(-15);
+  if (events.length === 0) {
+    return [
+      t(locale, 'auth_sync_events_title'),
+      t(locale, 'auth_sync_events_empty'),
+    ].join('\n');
+  }
+  return [
+    t(locale, 'auth_sync_events_title'),
+    ...events.map(formatAuthSyncEventLine),
+  ].join('\n');
+}
+
+function formatAuthSyncTrace(locale: AppLocale, status: RuntimeStatus['authSync'], requestId: string): string {
+  if (!status?.enabled) {
+    return t(locale, 'auth_sync_disabled');
+  }
+  const events = (status.recentEvents ?? [])
+    .filter(event => event.requestId === requestId || event.id === requestId)
+    .slice(-25);
+  if (events.length === 0) {
+    return [
+      t(locale, 'auth_sync_trace_title', { value: requestId }),
+      t(locale, 'auth_sync_events_empty'),
+    ].join('\n');
+  }
+  return [
+    t(locale, 'auth_sync_trace_title', { value: requestId }),
+    ...events.map(formatAuthSyncEventLine),
+  ].join('\n');
+}
+
+function filterAuthSyncEvents(events: AuthSyncRuntimeEvent[], filter: string | null): AuthSyncRuntimeEvent[] {
+  const normalized = filter?.trim().toLowerCase() ?? '';
+  if (!normalized) {
+    return events;
+  }
+  return events.filter((event) => [
+    event.id,
+    event.requestId,
+    event.candidateName,
+    event.peer,
+    event.kind,
+    event.stage,
+    event.detail,
+  ].some(value => value?.toLowerCase().includes(normalized)));
+}
+
+function formatAuthSyncEventLine(event: AuthSyncRuntimeEvent): string {
+  const fields = [
+    event.createdAt,
+    event.direction,
+    event.kind,
+    event.stage,
+    event.peer ? `peer=${event.peer}` : null,
+    event.requestId ? `requestId=${event.requestId}` : null,
+    event.candidateName ? `candidate=${event.candidateName}` : null,
+    event.detail ? truncateInline(event.detail, 160) : null,
+  ].filter(Boolean);
+  return `- ${fields.join(' | ')}`;
 }
 
 function normalizeHelpUsageKey(name: string): string | null {

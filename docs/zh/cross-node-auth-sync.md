@@ -172,6 +172,8 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 手动 `/auth` 切换和 `/auth reload` 只会尝试同节点本地 mirror 恢复，不会主动向跨节点 peer 发起 pull。只有 FoxClaw 检测到当前 auth 真的出现认证问题并进入自动恢复时，才会向 peer 查询可用副本。恢复超时通知会包含 request id、候选名、peer 列表和等待时长；如果等待期间收到过同 peer 的其他 auth sync 消息，通知会标明 peer 可达但该请求超时。
 
+从 0.5.8 起，`/auth sync status` 还会显示 peer 最近活跃时间和最近同步事件。`/auth sync events [过滤]` 可按候选名、peer、request id、事件类型、阶段或详情搜索近期事件。通知里带 request id 时，可用 `/auth sync trace <requestId>` 查看该请求最近的发送、接收和处理结果。
+
 如果升级或重启正好打断远端候选 usage 验证，旧版本可能留下 `auth.json -> .auth-sync-validate-*` 临时 symlink。0.5.2 起 FoxClaw 启动时会自动检测并恢复到 mirror 状态记录的候选，或同目录最近修改且可解析的真实 `auth.json_*` 候选，然后清理临时文件。
 
 5. 只有在完全理解 refresh token 轮换风险时，才测试：
@@ -197,6 +199,7 @@ auth sync 测试完成：已发送 1，收到回应 1。
 - 本机可能不是全局空闲；有 turn、审批、待输入、登录流程或镜像写入时会排队。
 - usage 验证失败会拒绝写盘。
 - 同名候选属于不同 account id 时会拒绝覆盖。
+- 执行 `/auth sync events <候选名>` 或 `/auth sync trace <requestId>`，查看 FoxClaw 记录的接收、验证、跳过或失败流水。
 
 **要不要定期 `/auth refresh all confirm` 保活**
 

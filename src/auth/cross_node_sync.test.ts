@@ -101,6 +101,18 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
 
     assert.equal(await serviceA.publishCandidate('auth.json_work'), true);
     await waitFor(() => notificationsB.some(event => event.kind === 'remote_import_imported'));
+    assert.equal(serviceA.getStatus().recentEvents.some(event =>
+      event.kind === 'push.bundle'
+      && event.stage === 'sent'
+      && event.peer === '@botb'
+      && event.candidateName === 'auth.json_work'
+    ), true);
+    assert.equal(serviceB.getStatus().recentEvents.some(event =>
+      event.kind === 'push.bundle'
+      && event.stage === 'imported'
+      && event.peer === '@bota'
+      && event.candidateName === 'auth.json_work'
+    ), true);
     assert.deepEqual(imported, {
       candidateName: 'auth.json_work',
       raw: candidate.raw,

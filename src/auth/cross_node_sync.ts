@@ -40,6 +40,8 @@ export interface AuthSyncStatus {
   lastError: string | null;
   candidateFailures: AuthSyncCandidateFailure[];
   activeLeaseId: string | null;
+  peerStatuses: AuthSyncPeerStatus[];
+  recentEvents: AuthSyncEventRecord[];
 }
 
 export interface AuthSyncCandidateFailure {
@@ -50,6 +52,23 @@ export interface AuthSyncCandidateFailure {
   peer: string | null;
   mode: AuthSyncRemoteImportMode;
   updatedAt: string;
+}
+
+export interface AuthSyncPeerStatus {
+  peer: string;
+  lastReceivedAt: string | null;
+}
+
+export interface AuthSyncEventRecord {
+  id: string;
+  createdAt: string;
+  direction: 'in' | 'out' | 'local';
+  kind: string;
+  stage: string;
+  peer: string | null;
+  requestId: string | null;
+  candidateName: string | null;
+  detail: string | null;
 }
 
 export interface AuthSyncValidationResult {
@@ -114,9 +133,11 @@ interface AuthSyncStateFile {
   lastPullCandidate?: string | null;
   lastError?: string | null;
   lastCandidateFailures?: Record<string, AuthSyncCandidateFailure>;
+  recentEvents?: AuthSyncEventRecord[];
 }
 
 interface AuthSyncBundlePayload {
+  requestId?: string | null;
   candidateName: string;
   accountId: string;
   lastRefreshMs: number;
@@ -125,7 +146,7 @@ interface AuthSyncBundlePayload {
 }
 
 type AuthSyncPlainMessage =
-  | ({ kind: 'push.bundle' } & AuthSyncBundlePayload)
+  | ({ kind: 'push.bundle'; requestId?: string | null } & AuthSyncBundlePayload)
   | { kind: 'pull.request'; requestId: string; candidateName: string; accountId: string | null; lastRefreshMs: number | null }
   | { kind: 'pull.response'; requestId: string; bundle: AuthSyncBundlePayload | null; reason?: string | null }
   | { kind: 'digest'; records: Array<{ candidateName: string; accountIdHash: string; lastRefreshMs: number }> }
@@ -207,6 +228,7 @@ const TEST_TIMEOUT_MS = 8_000;
 const LEASE_TIMEOUT_MS = 8_000;
 const LEASE_TTL_MS = 10 * 60_000;
 const REMOTE_ACCESS_TOKEN_MIN_TTL_MS = 60_000;
+const RECENT_EVENT_LIMIT = 120;
 
 export class CrossNodeAuthSync {
   private nodeId: string | null = null;
@@ -233,6 +255,7 @@ export class CrossNodeAuthSync {
     lastPullCandidate: null,
     lastError: null,
     lastCandidateFailures: {},
+    recentEvents: [],
   };
 
   constructor(
@@ -263,6 +286,7 @@ export class CrossNodeAuthSync {
       lastPullCandidate: stored.lastPullCandidate ?? null,
       lastError: stored.lastError ?? null,
       lastCandidateFailures: normalizeCandidateFailures(stored.lastCandidateFailures ?? {}),
+      recentEvents: normalizeRecentEvents(stored.recentEvents ?? []),
     };
     await fs.mkdir(this.config.tempDir, { recursive: true, mode: 0o700 });
     await this.writeState();
@@ -306,6 +330,14 @@ export class CrossNodeAuthSync {
       candidateFailures: Object.values(this.state.lastCandidateFailures)
         .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
       activeLeaseId: this.activeLocalLease?.leaseId ?? this.activeRemoteLease?.leaseId ?? null,
+      peerStatuses: this.peers.map((peer) => {
+        const lastActivityAt = this.lastPeerActivityAt.get(peer) ?? null;
+        return {
+          peer,
+          lastReceivedAt: lastActivityAt === null ? null : new Date(lastActivityAt).toISOString(),
+        };
+      }),
+      recentEvents: [...this.state.recentEvents],
     };
   }
 
@@ -323,15 +355,28 @@ export class CrossNodeAuthSync {
     if (!this.isReady()) return false;
     const record = await this.callbacks.readLocalCandidate(candidateName);
     if (!record) return false;
+    const requestId = crypto.randomUUID();
+    this.recordEvent({
+      direction: 'local',
+      kind: 'candidate.publish',
+      stage: 'started',
+      peer: null,
+      requestId,
+      candidateName,
+      detail: `peers=${this.peers.join(', ') || 'none'}`,
+    });
     this.notify({ kind: 'candidate_publish_started', candidateName, peers: [...this.peers] });
     try {
       await this.sendToAll({
         kind: 'push.bundle',
+        requestId,
         ...bundleFromRecord(record),
       });
+      this.recordEvent({ direction: 'local', kind: 'candidate.publish', stage: 'completed', peer: null, requestId, candidateName, detail: null });
       this.notify({ kind: 'candidate_publish_completed', candidateName, peers: [...this.peers] });
     } catch (error) {
       this.recordError(`candidate publish failed for ${candidateName}: ${formatError(error)}`, false);
+      this.recordEvent({ direction: 'local', kind: 'candidate.publish', stage: 'failed', peer: null, requestId, candidateName, detail: formatError(error) });
       this.notify({
         kind: 'candidate_publish_failed',
         candidateName,
@@ -357,6 +402,7 @@ export class CrossNodeAuthSync {
         }
         await this.sendToAll({
           kind: 'push.bundle',
+          requestId: crypto.randomUUID(),
           ...bundleFromRecord(record),
         });
         sent += 1;
@@ -408,6 +454,15 @@ export class CrossNodeAuthSync {
             waitMs,
             peerReachability,
           });
+          this.recordEvent({
+            direction: 'local',
+            kind: 'pull.request',
+            stage: 'timeout',
+            peer: null,
+            requestId,
+            candidateName,
+            detail: reason,
+          });
           this.notify({
             kind: 'recovery_failed',
             candidateName,
@@ -442,6 +497,15 @@ export class CrossNodeAuthSync {
         this.pendingPulls.delete(requestId);
         this.recordError(`pull request failed: ${formatError(error)}`, false);
         const waitMs = Date.now() - startedAt;
+        this.recordEvent({
+          direction: 'local',
+          kind: 'pull.request',
+          stage: 'send_failed',
+          peer: null,
+          requestId,
+          candidateName,
+          detail: formatError(error),
+        });
         this.notify({
           kind: 'recovery_failed',
           candidateName,
@@ -468,6 +532,7 @@ export class CrossNodeAuthSync {
     if (!this.isReady() || this.peers.length === 0) {
       const leaseId = crypto.randomUUID();
       this.activeLocalLease = { leaseId, expiresAt: Date.now() + LEASE_TTL_MS };
+      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'granted_local', peer: null, requestId: leaseId, candidateName: null, detail: reason });
       return { ok: true, leaseId };
     }
     if (!this.callbacks.isIdle()) {
@@ -478,6 +543,15 @@ export class CrossNodeAuthSync {
     const result = await new Promise<AuthSyncLeaseResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingLeases.delete(leaseId);
+        this.recordEvent({
+          direction: 'local',
+          kind: 'lease.request',
+          stage: 'timeout',
+          peer: null,
+          requestId: leaseId,
+          candidateName: null,
+          detail: `timed out waiting for ${this.peers.length} auth sync peer lease grant(s); reason=${reason}`,
+        });
         resolve({
           ok: false,
           leaseId: null,
@@ -495,12 +569,15 @@ export class CrossNodeAuthSync {
       void this.sendToAll({ kind: 'lease.request', leaseId, reason, expiresAt }).catch((error) => {
         clearTimeout(timer);
         this.pendingLeases.delete(leaseId);
+        this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'send_failed', peer: null, requestId: leaseId, candidateName: null, detail: formatError(error) });
         resolve({ ok: false, leaseId: null, reason: formatError(error) });
       });
     });
     if (result.ok) {
       this.activeLocalLease = { leaseId, expiresAt };
+      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'granted', peer: null, requestId: leaseId, candidateName: null, detail: reason });
     } else {
+      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'denied', peer: null, requestId: leaseId, candidateName: null, detail: result.reason ?? reason });
       await this.releaseRefreshLease(leaseId);
     }
     return result;
@@ -524,6 +601,7 @@ export class CrossNodeAuthSync {
     const peers = [...this.peers];
     const resultPromise = new Promise<AuthSyncTestResult>((resolve) => {
       const timer = setTimeout(() => {
+        this.recordEvent({ direction: 'local', kind: 'test.ping', stage: 'timeout', peer: null, requestId, candidateName: null, detail: null });
         this.finishPendingTest(requestId);
       }, TEST_TIMEOUT_MS);
       timer.unref();
@@ -565,8 +643,18 @@ export class CrossNodeAuthSync {
     }
     this.seenNonces.set(nonceKey, Date.now());
     this.state.lastReceivedAt = new Date().toISOString();
+    const normalizedPeer = normalizePeerIdentity(peer);
+    this.recordEvent({
+      direction: 'in',
+      kind: opened.message.kind,
+      stage: 'received',
+      peer: normalizedPeer,
+      requestId: requestIdFromMessage(opened.message),
+      candidateName: candidateNameFromMessage(opened.message),
+      detail: `sender=${opened.sender}`,
+    });
     await this.writeState();
-    this.notePeerActivity(normalizePeerIdentity(peer));
+    this.notePeerActivity(normalizedPeer);
     await this.handleMessage(opened.message, opened.sender, peer);
     return true;
   }
@@ -607,6 +695,7 @@ export class CrossNodeAuthSync {
       case 'lease.release':
         if (this.activeRemoteLease?.leaseId === message.leaseId) {
           this.activeRemoteLease = null;
+          this.recordEvent({ direction: 'in', kind: 'lease.release', stage: 'released', peer: normalizePeerIdentity(peer), requestId: message.leaseId, candidateName: null, detail: null });
         }
         return;
       default:
@@ -625,6 +714,7 @@ export class CrossNodeAuthSync {
     const record = await this.callbacks.readLocalCandidate(message.candidateName);
     if (!record) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'candidate not found' });
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'candidate_not_found', peer, requestId: message.requestId, candidateName: message.candidateName, detail: 'candidate not found' });
       this.notify({
         kind: 'pull_response_sent',
         candidateName: message.candidateName,
@@ -636,6 +726,7 @@ export class CrossNodeAuthSync {
     }
     if (message.accountId && record.accountId !== message.accountId) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'account mismatch' });
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'account_mismatch', peer, requestId: message.requestId, candidateName: message.candidateName, detail: 'account mismatch' });
       this.notify({
         kind: 'pull_response_sent',
         candidateName: message.candidateName,
@@ -647,6 +738,7 @@ export class CrossNodeAuthSync {
     }
     if (message.lastRefreshMs !== null && record.lastRefreshMs <= message.lastRefreshMs) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'not newer' });
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'not_newer', peer, requestId: message.requestId, candidateName: message.candidateName, detail: 'not newer' });
       this.notify({
         kind: 'pull_response_sent',
         candidateName: message.candidateName,
@@ -661,6 +753,7 @@ export class CrossNodeAuthSync {
       requestId: message.requestId,
       bundle: bundleFromRecord(record),
     });
+    this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'sent_bundle', peer, requestId: message.requestId, candidateName: message.candidateName, detail: null });
     this.notify({
       kind: 'pull_response_sent',
       candidateName: message.candidateName,
@@ -681,6 +774,7 @@ export class CrossNodeAuthSync {
     const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
     if (!message.bundle || message.bundle.candidateName !== pending.candidateName) {
       const reason = message.reason ?? 'peer did not return a matching candidate';
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'empty', peer, requestId: message.requestId, candidateName: pending.candidateName, detail: reason });
       this.notify({
         kind: 'recovery_peer_empty',
         candidateName: pending.candidateName,
@@ -699,12 +793,14 @@ export class CrossNodeAuthSync {
     const outcome = await this.validateAndImport(message.bundle, senderNodeId, sourceLabel, peer, 'pull');
     if (!outcome.imported) {
       this.markPullPeerUnavailable(message.requestId, matchedPeer, outcome.reason ?? 'peer candidate was not imported');
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'not_imported', peer, requestId: message.requestId, candidateName: pending.candidateName, detail: outcome.reason ?? 'peer candidate was not imported' });
       return;
     }
     pending.finished = true;
     clearTimeout(pending.timer);
     this.pendingPulls.delete(message.requestId);
     pending.resolve(true);
+    this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'imported', peer, requestId: message.requestId, candidateName: pending.candidateName, detail: null });
   }
 
   private markPullPeerUnavailable(requestId: string, peer: string, reason: string): void {
@@ -725,6 +821,15 @@ export class CrossNodeAuthSync {
       candidateName: pending.candidateName,
       peers: pending.peers,
       reason: `all peers replied without an importable auth candidate${details ? ` (${details})` : ''}`,
+    });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'pull.request',
+      stage: 'failed',
+      peer: null,
+      requestId,
+      candidateName: pending.candidateName,
+      detail: `all peers replied without an importable auth candidate${details ? ` (${details})` : ''}`,
     });
     pending.resolve(false);
   }
@@ -751,10 +856,12 @@ export class CrossNodeAuthSync {
     this.expireLeases();
     if (!this.callbacks.isIdle()) {
       await this.sendToPeer(peer, { kind: 'lease.deny', leaseId: message.leaseId, reason: 'runtime is not idle' });
+      this.recordEvent({ direction: 'local', kind: 'lease.deny', stage: 'sent', peer, requestId: message.leaseId, candidateName: null, detail: 'runtime is not idle' });
       return;
     }
     if (this.activeRemoteLease && this.activeRemoteLease.leaseId !== message.leaseId) {
       await this.sendToPeer(peer, { kind: 'lease.deny', leaseId: message.leaseId, reason: 'another refresh lease is active' });
+      this.recordEvent({ direction: 'local', kind: 'lease.deny', stage: 'sent', peer, requestId: message.leaseId, candidateName: null, detail: 'another refresh lease is active' });
       return;
     }
     this.activeRemoteLease = {
@@ -763,6 +870,7 @@ export class CrossNodeAuthSync {
       expiresAt: Math.min(message.expiresAt, Date.now() + LEASE_TTL_MS),
     };
     await this.sendToPeer(peer, { kind: 'lease.grant', leaseId: message.leaseId, expiresAt: this.activeRemoteLease.expiresAt });
+    this.recordEvent({ direction: 'local', kind: 'lease.grant', stage: 'sent', peer, requestId: message.leaseId, candidateName: null, detail: null });
   }
 
   private handleLeaseReply(message: Extract<AuthSyncPlainMessage, { kind: 'lease.grant' | 'lease.deny' }>, peer: string): void {
@@ -770,8 +878,10 @@ export class CrossNodeAuthSync {
     if (!pending) return;
     if (message.kind === 'lease.deny') {
       pending.denies.push(`${peer}: ${message.reason}`);
+      this.recordEvent({ direction: 'in', kind: 'lease.deny', stage: 'received', peer, requestId: message.leaseId, candidateName: null, detail: message.reason });
     } else {
       pending.grants.add(peer);
+      this.recordEvent({ direction: 'in', kind: 'lease.grant', stage: 'received', peer, requestId: message.leaseId, candidateName: null, detail: null });
     }
     if (pending.denies.length > 0) {
       clearTimeout(pending.timer);
@@ -794,6 +904,15 @@ export class CrossNodeAuthSync {
       sourceLabel,
       receivedAt: Date.now(),
       fromPeer,
+    });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'push.bundle',
+      stage: queued ? 'queued' : 'processing',
+      peer: fromPeer,
+      requestId: bundle.requestId ?? null,
+      candidateName: bundle.candidateName,
+      detail: `source=${sourceNodeId}; queue=${this.pendingImports.length}`,
     });
     this.notify({
       kind: 'remote_bundle_received',
@@ -864,6 +983,15 @@ export class CrossNodeAuthSync {
       this.state.lastError = null;
       await this.writeState();
       this.logger.info('auth.sync.imported', { candidateName: bundle.candidateName, sourceNodeId });
+      this.recordEvent({
+        direction: 'local',
+        kind: mode === 'pull' ? 'pull.response' : 'push.bundle',
+        stage: 'imported',
+        peer: fromPeer,
+        requestId: bundle.requestId ?? null,
+        candidateName: bundle.candidateName,
+        detail: `source=${sourceNodeId}`,
+      });
       this.notify({
         kind: 'remote_import_imported',
         candidateName: bundle.candidateName,
@@ -873,6 +1001,15 @@ export class CrossNodeAuthSync {
         mode,
       });
     } else {
+      this.recordEvent({
+        direction: 'local',
+        kind: mode === 'pull' ? 'pull.response' : 'push.bundle',
+        stage: 'skipped',
+        peer: fromPeer,
+        requestId: bundle.requestId ?? null,
+        candidateName: bundle.candidateName,
+        detail: result.reason ?? 'local candidate did not need an update',
+      });
       this.notify({
         kind: 'remote_import_skipped',
         candidateName: bundle.candidateName,
@@ -895,7 +1032,29 @@ export class CrossNodeAuthSync {
 
   private async sendToPeer(peer: string, message: AuthSyncPlainMessage): Promise<void> {
     const envelope = this.sealEnvelope(message);
-    await this.transport.send(peer, envelope);
+    try {
+      await this.transport.send(peer, envelope);
+      this.recordEvent({
+        direction: 'out',
+        kind: message.kind,
+        stage: 'sent',
+        peer,
+        requestId: requestIdFromMessage(message),
+        candidateName: candidateNameFromMessage(message),
+        detail: null,
+      });
+    } catch (error) {
+      this.recordEvent({
+        direction: 'out',
+        kind: message.kind,
+        stage: 'send_failed',
+        peer,
+        requestId: requestIdFromMessage(message),
+        candidateName: candidateNameFromMessage(message),
+        detail: formatError(error),
+      });
+      throw error;
+    }
     this.state.lastSentAt = new Date().toISOString();
     if (this.state.lastError?.includes('USER_BOT_TO_BOT_DISABLED')) {
       this.state.lastError = null;
@@ -908,6 +1067,7 @@ export class CrossNodeAuthSync {
     if (!pending || pending.finished) return;
     const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
     pending.replies.add(matchedPeer);
+    this.recordEvent({ direction: 'local', kind: 'test.pong', stage: 'matched', peer: matchedPeer, requestId, candidateName: null, detail: null });
     if (pending.peers.every(peerName => pending.replies.has(peerName))) {
       this.finishPendingTest(requestId);
     }
@@ -1035,6 +1195,15 @@ export class CrossNodeAuthSync {
     mode: AuthSyncRemoteImportMode,
     reason: string,
   ): Promise<AuthSyncImportOutcome> {
+    this.recordEvent({
+      direction: 'local',
+      kind: mode === 'pull' ? 'pull.response' : 'push.bundle',
+      stage: 'failed',
+      peer: fromPeer,
+      requestId: bundle.requestId ?? null,
+      candidateName: typeof bundle.candidateName === 'string' ? bundle.candidateName : null,
+      detail: reason,
+    });
     await this.recordCandidateFailure(bundle, sourceNodeId, sourceLabel, fromPeer, mode, reason);
     this.notify({
       kind: 'remote_import_failed',
@@ -1093,6 +1262,25 @@ export class CrossNodeAuthSync {
     this.lastPeerActivityAt.set(matchedPeer, Date.now());
   }
 
+  private recordEvent(event: Omit<AuthSyncEventRecord, 'id' | 'createdAt'>): void {
+    const record: AuthSyncEventRecord = {
+      id: crypto.randomBytes(6).toString('hex'),
+      createdAt: new Date().toISOString(),
+      direction: event.direction,
+      kind: event.kind,
+      stage: event.stage,
+      peer: event.peer,
+      requestId: event.requestId,
+      candidateName: event.candidateName,
+      detail: event.detail,
+    };
+    this.state.recentEvents = pruneRecentEvents([...this.state.recentEvents, record]);
+    this.logger.info('auth.sync.event', record);
+    void this.writeState().catch((error) => {
+      this.logger.warn('auth.sync.state_write_failed', { error: formatError(error) });
+    });
+  }
+
   private describePeerReachability(peers: string[], sinceMs: number): AuthSyncPeerReachability[] {
     return peers.map((peer) => {
       const lastActivityAt = this.lastPeerActivityAt.get(peer) ?? null;
@@ -1121,7 +1309,7 @@ export class CrossNodeAuthSync {
     if (!this.config.enabled) return;
     this.seenNonces = pruneSeenNonces(this.seenNonces);
     await fs.mkdir(path.dirname(this.config.statePath), { recursive: true, mode: 0o700 });
-    const temporary = `${this.config.statePath}.${process.pid}.${Date.now()}.tmp`;
+    const temporary = `${this.config.statePath}.${process.pid}.${Date.now()}.${crypto.randomBytes(3).toString('hex')}.tmp`;
     const state: AuthSyncStateFile = {
       seenNonces: Object.fromEntries(this.seenNonces),
       ...this.state,
@@ -1245,6 +1433,61 @@ function pruneCandidateFailures(failures: Record<string, AuthSyncCandidateFailur
   return Object.fromEntries(Object.entries(failures)
     .sort(([, left], [, right]) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
     .slice(0, 20));
+}
+
+function normalizeRecentEvents(raw: AuthSyncEventRecord[]): AuthSyncEventRecord[] {
+  if (!Array.isArray(raw)) return [];
+  return pruneRecentEvents(raw.filter((event): event is AuthSyncEventRecord => (
+    event
+    && typeof event.id === 'string'
+    && typeof event.createdAt === 'string'
+    && Number.isFinite(Date.parse(event.createdAt))
+    && (event.direction === 'in' || event.direction === 'out' || event.direction === 'local')
+    && typeof event.kind === 'string'
+    && typeof event.stage === 'string'
+    && (typeof event.peer === 'string' || event.peer === null)
+    && (typeof event.requestId === 'string' || event.requestId === null)
+    && (typeof event.candidateName === 'string' || event.candidateName === null)
+    && (typeof event.detail === 'string' || event.detail === null)
+  )));
+}
+
+function pruneRecentEvents(events: AuthSyncEventRecord[]): AuthSyncEventRecord[] {
+  return events
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+    .slice(-RECENT_EVENT_LIMIT);
+}
+
+function requestIdFromMessage(message: AuthSyncPlainMessage): string | null {
+  switch (message.kind) {
+    case 'push.bundle':
+      return message.requestId ?? null;
+    case 'pull.request':
+    case 'pull.response':
+    case 'test.ping':
+    case 'test.pong':
+      return message.requestId;
+    case 'lease.request':
+      return message.leaseId;
+    case 'lease.grant':
+    case 'lease.deny':
+    case 'lease.release':
+      return message.leaseId;
+    case 'digest':
+      return null;
+  }
+}
+
+function candidateNameFromMessage(message: AuthSyncPlainMessage): string | null {
+  switch (message.kind) {
+    case 'push.bundle':
+    case 'pull.request':
+      return message.candidateName;
+    case 'pull.response':
+      return message.bundle?.candidateName ?? null;
+    default:
+      return null;
+  }
 }
 
 function formatPullTimeoutReason(

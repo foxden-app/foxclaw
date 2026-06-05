@@ -401,6 +401,21 @@ export interface RuntimeStatus {
       updatedAt: string;
     }>;
     activeLeaseId: string | null;
+    peerStatuses?: Array<{
+      peer: string;
+      lastReceivedAt: string | null;
+    }>;
+    recentEvents?: Array<{
+      id: string;
+      createdAt: string;
+      direction: 'in' | 'out' | 'local';
+      kind: string;
+      stage: string;
+      peer: string | null;
+      requestId: string | null;
+      candidateName: string | null;
+      detail: string | null;
+    }>;
   } | null;
   lastUpdate?: {
     state: string;

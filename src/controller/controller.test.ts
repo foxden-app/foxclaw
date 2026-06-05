@@ -1395,6 +1395,18 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
         updatedAt: '2026-06-01T00:01:00.000Z',
       }],
       activeLeaseId: null,
+      peerStatuses: [{ peer: '@botB', lastReceivedAt: '2026-06-01T00:02:00.000Z' }],
+      recentEvents: [{
+        id: 'evt-1',
+        createdAt: '2026-06-01T00:03:00.000Z',
+        direction: 'out',
+        kind: 'push.bundle',
+        stage: 'sent',
+        peer: '@botB',
+        requestId: 'req-1',
+        candidateName: 'auth.json_bad',
+        detail: null,
+      }],
     }),
     authSyncPushAll: async () => {
       pushed = true;
@@ -1411,15 +1423,23 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
   });
 
   await (rig.controller as any).handleCommand(createEvent('/auth sync status'), 'en', 'auth', ['sync', 'status']);
+  await (rig.controller as any).handleCommand(createEvent('/auth sync events auth.json_bad'), 'en', 'auth', ['sync', 'events', 'auth.json_bad']);
+  await (rig.controller as any).handleCommand(createEvent('/auth sync trace req-1'), 'en', 'auth', ['sync', 'trace', 'req-1']);
   await (rig.controller as any).handleCommand(createEvent('/auth sync test'), 'en', 'auth', ['sync', 'test']);
   await (rig.controller as any).handleCommand(createEvent('/auth sync push all'), 'en', 'auth', ['sync', 'push', 'all']);
 
   assert.match(rig.sentMessages[0]!, /Cross-node auth sync:/);
   assert.match(rig.sentMessages[0]!, /Node: node-a/);
+  assert.match(rig.sentMessages[0]!, /Peer activity:/);
+  assert.match(rig.sentMessages[0]!, /Recent events:/);
   assert.match(rig.sentMessages[0]!, /Candidate failures:/);
   assert.match(rig.sentMessages[0]!, /auth\.json_bad: token invalidated/);
-  assert.equal(rig.sentMessages[1], 'Auth sync test complete: sent 1, replies 0.\nMissing replies: @botB');
-  assert.equal(rig.sentMessages[2], 'Auth sync push complete: sent 2, skipped 1.');
+  assert.match(rig.sentMessages[1]!, /Auth sync events:/);
+  assert.match(rig.sentMessages[1]!, /requestId=req-1/);
+  assert.match(rig.sentMessages[2]!, /Auth sync trace: req-1/);
+  assert.match(rig.sentMessages[2]!, /candidate=auth\.json_bad/);
+  assert.equal(rig.sentMessages[3], 'Auth sync test complete: sent 1, replies 0.\nMissing replies: @botB');
+  assert.equal(rig.sentMessages[4], 'Auth sync push complete: sent 2, skipped 1.');
   assert.equal(tested, true);
   assert.equal(pushed, true);
 });
