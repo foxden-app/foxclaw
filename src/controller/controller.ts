@@ -2188,9 +2188,15 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, lines.join('\n'));
       return;
     }
-    await this.sendMessage(scopeId, success
-      ? t(locale, 'login_completed')
-      : t(locale, 'login_failed', { error: params?.error ?? t(locale, 'unknown') }));
+    if (!success) {
+      await this.sendMessage(scopeId, t(locale, 'login_failed', { error: params?.error ?? t(locale, 'unknown') }));
+      return;
+    }
+    const currentCandidate = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
+    if (currentCandidate) {
+      await this.syncCodexAuthCandidate(currentCandidate.name);
+    }
+    await this.sendMessage(scopeId, t(locale, 'login_completed'));
   }
 
   private async restorePendingAuthAdd(record: PendingAuthAdd): Promise<void> {

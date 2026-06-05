@@ -1722,12 +1722,17 @@ test('/auth panel paginates large inventories, filters attention candidates, and
 });
 
 test('/auth panel can start device login from an inline action', async (t) => {
-  const rig = createControllerRig();
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    authCandidateUpdated: async (runtimeId, candidateName) => {
+      events.push(`sync:${runtimeId}:${candidateName}`);
+    },
+  });
   t.after(() => {
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
-  installTempAuthFiles(t, rig.tempDir);
+  const authDir = installTempAuthFiles(t, rig.tempDir);
 
   const calls: string[] = [];
   (rig.controller as any).app.startDeviceLogin = async () => {
@@ -1750,6 +1755,15 @@ test('/auth panel can start device login from an inline action', async (t) => {
   assert.equal(rig.callbackAnswers.at(-1), 'Device login started.');
   assert.match(rig.sentMessages.at(-1)!, /enable device code authorization for Codex/);
   assert.match(rig.sentMessages.at(-1)!, /PANEL-CODE/);
+
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', '2026-06-05T01:00:00.000Z');
+  await (rig.controller as any).handleNotification({
+    method: 'account/login/completed',
+    params: { loginId: 'login-panel', success: true, error: null },
+  });
+
+  assert.deepEqual(events, ['sync:default:auth.json_a']);
+  assert.match(rig.sentMessages.at(-1)!, /Login completed/);
 });
 
 test('/auth refresh all command can refresh all ChatGPT candidates and keep an auth panel', async (t) => {

@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.7 - 2026-06-05
+
+### 中文
+- 修复普通 `/login_device` 和 `/auth` 面板设备登录完成后只更新本机当前 auth、没有主动同步到同节点 bot home 和跨节点 peer 的问题。
+- 设备登录成功后，FoxClaw 现在会解析当前 auth 候选并调用既有 `authCandidateUpdated` 路径，和 `/auth add <name>`、auth 切换、reload、主动刷新保持一致。
+
+### English
+- Fixed normal `/login_device` and `/auth` panel device-login completions updating only the local current auth without actively syncing to same-node bot homes or cross-node peers.
+- After a successful device login, FoxClaw now resolves the current auth candidate and calls the existing `authCandidateUpdated` path, matching `/auth add <name>`, auth switching, reload, and proactive refresh behavior.
+
 ## 0.5.6 - 2026-06-04
 
 ### 中文
