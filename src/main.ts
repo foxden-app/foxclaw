@@ -1375,6 +1375,7 @@ function runDoctorChecks(): boolean {
   warnIfProxyEnvMissingFromLoadedEnv();
   warnIfProxyConfigNeedsAttention();
   warnIfInstalledServiceNodeLooksWrong();
+  warnIfSystemdUserLingerDisabled();
   return passed;
 }
 
@@ -1448,6 +1449,22 @@ function warnIfInstalledServiceNodeLooksWrong(): void {
   console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the service unit.');
 }
 
+function warnIfSystemdUserLingerDisabled(): void {
+  if (process.platform !== 'linux' || !hasCommand('loginctl')) {
+    return;
+  }
+  const user = currentServiceUser();
+  const linger = readSystemdUserLinger(user);
+  if (linger === 'enabled') {
+    console.log(`[OK] systemd user linger enabled: ${user}`);
+    return;
+  }
+  if (linger === 'disabled') {
+    console.log(`[WARN] systemd user linger is disabled for ${user}; user services may stop after logout.`);
+    console.log('[WARN] Run foxclaw start to let FoxClaw enable it, or run: sudo loginctl enable-linger "$USER"');
+  }
+}
+
 function extractNodePathFromExecStart(execStart: string): string {
   const tokens = execStart.split(/\s+/).map(systemdUnescape).filter(Boolean);
   const directNode = tokens[0] || '';
@@ -1505,6 +1522,7 @@ function installSystemd(): void {
       console.log(`[OK] updated FoxClaw ExecStart override: ${update.path}`);
     }
   }
+  ensureSystemdUserLingerEnabled();
   spawnChecked('systemctl', ['--user', 'daemon-reload']);
   spawnChecked('systemctl', ['--user', 'enable', unitName]);
   const restarted = spawnSync('systemctl', ['--user', 'restart', unitName], { stdio: 'inherit' });
@@ -1514,6 +1532,33 @@ function installSystemd(): void {
   console.log(`Installed ${unitPath}`);
   console.log(`Status: systemctl --user status ${unitName}`);
   console.log(`Logs:   journalctl --user -u ${unitName} -f`);
+}
+
+function ensureSystemdUserLingerEnabled(): void {
+  if (process.platform !== 'linux') {
+    return;
+  }
+  if (!hasCommand('loginctl')) {
+    console.log('[WARN] loginctl not found; cannot enable systemd user linger automatically.');
+    return;
+  }
+  const user = currentServiceUser();
+  const before = readSystemdUserLinger(user);
+  if (before === 'enabled') {
+    console.log(`[OK] systemd user linger enabled: ${user}`);
+    return;
+  }
+  console.log(`[INFO] Enabling systemd user linger for ${user} so FoxClaw keeps running after logout.`);
+  let result = spawnSync('loginctl', ['enable-linger', user], { stdio: 'inherit' });
+  if (result.status !== 0 && hasCommand('sudo')) {
+    result = spawnSync('sudo', ['-n', 'loginctl', 'enable-linger', user], { stdio: 'inherit' });
+  }
+  if (result.status === 0 && readSystemdUserLinger(user) === 'enabled') {
+    console.log(`[OK] systemd user linger enabled: ${user}`);
+    return;
+  }
+  console.log(`[WARN] Could not enable systemd user linger automatically for ${user}.`);
+  console.log(`[WARN] FoxClaw is installed, but it may stop after logout until you run: sudo loginctl enable-linger ${shellQuote(user)}`);
 }
 
 function uninstallSystemd(): void {
@@ -1643,6 +1688,38 @@ function buildServicePath(nodeDir: string): string {
 
 function serviceEnvPath(): string {
   return path.resolve(process.env.FOXCLAW_ENV?.trim() || getLoadedEnvPath() || DEFAULT_ENV_PATH);
+}
+
+function currentServiceUser(): string {
+  return process.env.USER?.trim()
+    || process.env.LOGNAME?.trim()
+    || os.userInfo().username;
+}
+
+function readSystemdUserLinger(user: string): 'enabled' | 'disabled' | 'unknown' {
+  const valueResult = spawnSync('loginctl', ['show-user', user, '-p', 'Linger', '--value'], { encoding: 'utf8' });
+  if (valueResult.status === 0) {
+    return parseSystemdUserLinger(valueResult.stdout);
+  }
+  const propertyResult = spawnSync('loginctl', ['show-user', user, '-p', 'Linger'], { encoding: 'utf8' });
+  if (propertyResult.status === 0) {
+    return parseSystemdUserLinger(propertyResult.stdout);
+  }
+  return 'unknown';
+}
+
+function parseSystemdUserLinger(output: string): 'enabled' | 'disabled' | 'unknown' {
+  const value = output.trim().replace(/^Linger=/, '').toLowerCase();
+  if (value === 'yes') return 'enabled';
+  if (value === 'no') return 'disabled';
+  return 'unknown';
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function hasStandardNodeProxyEnv(): boolean {

@@ -250,17 +250,17 @@ Create a short README-style summary of this folder.
 
 ## 10. Service Commands
 
-On Linux, `foxclaw start` manages a user-level systemd service. Check it with:
+On Linux, `foxclaw start` manages a user-level systemd service and tries to enable systemd user linger so the service keeps running after you leave SSH or log out. Check it with:
 
 ```bash
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-The service starts again when your user session starts. If you need it to start after reboot before you log in, run:
+If install reports that linger could not be enabled automatically, run:
 
 ```bash
-loginctl enable-linger "$USER"
+sudo loginctl enable-linger "$USER"
 ```
 
 On macOS, `foxclaw start` manages launchd and starts FoxClaw when you log in.

@@ -248,17 +248,17 @@ Create a short README-style summary of this folder.
 
 ## 10. 服务命令
 
-Linux 上 `foxclaw start` 管理用户级 systemd 服务。查看状态：
+Linux 上 `foxclaw start` 管理用户级 systemd 服务，并会尝试启用 systemd user linger，让服务在你退出 SSH 或桌面会话后继续运行。查看状态：
 
 ```bash
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-如果希望重启后未登录也能启动用户服务：
+如果安装时提示 linger 启用失败，手动执行：
 
 ```bash
-loginctl enable-linger "$USER"
+sudo loginctl enable-linger "$USER"
 ```
 
 macOS 上 `foxclaw start` 管理 launchd，并在你登录后启动 FoxClaw。

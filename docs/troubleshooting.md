@@ -261,10 +261,10 @@ Linux user systemd:
 systemctl --user is-enabled foxclaw.service
 ```
 
-`enabled` means it starts with your user session. To start after reboot before login:
+`enabled` means it starts with your user session. `foxclaw start` tries to enable systemd user linger automatically so the service keeps running after SSH logout and before login. If automatic linger setup fails:
 
 ```bash
-loginctl enable-linger "$USER"
+sudo loginctl enable-linger "$USER"
 ```
 
 macOS launchd starts FoxClaw when you log in after running:

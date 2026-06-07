@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.9 - 2026-06-07
+
+### 中文
+- Linux 用户级 systemd 安装现在会在 `foxclaw start` / `restart` / `install-systemd` 时自动尝试启用 systemd user linger，避免用户退出 SSH 或桌面会话后 FoxClaw 停止接收 Telegram 消息。
+- `foxclaw doctor` 新增 linger 状态检查；如果自动启用失败，会提示使用 `sudo loginctl enable-linger <user>` 手动修复。
+- 中文/英文安装指南和故障排查文档更新为默认自动处理 linger，失败时再手动介入。
+
+### English
+- Linux user-systemd installation now tries to enable systemd user linger during `foxclaw start`, `restart`, and `install-systemd`, preventing FoxClaw from stopping after SSH or desktop logout.
+- `foxclaw doctor` now checks linger state and tells users to run `sudo loginctl enable-linger <user>` if automatic setup fails.
+- Updated the Chinese and English install and troubleshooting docs to describe automatic linger setup with manual recovery only when needed.
+
 ## 0.5.8 - 2026-06-05
 
 ### 中文

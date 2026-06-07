@@ -262,10 +262,10 @@ Linux 用户级 systemd：
 systemctl --user is-enabled foxclaw.service
 ```
 
-`enabled` 表示会随用户会话启动。如果希望机器重启后未登录也启动用户服务：
+`enabled` 表示会随用户会话启动。`foxclaw start` 会尝试自动启用 systemd user linger，让服务在退出 SSH 或未登录时也继续运行。如果自动启用失败：
 
 ```bash
-loginctl enable-linger "$USER"
+sudo loginctl enable-linger "$USER"
 ```
 
 macOS 上，运行过下面命令后，FoxClaw 会在你登录时由 launchd 启动：
