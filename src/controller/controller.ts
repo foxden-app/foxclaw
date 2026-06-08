@@ -552,6 +552,7 @@ export class BridgeSessionCore {
   private selfUpdatePollTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshInProgress = false;
+  private proactiveAuthRefreshStatusMessage: { chatId: string; messageId: number } | null = null;
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -5386,11 +5387,11 @@ export class BridgeSessionCore {
         this.logger.warn('codex.auth_proactive_refresh_lease_failed', { reason: lease.reason });
         await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_lease_failed', {
           error: lease.reason ?? t(locale, 'unknown'),
-        }));
+        }), true);
         return;
       }
       const result = await this.refreshCodexAuthCandidates(new Set(dueCandidates.map(candidate => candidate.name)));
-      await this.notifyProactiveAuthRefresh(locale, formatAuthRefreshAllResult(locale, result, 'proactive'));
+      await this.notifyProactiveAuthRefresh(locale, formatAuthRefreshAllResult(locale, result, 'proactive'), true);
     } finally {
       await this.coordinator?.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
       this.proactiveAuthRefreshInProgress = false;
@@ -5405,12 +5406,29 @@ export class BridgeSessionCore {
     return this.localeForChat(privateScope.scopeId);
   }
 
-  private async notifyProactiveAuthRefresh(locale: AppLocale, message: string): Promise<void> {
+  private async notifyProactiveAuthRefresh(locale: AppLocale, message: string, final = false): Promise<void> {
     const identity = this.bot.identity;
     if (!identity) return;
     const privateScope = this.store.getTelegramPrivateScope(identity);
     if (!privateScope) return;
-    await this.bot.sendMessage(privateScope.chatId, message).catch((error) => {
+    const previous = this.proactiveAuthRefreshStatusMessage;
+    if (previous?.chatId === privateScope.chatId) {
+      try {
+        await this.bot.editMessage(privateScope.chatId, previous.messageId, message, []);
+        if (final) {
+          this.proactiveAuthRefreshStatusMessage = null;
+        }
+        return;
+      } catch (error) {
+        this.logger.warn('codex.auth_proactive_refresh_notify_edit_failed', { error: toErrorMeta(error) });
+      }
+    }
+    await this.bot.sendMessage(privateScope.chatId, message).then((messageId) => {
+      this.proactiveAuthRefreshStatusMessage = final ? null : { chatId: privateScope.chatId, messageId };
+    }).catch((error) => {
+      if (final) {
+        this.proactiveAuthRefreshStatusMessage = null;
+      }
       this.logger.warn('codex.auth_proactive_refresh_notify_failed', { error: toErrorMeta(error) });
     });
   }

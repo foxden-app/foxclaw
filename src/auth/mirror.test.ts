@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { AuthCandidateMirror } from './mirror.js';
+import { AuthCandidateMirror, type AuthMirrorNotification } from './mirror.js';
 
 const loggerStub = {
   debug(): void {},
@@ -35,7 +35,7 @@ test('AuthCandidateMirror propagates a newer validated refresh between runtimes'
   const a = path.join(root, 'bot1');
   const b = path.join(root, 'bot2');
   const statusPath = path.join(root, 'runtime', 'auth-mirror.json');
-  const notifications: string[] = [];
+  const notifications: AuthMirrorNotification[] = [];
   let notifyStarted!: () => void;
   const notificationStarted = new Promise<void>((resolve) => {
     notifyStarted = resolve;
@@ -67,7 +67,12 @@ test('AuthCandidateMirror propagates a newer validated refresh between runtimes'
     const sync = mirror.syncRuntimeCandidate('bot1', 'auth.json_work');
     await notificationStarted;
     assert.equal(mirror.isIdle(), false);
-    assert.match(notifications[0]!, /@botA/);
+    assert.deepEqual(notifications[0], {
+      kind: 'local_synced',
+      candidateName: 'auth.json_work',
+      sourceRuntimeId: 'bot1',
+      sourceLabel: '@botA',
+    });
     releaseNotification();
     assert.equal(await sync, true);
     assert.equal(mirror.isIdle(), true);
@@ -196,7 +201,7 @@ test('AuthCandidateMirror suppresses duplicate concurrent syncs for the same can
   const canonical = path.join(root, 'canonical');
   const a = path.join(root, 'bot1');
   const b = path.join(root, 'bot2');
-  const notifications: string[] = [];
+  const notifications: AuthMirrorNotification[] = [];
   let notifyStarted!: () => void;
   const notificationStarted = new Promise<void>((resolve) => {
     notifyStarted = resolve;

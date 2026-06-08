@@ -2383,7 +2383,7 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
     'release:lease-proactive',
   ]);
   assert.match(rig.sentMessages[0]!, /Proactive auth refresh started/);
-  assert.match(rig.sentMessages.at(-1)!, /Proactive auth refresh complete: 1 refreshed, 0 skipped, 0 failed/);
+  assert.match(rig.editedMessages.at(-1)!, /Proactive auth refresh complete: 1 refreshed, 0 skipped, 0 failed/);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_c'), 'utf8'), /2026-02-01T00:00:00.000Z/);

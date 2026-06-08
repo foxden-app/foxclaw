@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.19 - 2026-06-08
+
+### 中文
+- 主动后台 auth 刷新现在只保留一条私聊状态消息：开始时发送，完成或拿不到刷新锁时编辑为最终结果，减少开始/完成两条消息的打扰。
+- 本机 auth 镜像和跨节点 auth 同步的刷新 burst 现在会短窗口汇总，把候选镜像、跨节点发送、收到远端包、导入/跳过/失败合成摘要；恢复失败和人工介入提示仍会明确发出。
+
+### English
+- Background proactive auth refresh now keeps one private status message: it sends the starting state and edits that message to the final result or lease failure, reducing separate start/done notifications.
+- Same-node auth mirroring and cross-node auth sync now group refresh bursts into short summaries covering mirror writes, peer sends, received remote bundles, import/skip/failure results, while recovery failures and manual-intervention notices remain explicit.
+
 ## 0.5.18 - 2026-06-08
 
 ### 中文

@@ -19,6 +19,11 @@ import {
   type AppConfig,
 } from './config.js';
 import type { AuthSyncNotification } from './auth/cross_node_sync.js';
+import type { AuthMirrorNotification } from './auth/mirror.js';
+import {
+  createAuthRefreshNotificationAggregator,
+  type AuthRefreshNotificationAggregator,
+} from './auth/notifications.js';
 import type { AppLocale } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
@@ -263,6 +268,7 @@ async function runServeCli(): Promise<void> {
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
+  const authNotificationAggregator = createAuthRefreshNotificationAggregator(logger);
   attachIlinkRuntimeFromBridgeLogger(logger, config.wxIlinkRouteTag);
   const processLock = acquireProcessLock(config.lockPath);
   let store: InstanceType<typeof BridgeStore> | null = null;
@@ -351,12 +357,7 @@ async function runServeCli(): Promise<void> {
           label: runtime.bot.username ? `@${runtime.bot.username}` : runtime.id,
           authDir: runtime.authDir,
           validate: async (context) => validateRefreshedAuthCandidate(runtime, context.candidateName),
-          notify: async (message: string): Promise<void> => {
-            const chatId = store!.getTelegramPrivateChatId(runtime.id);
-            if (chatId) {
-              await runtime.bot.sendMessage(chatId, message);
-            }
-          },
+          notify: createAuthMirrorNotifier(store!, runtime.id, runtime.bot, authNotificationAggregator),
         })),
         logger,
         path.join(APP_HOME, 'runtime', 'auth-mirror.json'),
@@ -563,7 +564,7 @@ async function runServeCli(): Promise<void> {
             },
             importCandidate: (candidateName, raw, source) => mirror.importExternalCandidate(candidateName, raw, source),
             isIdle: authSyncLocalIdle,
-            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot),
+            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot, authNotificationAggregator),
           },
         );
         await authSync.initialize();
@@ -592,6 +593,7 @@ async function runServeCli(): Promise<void> {
 
       const shutdown = async (signal: string): Promise<void> => {
         logger.info('bridge.shutting_down', { signal });
+        await authNotificationAggregator.flushAll();
         authSync?.stop();
         mirror.stop();
         await weixinAdapter?.stop();
@@ -742,7 +744,7 @@ async function runServeCli(): Promise<void> {
           },
           importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
           isIdle: singleAuthSyncLocalIdle,
-          notify: createAuthSyncNotifier(store!, bot),
+          notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator),
         },
       );
       await singleAuthSync.initialize();
@@ -774,6 +776,7 @@ async function runServeCli(): Promise<void> {
 
     const shutdown = async (signal: string): Promise<void> => {
       logger.info('bridge.shutting_down', { signal });
+      await authNotificationAggregator.flushAll();
       singleAuthSync?.stop();
       singleMirror?.stop();
       await weixinAdapter?.stop();
@@ -804,6 +807,7 @@ async function runServeCli(): Promise<void> {
     process.on('SIGINT', () => void shutdown('SIGINT'));
     process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
+    await authNotificationAggregator.flushAll().catch(() => {});
     activeAuthSync?.stop();
     activeAuthMirror?.stop();
     await weixinAdapter?.stop().catch(() => {});
@@ -826,14 +830,52 @@ interface AuthSyncNotifyStore {
   getChatSettings(scopeId: string): { locale: AppLocale | null } | null;
 }
 
-function createAuthSyncNotifier(store: AuthSyncNotifyStore, bot: AuthSyncNotifyBot): (event: AuthSyncNotification) => Promise<void> {
+interface AuthMirrorNotifyBot {
+  sendMessage(chatId: string, text: string): Promise<number>;
+}
+
+function createAuthMirrorNotifier(
+  store: AuthSyncNotifyStore,
+  botId: string,
+  bot: AuthMirrorNotifyBot,
+  aggregator: AuthRefreshNotificationAggregator,
+): (event: AuthMirrorNotification) => Promise<void> {
+  return async (event: AuthMirrorNotification): Promise<void> => {
+    const privateScope = store.getTelegramPrivateScope(botId);
+    if (!privateScope) return;
+    const locale = store.getChatSettings(privateScope.scopeId)?.locale ?? 'en';
+    aggregator.enqueueMirror({
+      key: authNotificationDestinationKey(botId, privateScope.chatId),
+      locale,
+      sendMessage: (text) => bot.sendMessage(privateScope.chatId, text),
+    }, event);
+  };
+}
+
+function createAuthSyncNotifier(
+  store: AuthSyncNotifyStore,
+  bot: AuthSyncNotifyBot,
+  aggregator: AuthRefreshNotificationAggregator,
+): (event: AuthSyncNotification) => Promise<void> {
   return async (event: AuthSyncNotification): Promise<void> => {
     if (!bot.identity) return;
     const privateScope = store.getTelegramPrivateScope(bot.identity);
     if (!privateScope) return;
     const locale = store.getChatSettings(privateScope.scopeId)?.locale ?? 'en';
+    const destination = {
+      key: authNotificationDestinationKey(bot.identity, privateScope.chatId),
+      locale,
+      sendMessage: (text: string) => bot.sendMessage(privateScope.chatId, text),
+    };
+    if (aggregator.enqueueAuthSync(destination, event)) {
+      return;
+    }
     await bot.sendMessage(privateScope.chatId, formatAuthSyncNotification(locale, event));
   };
+}
+
+function authNotificationDestinationKey(botId: string, chatId: string): string {
+  return `${botId}:${chatId}`;
 }
 
 function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotification): string {

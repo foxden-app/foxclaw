@@ -421,11 +421,11 @@ Candidates: 2
 
 `/auth refresh all` 是仅命令入口的维护操作，因为 ChatGPT refresh token 会被轮换。只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。命令会先显示风险确认：如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并显示摘要。
 
-OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 超过 9 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。主动刷新完成后会私聊通知，并把较新的候选继续镜像和跨节点同步。
+OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 超过 9 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。私聊里会显示一条主动刷新状态消息，并在结束时编辑成最终结果；较新的候选会继续镜像和跨节点同步，成批出现的镜像/跨节点刷新通知会合并成简短汇总。
 
 ### 6.4 跨节点 auth 同步
 
-跨节点 auth 同步默认关闭。它适合你在多台自己控制的机器上使用同一组合法 ChatGPT 账号候选，并希望某台机器上 Codex 自动刷新出的新 token 能同步到其他机器。v1 使用 Telegram Bot-to-Bot 私聊传输加密文件，不需要公网 IP 或 FRP。推荐每台机器选择一个联系人 bot；同一节点内其他 bot 继续使用本机 auth 镜像。多 bot 模式下，默认联系人是 `TG_BOT_TOKENS` 的第一个 token。联系人 bot 的私聊会报告发送、接收、排队、导入、失败、恢复查询和人工介入提示；单个候选验证失败会作为“候选失败”显示，不会覆盖同步系统级最近错误。最近 bot-to-bot 通讯会保存在事件环里，可用 `/auth sync events [过滤]` 和 `/auth sync trace <requestId>` 追查某个候选、peer 或请求。
+跨节点 auth 同步默认关闭。它适合你在多台自己控制的机器上使用同一组合法 ChatGPT 账号候选，并希望某台机器上 Codex 自动刷新出的新 token 能同步到其他机器。v1 使用 Telegram Bot-to-Bot 私聊传输加密文件，不需要公网 IP 或 FRP。推荐每台机器选择一个联系人 bot；同一节点内其他 bot 继续使用本机 auth 镜像。多 bot 模式下，默认联系人是 `TG_BOT_TOKENS` 的第一个 token。联系人 bot 的私聊会报告发送、接收、排队、导入、失败、恢复查询和人工介入提示；刷新、发送、导入密集发生时会合并成汇总，恢复和人工介入提示仍会明确发出。单个候选验证失败会作为“候选失败”显示，不会覆盖同步系统级最近错误。最近 bot-to-bot 通讯会保存在事件环里，可用 `/auth sync events [过滤]` 和 `/auth sync trace <requestId>` 追查某个候选、peer 或请求。
 
 完整设计、安全边界、`.env` 示例和排查步骤见 [跨节点 auth 同步配置指南](./cross-node-auth-sync.md)。
 

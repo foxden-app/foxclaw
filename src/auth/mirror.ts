@@ -7,7 +7,7 @@ export interface AuthMirrorRuntime {
   id: string;
   label?: string;
   authDir: string;
-  notify?: (message: string) => Promise<void>;
+  notify?: (event: AuthMirrorNotification) => Promise<void>;
   validate?: (context: AuthMirrorValidationContext) => Promise<AuthMirrorValidationResult | boolean>;
 }
 
@@ -78,6 +78,10 @@ export interface AuthMirrorSyncAllResult {
 export interface AuthMirrorHooks {
   onSynced?: (event: AuthMirrorSyncedEvent) => Promise<void> | void;
 }
+
+export type AuthMirrorNotification =
+  | { kind: 'local_synced'; candidateName: string; sourceRuntimeId: string; sourceLabel: string }
+  | { kind: 'remote_imported'; candidateName: string; sourceNodeId: string; sourceLabel: string };
 
 const AUTH_SCAN_INTERVAL_MS = 5_000;
 
@@ -387,8 +391,13 @@ export class AuthCandidateMirror {
         };
         await writeMirrorStatus(this.statusPath, this.lastStatus);
         this.logger.info('auth.mirror.remote_imported', { candidateName, sourceNodeId: source.nodeId });
-        const message = `${candidateName} has been synchronized from remote node ${sourceLabel}.`;
-        await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+        const notification: AuthMirrorNotification = {
+          kind: 'remote_imported',
+          candidateName,
+          sourceNodeId: source.nodeId,
+          sourceLabel,
+        };
+        await Promise.allSettled(this.runtimes.map((target) => target.notify?.(notification)));
         return {
           ok: true,
           imported: true,
@@ -475,8 +484,13 @@ export class AuthCandidateMirror {
       };
       await writeMirrorStatus(this.statusPath, this.lastStatus);
       this.logger.info('auth.mirror.synced', { sourceRuntimeId: runtime.id, name });
-      const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
-      await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+      const notification: AuthMirrorNotification = {
+        kind: 'local_synced',
+        candidateName: name,
+        sourceRuntimeId: runtime.id,
+        sourceLabel,
+      };
+      await Promise.allSettled(this.runtimes.map((target) => target.notify?.(notification)));
       await this.hooks.onSynced?.({
         status: this.lastStatus,
         record: {
