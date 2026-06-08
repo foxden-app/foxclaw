@@ -535,6 +535,8 @@ export class BridgeSessionCore {
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
   private authRefreshAllInProgress = false;
+  private externalAuthValidationInProgress = false;
+  private turnStartInProgress = 0;
   private authRotationFailedTargets = new Set<string>();
   private localUsageCache: CodexLocalUsageSnapshot | null = null;
   private localUsageCacheLoaded = false;
@@ -671,6 +673,8 @@ export class BridgeSessionCore {
     this.commandUsageSequence = 0;
     this.pendingAuthRotation = null;
     this.authRefreshAllInProgress = false;
+    this.externalAuthValidationInProgress = false;
+    this.turnStartInProgress = 0;
     this.clearObservedThreadWatchers();
     this.releaseActiveTurnsForBridgeShutdown();
     this.bot.stop();
@@ -739,6 +743,10 @@ export class BridgeSessionCore {
         await this.handleActiveTurnInboundMessage(event, locale, event.text.trim());
         return;
       }
+      if (this.externalAuthValidationInProgress) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
+        return;
+      }
       await this.startBoundTurnFromEvent(event, locale, event.text.trim());
       return;
     }
@@ -794,6 +802,10 @@ export class BridgeSessionCore {
 
     if (this.findActiveTurn(scopeId)) {
       await this.handleActiveTurnInboundMessage(event, locale, decision.text);
+      return;
+    }
+    if (this.externalAuthValidationInProgress) {
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
       return;
     }
 
@@ -3718,50 +3730,58 @@ export class BridgeSessionCore {
     rawAuth: string,
     expectedAccountId: string,
   ): Promise<{ ok: boolean; reason?: string | null }> {
+    if (this.externalAuthValidationInProgress) {
+      return { ok: false, reason: 'runtime is not idle' };
+    }
     if (!this.isIdleForServiceUpdate()) {
       return { ok: false, reason: 'runtime is not idle' };
     }
-    const metadata = parseChatGptAuthMetadata(rawAuth);
-    if (!metadata || metadata.accountId !== expectedAccountId) {
-      return { ok: false, reason: 'remote auth account id mismatch' };
-    }
-    const state = await this.listCodexAuthState();
-    const existing = state.candidates.find(candidate => candidate.name === candidateName) ?? null;
-    if (existing) {
-      const existingMetadata = await readChatGptAuthMetadata(existing.path);
-      if (existingMetadata && existingMetadata.accountId !== expectedAccountId) {
-        return { ok: false, reason: 'same candidate belongs to a different account' };
-      }
-    }
-    const authStat = await fs.lstat(state.authPath).catch(() => null);
-    const originalRegularAuth = authStat?.isFile()
-      ? await fs.readFile(state.authPath, 'utf8').catch(() => null)
-      : null;
-    const tempPath = path.join(state.authDir, `.auth-sync-validate-${process.pid}-${Date.now()}.json`);
+    this.externalAuthValidationInProgress = true;
     try {
-      await fs.writeFile(tempPath, rawAuth, { encoding: 'utf8', mode: 0o600 });
-      await pointCodexAuthAtTarget(state.authDir, state.authPath, tempPath);
-      this.pendingTurnErrors.clear();
-      this.attachedThreads.clear();
-      await this.app.restart();
-      const account = await this.app.readAccount(false);
-      const rateLimits = await this.app.readAccountRateLimits();
-      if (!account || !rateLimits || !selectCodexRateLimitSnapshot(rateLimits)) {
-        return { ok: false, reason: 'Codex did not validate ChatGPT usage for remote auth' };
+      const metadata = parseChatGptAuthMetadata(rawAuth);
+      if (!metadata || metadata.accountId !== expectedAccountId) {
+        return { ok: false, reason: 'remote auth account id mismatch' };
       }
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, reason: formatUserError(error) };
+      const state = await this.listCodexAuthState();
+      const existing = state.candidates.find(candidate => candidate.name === candidateName) ?? null;
+      if (existing) {
+        const existingMetadata = await readChatGptAuthMetadata(existing.path);
+        if (existingMetadata && existingMetadata.accountId !== expectedAccountId) {
+          return { ok: false, reason: 'same candidate belongs to a different account' };
+        }
+      }
+      const authStat = await fs.lstat(state.authPath).catch(() => null);
+      const originalRegularAuth = authStat?.isFile()
+        ? await fs.readFile(state.authPath, 'utf8').catch(() => null)
+        : null;
+      const tempPath = path.join(state.authDir, `.auth-sync-validate-${process.pid}-${Date.now()}.json`);
+      try {
+        await fs.writeFile(tempPath, rawAuth, { encoding: 'utf8', mode: 0o600 });
+        await pointCodexAuthAtTarget(state.authDir, state.authPath, tempPath);
+        this.pendingTurnErrors.clear();
+        this.attachedThreads.clear();
+        await this.app.restart();
+        const account = await this.app.readAccount(false);
+        const rateLimits = await this.app.readAccountRateLimits();
+        if (!account || !rateLimits || !selectCodexRateLimitSnapshot(rateLimits)) {
+          return { ok: false, reason: 'Codex did not validate ChatGPT usage for remote auth' };
+        }
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: formatUserError(error) };
+      } finally {
+        await restoreCodexAuthTarget(state.authDir, state.authPath, state.currentTargetPath, originalRegularAuth).catch((error) => {
+          this.logger.warn('codex.auth_sync_restore_failed', { error: toErrorMeta(error) });
+        });
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+        this.pendingTurnErrors.clear();
+        this.attachedThreads.clear();
+        await this.app.restart().catch((error) => {
+          this.logger.warn('codex.auth_sync_restart_restore_failed', { error: toErrorMeta(error) });
+        });
+      }
     } finally {
-      await restoreCodexAuthTarget(state.authDir, state.authPath, state.currentTargetPath, originalRegularAuth).catch((error) => {
-        this.logger.warn('codex.auth_sync_restore_failed', { error: toErrorMeta(error) });
-      });
-      await fs.rm(tempPath, { force: true }).catch(() => undefined);
-      this.pendingTurnErrors.clear();
-      this.attachedThreads.clear();
-      await this.app.restart().catch((error) => {
-        this.logger.warn('codex.auth_sync_restart_restore_failed', { error: toErrorMeta(error) });
-      });
+      this.externalAuthValidationInProgress = false;
     }
   }
 
@@ -3772,7 +3792,9 @@ export class BridgeSessionCore {
       && this.pendingMcpElicitations.size === 0
       && this.pendingLoginsByScope.size === 0
       && !this.authRotationInProgress
-      && !this.authRefreshAllInProgress;
+      && !this.authRefreshAllInProgress
+      && !this.externalAuthValidationInProgress
+      && this.turnStartInProgress === 0;
   }
 
   private hasLocalBlockingActivity(): boolean {
@@ -8351,45 +8373,54 @@ export class BridgeSessionCore {
     text: string,
   ): Promise<void> {
     const scopeId = event.scopeId;
-    this.clearPlanImplementationPromptsForScope(scopeId);
-    await this.stopWatchingScopeThread(scopeId);
-    const existingBinding = this.store.getBinding(scopeId);
-    const binding = existingBinding
-      ? await this.ensureThreadReady(scopeId, existingBinding)
-      : await this.createBinding(scopeId, null);
-    await this.sendTyping(scopeId);
-    const previewMessageId = 0;
+    if (this.externalAuthValidationInProgress) {
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
+      return;
+    }
+    this.turnStartInProgress += 1;
     try {
-      const input = await this.buildTurnInput(binding, { ...event, text }, locale);
-      const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
-      if (turnState.collaborationMode === 'plan') {
-        this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+      this.clearPlanImplementationPromptsForScope(scopeId);
+      await this.stopWatchingScopeThread(scopeId);
+      const existingBinding = this.store.getBinding(scopeId);
+      const binding = existingBinding
+        ? await this.ensureThreadReady(scopeId, existingBinding)
+        : await this.createBinding(scopeId, null);
+      await this.sendTyping(scopeId);
+      const previewMessageId = 0;
+      try {
+        const input = await this.buildTurnInput(binding, { ...event, text }, locale);
+        const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
+        if (turnState.collaborationMode === 'plan') {
+          this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+        }
+        await this.registerActiveTurn(
+          scopeId,
+          event.chatId,
+          event.chatType,
+          event.topicId,
+          turnState.threadId,
+          turnState.turnId,
+          previewMessageId,
+          {
+            input,
+            threadId: turnState.threadId,
+            cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+            chatId: event.chatId,
+            chatType: event.chatType,
+            topicId: event.topicId,
+            collaborationMode: turnState.collaborationMode,
+            failedAuthTargets: new Set(),
+          },
+          turnState.collaborationMode,
+        );
+      } catch (error) {
+        if (previewMessageId > 0) {
+          await this.cleanupTransientPreview(scopeId, previewMessageId);
+        }
+        throw error;
       }
-      await this.registerActiveTurn(
-        scopeId,
-        event.chatId,
-        event.chatType,
-        event.topicId,
-        turnState.threadId,
-        turnState.turnId,
-        previewMessageId,
-        {
-          input,
-          threadId: turnState.threadId,
-          cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
-          chatId: event.chatId,
-          chatType: event.chatType,
-          topicId: event.topicId,
-          collaborationMode: turnState.collaborationMode,
-          failedAuthTargets: new Set(),
-        },
-        turnState.collaborationMode,
-      );
-    } catch (error) {
-      if (previewMessageId > 0) {
-        await this.cleanupTransientPreview(scopeId, previewMessageId);
-      }
-      throw error;
+    } finally {
+      this.turnStartInProgress -= 1;
     }
   }
 

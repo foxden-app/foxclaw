@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.20 - 2026-06-08
+
+### 中文
+- 修复跨节点 auth 同步远端导入验证和普通消息并发时的竞态：验证远端候选会临时重启 Codex app-server，现在这段窗口会标记为非空闲。
+- 如果普通消息刚好在远端验证重启期间进入，FoxClaw 会提示稍后重发，不再把这条消息送进正在重启的 bridge 并报 `Codex app bridge stopped`。
+- 普通对话启动过程现在也计入非空闲状态，避免 auth 同步验证插入到新 turn 建立中的窗口。
+
+### English
+- Fixed a race between cross-node auth remote-import validation and ordinary messages. Remote candidate validation temporarily restarts Codex app-server, and that window is now marked non-idle.
+- If an ordinary message arrives during the validation restart window, FoxClaw asks the user to resend it shortly instead of sending it into a restarting bridge and reporting `Codex app bridge stopped`.
+- Starting an ordinary turn now also counts as non-idle, preventing auth sync validation from entering the small window while a new turn is being established.
+
 ## 0.5.19 - 2026-06-08
 
 ### 中文

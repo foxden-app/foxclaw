@@ -2389,6 +2389,55 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
   assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_c'), 'utf8'), /2026-02-01T00:00:00.000Z/);
 });
 
+test('plain messages wait while external auth validation restarts app-server', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+  let releaseRestart!: () => void;
+  let restartStarted!: () => void;
+  const restartStartedPromise = new Promise<void>((resolve) => {
+    restartStarted = resolve;
+  });
+  const releaseRestartPromise = new Promise<void>((resolve) => {
+    releaseRestart = resolve;
+  });
+  t.after(() => releaseRestart?.());
+  let restartCalls = 0;
+  let startThreadCalls = 0;
+  (rig.controller as any).app.restart = async () => {
+    restartCalls += 1;
+    if (restartCalls === 1) {
+      restartStarted();
+      await releaseRestartPromise;
+    }
+  };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
+  (rig.controller as any).app.startThread = async () => {
+    startThreadCalls += 1;
+    throw new Error('startThread should wait during external auth validation');
+  };
+
+  const rawAuth = `${JSON.stringify({
+    tokens: { account_id: 'acct-remote' },
+    last_refresh: '2026-02-01T00:00:00.000Z',
+  })}\n`;
+  const validation = (rig.controller as any).validateExternalCodexAuthCandidate('auth.json_remote', rawAuth, 'acct-remote');
+  await restartStartedPromise;
+
+  assert.equal((rig.controller as any).isIdleForServiceUpdate(), false);
+  await (rig.controller as any).handleText(createEvent('continue'));
+
+  assert.equal(startThreadCalls, 0);
+  assert.match(rig.sentMessages.at(-1)!, /Auth sync is validating refreshed credentials/);
+  releaseRestart();
+  assert.deepEqual(await validation, { ok: true });
+  assert.equal((rig.controller as any).isIdleForServiceUpdate(), true);
+});
+
 test('/auth panel refresh all is blocked until every runtime is idle', async (t) => {
   const rig = createControllerRig(null, {
     canSelfUpdate: () => false,
