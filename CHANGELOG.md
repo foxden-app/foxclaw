@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.10 - 2026-06-08
+
+### 中文
+- Telegram 输入队列改为 SQLite 持久化 FIFO，FoxClaw 重启后不再丢失排队中的 Codex 请求，并在 `/status` 中显示排队数量。
+- Telegram 图片和文件会先进入附件暂存区，支持媒体组归并、下一条文字自动带附件发给 Codex，以及“分析 / 清空”按钮操作。
+- 引导式 Plan 会话现在会持久化并在重启后恢复，减少长任务或确认流程被服务重启打断的风险。
+- `/update` 完成回报会从已安装包的 `CHANGELOG.md` 读取当前版本更新内容，让 Telegram 里直接看到这次升级改了什么。
+
+### English
+- Replaced the in-memory Telegram prompt queue with a persisted SQLite FIFO so queued Codex requests survive FoxClaw restarts, and `/status` now reports queued turn count.
+- Telegram photos and files are staged before dispatch, with media-group merging, next-message attachment consumption, and Analyze/Clear buttons.
+- Guided Plan sessions are persisted and restored after restart, reducing interruption risk for long-running or confirmation-based flows.
+- `/update` completion reports now read the installed package `CHANGELOG.md` entry for the target version so Telegram shows what changed in the upgrade.
+
 ## 0.5.9 - 2026-06-07
 
 ### 中文
