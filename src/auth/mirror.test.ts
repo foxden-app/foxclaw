@@ -135,6 +135,62 @@ test('AuthCandidateMirror rejects a same-name candidate for a different ChatGPT 
   }
 });
 
+test('AuthCandidateMirror rejects a team candidate whose email does not match the candidate name', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-team-name-mismatch-'));
+  const canonical = path.join(root, 'canonical');
+  const runtime = path.join(root, 'bot1');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const original = auth('acct-team', '2026-05-01T00:00:00.000Z', {
+      email: 'jnmzk1668ese3@edu.aiceo.dev',
+    });
+    await fs.writeFile(path.join(canonical, 'auth.json_team_jnmzk1668ese3'), original);
+    const mirror = new AuthCandidateMirror(canonical, [{ id: 'bot1', authDir: runtime }], loggerStub as any);
+    await mirror.initialize();
+    await fs.writeFile(path.join(runtime, 'auth.json_team_jnmzk1668ese3'), auth('acct-team', '2026-05-27T00:00:00.000Z', {
+      email: 'jnmot7rqo4hle@edu.aiceo.dev',
+    }));
+
+    assert.equal(await mirror.syncRuntimeCandidate('bot1', 'auth.json_team_jnmzk1668ese3'), false);
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_team_jnmzk1668ese3'), 'utf8'), original);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('AuthCandidateMirror repairs mismatched team candidate copies from a matching runtime copy at startup', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-team-startup-repair-'));
+  const canonical = path.join(root, 'canonical');
+  const a = path.join(root, 'bot1');
+  const b = path.join(root, 'bot2');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    await fs.mkdir(a, { recursive: true });
+    await fs.mkdir(b, { recursive: true });
+    const bad = auth('acct-team', '2026-05-27T00:00:00.000Z', {
+      email: 'jnmot7rqo4hle@edu.aiceo.dev',
+    });
+    const good = auth('acct-team', '2026-05-01T00:00:00.000Z', {
+      email: 'jnmzk1668ese3@edu.aiceo.dev',
+    });
+    await fs.writeFile(path.join(canonical, 'auth.json_team_jnmzk1668ese3'), bad);
+    await fs.writeFile(path.join(a, 'auth.json_team_jnmzk1668ese3'), good);
+    await fs.writeFile(path.join(b, 'auth.json_team_jnmzk1668ese3'), bad);
+
+    const mirror = new AuthCandidateMirror(canonical, [
+      { id: 'bot1', authDir: a },
+      { id: 'bot2', authDir: b },
+    ], loggerStub as any);
+    await mirror.initialize();
+
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_team_jnmzk1668ese3'), 'utf8'), good);
+    assert.equal(await fs.readFile(path.join(a, 'auth.json_team_jnmzk1668ese3'), 'utf8'), good);
+    assert.equal(await fs.readFile(path.join(b, 'auth.json_team_jnmzk1668ese3'), 'utf8'), good);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror suppresses duplicate concurrent syncs for the same candidate', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-mirror-duplicate-'));
   const canonical = path.join(root, 'canonical');

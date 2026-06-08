@@ -235,9 +235,18 @@ export class AuthCandidateMirror {
       const destinationPath = path.join(runtime.authDir, candidateName);
       const destination = await readChatGptAuthRecord(destinationPath);
       if (!destination) return null;
+      const destinationMatchesName = chatGptAuthMetadataMatchesCandidateName(candidateName, destination);
       const sources = await this.collectAuthRecords();
       const newest = sources
-        .filter(entry => authRecordsCompatible(entry.record, destination))
+        .filter((entry) => {
+          if (!chatGptAuthMetadataMatchesCandidateName(candidateName, entry.record)) {
+            return false;
+          }
+          if (!destinationMatchesName) {
+            return entry.candidateName === candidateName;
+          }
+          return authRecordsCompatible(entry.record, destination);
+        })
         .reduce<(typeof sources)[number] | null>((current, entry) => (
           !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
         ), null);
@@ -280,10 +289,19 @@ export class AuthCandidateMirror {
         skipped += this.runtimes.length;
         continue;
       }
+      if (!chatGptAuthMetadataMatchesCandidateName(name, canonical)) {
+        skipped += this.runtimes.length;
+        this.logger.warn('auth.mirror.distribution_identity_mismatch', { name });
+        continue;
+      }
       for (const runtime of this.runtimes) {
         const destinationPath = path.join(runtime.authDir, name);
         const destination = await readChatGptAuthRecord(destinationPath);
-        if (destination && !authRecordsCompatible(destination, canonical)) {
+        if (
+          destination
+          && chatGptAuthMetadataMatchesCandidateName(name, destination)
+          && !authRecordsCompatible(destination, canonical)
+        ) {
           skipped += 1;
           this.logger.warn('auth.mirror.distribution_conflict', { runtimeId: runtime.id, name });
           continue;
@@ -317,8 +335,11 @@ export class AuthCandidateMirror {
         if (!metadata) {
           return { ok: false, imported: false, reason: 'invalid ChatGPT auth payload' };
         }
+        if (!chatGptAuthMetadataMatchesCandidateName(candidateName, metadata)) {
+          return { ok: false, imported: false, reason: 'candidate auth identity does not match candidate name' };
+        }
         const existing = (await this.collectAuthRecords())
-          .filter(entry => entry.candidateName === candidateName);
+          .filter(entry => entry.candidateName === candidateName && chatGptAuthMetadataMatchesCandidateName(candidateName, entry.record));
         const conflicting = existing.find(entry => !authRecordsCompatible(entry.record, metadata));
         if (conflicting) {
           return { ok: false, imported: false, reason: 'same candidate belongs to a different account or ChatGPT user' };
@@ -373,9 +394,17 @@ export class AuthCandidateMirror {
       const sourcePath = path.join(runtime.authDir, name);
       const record = await readChatGptAuthRecord(sourcePath);
       if (!record) return false;
+      if (!chatGptAuthMetadataMatchesCandidateName(name, record)) {
+        this.logger.warn('auth.mirror.identity_mismatch', { runtimeId: runtime.id, name });
+        return false;
+      }
       const canonicalPath = path.join(this.canonicalDir, name);
       const canonical = await readChatGptAuthRecord(canonicalPath);
-      if (canonical && !authRecordsCompatible(canonical, record)) {
+      if (
+        canonical
+        && chatGptAuthMetadataMatchesCandidateName(name, canonical)
+        && !authRecordsCompatible(canonical, record)
+      ) {
         this.logger.warn('auth.mirror.account_conflict', { runtimeId: runtime.id, name });
         return false;
       }
@@ -402,7 +431,17 @@ export class AuthCandidateMirror {
       await atomicWrite(canonicalPath, record.raw);
       for (const target of this.runtimes) {
         if (target.id !== runtime.id) {
-          await atomicWrite(path.join(target.authDir, name), record.raw);
+          const targetPath = path.join(target.authDir, name);
+          const targetRecord = await readChatGptAuthRecord(targetPath);
+          if (
+            targetRecord
+            && chatGptAuthMetadataMatchesCandidateName(name, targetRecord)
+            && !authRecordsCompatible(targetRecord, record)
+          ) {
+            this.logger.warn('auth.mirror.target_conflict', { sourceRuntimeId: runtime.id, targetRuntimeId: target.id, name });
+            continue;
+          }
+          await atomicWrite(targetPath, record.raw);
         }
       }
       this.lastSyncedRefresh.set(name, record.lastRefreshMs);
@@ -516,12 +555,17 @@ export class AuthCandidateMirror {
       record: await readChatGptAuthRecord(sourcePath),
     })))).filter((entry): entry is { sourcePath: string; record: ChatGptAuthRecord } => entry.record !== null);
     if (records.length === 0) return;
-    const reference = records[0]!.record;
-    if (records.some(entry => !authRecordsCompatible(reference, entry.record))) {
+    const trustedRecords = records.filter(entry => chatGptAuthMetadataMatchesCandidateName(name, entry.record));
+    if (trustedRecords.length === 0) {
+      this.logger.warn('auth.mirror.startup_identity_mismatch', { name });
+      return;
+    }
+    const reference = trustedRecords[0]!.record;
+    if (trustedRecords.some(entry => !authRecordsCompatible(reference, entry.record))) {
       this.logger.warn('auth.mirror.startup_conflict', { name });
       return;
     }
-    const newest = records.reduce((current, entry) => (
+    const newest = trustedRecords.reduce((current, entry) => (
       entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
     ));
     this.lastSyncedRefresh.set(name, newest.record.lastRefreshMs);
@@ -680,6 +724,31 @@ export function parseChatGptAuthMetadata(raw: string): ChatGptAuthMetadata | nul
   } catch {
     return null;
   }
+}
+
+export function chatGptAuthMetadataMatchesCandidateName(
+  candidateName: string,
+  metadata: Pick<ChatGptAuthMetadata, 'email'>,
+): boolean {
+  const expectedLocalPart = expectedTeamCandidateEmailLocalPart(candidateName);
+  if (!expectedLocalPart || !metadata.email) {
+    return true;
+  }
+  const actualLocalPart = metadata.email.split('@', 1)[0]?.trim().toLowerCase() ?? '';
+  return actualLocalPart === expectedLocalPart;
+}
+
+function expectedTeamCandidateEmailLocalPart(candidateName: string): string | null {
+  const prefix = 'auth.json_team_';
+  if (!candidateName.startsWith(prefix)) {
+    return null;
+  }
+  const raw = candidateName.slice(prefix.length).trim().toLowerCase();
+  if (!raw || raw.includes('/') || raw.includes('\\')) {
+    return null;
+  }
+  const localPart = raw.includes('@') ? raw.split('@', 1)[0]! : raw;
+  return /^[a-z0-9][a-z0-9._+-]*$/.test(localPart) ? localPart : null;
 }
 
 function chatGptQuotaIdentityId(accountId: string, userId: string | null, email: string | null): string {

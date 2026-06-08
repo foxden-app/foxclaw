@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.13 - 2026-06-08
+
+### 中文
+- `auth.json_team_<localpart>` 候选现在会校验文件内 ChatGPT email localpart 是否匹配候选名；不匹配时 `/auth` 标为无效，避免继续显示另一位 seat 的额度。
+- 本机 auth mirror 不再传播 team 候选名与文件身份不一致的 auth，并会在启动 reconcile 时用仍然匹配候选名的 runtime 副本修复错误副本。
+- `/auth refresh all` 和当前候选额度刷新会跳过身份与 `team_` 候选名不匹配的文件，避免脏额度快照再次写入。
+
+### English
+- `auth.json_team_<localpart>` candidates now verify that the ChatGPT email local part inside the auth file matches the candidate name; mismatches are marked invalid in `/auth` instead of displaying another seat's quota.
+- The local auth mirror no longer propagates team candidates whose filename identity and auth payload disagree, and startup reconciliation can repair bad copies from a runtime copy that still matches the candidate name.
+- `/auth refresh all` and current-candidate quota refresh now skip files whose identity does not match the `team_` candidate name, preventing dirty quota snapshots from being recorded again.
+
 ## 0.5.12 - 2026-06-08
 
 ### 中文

@@ -6,7 +6,12 @@ import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore, CodexAuthQuotaSnapshotRecord, PendingUserInputStoredRecord } from '../store/database.js';
-import { parseChatGptAuthMetadata, readChatGptAuthMetadata, type ChatGptAuthMetadata } from '../auth/mirror.js';
+import {
+  chatGptAuthMetadataMatchesCandidateName,
+  parseChatGptAuthMetadata,
+  readChatGptAuthMetadata,
+  type ChatGptAuthMetadata,
+} from '../auth/mirror.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -6550,7 +6555,7 @@ export class BridgeSessionCore {
     try {
       for (const candidate of candidates) {
         const before = await readChatGptAuthMetadata(candidate.path);
-        if (!before) {
+        if (!before || !chatGptAuthMetadataMatchesCandidateName(candidate.name, before)) {
           result.skipped.push(candidate.name);
           continue;
         }
@@ -6567,7 +6572,11 @@ export class BridgeSessionCore {
             throw new Error('Codex did not return ChatGPT rate limits after refresh');
           }
           const after = await readChatGptAuthMetadata(candidate.path);
-          if (!after || !chatGptAuthMetadataCompatible(before, after)) {
+          if (
+            !after
+            || !chatGptAuthMetadataMatchesCandidateName(candidate.name, after)
+            || !chatGptAuthMetadataCompatible(before, after)
+          ) {
             throw new Error('refreshed auth identity did not match the original candidate');
           }
           if (after.lastRefreshMs <= before.lastRefreshMs) {
@@ -6806,6 +6815,9 @@ export class BridgeSessionCore {
     }
     try {
       const metadata = await readChatGptAuthMetadata(candidate.path);
+      if (!metadata || !chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)) {
+        return;
+      }
       const snapshot = selectCodexRateLimitSnapshot(await this.app.readAccountRateLimits());
       if (!snapshot) {
         return;
@@ -6884,13 +6896,16 @@ export class BridgeSessionCore {
   private async readCodexAuthCandidateQuotaIdentities(candidates: CodexAuthCandidate[]): Promise<Map<string, CodexAuthQuotaIdentity>> {
     const entries = await Promise.all(candidates.map(async (candidate) => {
       const metadata = await readChatGptAuthMetadata(candidate.path);
-      candidate.credentialKind = metadata
+      const metadataMatchesName = metadata
+        ? chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)
+        : false;
+      candidate.credentialKind = metadata && metadataMatchesName
         ? 'chatgpt'
         : await isCodexApiKeyAuthCandidate(candidate.path)
           ? 'api-key'
           : 'invalid';
-      candidate.credentialLastRefreshMs = metadata?.lastRefreshMs ?? null;
-      return [candidate.name, metadata ? {
+      candidate.credentialLastRefreshMs = metadata && metadataMatchesName ? metadata.lastRefreshMs : null;
+      return [candidate.name, metadata && metadataMatchesName ? {
         accountId: metadata.accountId,
         quotaIdentityId: metadata.quotaIdentityId,
       } : null] as const;

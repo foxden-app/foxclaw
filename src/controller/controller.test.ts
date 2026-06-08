@@ -1904,6 +1904,56 @@ test('/auth separates quota snapshots for ChatGPT users on the same account id',
   assert.doesNotMatch(rig.sentMessages[0]!, /5h:86\|b/);
 });
 
+test('/auth marks team candidate as invalid when file email does not match candidate name', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  fs.rmSync(path.join(authDir, 'auth.json'), { force: true });
+  fs.rmSync(path.join(authDir, 'auth.json_a'), { force: true });
+  fs.rmSync(path.join(authDir, 'auth.json_b'), { force: true });
+  const refreshedAt = new Date().toISOString();
+  writeChatGptAuthCandidate(authDir, 'auth.json_team_jnmot7rqo4hle', 'acct-team', refreshedAt, {
+    email: 'jnmot7rqo4hle@edu.aiceo.dev',
+  });
+  writeChatGptAuthCandidate(authDir, 'auth.json_team_jnmzk1668ese3', 'acct-team', refreshedAt, {
+    email: 'jnmot7rqo4hle@edu.aiceo.dev',
+  });
+  fs.symlinkSync(path.join(authDir, 'auth.json_team_jnmot7rqo4hle'), path.join(authDir, 'auth.json'));
+  fs.writeFileSync(path.join(rig.tempDir, 'codex-auth-quota.json'), `${JSON.stringify({
+    'auth.json_team_jnmzk1668ese3': {
+      capturedAtMs: Date.now(),
+      accountId: 'acct-team',
+      quotaIdentityId: 'acct-team:email:jnmot7rqo4hle@edu.aiceo.dev',
+      planType: 'team',
+      primaryWindowDurationMins: 300,
+      primaryRemainingPercent: 33,
+      secondaryWindowDurationMins: null,
+      secondaryRemainingPercent: null,
+    },
+  })}\n`);
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 67, windowDurationMins: 300, resetsAt: null },
+      secondary: null,
+      credits: null,
+      planType: 'team',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /5h:33\|team_jnmot7rqo4hle \* \[Team · ready · refreshed 0m ago\]/);
+  assert.match(rig.sentMessages[0]!, /--\|team_jnmzk1668ese3 \[invalid auth file\]/);
+  assert.doesNotMatch(rig.sentMessages[0]!, /5h:33\|team_jnmzk1668ese3/);
+});
+
 test('/auth panel paginates large inventories, filters attention candidates, and searches by filename', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
