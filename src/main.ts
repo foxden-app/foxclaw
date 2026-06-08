@@ -24,6 +24,7 @@ import {
   createAuthRefreshNotificationAggregator,
   type AuthRefreshNotificationAggregator,
 } from './auth/notifications.js';
+import type { CodexAuthPoolStats } from './store/database.js';
 import type { AppLocale } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
@@ -357,7 +358,9 @@ async function runServeCli(): Promise<void> {
           label: runtime.bot.username ? `@${runtime.bot.username}` : runtime.id,
           authDir: runtime.authDir,
           validate: async (context) => validateRefreshedAuthCandidate(runtime, context.candidateName),
-          notify: createAuthMirrorNotifier(store!, runtime.id, runtime.bot, authNotificationAggregator),
+          notify: createAuthMirrorNotifier(store!, runtime.id, runtime.bot, authNotificationAggregator, {
+            quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+          }),
         })),
         logger,
         path.join(APP_HOME, 'runtime', 'auth-mirror.json'),
@@ -434,8 +437,10 @@ async function runServeCli(): Promise<void> {
           && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
-        authCandidateDeleted: (_runtimeId: string, candidateName: string): Promise<void> =>
-          mirror.deleteCandidate(candidateName).then(() => undefined),
+        authCandidateDeleted: async (_runtimeId: string, candidateName: string, reason: string | null = null): Promise<void> => {
+          await mirror.deleteCandidate(candidateName);
+          await authSync?.publishCandidateDeletion(candidateName, reason);
+        },
         recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
           const local = await mirror.recoverRuntimeCandidate(runtimeId, candidateName);
           if (local) return true;
@@ -563,8 +568,22 @@ async function runServeCli(): Promise<void> {
               return runtime.core.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
             },
             importCandidate: (candidateName, raw, source) => mirror.importExternalCandidate(candidateName, raw, source),
+            deleteLocalCandidate: async (candidateName, source) => {
+              if (!authSyncLocalIdle()) {
+                return { ok: false, deleted: false, reason: 'runtime is not idle' };
+              }
+              await mirror.deleteCandidate(candidateName);
+              store!.deleteCodexAuthCandidate(candidateName);
+              await Promise.all(runtimes.map(runtime => runtime.core.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null)));
+              if (activeWeixinCore) {
+                await activeWeixinCore.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null);
+              }
+              return { ok: true, deleted: true, reason: source.reason ?? null };
+            },
             isIdle: authSyncLocalIdle,
-            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot, authNotificationAggregator),
+            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot, authNotificationAggregator, {
+              quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+            }),
           },
         );
         await authSync.initialize();
@@ -653,8 +672,10 @@ async function runServeCli(): Promise<void> {
         && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
       authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
         singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
-      authCandidateDeleted: (_runtimeId: string, candidateName: string): Promise<void> =>
-        singleMirror?.deleteCandidate(candidateName).then(() => undefined) ?? Promise.resolve(),
+      authCandidateDeleted: async (_runtimeId: string, candidateName: string, reason: string | null = null): Promise<void> => {
+        await singleMirror?.deleteCandidate(candidateName);
+        await singleAuthSync?.publishCandidateDeletion(candidateName, reason);
+      },
       recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
         const local = await singleMirror?.recoverRuntimeCandidate(runtimeId, candidateName) ?? null;
         if (local) return true;
@@ -743,8 +764,19 @@ async function runServeCli(): Promise<void> {
             return core!.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
           },
           importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
+          deleteLocalCandidate: async (candidateName, source) => {
+            if (!singleAuthSyncLocalIdle()) {
+              return { ok: false, deleted: false, reason: 'runtime is not idle' };
+            }
+            await singleMirror!.deleteCandidate(candidateName);
+            store!.deleteCodexAuthCandidate(candidateName);
+            await core!.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null);
+            return { ok: true, deleted: true, reason: source.reason ?? null };
+          },
           isIdle: singleAuthSyncLocalIdle,
-          notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator),
+          notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator, {
+            quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+          }),
         },
       );
       await singleAuthSync.initialize();
@@ -828,6 +860,15 @@ interface AuthSyncNotifyBot {
 interface AuthSyncNotifyStore {
   getTelegramPrivateScope(botId: string): { scopeId: string; chatId: string } | null;
   getChatSettings(scopeId: string): { locale: AppLocale | null } | null;
+  getCodexAuthPoolStats(): CodexAuthPoolStats;
+}
+
+interface AuthSyncNotifierOptions {
+  quietAuthPoolMode?: () => boolean;
+}
+
+interface AuthMirrorNotifierOptions {
+  quietAuthPoolMode?: () => boolean;
 }
 
 interface AuthMirrorNotifyBot {
@@ -839,8 +880,10 @@ function createAuthMirrorNotifier(
   botId: string,
   bot: AuthMirrorNotifyBot,
   aggregator: AuthRefreshNotificationAggregator,
+  options: AuthMirrorNotifierOptions = {},
 ): (event: AuthMirrorNotification) => Promise<void> {
   return async (event: AuthMirrorNotification): Promise<void> => {
+    if (options.quietAuthPoolMode?.()) return;
     const privateScope = store.getTelegramPrivateScope(botId);
     if (!privateScope) return;
     const locale = store.getChatSettings(privateScope.scopeId)?.locale ?? 'en';
@@ -856,7 +899,37 @@ function createAuthSyncNotifier(
   store: AuthSyncNotifyStore,
   bot: AuthSyncNotifyBot,
   aggregator: AuthRefreshNotificationAggregator,
+  options: AuthSyncNotifierOptions = {},
 ): (event: AuthSyncNotification) => Promise<void> {
+  const poolSummaryQueues = new Map<string, {
+    locale: AppLocale;
+    sendMessage: (text: string) => Promise<number>;
+    timer: NodeJS.Timeout;
+  }>();
+
+  const enqueuePoolSummary = (destination: {
+    key: string;
+    locale: AppLocale;
+    sendMessage: (text: string) => Promise<number>;
+  }): void => {
+    const existing = poolSummaryQueues.get(destination.key);
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+    const timer = setTimeout(() => {
+      const queued = poolSummaryQueues.get(destination.key);
+      if (!queued) return;
+      poolSummaryQueues.delete(destination.key);
+      void queued.sendMessage(formatAuthPoolSummary(queued.locale, store.getCodexAuthPoolStats())).catch(() => undefined);
+    }, 2_000);
+    timer.unref();
+    poolSummaryQueues.set(destination.key, {
+      locale: destination.locale,
+      sendMessage: destination.sendMessage,
+      timer,
+    });
+  };
+
   return async (event: AuthSyncNotification): Promise<void> => {
     if (!bot.identity) return;
     const privateScope = store.getTelegramPrivateScope(bot.identity);
@@ -867,6 +940,12 @@ function createAuthSyncNotifier(
       locale,
       sendMessage: (text: string) => bot.sendMessage(privateScope.chatId, text),
     };
+    if (options.quietAuthPoolMode?.() && isQuietAuthPoolNotification(event)) {
+      if (shouldSendQuietAuthPoolSummary(event)) {
+        enqueuePoolSummary(destination);
+      }
+      return;
+    }
     if (aggregator.enqueueAuthSync(destination, event)) {
       return;
     }
@@ -876,6 +955,48 @@ function createAuthSyncNotifier(
 
 function authNotificationDestinationKey(botId: string, chatId: string): string {
   return `${botId}:${chatId}`;
+}
+
+function formatAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): string {
+  return locale === 'zh'
+    ? `auth 池：历史 ${stats.totalSeen}，存活 ${stats.alive}，因失效剔除 ${stats.deletedInvalid}。`
+    : `Auth pool: total seen ${stats.totalSeen}, alive ${stats.alive}, invalid-deleted ${stats.deletedInvalid}.`;
+}
+
+function isQuietAuthPoolNotification(event: AuthSyncNotification): boolean {
+  switch (event.kind) {
+    case 'candidate_publish_started':
+    case 'candidate_publish_completed':
+    case 'push_all_started':
+    case 'push_all_completed':
+    case 'remote_bundle_received':
+    case 'remote_import_imported':
+    case 'remote_import_skipped':
+    case 'candidate_delete_sent':
+    case 'remote_delete_received':
+    case 'remote_delete_deleted':
+    case 'remote_delete_skipped':
+    case 'recovery_started':
+    case 'recovery_peer_empty':
+    case 'recovery_peer_bundle_received':
+    case 'recovery_failed':
+    case 'pull_request_received':
+    case 'pull_response_sent':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function shouldSendQuietAuthPoolSummary(event: AuthSyncNotification): boolean {
+  switch (event.kind) {
+    case 'candidate_delete_sent':
+    case 'remote_delete_deleted':
+    case 'remote_delete_skipped':
+      return true;
+    default:
+      return false;
+  }
 }
 
 function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotification): string {
@@ -906,6 +1027,23 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
         return `${event.mode === 'pull' ? '跨节点拉取未改动本机文件' : '收到跨节点 auth 但未写盘'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
       case 'remote_import_failed':
         return `${event.mode === 'pull' ? '跨节点拉取导入失败' : '跨节点 auth 导入失败'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}\n需要注意：如果其他候选也无法恢复，请人工介入重新登录或刷新这个 auth。`;
+      case 'candidate_delete_sent':
+        return `跨节点 auth 删除已发出：${event.candidateName}\nPeer：${peers}${event.reason ? `\n原因：${event.reason}` : ''}`;
+      case 'candidate_delete_failed':
+        return `跨节点 auth 删除发送失败：${event.candidateName}\nPeer：${peers}\n原因：${event.reason}`;
+      case 'remote_delete_received':
+        return [
+          `收到跨节点 auth 删除：${event.candidateName}`,
+          `来源：${formatSource(event.sourceLabel, event.sourceNodeId)}，peer ${event.peer}`,
+          `处理：${event.queued ? `本机忙，已排队等待空闲后删除；当前待删除 ${event.queueLength}` : '本机空闲，正在删除同名候选'}`,
+          event.reason ? `原因：${event.reason}` : null,
+        ].filter(Boolean).join('\n');
+      case 'remote_delete_deleted':
+        return `已执行跨节点 auth 删除：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}${event.reason ? `\n原因：${event.reason}` : ''}`;
+      case 'remote_delete_skipped':
+        return `跨节点 auth 删除未改动本机文件：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
+      case 'remote_delete_failed':
+        return `跨节点 auth 删除失败：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
       case 'recovery_started':
         return `auth 恢复开始：${event.candidateName}\nRequest：${event.requestId}\n处理：同节点没有可用较新副本，正在向跨节点 peer 查询：${peers}，最长等待 ${event.timeoutMs}ms`;
       case 'recovery_peer_empty':
@@ -955,6 +1093,23 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
       return `${event.mode === 'pull' ? 'Cross-node pull did not change local files' : 'Received cross-node auth but did not write it'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
     case 'remote_import_failed':
       return `${event.mode === 'pull' ? 'Cross-node pull import failed' : 'Cross-node auth import failed'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}\nAttention: if no other candidate can recover this account, run device login or refresh this auth manually.`;
+    case 'candidate_delete_sent':
+      return `Cross-node auth delete sent: ${event.candidateName}\nPeers: ${peers}${event.reason ? `\nReason: ${event.reason}` : ''}`;
+    case 'candidate_delete_failed':
+      return `Cross-node auth delete send failed: ${event.candidateName}\nPeers: ${peers}\nReason: ${event.reason}`;
+    case 'remote_delete_received':
+      return [
+        `Received cross-node auth delete: ${event.candidateName}`,
+        `Source: ${formatSource(event.sourceLabel, event.sourceNodeId)}, peer ${event.peer}`,
+        `Action: ${event.queued ? `queued until this node is idle; pending deletes ${event.queueLength}` : 'deleting the matching local candidate'}`,
+        event.reason ? `Reason: ${event.reason}` : null,
+      ].filter(Boolean).join('\n');
+    case 'remote_delete_deleted':
+      return `Applied cross-node auth delete: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}${event.reason ? `\nReason: ${event.reason}` : ''}`;
+    case 'remote_delete_skipped':
+      return `Cross-node auth delete did not change local files: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
+    case 'remote_delete_failed':
+      return `Cross-node auth delete failed: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
     case 'recovery_started':
       return `Auth recovery started: ${event.candidateName}\nRequest: ${event.requestId}\nAction: no newer same-node copy was available; querying cross-node peers: ${peers}; timeout ${event.timeoutMs}ms`;
     case 'recovery_peer_empty':

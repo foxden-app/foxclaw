@@ -74,6 +74,59 @@ test('BridgeStore persists Codex auth repair state globally with runtime overrid
   });
 });
 
+test('BridgeStore tracks Codex auth pool history and invalid deletes', () => {
+  withStore((store) => {
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 0,
+      alive: 0,
+      deletedInvalid: 0,
+    });
+
+    store.recordCodexAuthPoolInventory(['auth.json_a', 'auth.json_b', 'auth.json_a']);
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 2,
+      deletedInvalid: 0,
+    });
+
+    store.recordCodexAuthCandidateInvalidDelete('auth.json_a', 'needs_repair');
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthCandidateRemoved('auth.json_b', null);
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 0,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthPoolInventory(['auth.json_b']);
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthCandidateInvalidDelete('auth.json_a', 'needs_repair');
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthPoolInventory(['auth.json_a']);
+    store.recordCodexAuthCandidateInvalidDelete('auth.json_a', 'needs_repair');
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 2,
+    });
+  });
+});
+
 test('BridgeStore shares Codex auth quota snapshots by quota identity id', () => {
   withStore((store) => {
     store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', 'acct-a:user-1', {

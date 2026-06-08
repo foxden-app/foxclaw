@@ -5,7 +5,13 @@ import path from 'node:path';
 import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
-import type { BridgeStore, CodexAuthCandidateState, CodexAuthQuotaSnapshotRecord, PendingUserInputStoredRecord } from '../store/database.js';
+import type {
+  BridgeStore,
+  CodexAuthCandidateState,
+  CodexAuthPoolStats,
+  CodexAuthQuotaSnapshotRecord,
+  PendingUserInputStoredRecord,
+} from '../store/database.js';
 import {
   chatGptAuthMetadataMatchesCandidateName,
   parseChatGptAuthMetadata,
@@ -127,10 +133,12 @@ import { renderActiveTurnStatus } from './status.js';
 import { writeRuntimeStatus } from '../runtime.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
+const AUTH_DELETE_REASON_NEEDS_REPAIR = 'needs_repair';
+
 export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
-  authCandidateDeleted?: (runtimeId: string, candidateName: string) => Promise<void>;
+  authCandidateDeleted?: (runtimeId: string, candidateName: string, reason?: string | null) => Promise<void>;
   recoverAuthCandidate?: (runtimeId: string, candidateName: string, options?: { crossNode?: boolean }) => Promise<boolean>;
   acquireAuthRefreshLease?: (reason: string) => Promise<{ ok: boolean; leaseId: string | null; reason?: string | null }>;
   releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
@@ -354,6 +362,13 @@ interface CodexAuthSwitchOutcome extends CodexAuthSwitchResult {
   recovered: boolean;
   error: string | null;
   restoredPrevious: boolean;
+  autoDeleted: boolean;
+  deleteRestarted: boolean;
+}
+
+interface CodexAuthRepairDisposition {
+  deleted: boolean;
+  restarted: boolean;
 }
 
 interface CodexAuthRefreshAllResult {
@@ -865,6 +880,7 @@ export class BridgeSessionCore {
           t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
           t(locale, 'status_queued_turns', { value: this.store.countQueuedTurnInputs(scopeId) }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
+          formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()),
         ];
         if (serviceStatus) {
           lines.push('', t(locale, 'status_runtime_overview'));
@@ -1186,7 +1202,7 @@ export class BridgeSessionCore {
         return;
       }
       case 'config': {
-        await this.handleConfigCommand(scopeId, locale);
+        await this.handleConfigCommand(scopeId, locale, args);
         return;
       }
       case 'requirements': {
@@ -1508,6 +1524,11 @@ export class BridgeSessionCore {
         setupMatch[2]!,
         locale,
       );
+      return;
+    }
+    const configMatch = /^config:auth_auto_delete:(on|off)$/.exec(event.data);
+    if (configMatch) {
+      await this.handleConfigToggleCallback(event, configMatch[1] === 'on', locale);
       return;
     }
     const settingsMatch = /^settings:(model|effort|access):(.+)$/.exec(event.data);
@@ -3725,6 +3746,19 @@ export class BridgeSessionCore {
     return (await this.listCodexAuthState()).currentLabel;
   }
 
+  async handleExternalCodexAuthCandidateDeleted(candidateName: string, reason: string | null = null): Promise<void> {
+    this.store.deleteCodexAuthCandidate(candidateName);
+    if (isInvalidCodexAuthDeleteReason(reason)) {
+      this.store.recordCodexAuthCandidateInvalidDelete(candidateName, reason);
+    } else {
+      this.store.recordCodexAuthCandidateRemoved(candidateName, reason);
+    }
+    this.authRotationFailedTargets.delete(path.join(this.resolveAuthDir(), candidateName));
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    await this.app.restart();
+  }
+
   async validateExternalCodexAuthCandidate(
     candidateName: string,
     rawAuth: string,
@@ -5791,13 +5825,16 @@ export class BridgeSessionCore {
     }
   }
 
-  private async deleteCodexAuthCandidate(candidate: CodexAuthCandidate): Promise<boolean> {
+  private async deleteCodexAuthCandidate(
+    candidate: CodexAuthCandidate,
+    reason: string | null = null,
+  ): Promise<boolean> {
     const wasCurrent = candidate.isCurrent;
     const authDir = this.resolveAuthDir();
     const authPath = path.join(authDir, 'auth.json');
     let deletedByCoordinator = false;
     try {
-      await this.coordinator?.authCandidateDeleted?.(this.authRuntimeId(), candidate.name);
+      await this.coordinator?.authCandidateDeleted?.(this.authRuntimeId(), candidate.name, reason);
       deletedByCoordinator = Boolean(this.coordinator?.authCandidateDeleted);
     } catch (error) {
       this.logger.warn('codex.auth_candidate_delete_sync_failed', {
@@ -5813,6 +5850,11 @@ export class BridgeSessionCore {
       }
     }
     this.store.deleteCodexAuthCandidate(candidate.name);
+    if (isInvalidCodexAuthDeleteReason(reason)) {
+      this.store.recordCodexAuthCandidateInvalidDelete(candidate.name, reason);
+    } else {
+      this.store.recordCodexAuthCandidateRemoved(candidate.name, reason);
+    }
     this.authRotationFailedTargets.delete(candidate.path);
     const snapshots = await this.readCodexAuthQuotaSnapshots();
     if (Object.prototype.hasOwnProperty.call(snapshots, candidate.name)) {
@@ -6150,10 +6192,66 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, formatFeaturesMessage(locale, features));
   }
 
-  private async handleConfigCommand(scopeId: string, locale: AppLocale): Promise<void> {
+  private async handleConfigCommand(scopeId: string, locale: AppLocale, args: string[] = []): Promise<void> {
+    const action = args[0]?.toLowerCase() ?? '';
+    if (['auth_auto_delete', 'auth-auto-delete', 'auto_delete_needs_repair', 'auto-delete-needs-repair'].includes(action)) {
+      const enabled = parseConfigBooleanArg(args[1]);
+      if (enabled === null) {
+        await this.sendMessage(scopeId, t(locale, 'config_auth_auto_delete_usage'));
+        return;
+      }
+      const update = await this.setAuthAutoDeleteNeedsRepair(enabled);
+      const binding = this.store.getBinding(scopeId);
+      const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+      await this.sendMessage(
+        scopeId,
+        `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
+        configKeyboard(locale, this.config),
+      );
+      return;
+    }
     const binding = this.store.getBinding(scopeId);
     const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-    await this.sendMessage(scopeId, formatConfigMessage(locale, result));
+    await this.sendMessage(scopeId, formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats()), configKeyboard(locale, this.config));
+  }
+
+  private async handleConfigToggleCallback(event: TelegramCallbackEvent, enabled: boolean, locale: AppLocale): Promise<void> {
+    const update = await this.setAuthAutoDeleteNeedsRepair(enabled);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+    const binding = this.store.getBinding(event.scopeId);
+    const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+    const message = `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`;
+    if (event.messageId !== null) {
+      await this.editMessage(event.scopeId, event.messageId, message, configKeyboard(locale, this.config));
+    } else {
+      await this.sendMessage(event.scopeId, message, configKeyboard(locale, this.config));
+    }
+  }
+
+  private async setAuthAutoDeleteNeedsRepair(enabled: boolean): Promise<{ enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null }> {
+    this.config.authAutoDeleteNeedsRepair = enabled;
+    const envPath = this.config.envPath;
+    if (!envPath) {
+      return { enabled, envPath: null, envUpdated: false, envError: null };
+    }
+    try {
+      await writeEnvBoolean(envPath, 'AUTH_AUTO_DELETE_NEEDS_REPAIR', enabled);
+      return { enabled, envPath, envUpdated: true, envError: null };
+    } catch (error) {
+      this.logger.warn('config.env_update_failed', { key: 'AUTH_AUTO_DELETE_NEEDS_REPAIR', envPath, error: toErrorMeta(error) });
+      return { enabled, envPath, envUpdated: false, envError: formatUserError(error) };
+    }
+  }
+
+  private formatConfigToggleUpdate(
+    locale: AppLocale,
+    update: { enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null },
+  ): string {
+    const lines = [t(locale, 'config_auth_auto_delete_updated', { value: t(locale, update.enabled ? 'yes' : 'no') })];
+    if (update.envError) {
+      lines.push(t(locale, 'config_env_update_failed', { value: update.envPath ?? t(locale, 'unknown'), error: update.envError }));
+    }
+    return lines.join('\n');
   }
 
   private async handleRequirementsCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -6615,7 +6713,10 @@ export class BridgeSessionCore {
           }
           return false;
         }
-        this.markCodexAuthCandidateNeedsRepair(current.name);
+        const disposition = await this.markCodexAuthCandidateNeedsRepair(current.name);
+        if (disposition.deleted) {
+          await this.sendMessage(rotation.scopeId, formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()));
+        }
       }
       const selection = await this.selectNextCodexAuthCandidate(failedTargets);
       if (!selection) {
@@ -6625,10 +6726,12 @@ export class BridgeSessionCore {
         return false;
       }
       const { candidate, fromLabel, toLabel } = selection;
-      await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_switching', {
-        ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
-        error: formatShortStatusError(rotation.reason),
-      }));
+      await this.sendMessage(rotation.scopeId, this.config.authAutoDeleteNeedsRepair
+        ? t(locale, 'auth_auto_switching_quiet', { error: formatShortStatusError(rotation.reason) })
+        : t(locale, 'auth_auto_switching', {
+          ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
+          error: formatShortStatusError(rotation.reason),
+        }));
       const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
       if (!outcome.ok) {
         return false;
@@ -6738,6 +6841,7 @@ export class BridgeSessionCore {
       this.store.listCodexAuthCandidateStates(this.authRuntimeId()),
       this.resolveAuthDir(),
     );
+    this.store.recordCodexAuthPoolInventory(state.candidates.map(candidate => candidate.name));
     const snapshots = await this.readCodexAuthQuotaSnapshots();
     const candidateQuotaIdentities = await this.readCodexAuthCandidateQuotaIdentities(state.candidates);
     state.candidates.forEach((candidate) => {
@@ -6794,7 +6898,6 @@ export class BridgeSessionCore {
     await this.app.restart();
     const validation = await this.validateCurrentCodexAuthCandidate(candidate);
     if (!validation.ok) {
-      this.markCodexAuthCandidateNeedsRepair(candidate.name);
       let restoredPrevious = false;
       try {
         await restoreCodexAuthTarget(initialState.authDir, initialState.authPath, initialState.currentTargetPath, originalRegularAuth);
@@ -6808,6 +6911,7 @@ export class BridgeSessionCore {
           error: toErrorMeta(error),
         });
       }
+      const repairDisposition = await this.markCodexAuthCandidateNeedsRepair(candidate.name);
       const outcome: CodexAuthSwitchOutcome = {
         ...result,
         ok: false,
@@ -6815,6 +6919,8 @@ export class BridgeSessionCore {
         recovered,
         error: validation.error,
         restoredPrevious,
+        autoDeleted: repairDisposition.deleted,
+        deleteRestarted: repairDisposition.restarted,
       };
       if (sendResult) {
         const lines = this.formatAuthSwitchValidationLines(locale, outcome);
@@ -6832,16 +6938,20 @@ export class BridgeSessionCore {
       recovered,
       error: null,
       restoredPrevious: false,
+      autoDeleted: false,
+      deleteRestarted: false,
     };
 
     if (!sendResult) {
       return outcome;
     }
-    const lines = [t(
-      locale,
-      automatic ? 'auth_auto_done' : 'auth_switch_done',
-      this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
-    )];
+    const lines = [automatic && this.config.authAutoDeleteNeedsRepair
+      ? t(locale, 'auth_auto_done_quiet')
+      : t(
+        locale,
+        automatic ? 'auth_auto_done' : 'auth_switch_done',
+        this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
+      )];
     if (recovered) {
       lines.push(t(locale, 'auth_recovered_newer_candidate', { value: candidate.name }));
     }
@@ -6893,12 +7003,19 @@ export class BridgeSessionCore {
     if (outcome.ok) {
       return [];
     }
+    const validationKey = outcome.autoDeleted && this.config.authAutoDeleteNeedsRepair
+      ? 'auth_switch_validation_auto_deleted_quiet'
+      : outcome.autoDeleted
+        ? 'auth_switch_validation_auto_deleted'
+        : 'auth_switch_validation_failed';
     return [
-      t(locale, 'auth_switch_validation_failed', {
+      t(locale, validationKey, {
         value: outcome.candidateName,
         error: outcome.error ?? t(locale, 'unknown'),
       }),
       outcome.restoredPrevious ? t(locale, 'auth_switch_validation_reverted') : '',
+      outcome.deleteRestarted ? t(locale, 'auth_delete_current_restarted') : '',
+      outcome.autoDeleted ? formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()) : '',
     ].filter(Boolean);
   }
 
@@ -6918,8 +7035,23 @@ export class BridgeSessionCore {
     }
   }
 
-  private markCodexAuthCandidateNeedsRepair(candidateName: string): void {
+  private async markCodexAuthCandidateNeedsRepair(candidateName: string): Promise<CodexAuthRepairDisposition> {
+    if (this.config.authAutoDeleteNeedsRepair) {
+      const candidate = (await this.listCodexAuthState()).candidates.find(entry => entry.name === candidateName) ?? null;
+      if (!candidate) {
+        this.store.deleteCodexAuthCandidate(candidateName);
+        this.store.recordCodexAuthCandidateInvalidDelete(candidateName, AUTH_DELETE_REASON_NEEDS_REPAIR);
+        return { deleted: true, restarted: false };
+      }
+      const restarted = await this.deleteCodexAuthCandidate(candidate, AUTH_DELETE_REASON_NEEDS_REPAIR);
+      this.logger.warn('codex.auth_candidate_auto_deleted', {
+        candidate: candidateName,
+        runtimeId: this.authRuntimeId(),
+      });
+      return { deleted: true, restarted };
+    }
     this.store.setCodexAuthCandidateState(candidateName, 'needs_repair');
+    return { deleted: false, restarted: false };
   }
 
   private markCodexAuthCandidateActive(candidateName: string): void {
@@ -9643,7 +9775,12 @@ function formatFeaturesMessage(locale: AppLocale, features: CodexExperimentalFea
   return lines.join('\n');
 }
 
-function formatConfigMessage(locale: AppLocale, result: Record<string, unknown>): string {
+function formatConfigMessage(
+  locale: AppLocale,
+  result: Record<string, unknown>,
+  appConfig: AppConfig,
+  authPoolStats: CodexAuthPoolStats,
+): string {
   const config = result.config && typeof result.config === 'object' ? result.config as Record<string, unknown> : {};
   const layers = Array.isArray(result.layers) ? result.layers : [];
   const keys = ['model', 'model_provider', 'approval_policy', 'sandbox_mode', 'web_search', 'service_tier', 'profile', 'review_model'];
@@ -9653,7 +9790,63 @@ function formatConfigMessage(locale: AppLocale, result: Record<string, unknown>)
     lines.push(`${key}: ${value === null || value === undefined ? '-' : formatConfigValue(value)}`);
   }
   lines.push(t(locale, 'config_layers', { count: layers.length }));
+  lines.push('');
+  lines.push(t(locale, 'config_foxclaw_title'));
+  lines.push(t(locale, 'config_auth_auto_delete_needs_repair', {
+    value: t(locale, appConfig.authAutoDeleteNeedsRepair ? 'yes' : 'no'),
+  }));
+  lines.push(`AUTH_AUTO_DELETE_NEEDS_REPAIR=${appConfig.authAutoDeleteNeedsRepair ? 'true' : 'false'}`);
+  lines.push(formatCodexAuthPoolSummary(locale, authPoolStats));
   return lines.join('\n');
+}
+
+function formatCodexAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): string {
+  return t(locale, 'auth_pool_summary', {
+    total: stats.totalSeen,
+    alive: stats.alive,
+    deleted: stats.deletedInvalid,
+  });
+}
+
+function isInvalidCodexAuthDeleteReason(reason: string | null | undefined): boolean {
+  return reason === AUTH_DELETE_REASON_NEEDS_REPAIR;
+}
+
+function configKeyboard(locale: AppLocale, appConfig: AppConfig): Array<Array<{ text: string; callback_data: string }>> {
+  const enabled = appConfig.authAutoDeleteNeedsRepair;
+  return [[{
+    text: t(locale, enabled ? 'button_config_auth_auto_delete_off' : 'button_config_auth_auto_delete_on'),
+    callback_data: `config:auth_auto_delete:${enabled ? 'off' : 'on'}`,
+  }]];
+}
+
+function parseConfigBooleanArg(value: string | undefined): boolean | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return null;
+  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
+  return null;
+}
+
+async function writeEnvBoolean(envPath: string, key: string, enabled: boolean): Promise<void> {
+  await fs.mkdir(path.dirname(envPath), { recursive: true });
+  const nextLine = `${key}=${enabled ? 'true' : 'false'}`;
+  let contents = '';
+  try {
+    contents = await fs.readFile(envPath, 'utf8');
+  } catch {
+    await fs.writeFile(envPath, `${nextLine}\n`, { encoding: 'utf8', mode: 0o600 });
+    return;
+  }
+  const pattern = new RegExp(`(^|\\n)[ \\t#]*${escapeRegExp(key)}\\s*=.*(?=\\r?\\n|$)`);
+  const nextContents = pattern.test(contents)
+    ? contents.replace(pattern, (_match, prefix: string) => `${prefix}${nextLine}`)
+    : `${contents}${contents.endsWith('\n') || contents.length === 0 ? '' : '\n'}${nextLine}\n`;
+  await fs.writeFile(envPath, nextContents, { encoding: 'utf8', mode: 0o600 });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function formatRequirementsMessage(locale: AppLocale, requirements: CodexConfigRequirements | null): string {

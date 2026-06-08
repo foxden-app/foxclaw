@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.21 - 2026-06-09
+
+### 中文
+- 新增资源富裕 auth 池模式：`AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 或 `/config auth_auto_delete on` 会把原本要标记为 `?`/需要登录修复、且无法恢复的候选自动剔除。
+- 自动剔除会通过跨节点 auth sync 发送删除 tombstone，peer 收到后删除同名候选，并优先处理删除，避免待导入队列把坏候选复活。
+- `/status` 和 `/config` 现在显示 auth 池摘要：历史见过的候选数、当前存活数、因失效自动剔除数；`/config` 的开关会写回当前 FoxClaw `.env`。
+- 开启自动剔除后，auth mirror / auth sync 的候选级同步、导入、删除和恢复通知会静默或汇总为池子摘要；同步发送/导入失败、删除失败和系统级 `sync_error` 仍会明确提示。
+
+### English
+- Added a resource-rich auth pool mode: `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` or `/config auth_auto_delete on` automatically deletes unrecoverable candidates that would otherwise be marked `?` / needs login repair.
+- Auto-delete now publishes a cross-node auth-sync delete tombstone, so peers delete the same candidate and process deletes before pending imports to avoid resurrecting bad candidates.
+- `/status` and `/config` now show an auth-pool summary: total candidates seen, currently alive, and invalid-deleted count. The `/config` toggle writes back to the active FoxClaw `.env`.
+- When auto-delete is enabled, candidate-level auth mirror / auth sync publish, import, delete, and recovery chatter is silenced or collapsed into pool summaries; sync send/import failures, delete failures, and system-level `sync_error` still notify explicitly.
+
 ## 0.5.20 - 2026-06-08
 
 ### 中文

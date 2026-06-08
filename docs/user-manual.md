@@ -448,6 +448,8 @@ AUTH_SYNC_PEERS=@other_node_bot,@third_node_bot
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 # Optional; FoxClaw generates and persists a local node id when omitted.
 AUTH_SYNC_NODE_ID=workstation-a
+# Optional resource-rich mode: auto-delete unrecoverable candidates across peers.
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 Safety boundaries:
@@ -457,6 +459,7 @@ Safety boundaries:
 - Remote imports wait for global local idleness, temporarily switch to the candidate for app-server usage validation, and only then write the candidate.
 - A same-name candidate known to belong to a different account id, or to a different identifiable ChatGPT user/email under the same account, is never overwritten.
 - Cross-node recovery only pulls an already-held valid peer copy and does not rotate refresh tokens during recovery. If no peer has a usable copy, it stops and asks you to maintain auth manually. The background 9-day proactive refresh separately requests the cross-node refresh lease and skips that cycle if the lease is not granted.
+- When `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` is enabled, or the same option is turned on in `/config`, unrecoverable candidates are deleted and propagated to peers with a delete tombstone. Private notifications collapse to an auth-pool summary: total seen, alive, and invalid-deleted.
 
 Dual-active behavior:
 

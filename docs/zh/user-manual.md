@@ -448,6 +448,8 @@ AUTH_SYNC_PEERS=@other_node_bot,@third_node_bot
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 # 可选；不填时 FoxClaw 会生成并持久化本机 node id
 AUTH_SYNC_NODE_ID=workstation-a
+# 可选；资源富裕模式下自动跨节点剔除无法恢复的候选
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 安全边界：
@@ -457,6 +459,7 @@ AUTH_SYNC_NODE_ID=workstation-a
 - 远端导入必须等本机全局空闲，再临时切换到待验证 auth、重启 app-server、读取 usage 验证成功后才写入候选。
 - 同名候选如果已知属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱，永远拒绝覆盖。
 - 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 9 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
+- 如果开启 `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 或在 `/config` 中打开自动剔除，无法恢复的候选会直接删除并向 peer 传播删除 tombstone；私聊通知会压缩为 auth 池摘要：历史总数、存活数、因失效剔除数。
 
 双主动流程：
 

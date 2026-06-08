@@ -75,6 +75,7 @@ export interface AppConfig {
   statusPath: string;
   logPath: string;
   lockPath: string;
+  envPath: string | null;
   /** When true, start Weixin (iLink) long-poll alongside Telegram. */
   wxEnabled: boolean;
   /** Allowed `from_user_id` values for inbound Weixin messages (empty = allow any). */
@@ -92,6 +93,7 @@ export interface AppConfig {
   authSyncClusterId: string;
   authSyncStatePath: string;
   authSyncTempDir: string;
+  authAutoDeleteNeedsRepair: boolean;
 }
 
 export function loadConfig(): AppConfig {
@@ -137,6 +139,7 @@ export function loadConfig(): AppConfig {
     statusPath: DEFAULT_STATUS_PATH,
     logPath: DEFAULT_LOG_PATH,
     lockPath: process.env.LOCK_PATH || DEFAULT_LOCK_PATH,
+    envPath: getLoadedEnvPath(),
     wxEnabled: boolEnv('WX_ENABLED', false),
     wxAllowedIlinkUserIds: parseCommaSeparatedIds(process.env.WX_ALLOWED_ILINK_USER_IDS),
     weixinAccountsDir: process.env.WEIXIN_ACCOUNTS_DIR || path.join(APP_HOME, 'weixin', 'accounts'),
@@ -151,6 +154,7 @@ export function loadConfig(): AppConfig {
     authSyncClusterId: process.env.AUTH_SYNC_CLUSTER_ID?.trim() || 'default',
     authSyncStatePath: process.env.AUTH_SYNC_STATE_PATH || DEFAULT_AUTH_SYNC_STATE_PATH,
     authSyncTempDir: process.env.AUTH_SYNC_TEMP_DIR || DEFAULT_AUTH_SYNC_TEMP_DIR,
+    authAutoDeleteNeedsRepair: boolEnv('AUTH_AUTO_DELETE_NEEDS_REPAIR', false),
   };
   ensureAppDirs(config);
   return config;

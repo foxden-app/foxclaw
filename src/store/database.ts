@@ -62,6 +62,12 @@ export interface CodexAuthQuotaSnapshotRecord {
   updatedAt: number;
 }
 
+export interface CodexAuthPoolStats {
+  totalSeen: number;
+  alive: number;
+  deletedInvalid: number;
+}
+
 export type CodexAuthCandidateState = 'active' | 'needs_repair';
 
 export class BridgeStore {
@@ -260,6 +266,14 @@ export class BridgeStore {
       );
       CREATE INDEX IF NOT EXISTS codex_auth_quota_snapshots_account_idx
         ON codex_auth_quota_snapshots(account_id);
+      CREATE TABLE IF NOT EXISTS codex_auth_pool_history (
+        name TEXT PRIMARY KEY,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        delete_reason TEXT,
+        invalid_delete_count INTEGER NOT NULL DEFAULT 0
+      );
     `);
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
@@ -280,6 +294,7 @@ export class BridgeStore {
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'quota_identity_id', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('codex_auth_pool_history', 'invalid_delete_count', 'INTEGER NOT NULL DEFAULT 0');
     this.db.prepare(`
       UPDATE codex_auth_quota_snapshots
       SET quota_identity_id = account_id
@@ -1187,6 +1202,87 @@ export class BridgeStore {
     this.db.prepare('DELETE FROM codex_auth_candidates WHERE name = ?').run(name);
     this.db.prepare('DELETE FROM codex_auth_candidate_runtime WHERE name = ?').run(name);
     this.db.prepare('DELETE FROM codex_auth_quota_snapshots WHERE candidate_name = ?').run(name);
+  }
+
+  recordCodexAuthPoolInventory(names: string[]): void {
+    if (names.length === 0) {
+      return;
+    }
+    const now = Date.now();
+    const upsert = this.db.prepare(`
+      INSERT INTO codex_auth_pool_history (name, first_seen_at, last_seen_at, deleted_at, delete_reason, invalid_delete_count)
+      VALUES (?, ?, ?, NULL, NULL, 0)
+      ON CONFLICT(name) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        deleted_at = NULL,
+        delete_reason = NULL
+    `);
+    const seen = new Set(names);
+    this.db.exec('BEGIN');
+    try {
+      for (const name of seen) {
+        upsert.run(name, now, now);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  recordCodexAuthCandidateInvalidDelete(name: string, reason: string | null = null): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO codex_auth_pool_history (
+        name,
+        first_seen_at,
+        last_seen_at,
+        deleted_at,
+        delete_reason,
+        invalid_delete_count
+      )
+      VALUES (?, ?, ?, ?, ?, 1)
+      ON CONFLICT(name) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        deleted_at = excluded.deleted_at,
+        delete_reason = excluded.delete_reason,
+        invalid_delete_count = codex_auth_pool_history.invalid_delete_count
+          + CASE WHEN codex_auth_pool_history.deleted_at IS NULL THEN 1 ELSE 0 END
+    `).run(name, now, now, now, reason);
+  }
+
+  recordCodexAuthCandidateRemoved(name: string, reason: string | null = null): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO codex_auth_pool_history (
+        name,
+        first_seen_at,
+        last_seen_at,
+        deleted_at,
+        delete_reason,
+        invalid_delete_count
+      )
+      VALUES (?, ?, ?, ?, ?, 0)
+      ON CONFLICT(name) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        deleted_at = excluded.deleted_at,
+        delete_reason = excluded.delete_reason
+    `).run(name, now, now, now, reason);
+  }
+
+  getCodexAuthPoolStats(): CodexAuthPoolStats {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total_seen,
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS alive,
+        COALESCE(SUM(invalid_delete_count), 0) AS deleted_invalid
+      FROM codex_auth_pool_history
+    `).get() as { total_seen: number; alive: number; deleted_invalid: number } | undefined;
+    return {
+      totalSeen: Number(row?.total_seen ?? 0),
+      alive: Number(row?.alive ?? 0),
+      deletedInvalid: Number(row?.deleted_invalid ?? 0),
+    };
   }
 
   setCodexAuthQuotaSnapshot(

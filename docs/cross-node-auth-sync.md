@@ -92,6 +92,7 @@ AUTH_SYNC_KEY=<shared key with at least 32 bytes>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 AUTH_SYNC_NODE_ID=workstation-a
 AUTH_SYNC_PEERS=@foxclaw_node_b_bot
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 Node B:
@@ -103,6 +104,7 @@ AUTH_SYNC_KEY=<shared key with at least 32 bytes>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 AUTH_SYNC_NODE_ID=workstation-b
 AUTH_SYNC_PEERS=@foxclaw_node_a_bot
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 For more peers, separate bot usernames with commas:
@@ -167,6 +169,8 @@ Confirm that pending imports were processed, or that the candidate exists or has
 Note: `/auth sync push all` saying “sent” only means this node successfully handed encrypted packages to Telegram. It does not prove the peer wrote files. The peer imports only when it is globally idle, usage validation succeeds, same-name candidates belong to the same account id and compatible ChatGPT user/email identity, and the remote `last_refresh` is newer than the local copy. If the local file is already equal or newer, it will not change and `Last import` may remain empty.
 
 When cross-node sync is enabled, the contact bot private chat receives node-level notifications: local auth updates and the peers being contacted, received remote bundles and whether they were queued or immediately validated, import success/skip/failure reasons, recovery peer queries and peer replies, and a manual-intervention notice when every peer lacks an importable copy. Refresh/send/import bursts are grouped into short summaries so one candidate update does not produce separate start, receive, mirror-write, and completion messages. Recovery and manual-intervention notices remain explicit. Remote import validation temporarily restarts the local Codex app-server; during that restart window FoxClaw treats the runtime as non-idle and asks ordinary messages to be resent shortly instead of running them against a restarting bridge. Notifications never include auth contents, tokens, or encrypted bundle payloads.
+
+For a resource-rich pool where individual candidate maintenance is not important, enable `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` or toggle it with `/config auth_auto_delete on`. Candidates that cannot be recovered and would otherwise be marked for repair are deleted locally, a delete tombstone is sent to peers, and candidate-level sync/delete chatter is collapsed into an auth-pool summary.
 
 Starting in 0.5.2, `/auth sync status` separates sync-system `Last error` from per-auth `Candidate failures`. For example, a remote candidate that returns `token_invalidated` or has an expired access token is recorded under that candidate name only; current `auth.json` health is still determined by validating the current auth usage. `local candidate is already newer or equal` is a normal skip, not an error.
 

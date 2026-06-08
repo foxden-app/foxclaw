@@ -51,6 +51,7 @@ function createConfig(tempDir: string): AppConfig {
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
     lockPath: path.join(tempDir, 'bridge.lock'),
+    envPath: path.join(tempDir, '.env'),
     wxEnabled: false,
     wxAllowedIlinkUserIds: [],
     weixinAccountsDir: path.join(tempDir, 'weixin', 'accounts'),
@@ -65,6 +66,7 @@ function createConfig(tempDir: string): AppConfig {
     authSyncClusterId: 'default',
     authSyncStatePath: path.join(tempDir, 'auth-sync.json'),
     authSyncTempDir: path.join(tempDir, 'auth-sync'),
+    authAutoDeleteNeedsRepair: false,
   };
 }
 
@@ -3831,6 +3833,40 @@ test('diagnostic read-only commands render app-server inventory', async (t) => {
   assert.match(rig.sentMessages[7]!, /model: gpt-5/);
   assert.match(rig.sentMessages[8]!, /approval: never/);
   assert.match(rig.sentMessages[9]!, /webSearch: yes/);
+});
+
+test('/config toggles auth auto-delete and writes the env file', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).app.readConfig = async () => ({
+    config: { model: 'gpt-5', approval_policy: 'never', sandbox_mode: 'read-only' },
+    layers: [],
+    origins: {},
+  });
+
+  await (rig.controller as any).handleCommand(
+    createEvent('/config auth_auto_delete on'),
+    'en',
+    'config',
+    ['auth_auto_delete', 'on'],
+  );
+
+  assert.equal((rig.controller as any).config.authAutoDeleteNeedsRepair, true);
+  assert.match(rig.sentMessages.at(-1)!, /Auto-delete unrecoverable auth candidates set to: yes/);
+  assert.match(rig.sentMessages.at(-1)!, /Auth pool: total seen 0, alive 0, invalid-deleted 0\./);
+  assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /AUTH_AUTO_DELETE_NEEDS_REPAIR=true/);
+  assert.equal(rig.sentKeyboards.at(-1)?.[0]?.[0]?.callback_data, 'config:auth_auto_delete:off');
+
+  await (rig.controller as any).handleCallback(createCallback('config:auth_auto_delete:off', 1));
+
+  assert.equal((rig.controller as any).config.authAutoDeleteNeedsRepair, false);
+  assert.equal(rig.callbackAnswers.at(-1), 'Decision recorded');
+  assert.match(rig.editedMessages.at(-1)!, /Auto-delete unrecoverable auth candidates set to: no/);
+  assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /AUTH_AUTO_DELETE_NEEDS_REPAIR=false/);
+  assert.equal(rig.editedKeyboards.at(-1)?.[0]?.[0]?.callback_data, 'config:auth_auto_delete:on');
 });
 
 test('diagnostic notifications are routed to bound Telegram scope', async (t) => {

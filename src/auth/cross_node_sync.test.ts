@@ -156,6 +156,72 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
   }
 });
 
+test('CrossNodeAuthSync propagates candidate deletion tombstones', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-delete-'));
+  try {
+    const notificationsA: AuthSyncNotification[] = [];
+    const notificationsB: AuthSyncNotification[] = [];
+    let deleted: { candidateName: string; source: string; reason: string | null } | null = null;
+    const services: { b?: CrossNodeAuthSync } = {};
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({
+        deleteLocalCandidate: async (candidateName, source) => {
+          deleted = { candidateName, source: source.nodeId, reason: source.reason ?? null };
+          return { ok: true, deleted: true, reason: source.reason ?? null };
+        },
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({
+        notify: async (event) => {
+          notificationsA.push(event);
+        },
+      }),
+    );
+    await serviceB.initialize();
+    await serviceA.initialize();
+
+    assert.equal(await serviceA.publishCandidateDeletion('auth.json_work', 'needs_repair'), true);
+    await waitFor(() => notificationsB.some(event => event.kind === 'remote_delete_deleted'));
+    assert.deepEqual(deleted, {
+      candidateName: 'auth.json_work',
+      source: 'node-a',
+      reason: 'needs_repair',
+    });
+    assert.deepEqual(notificationsA.map(event => event.kind), ['candidate_delete_sent']);
+    assert.deepEqual(notificationsB.map(event => event.kind), [
+      'remote_delete_received',
+      'remote_delete_deleted',
+    ]);
+    assert.equal(serviceA.getStatus().recentEvents.some(event =>
+      event.kind === 'delete.candidate'
+      && event.stage === 'sent'
+      && event.candidateName === 'auth.json_work'
+    ), true);
+    assert.equal(serviceB.getStatus().recentEvents.some(event =>
+      event.kind === 'delete.candidate'
+      && event.stage === 'deleted'
+      && event.candidateName === 'auth.json_work'
+    ), true);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync ignores envelopes from peers outside the allowlist', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-peer-'));
   try {
@@ -627,6 +693,7 @@ function callbacks(options: {
   isIdle?: () => boolean;
   validate?: AuthSyncImportCallbacks['validateCandidate'];
   importCandidate?: AuthSyncImportCallbacks['importCandidate'];
+  deleteLocalCandidate?: AuthSyncImportCallbacks['deleteLocalCandidate'];
   notify?: AuthSyncImportCallbacks['notify'];
 }): AuthSyncImportCallbacks {
   const records = options.records ?? [];
@@ -637,6 +704,9 @@ function callbacks(options: {
     importCandidate: options.importCandidate ?? (async () => ({ ok: true, imported: true })),
     isIdle: options.isIdle ?? (() => true),
   };
+  if (options.deleteLocalCandidate) {
+    result.deleteLocalCandidate = options.deleteLocalCandidate;
+  }
   if (options.notify) {
     result.notify = options.notify;
   }
