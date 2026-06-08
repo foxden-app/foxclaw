@@ -129,6 +129,7 @@ export interface CoreCoordinator {
   acquireAuthRefreshLease?: (reason: string) => Promise<{ ok: boolean; leaseId: string | null; reason?: string | null }>;
   releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
   getAuthSyncStatus?: () => RuntimeStatus['authSync'];
+  authSyncSafeAll?: () => Promise<{ localSynced: number; localSkipped: number; sent: number; skipped: number }>;
   authSyncPushAll?: () => Promise<{ sent: number; skipped: number }>;
   authSyncTest?: () => Promise<{ sent: number; replied: number; missing: string[] }>;
   statusUpdated?: (status: RuntimeStatus) => void;
@@ -1514,12 +1515,12 @@ export class BridgeSessionCore {
       await this.handleAuthListViewCallback(event, authClearSearchMatch[1]!, 'clear_search', locale);
       return;
     }
-    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
+    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|safe_sync|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
     if (authActionMatch) {
       await this.handleAuthPanelActionCallback(
         event,
         authActionMatch[1]!,
-        authActionMatch[2]! as 'login_device' | 'reload' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
+        authActionMatch[2]! as 'login_device' | 'reload' | 'safe_sync' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
         locale,
       );
       return;
@@ -3721,7 +3722,7 @@ export class BridgeSessionCore {
 
   private authDisplayBotLabel(): string | null {
     if (!this.config.tgScopeBotId) return null;
-    return this.botUsername ? `@${this.botUsername}` : this.config.tgScopeBotId;
+    return this.botUsername ? `@${this.botUsername} (${this.config.tgScopeBotId})` : this.config.tgScopeBotId;
   }
 
   private ownsScope(scopeId: string): boolean {
@@ -5439,23 +5440,36 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, message);
       return;
     }
-    if (action === 'push' && args[1]?.toLowerCase() === 'all') {
+    if (action === 'safe' || (action === 'push' && args[1]?.toLowerCase() === 'all')) {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_push_blocked_active'));
         return;
       }
-      const result = await this.coordinator?.authSyncPushAll?.();
+      const result = await this.runAuthSafeSyncAll();
       if (!result) {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
         return;
       }
-      await this.sendMessage(scopeId, t(locale, 'auth_sync_push_done', {
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_safe_done', {
+        localSynced: result.localSynced,
+        localSkipped: result.localSkipped,
         sent: result.sent,
         skipped: result.skipped,
       }));
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'usage_auth_sync'));
+  }
+
+  private async runAuthSafeSyncAll(): Promise<{ localSynced: number; localSkipped: number; sent: number; skipped: number } | null> {
+    const safeResult = await this.coordinator?.authSyncSafeAll?.();
+    if (safeResult) {
+      return safeResult;
+    }
+    const pushResult = await this.coordinator?.authSyncPushAll?.();
+    return pushResult
+      ? { localSynced: 0, localSkipped: 0, sent: pushResult.sent, skipped: pushResult.skipped }
+      : null;
   }
 
   private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale, confirmed = false): Promise<void> {
@@ -6010,7 +6024,7 @@ export class BridgeSessionCore {
   private async handleAuthPanelActionCallback(
     event: TelegramCallbackEvent,
     localId: string,
-    action: 'login_device' | 'reload' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
+    action: 'login_device' | 'reload' | 'safe_sync' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
     locale: AppLocale,
   ): Promise<void> {
     const record = this.pendingAuthChoiceLists.get(localId);
@@ -6025,6 +6039,47 @@ export class BridgeSessionCore {
     if (action === 'login_device') {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'login_device_started'));
       await this.handleLoginDeviceCommand(event.scopeId, locale);
+      return;
+    }
+    if (action === 'safe_sync') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_sync_push_blocked_active'));
+        return;
+      }
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_sync_safe_starting'));
+      if (record.messageId !== null) {
+        await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_safe_starting'), []);
+      }
+      const result = await this.runAuthSafeSyncAll();
+      if (!result) {
+        if (record.messageId !== null) {
+          await this.editMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_sync_disabled'),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      clampCodexAuthListOffset(record);
+      if (record.messageId !== null) {
+        await this.editMessage(
+          event.scopeId,
+          record.messageId,
+          `${t(locale, 'auth_sync_safe_done', {
+            localSynced: result.localSynced,
+            localSkipped: result.localSkipped,
+            sent: result.sent,
+            skipped: result.skipped,
+          })}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
+          authChoiceKeyboard(locale, record),
+        );
+      }
       return;
     }
     if (action === 'refresh_all') {
@@ -9987,6 +10042,7 @@ function renderAuthListMessage(
         t(locale, 'weixin_copy_paste_divider'),
         t(locale, 'weixin_copy_auth_title'),
         '/login_device',
+        '/auth sync safe',
         '/auth reload',
         '/permissions',
       );
@@ -10033,6 +10089,7 @@ function renderAuthListMessage(
       '/auth filter attention',
       '/auth list <keyword>',
       '/login_device',
+      '/auth sync safe',
       '/auth reload',
       '/permissions',
     );
@@ -10074,7 +10131,10 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
     { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
     { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
   ]);
-  rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
+  rows.push([
+    { text: t(locale, 'button_auth_safe_sync'), callback_data: `auth:${record.localId}:safe_sync` },
+    { text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` },
+  ]);
   return rows;
 }
 

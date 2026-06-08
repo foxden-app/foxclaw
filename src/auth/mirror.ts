@@ -67,6 +67,11 @@ export interface AuthMirrorSyncedEvent {
   record: AuthMirrorCandidateRecord;
 }
 
+export interface AuthMirrorSyncAllResult {
+  synced: number;
+  skipped: number;
+}
+
 export interface AuthMirrorHooks {
   onSynced?: (event: AuthMirrorSyncedEvent) => Promise<void> | void;
 }
@@ -197,6 +202,28 @@ export class AuthCandidateMirror {
     return this.withActivity(() => this.propagateValidatedCandidate(runtime, candidateName));
   }
 
+  async syncAllRuntimeCandidates(): Promise<AuthMirrorSyncAllResult> {
+    return this.withActivity(async () => {
+      let synced = 0;
+      let skipped = 0;
+      for (const runtime of this.runtimes) {
+        const names = await listAuthCandidateNames(runtime.authDir);
+        for (const name of names) {
+          if (await this.propagateValidatedCandidate(runtime, name)) {
+            synced += 1;
+          } else {
+            skipped += 1;
+          }
+        }
+      }
+      const distributed = await this.distributeCanonicalCandidates();
+      return {
+        synced: synced + distributed.synced,
+        skipped: skipped + distributed.skipped,
+      };
+    });
+  }
+
   async recoverRuntimeCandidate(runtimeId: string, candidateName: string): Promise<AuthMirrorRecovery | null> {
     if (!isAuthCandidateName(candidateName)) return null;
     const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
@@ -239,6 +266,34 @@ export class AuthCandidateMirror {
         }
       }
     });
+  }
+
+  private async distributeCanonicalCandidates(): Promise<AuthMirrorSyncAllResult> {
+    let synced = 0;
+    let skipped = 0;
+    for (const name of await listAuthCandidateNames(this.canonicalDir)) {
+      const canonical = await readChatGptAuthRecord(path.join(this.canonicalDir, name));
+      if (!canonical) {
+        skipped += this.runtimes.length;
+        continue;
+      }
+      for (const runtime of this.runtimes) {
+        const destinationPath = path.join(runtime.authDir, name);
+        const destination = await readChatGptAuthRecord(destinationPath);
+        if (destination && destination.accountId !== canonical.accountId) {
+          skipped += 1;
+          this.logger.warn('auth.mirror.distribution_conflict', { runtimeId: runtime.id, name });
+          continue;
+        }
+        if (destination && destination.lastRefreshMs >= canonical.lastRefreshMs) {
+          skipped += 1;
+          continue;
+        }
+        await atomicWrite(destinationPath, canonical.raw);
+        synced += 1;
+      }
+    }
+    return { synced, skipped };
   }
 
   async importExternalCandidate(

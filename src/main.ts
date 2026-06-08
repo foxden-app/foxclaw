@@ -439,6 +439,16 @@ async function runServeCli(): Promise<void> {
         releaseAuthRefreshLease: (leaseId: string | null) => authSync?.releaseRefreshLease(leaseId)
           ?? localAuthRefreshLease.release(leaseId),
         getAuthSyncStatus: () => authSync?.getStatus() ?? null,
+        authSyncSafeAll: async () => {
+          const local = await mirror.syncAllRuntimeCandidates();
+          const remote = await authSync?.pushAll() ?? { sent: 0, skipped: 0 };
+          return {
+            localSynced: local.synced,
+            localSkipped: local.skipped,
+            sent: remote.sent,
+            skipped: remote.skipped,
+          };
+        },
         authSyncPushAll: () => authSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
         authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
         statusUpdated: (): void => writeAggregateStatus(),
@@ -645,6 +655,16 @@ async function runServeCli(): Promise<void> {
       releaseAuthRefreshLease: (leaseId: string | null) => singleAuthSync?.releaseRefreshLease(leaseId)
         ?? singleLocalAuthRefreshLease.release(leaseId),
       getAuthSyncStatus: () => singleAuthSync?.getStatus() ?? null,
+      authSyncSafeAll: async () => {
+        const local = await singleMirror?.syncAllRuntimeCandidates() ?? { synced: 0, skipped: 0 };
+        const remote = await singleAuthSync?.pushAll() ?? { sent: 0, skipped: 0 };
+        return {
+          localSynced: local.synced,
+          localSkipped: local.skipped,
+          sent: remote.sent,
+          skipped: remote.skipped,
+        };
+      },
       authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
       authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
       statusUpdated: (status: import('./types.js').RuntimeStatus): void => {

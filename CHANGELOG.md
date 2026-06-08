@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.11 - 2026-06-08
+
+### 中文
+- `/auth` 面板的 `Bot runtime` 现在显示 Telegram bot id，例如 `@WuguiAI2_Bot (bot8949529424)`，便于和 `~/.foxclaw/codex/telegram/<botid>/home` 对应。
+- `/auth` 面板新增“安全同步”按钮，并支持 `/auth sync safe`，可在全局空闲时安全打平本机多 bot auth，并把已校验的候选推送到跨节点 peer。
+- 本机 auth mirror 新增全量安全同步路径：只传播通过既有在线校验的刷新候选，同时补齐 canonical 中已知、同账号且更新的 runtime 副本。
+
+### English
+- The `/auth` panel now shows the Telegram bot id in `Bot runtime`, for example `@WuguiAI2_Bot (bot8949529424)`, making it easy to match the runtime with `~/.foxclaw/codex/telegram/<botid>/home`.
+- Added a Safe sync button to the `/auth` panel, plus `/auth sync safe`, to flatten same-node multi-bot auth while globally idle and push validated candidates to cross-node peers.
+- Added a full safe-sync path for the local auth mirror: it only propagates candidates that pass the existing online validation and fills runtime copies from newer same-account canonical candidates.
+
 ## 0.5.10 - 2026-06-08
 
 ### 中文

@@ -178,6 +178,40 @@ test('AuthCandidateMirror requires runtime validation before propagating a refre
   }
 });
 
+test('AuthCandidateMirror safe sync all propagates validated local updates and fills missing runtime copies', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-safe-all-'));
+  const canonical = path.join(root, 'canonical');
+  const a = path.join(root, 'bot1');
+  const b = path.join(root, 'bot2');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), auth('acct-1', '2026-05-01T00:00:00.000Z'));
+    await fs.writeFile(path.join(canonical, 'auth.json_extra'), auth('acct-2', '2026-05-01T00:00:00.000Z'));
+    const mirror = new AuthCandidateMirror(canonical, [
+      {
+        id: 'bot1',
+        authDir: a,
+        validate: async ({ candidateName }) => ({ ok: candidateName === 'auth.json_work', reason: 'not current' }),
+      },
+      { id: 'bot2', authDir: b },
+    ], loggerStub as any);
+    await mirror.initialize();
+    const refreshed = auth('acct-1', '2026-05-27T00:00:00.000Z');
+    await fs.writeFile(path.join(a, 'auth.json_work'), refreshed);
+    await fs.rm(path.join(b, 'auth.json_extra'), { force: true });
+
+    const result = await mirror.syncAllRuntimeCandidates();
+
+    assert.equal(result.synced, 2);
+    assert.ok(result.skipped >= 1);
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), refreshed);
+    assert.equal(await fs.readFile(path.join(b, 'auth.json_work'), 'utf8'), refreshed);
+    assert.equal(await fs.readFile(path.join(b, 'auth.json_extra'), 'utf8'), auth('acct-2', '2026-05-01T00:00:00.000Z'));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror ignores invalid runtime-only candidates during initialization', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-invalid-'));
   const canonical = path.join(root, 'canonical');

@@ -1539,9 +1539,9 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
         detail: null,
       }],
     }),
-    authSyncPushAll: async () => {
+    authSyncSafeAll: async () => {
       pushed = true;
-      return { sent: 2, skipped: 1 };
+      return { localSynced: 3, localSkipped: 4, sent: 2, skipped: 1 };
     },
     authSyncTest: async () => {
       tested = true;
@@ -1570,9 +1570,40 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
   assert.match(rig.sentMessages[2]!, /Auth sync trace: req-1/);
   assert.match(rig.sentMessages[2]!, /candidate=auth\.json_bad/);
   assert.equal(rig.sentMessages[3], 'Auth sync test complete: sent 1, replies 0.\nMissing replies: @botB');
-  assert.equal(rig.sentMessages[4], 'Auth sync push complete: sent 2, skipped 1.');
+  assert.equal(rig.sentMessages[4], 'Safe auth sync complete: local synced 3, local skipped 4; cross-node sent 2, skipped 1.');
   assert.equal(tested, true);
   assert.equal(pushed, true);
+});
+
+test('/auth panel can trigger safe auth sync', async (t) => {
+  let pushed = false;
+  const rig = createControllerRig(null, {
+    authSyncSafeAll: async () => {
+      pushed = true;
+      return { localSynced: 1, localSkipped: 2, sent: 3, skipped: 4 };
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
+    { text: '🧷 Safe sync', callback_data: `auth:${list.localId}:safe_sync` },
+    { text: '🔄 Reload auth', callback_data: `auth:${list.localId}:reload` },
+  ]);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:safe_sync`, 1));
+
+  assert.equal(pushed, true);
+  assert.equal(rig.callbackAnswers.at(-1), 'Safely syncing auth across local bot runtimes and cross-node peers...');
+  assert.equal(rig.editedMessages[0], 'Safely syncing auth across local bot runtimes and cross-node peers...');
+  assert.match(rig.editedMessages.at(-1)!, /Safe auth sync complete: local synced 1, local skipped 2; cross-node sent 3, skipped 4\./);
+  assert.match(rig.editedMessages.at(-1)!, /Codex auth files:/);
 });
 
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
@@ -1622,7 +1653,7 @@ test('/auth identifies the requesting bot runtime in multi-bot mode', async (t) 
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
-  assert.match(rig.sentMessages[0]!, /Bot runtime: @bot_one/);
+  assert.match(rig.sentMessages[0]!, /Bot runtime: @bot_one \(bot123\)/);
 });
 
 test('/auth switch labels resolve symlink-backed auth files', async (t) => {
@@ -1972,6 +2003,7 @@ test('/auth refresh all command can refresh all ChatGPT candidates and keep an a
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
   assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
+    { text: '🧷 Safe sync', callback_data: `auth:${list.localId}:safe_sync` },
     { text: '🔄 Reload auth', callback_data: `auth:${list.localId}:reload` },
   ]);
   events.length = 0;
@@ -2003,6 +2035,7 @@ test('/auth refresh all command can refresh all ChatGPT candidates and keep an a
   assert.match(rig.editedMessages.at(-1)!, /Auth refresh all complete: 2 refreshed, 1 skipped, 0 failed/);
   assert.match(rig.editedMessages.at(-1)!, /Current auth: a/);
   assert.deepEqual(rig.editedKeyboards.at(-1)?.at(-1), [
+    { text: '🧷 Safe sync', callback_data: `auth:${confirmationList.localId}:safe_sync` },
     { text: '🔄 Reload auth', callback_data: `auth:${confirmationList.localId}:reload` },
   ]);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
