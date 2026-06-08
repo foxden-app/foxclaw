@@ -444,6 +444,110 @@ test('BridgeStore persists active turn preview cleanup state', () => {
   });
 });
 
+test('BridgeStore persists queued turns in FIFO order', () => {
+  withStore((store) => {
+    const now = Date.now();
+    store.saveQueuedTurnInput({
+      queueId: 'queue-1',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      inputJson: JSON.stringify([{ type: 'text', text: 'first', text_elements: [] }]),
+      sourceSummary: 'first',
+      messageId: 1,
+      status: 'queued',
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+    store.saveQueuedTurnInput({
+      queueId: 'queue-2',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      inputJson: JSON.stringify([{ type: 'text', text: 'second', text_elements: [] }]),
+      sourceSummary: 'second',
+      messageId: 2,
+      status: 'queued',
+      error: null,
+      createdAt: now + 1,
+      updatedAt: now + 1,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.peekQueuedTurnInput(S1)?.queueId, 'queue-1');
+    assert.deepEqual(store.listQueuedTurnInputs(S1).map(record => record.queueId), ['queue-1', 'queue-2']);
+    store.updateQueuedTurnInputStatus('queue-1', 'processing');
+    assert.equal(store.peekQueuedTurnInput(S1)?.queueId, 'queue-2');
+    store.requeueInterruptedQueuedTurnInputs();
+    assert.equal(store.peekQueuedTurnInput(S1)?.queueId, 'queue-1');
+    store.cancelQueuedTurnInputs(S1);
+    assert.equal(store.countQueuedTurnInputs(S1), 0);
+  });
+});
+
+test('BridgeStore persists pending attachment batches', () => {
+  withStore((store) => {
+    const now = Date.now();
+    store.savePendingAttachmentBatch({
+      batchId: 'batch-1',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      cwd: '/repo',
+      mediaGroupId: 'album-1',
+      attachmentsJson: JSON.stringify([{ kind: 'photo', fileName: 'a.jpg', localPath: '/repo/a.jpg', relativePath: 'a.jpg' }]),
+      caption: 'caption',
+      messageId: null,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.findPendingAttachmentBatchByMediaGroup(S1, 'album-1')?.batchId, 'batch-1');
+    store.updatePendingAttachmentBatchMessage('batch-1', 42);
+    assert.equal(store.getPendingAttachmentBatch('batch-1')?.messageId, 42);
+    store.resolvePendingAttachmentBatch('batch-1', 'consumed');
+    assert.equal(store.getLatestPendingAttachmentBatch(S1), null);
+  });
+});
+
+test('BridgeStore persists guided plan sessions', () => {
+  withStore((store) => {
+    const now = Date.now();
+    store.saveGuidedPlanSession({
+      sessionId: 'plan-1',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      cwd: '/repo',
+      planMarkdown: '- patch',
+      messageId: null,
+      state: 'awaiting_confirmation',
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.findOpenGuidedPlanSession(S1, 'turn-1')?.sessionId, 'plan-1');
+    store.updateGuidedPlanSessionMessage('plan-1', 77);
+    assert.equal(store.getGuidedPlanSession('plan-1')?.messageId, 77);
+    store.updateGuidedPlanSessionState('plan-1', 'completed');
+    assert.equal(store.findOpenGuidedPlanSession(S1, 'turn-1'), null);
+  });
+});
+
 test('BridgeStore migrates legacy telegram scope keys on reopen', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-migrate-'));
   const dbPath = path.join(tmpDir, 'bridge.sqlite');

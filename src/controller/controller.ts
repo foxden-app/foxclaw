@@ -31,9 +31,12 @@ import type {
   CodexSkillsListEntry,
   CodexThreadGoal,
   CollaborationModeValue,
+  GuidedPlanSessionRecord,
   AppTurnSnapshot,
   ModelInfo,
+  PendingAttachmentBatchRecord,
   PendingApprovalRecord,
+  QueuedTurnInputRecord,
   ReasoningEffortValue,
   ReviewTarget,
   RuntimeStatus,
@@ -189,6 +192,7 @@ interface ActiveTurn {
   isObserved: boolean;
   threadId: string;
   turnId: string;
+  queuedInputId: string | null;
   previewMessageId: number;
   previewActive: boolean;
   draftId: number | null;
@@ -232,11 +236,6 @@ interface ObservedThreadWatcher {
   sessionRemainder: string;
   sessionCursor: SessionLogCursor;
   stopped: boolean;
-}
-
-interface QueuedPromptRequest {
-  event: TelegramTextEvent;
-  text: string;
 }
 
 interface PendingUserInputOption {
@@ -429,6 +428,7 @@ const CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS = 60 * 60_000;
 const CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS = 5 * 60_000;
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const SELF_UPDATE_STATUS_POLL_MS = 1000;
+const ATTACHMENT_BATCH_MERGE_WINDOW_MS = 120_000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
 const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
 
@@ -499,11 +499,9 @@ export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
   private activeTurnsByTurnId = new Map<string, Set<string>>();
   private observedThreadWatchers = new Map<string, ObservedThreadWatcher>();
-  private queuedPrompts = new Map<string, QueuedPromptRequest>();
   private pendingTurnErrors = new Map<string, string>();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
   private pendingMcpElicitations = new Map<string, PendingMcpElicitation>();
-  private pendingPlanImplementations = new Map<string, PendingPlanImplementation>();
   private pendingLoginsByScope = new Map<string, string>();
   private pendingLoginScopesById = new Map<string, string>();
   private pendingAuthAddsByLoginId = new Map<string, PendingAuthAdd>();
@@ -595,7 +593,6 @@ export class BridgeSessionCore {
     });
     this.app.on('disconnected', () => {
       this.attachedThreads.clear();
-      this.queuedPrompts.clear();
       this.threadTokenUsageAlerts.clear();
       this.clearObservedThreadWatchers();
       void this.abandonActiveTurns().catch((error) => {
@@ -605,8 +602,13 @@ export class BridgeSessionCore {
     });
 
     await this.app.start();
+    this.store.requeueInterruptedQueuedTurnInputs();
     await this.restorePendingUserInputs();
+    await this.restoreGuidedPlanSessions();
     await this.cleanupStaleTurnPreviews();
+    void this.recoverQueuedTurns().catch((error) => {
+      this.logger.warn('codex.queued_turn_recovery_failed', { error: toErrorMeta(error) });
+    });
     void this.refreshCodexLocalUsageIfNeeded().catch((error) => {
       this.logger.warn('codex.local_usage_background_refresh_failed', { error: formatUserError(error) });
     });
@@ -630,11 +632,9 @@ export class BridgeSessionCore {
   }
 
   async stop(): Promise<void> {
-    this.queuedPrompts.clear();
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
     this.pendingMcpElicitations.clear();
-    this.pendingPlanImplementations.clear();
     this.pendingLoginsByScope.clear();
     this.pendingLoginScopesById.clear();
     this.pendingAuthAddsByLoginId.clear();
@@ -674,6 +674,7 @@ export class BridgeSessionCore {
       currentBindings: this.store.countBindings(),
       pendingApprovals: this.store.countPendingApprovals(),
       pendingUserInputs: this.store.countPendingUserInputs(),
+      queuedTurns: this.store.countQueuedTurnInputs(),
       activeTurns: this.activeTurns.size,
       lastError: this.lastError,
       updatedAt: new Date().toISOString(),
@@ -758,6 +759,15 @@ export class BridgeSessionCore {
       return;
     }
 
+    if (event.attachments.length > 0) {
+      await this.handleTelegramAttachmentBatch(event, locale, decision.text);
+      return;
+    }
+
+    if (await this.consumePendingAttachmentBatchWithText(event, locale, decision.text)) {
+      return;
+    }
+
     if (this.findActiveTurn(scopeId)) {
       await this.handleActiveTurnInboundMessage(event, locale, decision.text);
       return;
@@ -817,6 +827,7 @@ export class BridgeSessionCore {
           t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
           t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
           t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
+          t(locale, 'status_queued_turns', { value: this.store.countQueuedTurnInputs(scopeId) }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
         if (serviceStatus) {
@@ -990,7 +1001,7 @@ export class BridgeSessionCore {
           await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
           return;
         }
-        this.queuedPrompts.delete(scopeId);
+        this.store.cancelQueuedTurnInputs(scopeId);
         await this.stopWatchingScopeThread(scopeId, thread.threadId);
         let binding: ThreadBinding;
         try {
@@ -1540,6 +1551,16 @@ export class BridgeSessionCore {
         event,
         planImplMatch[1]!,
         planImplMatch[2]! as 'run' | 'fresh' | 'stay',
+        locale,
+      );
+      return;
+    }
+    const attachmentBatchMatch = /^attach:([a-f0-9]+):(analyze|clear)$/.exec(event.data);
+    if (attachmentBatchMatch) {
+      await this.handleAttachmentBatchCallback(
+        event,
+        attachmentBatchMatch[1]!,
+        attachmentBatchMatch[2]! as 'analyze' | 'clear',
         locale,
       );
       return;
@@ -2308,6 +2329,7 @@ export class BridgeSessionCore {
       await this.completeTurn(active);
       await this.cleanupObservedTransientMessages(active);
       await this.finalizeUserInputsForTurn(active, 'resolved');
+      this.markQueuedTurnCompleted(active);
     } finally {
       if (active.isObserved) {
         this.clearObservedTurnWatcher(active.turnId, active.scopeId);
@@ -2644,7 +2666,7 @@ export class BridgeSessionCore {
   }
 
   private async maybeSendPlanImplementationPrompt(active: ActiveTurn): Promise<boolean> {
-    if (active.interruptRequested || this.queuedPrompts.has(active.scopeId)) {
+    if (active.interruptRequested || this.store.countQueuedTurnInputs(active.scopeId) > 0) {
       return false;
     }
     if (this.hasPendingUserInputForTurn(active.scopeId, active.turnId)) {
@@ -2661,8 +2683,8 @@ export class BridgeSessionCore {
     }
 
     const binding = this.store.getBinding(active.scopeId);
-    const record: PendingPlanImplementation = {
-      localId: crypto.randomBytes(8).toString('hex'),
+    const session: GuidedPlanSessionRecord = {
+      sessionId: crypto.randomBytes(8).toString('hex'),
       scopeId: active.scopeId,
       chatId: active.chatId,
       chatType: active.chatType,
@@ -2672,37 +2694,84 @@ export class BridgeSessionCore {
       cwd: binding?.cwd ?? null,
       planMarkdown,
       messageId: null,
+      state: 'awaiting_confirmation',
       createdAt: Date.now(),
+      updatedAt: Date.now(),
+      resolvedAt: null,
     };
-    this.pendingPlanImplementations.set(record.localId, record);
+    this.store.saveGuidedPlanSession(session);
+    const record = this.pendingPlanImplementationFromSession(session);
     const locale = this.localeForChat(active.scopeId);
     const messageId = await this.sendMessage(
       active.scopeId,
       renderPlanImplementationPrompt(locale, record),
       planImplementationKeyboard(locale, record.localId),
     );
-    record.messageId = messageId;
+    this.store.updateGuidedPlanSessionMessage(session.sessionId, messageId);
     return true;
   }
 
   private findPendingPlanImplementation(scopeId: string, turnId?: string): PendingPlanImplementation | null {
-    for (const record of this.pendingPlanImplementations.values()) {
-      if (record.scopeId !== scopeId) {
-        continue;
-      }
-      if (turnId !== undefined && record.turnId !== turnId) {
-        continue;
-      }
-      return record;
-    }
-    return null;
+    const session = this.store.findOpenGuidedPlanSession(scopeId, turnId);
+    return session ? this.pendingPlanImplementationFromSession(session) : null;
   }
 
   private clearPlanImplementationPromptsForScope(scopeId: string): void {
-    for (const [localId, record] of this.pendingPlanImplementations.entries()) {
-      if (record.scopeId === scopeId) {
-        this.pendingPlanImplementations.delete(localId);
+    const record = this.store.findOpenGuidedPlanSession(scopeId);
+    if (record) {
+      this.store.updateGuidedPlanSessionState(record.sessionId, 'cancelled');
+    }
+  }
+
+  private pendingPlanImplementationFromSession(session: GuidedPlanSessionRecord): PendingPlanImplementation {
+    return {
+      localId: session.sessionId,
+      scopeId: session.scopeId,
+      chatId: session.chatId,
+      chatType: session.chatType,
+      topicId: session.topicId,
+      threadId: session.threadId,
+      turnId: session.turnId,
+      cwd: session.cwd,
+      planMarkdown: session.planMarkdown,
+      messageId: session.messageId,
+      createdAt: session.createdAt,
+    };
+  }
+
+  private async restoreGuidedPlanSessions(): Promise<void> {
+    for (const session of this.store.listOpenGuidedPlanSessions()) {
+      if (!this.messaging.canSendToScope(session.scopeId)) {
+        continue;
       }
+      const locale = this.localeForChat(session.scopeId);
+      const record = this.pendingPlanImplementationFromSession(session);
+      if (session.messageId !== null) {
+        try {
+          await this.editMessage(
+            session.scopeId,
+            session.messageId,
+            renderPlanImplementationPrompt(locale, record),
+            planImplementationKeyboard(locale, record.localId),
+          );
+          continue;
+        } catch (error) {
+          if (!isTelegramMessageGone(error)) {
+            this.logger.warn('telegram.plan_impl_restore_edit_failed', {
+              sessionId: session.sessionId,
+              scopeId: session.scopeId,
+              messageId: session.messageId,
+              error: toErrorMeta(error),
+            });
+          }
+        }
+      }
+      const messageId = await this.sendMessage(
+        session.scopeId,
+        renderPlanImplementationPrompt(locale, record),
+        planImplementationKeyboard(locale, record.localId),
+      );
+      this.store.updateGuidedPlanSessionMessage(session.sessionId, messageId);
     }
   }
 
@@ -2764,17 +2833,18 @@ export class BridgeSessionCore {
     action: 'run' | 'fresh' | 'stay',
     locale: AppLocale,
   ): Promise<void> {
-    const record = this.pendingPlanImplementations.get(localId);
-    if (!record) {
+    const session = this.store.getGuidedPlanSession(localId);
+    if (!session || session.state !== 'awaiting_confirmation') {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'plan_impl_expired'));
       return;
     }
+    const record = this.pendingPlanImplementationFromSession(session);
     if (record.scopeId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'plan_impl_mismatch'));
       return;
     }
     if (action === 'stay') {
-      this.pendingPlanImplementations.delete(localId);
+      this.store.updateGuidedPlanSessionState(localId, 'cancelled');
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
       if (record.messageId !== null) {
         await this.editMessage(record.scopeId, record.messageId, t(locale, 'plan_impl_staying'), []);
@@ -2786,9 +2856,9 @@ export class BridgeSessionCore {
       return;
     }
 
-    this.pendingPlanImplementations.delete(localId);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     const turn = await this.startPlanImplementationTurn(record, action === 'fresh');
+    this.store.updateGuidedPlanSessionState(localId, 'completed');
     if (record.messageId !== null) {
       await this.editMessage(
         record.scopeId,
@@ -2809,17 +2879,18 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'usage_planimpl'));
       return;
     }
-    const record = this.pendingPlanImplementations.get(localId);
-    if (!record) {
+    const session = this.store.getGuidedPlanSession(localId);
+    if (!session || session.state !== 'awaiting_confirmation') {
       await this.sendMessage(scopeId, t(locale, 'plan_impl_expired'));
       return;
     }
+    const record = this.pendingPlanImplementationFromSession(session);
     if (record.scopeId !== scopeId) {
       await this.sendMessage(scopeId, t(locale, 'plan_impl_mismatch'));
       return;
     }
     if (action === 'stay') {
-      this.pendingPlanImplementations.delete(localId);
+      this.store.updateGuidedPlanSessionState(localId, 'cancelled');
       if (record.messageId !== null) {
         await this.editMessage(record.scopeId, record.messageId, t(locale, 'plan_impl_staying'), []);
       } else {
@@ -2832,8 +2903,8 @@ export class BridgeSessionCore {
       return;
     }
 
-    this.pendingPlanImplementations.delete(localId);
     const turn = await this.startPlanImplementationTurn(record, action === 'fresh');
+    this.store.updateGuidedPlanSessionState(localId, 'completed');
     const message = t(locale, action === 'fresh' ? 'plan_impl_started_fresh' : 'plan_impl_started', {
       threadId: turn.threadId,
       turnId: turn.turnId,
@@ -3149,6 +3220,25 @@ export class BridgeSessionCore {
     return input;
   }
 
+  private buildTurnInputFromStagedAttachments(
+    text: string,
+    attachments: readonly StagedTelegramAttachment[],
+  ): TurnInput[] {
+    const input: TurnInput[] = [{
+      type: 'text',
+      text: buildAttachmentPrompt(text, attachments),
+      text_elements: [],
+    }];
+    for (const attachment of attachments) {
+      if (!attachment.nativeImage) continue;
+      input.push({
+        type: 'localImage',
+        path: attachment.localPath,
+      });
+    }
+    return input;
+  }
+
   private async resolveServiceTierForTurn(
     scopeId: string,
     settings: ChatSessionSettings | null,
@@ -3251,6 +3341,209 @@ export class BridgeSessionCore {
     return staged;
   }
 
+  private async handleTelegramAttachmentBatch(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<void> {
+    const active = this.findActiveTurn(event.scopeId);
+    if (active?.isObserved) {
+      await this.sendMessage(event.scopeId, t(locale, 'watch_read_only_active'));
+      return;
+    }
+
+    const existingBinding = this.store.getBinding(event.scopeId);
+    const binding = active
+      ? {
+          threadId: active.threadId,
+          cwd: existingBinding?.cwd ?? this.config.defaultCwd,
+        }
+      : existingBinding
+        ? await this.ensureThreadReady(event.scopeId, existingBinding)
+        : await this.createBinding(event.scopeId, null);
+    const cwd = binding.cwd ?? this.config.defaultCwd;
+    const stagedAttachments = await this.stageAttachments(cwd, binding.threadId, event.attachments, locale);
+    const mediaGroupId = event.mediaGroupId ?? null;
+    const now = Date.now();
+    const existingBatch = mediaGroupId
+      ? this.store.findPendingAttachmentBatchByMediaGroup(event.scopeId, mediaGroupId)
+      : findReusableStandaloneAttachmentBatch(this.store.getLatestPendingAttachmentBatch(event.scopeId), now);
+    const existingAttachments = existingBatch ? parseStagedTelegramAttachments(existingBatch.attachmentsJson) : [];
+    const record: PendingAttachmentBatchRecord = {
+      batchId: existingBatch?.batchId ?? crypto.randomBytes(8).toString('hex'),
+      scopeId: event.scopeId,
+      chatId: event.chatId,
+      chatType: event.chatType,
+      topicId: event.topicId,
+      threadId: binding.threadId,
+      cwd,
+      mediaGroupId,
+      attachmentsJson: JSON.stringify([...existingAttachments, ...stagedAttachments]),
+      caption: mergeAttachmentBatchCaption(existingBatch?.caption ?? '', text.trim()),
+      messageId: existingBatch?.messageId ?? null,
+      status: 'pending',
+      createdAt: existingBatch?.createdAt ?? now,
+      updatedAt: now,
+      resolvedAt: null,
+    };
+    this.store.savePendingAttachmentBatch(record);
+    await this.renderAttachmentBatchCard(record, locale);
+  }
+
+  private async consumePendingAttachmentBatchWithText(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<boolean> {
+    const prompt = text.trim();
+    if (!prompt) {
+      return false;
+    }
+    const batch = this.store.getLatestPendingAttachmentBatch(event.scopeId);
+    if (!batch) {
+      return false;
+    }
+    await this.consumePendingAttachmentBatch(batch, locale, prompt, event.messageId);
+    return true;
+  }
+
+  private async handleAttachmentBatchCallback(
+    event: TelegramCallbackEvent,
+    batchId: string,
+    action: 'analyze' | 'clear',
+    locale: AppLocale,
+  ): Promise<void> {
+    const batch = this.store.getPendingAttachmentBatch(batchId);
+    if (!batch || batch.status !== 'pending') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'attachment_batch_missing'));
+      return;
+    }
+    if (batch.scopeId !== event.scopeId || (batch.messageId !== null && batch.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'attachment_batch_mismatch'));
+      return;
+    }
+    if (action === 'clear') {
+      this.store.resolvePendingAttachmentBatch(batch.batchId, 'cleared');
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+      if (batch.messageId !== null) {
+        await this.editMessage(batch.scopeId, batch.messageId, t(locale, 'attachment_batch_cleared'), []);
+      }
+      return;
+    }
+    const prompt = batch.caption.trim() || t(locale, 'attachment_batch_default_prompt');
+    await this.consumePendingAttachmentBatch(batch, locale, prompt, batch.messageId);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+  }
+
+  private async consumePendingAttachmentBatch(
+    batch: PendingAttachmentBatchRecord,
+    locale: AppLocale,
+    prompt: string,
+    sourceMessageId: number | null,
+  ): Promise<void> {
+    const active = this.findActiveTurn(batch.scopeId);
+    if (active?.isObserved) {
+      await this.sendMessage(batch.scopeId, t(locale, 'watch_read_only_active'));
+      return;
+    }
+    const attachments = parseStagedTelegramAttachments(batch.attachmentsJson);
+    const input = this.buildTurnInputFromStagedAttachments(prompt, attachments);
+    if (active) {
+      const queueId = this.enqueuePreparedTurnInput({
+        scopeId: batch.scopeId,
+        chatId: batch.chatId,
+        chatType: batch.chatType,
+        topicId: batch.topicId,
+        threadId: active.threadId,
+        input,
+        sourceSummary: summarizeStagedAttachmentInput(prompt, attachments),
+        messageId: sourceMessageId,
+      });
+      this.store.resolvePendingAttachmentBatch(batch.batchId, 'consumed');
+      if (batch.messageId !== null) {
+        await this.editMessage(batch.scopeId, batch.messageId, t(locale, 'attachment_batch_queued', {
+          id: shortId(queueId),
+          position: this.store.countQueuedTurnInputs(batch.scopeId),
+        }), []);
+      } else {
+        await this.sendMessage(batch.scopeId, t(locale, 'attachment_batch_queued', {
+          id: shortId(queueId),
+          position: this.store.countQueuedTurnInputs(batch.scopeId),
+        }));
+      }
+      return;
+    }
+
+    this.store.resolvePendingAttachmentBatch(batch.batchId, 'consumed');
+    if (batch.messageId !== null) {
+      await this.editMessage(batch.scopeId, batch.messageId, t(locale, 'attachment_batch_consumed'), []);
+    }
+    await this.startTurnFromPreparedAttachmentBatch(batch, input);
+  }
+
+  private async startTurnFromPreparedAttachmentBatch(
+    batch: PendingAttachmentBatchRecord,
+    input: TurnInput[],
+  ): Promise<void> {
+    this.clearPlanImplementationPromptsForScope(batch.scopeId);
+    await this.stopWatchingScopeThread(batch.scopeId);
+    const existingBinding = this.store.getBinding(batch.scopeId);
+    const binding = await this.ensureThreadReady(batch.scopeId, {
+      chatId: batch.scopeId,
+      threadId: batch.threadId,
+      cwd: existingBinding?.cwd ?? batch.cwd,
+      updatedAt: Date.now(),
+    });
+    this.store.setBinding(batch.scopeId, binding.threadId, binding.cwd);
+    await this.sendTyping(batch.scopeId);
+    const turnState = await this.startTurnWithRecovery(batch.scopeId, binding, input);
+    if (turnState.collaborationMode === 'plan') {
+      this.store.setChatCollaborationMode(batch.scopeId, DEFAULT_COLLABORATION_MODE);
+    }
+    await this.registerActiveTurn(
+      batch.scopeId,
+      batch.chatId,
+      batch.chatType,
+      batch.topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        input,
+        threadId: turnState.threadId,
+        cwd: this.store.getBinding(batch.scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+        chatId: batch.chatId,
+        chatType: batch.chatType,
+        topicId: batch.topicId,
+        collaborationMode: turnState.collaborationMode,
+        failedAuthTargets: new Set(),
+      },
+      turnState.collaborationMode,
+    );
+  }
+
+  private async renderAttachmentBatchCard(record: PendingAttachmentBatchRecord, locale: AppLocale): Promise<void> {
+    const text = renderAttachmentBatchMessage(locale, record);
+    const keyboard = attachmentBatchKeyboard(locale, record.batchId);
+    if (record.messageId !== null) {
+      try {
+        await this.editMessage(record.scopeId, record.messageId, text, keyboard);
+        return;
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.attachment_batch_edit_failed', {
+            batchId: record.batchId,
+            scopeId: record.scopeId,
+            messageId: record.messageId,
+            error: toErrorMeta(error),
+          });
+        }
+      }
+    }
+    const messageId = await this.sendMessage(record.scopeId, text, keyboard);
+    this.store.updatePendingAttachmentBatchMessage(record.batchId, messageId);
+  }
+
   private async registerActiveTurn(
     scopeId: string,
     chatId: string,
@@ -3261,6 +3554,7 @@ export class BridgeSessionCore {
     previewMessageId: number,
     authRetry: AuthRetryContext | null = null,
     collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
+    queuedInputId: string | null = null,
   ): Promise<void> {
     const active = this.createActiveTurnState(
       scopeId,
@@ -3272,6 +3566,7 @@ export class BridgeSessionCore {
       previewMessageId,
       false,
       collaborationMode,
+      queuedInputId,
     );
     active.authRetry = authRetry;
     this.setActiveTurn(scopeId, turnId, active);
@@ -3306,6 +3601,7 @@ export class BridgeSessionCore {
     previewMessageId: number,
     isObserved = false,
     collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
+    queuedInputId: string | null = null,
   ): ActiveTurn {
     let resolver: () => void = () => {};
     const completion = new Promise<void>((resolve) => {
@@ -3320,6 +3616,7 @@ export class BridgeSessionCore {
       isObserved,
       threadId,
       turnId,
+      queuedInputId,
       previewMessageId,
       previewActive: previewMessageId > 0,
       draftId: null,
@@ -3604,6 +3901,7 @@ export class BridgeSessionCore {
           await this.cleanupObservedTransientMessages(active);
           await this.finalizeUserInputsForTurn(active, active.interruptRequested ? 'interrupted' : 'resolved');
           await this.maybeSendPlanImplementationPrompt(active);
+          this.markQueuedTurnCompleted(active);
           if (this.config.codexAppSyncOnTurnComplete) {
             const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
             if (revealError) {
@@ -4431,7 +4729,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    this.queuedPrompts.delete(scopeId);
+    this.store.cancelQueuedTurnInputs(scopeId);
     const active = this.findActiveTurn(scopeId);
     if (active) {
       if (active.isObserved) {
@@ -4466,9 +4764,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    const replaced = this.queuedPrompts.has(scopeId);
-    this.queuedPrompts.set(scopeId, { event, text: nextPrompt });
-    await this.sendMessage(scopeId, t(locale, replaced ? 'queued_prompt_replaced' : 'queued_prompt_set'));
+    await this.queuePromptAfterActiveTurn(event, locale, nextPrompt);
   }
 
   private async handleActiveTurnInboundMessage(
@@ -4512,9 +4808,29 @@ export class BridgeSessionCore {
     locale: AppLocale,
     text: string,
   ): Promise<void> {
-    const replaced = this.queuedPrompts.has(event.scopeId);
-    this.queuedPrompts.set(event.scopeId, { event, text });
-    await this.sendMessage(event.scopeId, t(locale, replaced ? 'queued_prompt_replaced' : 'queued_prompt_set'));
+    const active = this.findActiveTurn(event.scopeId);
+    if (!active) {
+      await this.startBoundTurnFromEvent(event, locale, text);
+      return;
+    }
+    const input = await this.buildTurnInput({
+      threadId: active.threadId,
+      cwd: this.store.getBinding(event.scopeId)?.cwd ?? this.config.defaultCwd,
+    }, { ...event, text }, locale);
+    const queueId = this.enqueuePreparedTurnInput({
+      scopeId: event.scopeId,
+      chatId: event.chatId,
+      chatType: event.chatType,
+      topicId: event.topicId,
+      threadId: active.threadId,
+      input,
+      sourceSummary: summarizeTelegramInput(text, event.attachments),
+      messageId: event.messageId,
+    });
+    await this.sendMessage(event.scopeId, t(locale, 'queued_prompt_set', {
+      id: shortId(queueId),
+      position: this.store.countQueuedTurnInputs(event.scopeId),
+    }));
   }
 
   private async steerActiveTurn(
@@ -4534,20 +4850,110 @@ export class BridgeSessionCore {
     await this.sendMessage(event.scopeId, t(locale, 'steer_sent', { turnId: active.turnId }));
   }
 
+  private enqueuePreparedTurnInput(params: {
+    scopeId: string;
+    chatId: string;
+    chatType: string;
+    topicId: number | null;
+    threadId: string;
+    input: TurnInput[];
+    sourceSummary: string;
+    messageId: number | null;
+  }): string {
+    const now = Date.now();
+    const queueId = crypto.randomBytes(8).toString('hex');
+    this.store.saveQueuedTurnInput({
+      queueId,
+      scopeId: params.scopeId,
+      chatId: params.chatId,
+      chatType: params.chatType,
+      topicId: params.topicId,
+      threadId: params.threadId,
+      inputJson: JSON.stringify(params.input),
+      sourceSummary: params.sourceSummary,
+      messageId: params.messageId,
+      status: 'queued',
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+    return queueId;
+  }
+
+  private async startBoundTurnFromQueuedInput(record: QueuedTurnInputRecord): Promise<void> {
+    const scopeId = record.scopeId;
+    this.clearPlanImplementationPromptsForScope(scopeId);
+    await this.stopWatchingScopeThread(scopeId);
+    const existingBinding = this.store.getBinding(scopeId);
+    const binding = await this.ensureThreadReady(scopeId, {
+      chatId: scopeId,
+      threadId: record.threadId,
+      cwd: existingBinding?.cwd ?? null,
+      updatedAt: Date.now(),
+    });
+    this.store.setBinding(scopeId, binding.threadId, binding.cwd);
+    await this.sendTyping(scopeId);
+    const input = parseStoredTurnInput(record.inputJson);
+    const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
+    if (turnState.collaborationMode === 'plan') {
+      this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+    }
+    await this.registerActiveTurn(
+      scopeId,
+      record.chatId,
+      record.chatType,
+      record.topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        input,
+        threadId: turnState.threadId,
+        cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+        chatId: record.chatId,
+        chatType: record.chatType,
+        topicId: record.topicId,
+        collaborationMode: turnState.collaborationMode,
+        failedAuthTargets: new Set(),
+      },
+      turnState.collaborationMode,
+      record.queueId,
+    );
+  }
+
   private async startQueuedPromptIfPresent(scopeId: string): Promise<void> {
     if (this.findActiveTurn(scopeId)) {
       return;
     }
-    const queued = this.queuedPrompts.get(scopeId);
+    const queued = this.store.peekQueuedTurnInput(scopeId);
     if (!queued) {
       return;
     }
-    this.queuedPrompts.delete(scopeId);
-    await this.startBoundTurnFromEvent(
-      queued.event,
-      this.localeForChat(scopeId, queued.event.languageCode),
-      queued.text,
-    );
+    this.store.updateQueuedTurnInputStatus(queued.queueId, 'processing');
+    try {
+      await this.startBoundTurnFromQueuedInput(queued);
+    } catch (error) {
+      this.store.updateQueuedTurnInputStatus(queued.queueId, 'failed', formatUserError(error));
+      throw error;
+    }
+  }
+
+  private async recoverQueuedTurns(): Promise<void> {
+    const scopeIds = new Set(this.store.listQueuedTurnInputs().map((record) => record.scopeId));
+    for (const scopeId of scopeIds) {
+      if (!this.messaging.canSendToScope(scopeId)) {
+        continue;
+      }
+      await this.withLock(scopeId, async () => this.startQueuedPromptIfPresent(scopeId));
+    }
+  }
+
+  private markQueuedTurnCompleted(active: ActiveTurn): void {
+    if (!active.queuedInputId) {
+      return;
+    }
+    this.store.updateQueuedTurnInputStatus(active.queuedInputId, 'completed');
   }
 
   private async handleModeCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -6830,7 +7236,7 @@ export class BridgeSessionCore {
     cwd: string,
     panelMessageId: number | null,
   ): Promise<void> {
-    this.queuedPrompts.delete(scopeId);
+    this.store.cancelQueuedTurnInputs(scopeId);
     await this.stopWatchingScopeThread(scopeId);
     const binding = await this.createBinding(scopeId, cwd);
     await this.sendNewThreadStartedMessage(scopeId, locale, binding, cwd);
@@ -7766,6 +8172,9 @@ export class BridgeSessionCore {
           t(this.localeForChat(active.scopeId), 'stale_preview_expired'),
           active.turnId,
         );
+      }
+      if (active.queuedInputId) {
+        this.store.updateQueuedTurnInputStatus(active.queuedInputId, 'queued');
       }
       active.resolver();
       this.deleteActiveTurnRecord(active);
@@ -10318,6 +10727,92 @@ function userInputKeyboard(record: PendingUserInputRequest): Array<Array<{ text:
     })));
   });
   return rows;
+}
+
+function parseStoredTurnInput(inputJson: string): TurnInput[] {
+  const value = JSON.parse(inputJson) as unknown;
+  if (!Array.isArray(value)) {
+    throw new Error('Queued turn input is not an array');
+  }
+  return value as TurnInput[];
+}
+
+function parseStagedTelegramAttachments(attachmentsJson: string): StagedTelegramAttachment[] {
+  const value = JSON.parse(attachmentsJson) as unknown;
+  if (!Array.isArray(value)) {
+    throw new Error('Attachment batch payload is not an array');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      throw new Error('Attachment batch contains an invalid entry');
+    }
+    const attachment = entry as Partial<StagedTelegramAttachment>;
+    if (typeof attachment.localPath !== 'string' || typeof attachment.relativePath !== 'string') {
+      throw new Error('Attachment batch entry is missing a local path');
+    }
+    return attachment as StagedTelegramAttachment;
+  });
+}
+
+function findReusableStandaloneAttachmentBatch(
+  batch: PendingAttachmentBatchRecord | null,
+  now: number,
+): PendingAttachmentBatchRecord | null {
+  if (!batch || batch.mediaGroupId !== null) {
+    return null;
+  }
+  return now - batch.updatedAt <= ATTACHMENT_BATCH_MERGE_WINDOW_MS ? batch : null;
+}
+
+function mergeAttachmentBatchCaption(existing: string, next: string): string {
+  const normalizedNext = next.trim();
+  if (!normalizedNext) {
+    return existing;
+  }
+  const normalizedExisting = existing.trim();
+  if (!normalizedExisting) {
+    return normalizedNext;
+  }
+  return normalizedExisting === normalizedNext ? normalizedExisting : `${normalizedExisting}\n\n${normalizedNext}`;
+}
+
+function summarizeStagedAttachmentInput(
+  text: string,
+  attachments: readonly StagedTelegramAttachment[],
+): string {
+  const lines = [text.trim() || '(no text)'];
+  if (attachments.length > 0) {
+    lines.push(`[attachments: ${attachments.map((attachment) => `${attachment.kind}:${attachment.fileName}`).join(', ')}]`);
+  }
+  return lines.join('\n');
+}
+
+function renderAttachmentBatchMessage(locale: AppLocale, record: PendingAttachmentBatchRecord): string {
+  const attachments = parseStagedTelegramAttachments(record.attachmentsJson);
+  const lines = [
+    t(locale, 'attachment_batch_staged', { count: attachments.length }),
+  ];
+  if (record.caption.trim()) {
+    lines.push('', t(locale, 'attachment_batch_caption', { value: truncateInline(record.caption.trim(), 600) }));
+  }
+  lines.push('');
+  for (const [index, attachment] of attachments.entries()) {
+    const name = attachment.fileName || attachment.fileUniqueId;
+    const size = attachment.fileSize === null ? '' : `, ${attachment.fileSize} bytes`;
+    lines.push(`${index + 1}. ${attachment.kind}: ${name}${size}`);
+  }
+  return lines.join('\n');
+}
+
+function attachmentBatchKeyboard(locale: AppLocale, batchId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: t(locale, 'attachment_batch_button_analyze'), callback_data: `attach:${batchId}:analyze` },
+    { text: t(locale, 'attachment_batch_button_clear'), callback_data: `attach:${batchId}:clear` },
+  ]];
+}
+
+function shortId(value: string): string {
+  return value.slice(0, 8);
 }
 
 function renderPlanImplementationPrompt(locale: AppLocale, record: PendingPlanImplementation): string {

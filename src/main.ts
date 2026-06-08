@@ -387,6 +387,7 @@ async function runServeCli(): Promise<void> {
           currentBindings: store!.countBindings(),
           pendingApprovals: store!.countPendingApprovals(),
           pendingUserInputs: store!.countPendingUserInputs(),
+          queuedTurns: store!.countQueuedTurnInputs(),
           activeTurns: statuses.reduce((sum, status) => sum + status.activeTurns, 0)
             + (weixinStatus?.activeTurns ?? 0),
           lastError: statuses.find((status) => status.lastError)?.lastError
@@ -750,6 +751,7 @@ async function runServeCli(): Promise<void> {
         currentBindings: 0,
         pendingApprovals: 0,
         pendingUserInputs: 0,
+        queuedTurns: 0,
         activeTurns: 0,
         lastError: null,
         updatedAt: new Date().toISOString(),

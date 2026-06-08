@@ -28,6 +28,7 @@ interface TelegramMessage {
   message_id: number;
   chat: TelegramChat;
   message_thread_id?: number;
+  media_group_id?: string;
   is_topic_message?: boolean;
   from?: TelegramUser;
   text?: string;
@@ -75,6 +76,7 @@ export interface TelegramTextEvent {
   userId: string;
   text: string;
   messageId: number;
+  mediaGroupId?: string | null;
   attachments: TelegramInboundAttachment[];
   entities: TelegramMessageEntity[];
   replyToBot: boolean;
@@ -394,6 +396,7 @@ export class TelegramGateway extends EventEmitter {
           userId: String(update.message.from.id),
           text,
           messageId: update.message.message_id,
+          mediaGroupId: update.message.media_group_id ?? null,
           attachments,
           entities,
           replyToBot,

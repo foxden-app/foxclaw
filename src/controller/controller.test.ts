@@ -11,6 +11,7 @@ import { BridgeController } from './controller.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 import type { CoreCoordinator } from './controller.js';
+import type { GuidedPlanSessionRecord } from '../types.js';
 
 const loggerStub = {
   debug(): void {},
@@ -127,6 +128,66 @@ function hasActiveTurnForTest(rig: ReturnType<typeof createControllerRig>, turnI
 
 function deleteActiveTurnForTest(rig: ReturnType<typeof createControllerRig>, active: any): void {
   (rig.controller as any).deleteActiveTurn(active.scopeId, active.turnId);
+}
+
+function queuedTextsForTest(rig: ReturnType<typeof createControllerRig>, scopeId: string): string[] {
+  return rig.store.listQueuedTurnInputs(scopeId).map((record) => {
+    const input = JSON.parse(record.inputJson) as Array<{ text?: string }>;
+    return input[0]?.text ?? '';
+  });
+}
+
+function saveQueuedTurnForTest(
+  rig: ReturnType<typeof createControllerRig>,
+  scopeId: string,
+  text: string,
+  overrides: { chatId?: string; chatType?: string; topicId?: number | null; threadId?: string } = {},
+): string {
+  const now = Date.now();
+  const queueId = `queue${Math.random().toString(16).slice(2, 10)}`;
+  rig.store.saveQueuedTurnInput({
+    queueId,
+    scopeId,
+    chatId: overrides.chatId ?? (scopeId.startsWith('weixin:') ? 'wx-user-1' : '99'),
+    chatType: overrides.chatType ?? 'private',
+    topicId: overrides.topicId ?? null,
+    threadId: overrides.threadId ?? 'thread-1',
+    inputJson: JSON.stringify([{ type: 'text', text, text_elements: [] }]),
+    sourceSummary: text,
+    messageId: 1,
+    status: 'queued',
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: null,
+  });
+  return queueId;
+}
+
+function savePlanSessionForTest(
+  rig: ReturnType<typeof createControllerRig>,
+  overrides: Partial<GuidedPlanSessionRecord> = {},
+): GuidedPlanSessionRecord {
+  const now = Date.now();
+  const session: GuidedPlanSessionRecord = {
+    sessionId: 'planabc1',
+    scopeId: 'telegram:99::root',
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    threadId: 'thread-1',
+    turnId: 'turn-plan',
+    cwd: rig.tempDir,
+    planMarkdown: '- Do one thing',
+    messageId: null,
+    state: 'awaiting_confirmation',
+    createdAt: now,
+    updatedAt: now,
+    resolvedAt: null,
+    ...overrides,
+  };
+  rig.store.saveGuidedPlanSession(session);
+  return session;
 }
 
 function installTempAuthFiles(t: TestContext, tempDir: string): string {
@@ -414,7 +475,7 @@ test('takeover interrupts the active turn and starts a replacement turn after co
   rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
   setActiveTurnForTest(rig, active);
-  (rig.controller as any).queuedPrompts.set('telegram:99::root', { event: createEvent('/queue later'), text: 'later' });
+  saveQueuedTurnForTest(rig, 'telegram:99::root', 'later');
 
   const calls: string[] = [];
   (rig.controller as any).requestInterrupt = async (turn: any) => {
@@ -456,7 +517,7 @@ test('takeover interrupts the active turn and starts a replacement turn after co
 
   await (rig.controller as any).handleCommand(createEvent('/takeover ship it'), 'en', 'takeover', ['ship', 'it']);
 
-  assert.equal((rig.controller as any).queuedPrompts.size, 0);
+  assert.equal(rig.store.countQueuedTurnInputs('telegram:99::root'), 0);
   assert.deepEqual(calls, [
     'interrupt:turn-1',
     'unwatch:telegram:99::root',
@@ -480,12 +541,12 @@ test('queue stores the next prompt while a turn is active', async (t) => {
   setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCommand(createEvent('/queue first'), 'en', 'queue', ['first']);
-  assert.equal((rig.controller as any).queuedPrompts.get('telegram:99::root')?.text, 'first');
-  assert.equal(rig.sentMessages[0], 'Queued. I will send it after the current turn finishes.');
+  assert.deepEqual(queuedTextsForTest(rig, 'telegram:99::root'), ['first']);
+  assert.match(rig.sentMessages[0]!, /Queued #1/);
 
   await (rig.controller as any).handleCommand(createEvent('/queue second'), 'en', 'queue', ['second']);
-  assert.equal((rig.controller as any).queuedPrompts.get('telegram:99::root')?.text, 'second');
-  assert.equal(rig.sentMessages[1], 'Replaced the queued prompt. I will send the new one after the current turn finishes.');
+  assert.deepEqual(queuedTextsForTest(rig, 'telegram:99::root'), ['first', 'second']);
+  assert.match(rig.sentMessages[1]!, /Queued #2/);
 });
 
 test('plain messages during active turns steer by default or queue by chat setting', async (t) => {
@@ -514,8 +575,73 @@ test('plain messages during active turns steer by default or queue by chat setti
   await (rig.controller as any).handleText(createEvent('next after this'));
 
   assert.equal(steers.length, 1);
-  assert.equal((rig.controller as any).queuedPrompts.get('telegram:99::root')?.text, 'next after this');
-  assert.equal(rig.sentMessages.at(-1), 'Queued. I will send it after the current turn finishes.');
+  assert.deepEqual(queuedTextsForTest(rig, 'telegram:99::root'), ['next after this']);
+  assert.match(rig.sentMessages.at(-1)!, /Queued #1/);
+});
+
+test('telegram attachments are staged and consumed by the next text prompt', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).stageAttachments = async () => [{
+    kind: 'document',
+    fileId: 'file-1',
+    fileUniqueId: 'unique-1',
+    fileName: 'notes.txt',
+    mimeType: 'text/plain',
+    fileSize: 12,
+    width: null,
+    height: null,
+    durationSeconds: null,
+    isAnimated: false,
+    isVideo: false,
+    localPath: path.join(rig.tempDir, 'notes.txt'),
+    relativePath: '.telegram-inbox/notes.txt',
+    nativeImage: false,
+  }];
+  (rig.controller as any).stopWatchingScopeThread = async () => {};
+  (rig.controller as any).sendTyping = async () => {};
+  const starts: any[] = [];
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[]) => {
+    starts.push({ binding, input });
+    return { threadId: binding.threadId, turnId: 'turn-2', collaborationMode: 'default' };
+  };
+  (rig.controller as any).registerActiveTurn = async () => {};
+
+  await (rig.controller as any).handleText({
+    ...createEvent('reference notes'),
+    attachments: [{
+      kind: 'document',
+      fileId: 'file-1',
+      fileUniqueId: 'unique-1',
+      fileName: 'notes.txt',
+      mimeType: 'text/plain',
+      fileSize: 12,
+      width: null,
+      height: null,
+      durationSeconds: null,
+      isAnimated: false,
+      isVideo: false,
+    }],
+  } satisfies TelegramTextEvent);
+
+  const batch = rig.store.getLatestPendingAttachmentBatch('telegram:99::root');
+  assert.ok(batch);
+  assert.equal(batch.caption, 'reference notes');
+  assert.match(rig.sentMessages.at(-1)!, /Attachments staged: 1/);
+
+  await (rig.controller as any).handleText(createEvent('please summarize it'));
+
+  assert.equal(rig.store.getLatestPendingAttachmentBatch('telegram:99::root'), null);
+  assert.equal(starts.length, 1);
+  assert.match(starts[0].input[0].text, /please summarize it/);
+  assert.match(starts[0].input[0].text, /notes\.txt/);
+  assert.match(rig.editedMessages.at(-1)!, /Attachments attached/);
 });
 
 test('/active configures active-turn message behavior and opens setup focus', async (t) => {
@@ -2844,10 +2970,10 @@ test('plan mode completion offers implementation prompt and starts default-mode 
   });
 
   assert.match(rig.sentMessages[0]!, /Plan mode produced a plan/);
-  const pending = [...(rig.controller as any).pendingPlanImplementations.values()][0];
+  const pending = rig.store.findOpenGuidedPlanSession('telegram:99::root', 'turn-1');
   assert.ok(pending);
 
-  await (rig.controller as any).handleCallback(createCallback(`planimpl:${pending.localId}:run`, 1));
+  await (rig.controller as any).handleCallback(createCallback(`planimpl:${pending.sessionId}:run`, 1));
 
   assert.equal(starts[0]?.input[0]?.text, 'Implement the plan.');
   assert.equal(starts[0]?.overrides?.collaborationMode, 'default');
@@ -2932,7 +3058,7 @@ test('plan mode prompts for implementation after clarification answer and plan u
   });
 
   assert.ok(rig.sentMessages.some(message => /Plan mode produced a plan/.test(message)));
-  const pendingPlan = [...(rig.controller as any).pendingPlanImplementations.values()][0];
+  const pendingPlan = rig.store.findOpenGuidedPlanSession('telegram:99::root', 'turn-1');
   assert.ok(pendingPlan);
   assert.match(pendingPlan.planMarkdown, /Patch plan implementation prompt/);
 });
@@ -2978,11 +3104,11 @@ test('weixin default turn with proposed_plan final offers plan implementation co
     state: 'completed',
   });
 
-  const pending = [...(rig.controller as any).pendingPlanImplementations.values()][0];
+  const pending = rig.store.findOpenGuidedPlanSession(scope, 'turn-1');
   assert.ok(pending);
   assert.match(pending.planMarkdown, /修改 \/auth 面板/);
   assert.match(rig.sentMessages.at(-1)!, /Plan 模式已经产出计划/);
-  assert.match(rig.sentMessages.at(-1)!, new RegExp(`/planimpl ${pending.localId} run`));
+  assert.match(rig.sentMessages.at(-1)!, new RegExp(`/planimpl ${pending.sessionId} run`));
 });
 
 test('default turn plan progress does not offer implementation without proposed_plan tag', async (t) => {
@@ -3024,7 +3150,7 @@ test('default turn plan progress does not offer implementation without proposed_
     state: 'completed',
   });
 
-  assert.equal((rig.controller as any).pendingPlanImplementations.size, 0);
+  assert.equal(rig.store.findOpenGuidedPlanSession('telegram:99::root', 'turn-1'), null);
   assert.ok(!rig.sentMessages.some(message => /Plan mode produced a plan/.test(message)));
 });
 
@@ -3846,16 +3972,15 @@ test('completed turns automatically start a queued prompt', async (t) => {
 
   const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
   setActiveTurnForTest(rig, active);
-  (rig.controller as any).queuedPrompts.set('telegram:99::root', {
-    event: createEvent('/queue continue'),
-    text: 'continue',
-  });
+  saveQueuedTurnForTest(rig, 'telegram:99::root', 'continue');
   (rig.controller as any).completeTurn = async () => {};
   (rig.controller as any).clearObservedTurnWatcher = () => {};
 
-  const started: Array<{ text: string; locale: string }> = [];
-  (rig.controller as any).startBoundTurnFromEvent = async (_event: TelegramTextEvent, locale: string, text: string) => {
-    started.push({ locale, text });
+  const started: string[] = [];
+  (rig.controller as any).startBoundTurnFromQueuedInput = async (record: any) => {
+    const input = JSON.parse(record.inputJson) as Array<{ text?: string }>;
+    started.push(input[0]?.text ?? '');
+    rig.store.updateQueuedTurnInputStatus(record.queueId, 'completed');
   };
 
   await (rig.controller as any).handleTurnActivityEvent({
@@ -3864,8 +3989,8 @@ test('completed turns automatically start a queued prompt', async (t) => {
     state: 'completed',
   });
 
-  assert.deepEqual(started, [{ locale: 'en', text: 'continue' }]);
-  assert.equal((rig.controller as any).queuedPrompts.size, 0);
+  assert.deepEqual(started, ['continue']);
+  assert.equal(rig.store.countQueuedTurnInputs('telegram:99::root'), 0);
   assert.equal((rig.controller as any).activeTurns.size, 0);
 });
 
@@ -4142,7 +4267,7 @@ test('weixin queue works like Telegram when a turn is active', async (t) => {
   setActiveTurnForTest(rig, active);
 
   await (rig.controller as any).handleCommand(createWeixinEvent('/queue next'), 'en', 'queue', ['next']);
-  assert.equal((rig.controller as any).queuedPrompts.get('weixin:acc1:wx-user-1')?.text, 'next');
+  assert.deepEqual(queuedTextsForTest(rig, 'weixin:acc1:wx-user-1'), ['next']);
 });
 
 test('weixin takeover runs the same path as Telegram', async (t) => {
@@ -4418,8 +4543,8 @@ test('weixin text fallback commands resolve approval, answers, plan implementati
     return { threadId: binding.threadId, turnId: 'turn-plan-run' };
   };
   (rig.controller as any).registerActiveTurn = async () => {};
-  const plan = {
-    localId: 'planabc1',
+  const plan = savePlanSessionForTest(rig, {
+    sessionId: 'planabc1',
     scopeId: scope,
     chatId: 'wx-user-1',
     chatType: 'private',
@@ -4429,10 +4554,8 @@ test('weixin text fallback commands resolve approval, answers, plan implementati
     cwd: rig.tempDir,
     planMarkdown: '- 做一件事',
     messageId: null,
-    createdAt: Date.now(),
-  };
-  (rig.controller as any).pendingPlanImplementations.set(plan.localId, plan);
-  await (rig.controller as any).handleCommand(createWeixinEvent(`/planimpl ${plan.localId} run`), 'zh', 'planimpl', [plan.localId, 'run']);
+  });
+  await (rig.controller as any).handleCommand(createWeixinEvent(`/planimpl ${plan.sessionId} run`), 'zh', 'planimpl', [plan.sessionId, 'run']);
   assert.equal(starts.at(-1)?.input[0]?.text, 'Implement the plan.');
   assert.equal(starts.at(-1)?.overrides?.collaborationMode, 'default');
 
