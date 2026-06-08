@@ -1225,6 +1225,8 @@ test('/update launches a background self-update and reports the completed result
     locale: 'zh',
     fromVersion: '0.3.13',
     toVersion: '0.3.14',
+    releaseNotes: ['修复升级回报', '显示更新内容'],
+    releaseNotesVersion: '0.3.14',
     codexFromVersion: '0.135.0',
     codexToVersion: '0.136.0',
     error: null,
@@ -1233,6 +1235,9 @@ test('/update launches a background self-update and reports the completed result
   await (rig.controller as any).pollSelfUpdateStatus();
 
   assert.match(rig.sentMessages[1]!, /FoxClaw 已升级并重启：0\.3\.13 -> 0\.3\.14/);
+  assert.match(rig.sentMessages[1]!, /更新内容：/);
+  assert.match(rig.sentMessages[1]!, /- 修复升级回报/);
+  assert.match(rig.sentMessages[1]!, /- 显示更新内容/);
   assert.match(rig.sentMessages[1]!, /Codex CLI：0\.135\.0 -> 0\.136\.0/);
   assert.equal(status, null);
   assert.equal(completed.status?.toVersion, '0.3.14');

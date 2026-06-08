@@ -6,12 +6,36 @@ import assert from 'node:assert/strict';
 import {
   buildSelfUpdateLaunchCommand,
   createSelfUpdateRuntime,
+  extractReleaseNotes,
   readSelfUpdateStatus,
   resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
   selfUpdateStatusPath,
   writeSelfUpdateStatus,
 } from './update.js';
+
+test('extractReleaseNotes reads localized bullets from packaged changelog text', () => {
+  const changelog = [
+    '# Changelog',
+    '',
+    '## 0.6.0 - 2026-06-08',
+    '',
+    '### 中文',
+    '- 持久队列',
+    '- 附件暂存',
+    '',
+    '### English',
+    '- Persistent queue',
+    '- Staged attachments',
+    '',
+    '## 0.5.9 - 2026-06-07',
+    '- Older entry',
+  ].join('\n');
+
+  assert.deepEqual(extractReleaseNotes(changelog, '0.6.0', 'zh'), ['持久队列', '附件暂存']);
+  assert.deepEqual(extractReleaseNotes(changelog, '0.6.0', 'en'), ['Persistent queue', 'Staged attachments']);
+  assert.equal(extractReleaseNotes(changelog, '0.1.0', 'zh'), null);
+});
 
 test('resolveSelfUpdateInstaller preserves pnpm-managed global installations', () => {
   const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.13/node_modules/@foxden-app/foxclaw/dist/main.js';
@@ -240,6 +264,8 @@ test('self-update statuses are stored alongside runtime status', () => {
       locale: 'zh',
       fromVersion: '0.3.13',
       toVersion: null,
+      releaseNotes: ['one change'],
+      releaseNotesVersion: '0.3.13',
       codexFromVersion: '0.135.0',
       codexToVersion: '0.136.0',
       error: null,
@@ -252,6 +278,8 @@ test('self-update statuses are stored alongside runtime status', () => {
       locale: 'zh',
       fromVersion: '0.3.13',
       toVersion: null,
+      releaseNotes: ['one change'],
+      releaseNotesVersion: '0.3.13',
       codexFromVersion: '0.135.0',
       codexToVersion: '0.136.0',
       error: null,

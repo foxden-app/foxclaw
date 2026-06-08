@@ -5238,15 +5238,28 @@ export class BridgeSessionCore {
 
   private formatSelfUpdateResult(status: SelfUpdateStatus): string {
     const codexUpdateLine = this.formatCodexUpdateResult(status);
+    const releaseNotes = this.formatSelfUpdateReleaseNotes(status);
     if (status.state === 'succeeded') {
       const result = t(status.locale, 'update_succeeded', {
         from: status.fromVersion,
         to: status.toVersion ?? t(status.locale, 'unknown'),
       });
-      return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+      return [result, releaseNotes, codexUpdateLine].filter(Boolean).join('\n');
     }
     const result = t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
     return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+  }
+
+  private formatSelfUpdateReleaseNotes(status: SelfUpdateStatus): string | null {
+    const notes = status.releaseNotes?.filter(note => note.trim()) ?? [];
+    if (status.state !== 'succeeded' || notes.length === 0) {
+      return null;
+    }
+    return [
+      '',
+      t(status.locale, 'update_changes_title'),
+      ...notes.map(note => `- ${note}`),
+    ].join('\n');
   }
 
   private formatCodexUpdateResult(status: SelfUpdateStatus): string | null {

@@ -17,6 +17,8 @@ export interface SelfUpdateStatus {
   locale: AppLocale;
   fromVersion: string;
   toVersion: string | null;
+  releaseNotes?: string[] | null;
+  releaseNotesVersion?: string | null;
   codexUpdate?: string | null;
   codexFromVersion?: string | null;
   codexToVersion?: string | null;
@@ -227,6 +229,10 @@ export function readSelfUpdateStatus(statusFile: string): SelfUpdateStatus | nul
       locale: parsed.locale,
       fromVersion: parsed.fromVersion,
       toVersion: typeof parsed.toVersion === 'string' ? parsed.toVersion : null,
+      ...(Array.isArray(parsed.releaseNotes) ? {
+        releaseNotes: parsed.releaseNotes.filter((entry): entry is string => typeof entry === 'string'),
+      } : {}),
+      ...(typeof parsed.releaseNotesVersion === 'string' ? { releaseNotesVersion: parsed.releaseNotesVersion } : {}),
       ...(typeof parsed.codexUpdate === 'string' ? { codexUpdate: parsed.codexUpdate } : {}),
       ...(typeof parsed.codexFromVersion === 'string' ? { codexFromVersion: parsed.codexFromVersion } : {}),
       ...(typeof parsed.codexToVersion === 'string' ? { codexToVersion: parsed.codexToVersion } : {}),
@@ -286,6 +292,8 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
         locale,
         fromVersion: options.version,
         toVersion: null,
+        releaseNotes: null,
+        releaseNotesVersion: null,
         codexUpdate: null,
         codexFromVersion: null,
         codexToVersion: null,
@@ -332,6 +340,8 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           locale,
           fromVersion: options.version,
           toVersion: null,
+          releaseNotes: null,
+          releaseNotesVersion: null,
           codexUpdate: null,
           codexFromVersion: null,
           codexToVersion: null,
@@ -410,9 +420,10 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     runInherited(installer.command, installer.installArgs, installerEnv);
     const updatedEntryPoint = resolveUpdatedEntryPoint(installer, installerEnv);
     toVersion = readInstalledPackageVersion(updatedEntryPoint);
+    const releaseNotes = readInstalledReleaseNotes(updatedEntryPoint, toVersion, options.notificationFile);
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
     runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
-    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null);
+    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null, releaseNotes);
     console.log(`[OK] FoxClaw updated and restarted: ${options.version} -> ${toVersion}`);
     return {
       ok: true,
@@ -422,7 +433,7 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     };
   } catch (error) {
     const message = formatError(error);
-    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message);
+    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message, null);
     console.error(`[FAIL] FoxClaw update failed: ${message}`);
     return {
       ok: false,
@@ -587,12 +598,78 @@ function readInstalledPackageVersion(updatedEntryPoint: string): string {
   }
 }
 
+function readInstalledReleaseNotes(
+  updatedEntryPoint: string,
+  version: string | null,
+  notificationFile: string | undefined,
+): string[] | null {
+  if (!version || version === 'unknown') {
+    return null;
+  }
+  const pending = notificationFile ? readSelfUpdateStatus(notificationFile) : null;
+  const locale = pending?.locale ?? 'zh';
+  const changelogPath = path.resolve(path.dirname(updatedEntryPoint), '..', 'CHANGELOG.md');
+  try {
+    return extractReleaseNotes(fs.readFileSync(changelogPath, 'utf8'), version, locale);
+  } catch {
+    return null;
+  }
+}
+
+export function extractReleaseNotes(changelog: string, version: string, locale: AppLocale): string[] | null {
+  const escapedVersion = escapeRegExp(version.replace(/^v/i, ''));
+  const versionHeadingPattern = new RegExp(`^##\\s+\\[?v?${escapedVersion}\\]?\\b.*$`, 'im');
+  const versionMatch = versionHeadingPattern.exec(changelog);
+  if (!versionMatch || versionMatch.index === undefined) {
+    return null;
+  }
+  const sectionStart = versionMatch.index + versionMatch[0].length;
+  const nextHeadingMatch = /^##\s+/m.exec(changelog.slice(sectionStart));
+  const versionSection = nextHeadingMatch
+    ? changelog.slice(sectionStart, sectionStart + nextHeadingMatch.index)
+    : changelog.slice(sectionStart);
+  const localizedSection = extractLocalizedReleaseNoteSection(versionSection, locale) ?? versionSection;
+  const bullets = localizedSection
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => /^[-*]\s+/.test(line))
+    .map(line => line.replace(/^[-*]\s+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return bullets.length > 0 ? bullets : null;
+}
+
+function extractLocalizedReleaseNoteSection(section: string, locale: AppLocale): string | null {
+  const headingPattern = /^###\s+(.+)$/gm;
+  const headings = [...section.matchAll(headingPattern)];
+  if (headings.length === 0) {
+    return null;
+  }
+  const preferred = locale === 'zh' ? ['中文', 'Chinese'] : ['English', '英文'];
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index]!;
+    const headingText = heading[1]!.trim().toLowerCase();
+    if (!preferred.some(label => headingText === label.toLowerCase())) {
+      continue;
+    }
+    const start = heading.index! + heading[0].length;
+    const next = headings[index + 1];
+    return next ? section.slice(start, next.index) : section.slice(start);
+  }
+  return null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function completeNotification(
   notificationFile: string | undefined,
   state: Extract<SelfUpdateState, 'succeeded' | 'failed'>,
   toVersion: string | null,
   codexUpdate: CodexCliUpdateResult | null,
   error: string | null,
+  releaseNotes: string[] | null,
 ): void {
   if (!notificationFile) {
     return;
@@ -605,6 +682,8 @@ function completeNotification(
     ...pending,
     state,
     toVersion,
+    releaseNotes,
+    releaseNotesVersion: releaseNotes && toVersion ? toVersion : null,
     codexUpdate: codexUpdate?.message ?? null,
     codexFromVersion: codexUpdate?.fromVersion ?? null,
     codexToVersion: codexUpdate?.toVersion ?? null,
