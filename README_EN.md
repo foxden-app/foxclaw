@@ -39,6 +39,7 @@ FoxClaw is more than message forwarding. It provides Telegram panels for Codex w
 - Already installed and want the full command guide for `/help`, `/setup`, `/threads`, `/watch`, `/auth`, and auth rotation? Read the [User Manual](./docs/user-manual.md).
 - Want to sync the same legally owned ChatGPT auth candidate pool across multiple machines? Read the [Cross-Node Auth Sync Setup Guide](./docs/cross-node-auth-sync.md).
 - Want to see what changed in each release? Read the [Changelog](./CHANGELOG.md).
+- Maintaining a release? Use the [Release Runbook](./docs/release.md).
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
