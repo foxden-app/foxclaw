@@ -234,6 +234,30 @@ function fakeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.sig`;
 }
 
+function chatGptAccount(planType = 'plus'): any {
+  return {
+    type: 'chatgpt',
+    email: 'user@example.com',
+    planType,
+    requiresOpenaiAuth: false,
+  };
+}
+
+function codexRateLimits(primaryUsedPercent = 80, secondaryUsedPercent = 75, planType = 'plus'): any {
+  return {
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: primaryUsedPercent, windowDurationMins: 300, resetsAt: null },
+      secondary: { usedPercent: secondaryUsedPercent, windowDurationMins: 10080, resetsAt: null },
+      credits: null,
+      planType,
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  };
+}
+
 function installTempCodexHome(t: TestContext, tempDir: string): string {
   const codexHome = path.join(tempDir, '.codex-home');
   fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
@@ -1485,16 +1509,25 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
 
   let restarts = 0;
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => {
+    const currentName = path.basename(fs.realpathSync(path.join(authDir, 'auth.json')));
+    return currentName === 'auth.json_a'
+      ? codexRateLimits(80, 75)
+      : codexRateLimits(10, 5);
+  };
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
   assert.match(rig.sentMessages[0]!, /Codex auth files:/);
-  assert.match(rig.sentMessages[0]!, /\|a \*/);
+  assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \*/);
   assert.match(rig.sentMessages[0]!, /\|b/);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
@@ -1506,15 +1539,51 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
   assert.match(rig.editedMessages.at(-1)!, /Current auth: b/);
+  assert.match(rig.editedMessages.at(-1)!, /5h:90\|7d:95\|b \* \[Plus · ready · refreshed 0m ago\]/);
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'active');
   assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
-  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ —\|—\|b/);
+  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ 90\|95\|b/);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:0`, 1));
 
   assert.equal(restarts, 2);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
   assert.match(rig.editedMessages.at(-1)!, /Current auth: a/);
-  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ —\|—\|a/);
+  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ 20\|25\|a/);
+});
+
+test('/auth switch validates selected candidate and marks unusable auth for repair', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  fs.writeFileSync(path.join(authDir, 'auth.json_b'), '{"account":"broken"}\n');
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:1`, 1));
+
+  assert.equal(restarts, 2);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
+  assert.match(rig.editedMessages.at(-1)!, /Selected auth failed validation: candidate is not a readable ChatGPT auth file/);
+  assert.match(rig.editedMessages.at(-1)!, /Restored the previous auth after the failed switch/);
+  assert.match(rig.editedMessages.at(-1)!, /\|b \[needs login repair\]/);
+  assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
+    { text: '? —|—|b', callback_data: `auth:${list.localId}:repair:1` },
+    { text: '?', callback_data: `auth:${list.localId}:repair:1` },
+  ]);
 });
 
 test('/auth sync commands report status, test peers, and push all', async (t) => {
@@ -1640,14 +1709,19 @@ test('/auth switch recovers a newer same-account credential before restart and s
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
-  installTempAuthFiles(t, rig.tempDir);
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
   (rig.controller as any).app.restart = async () => {
     events.push('restart');
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
+  events.length = 0;
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:1`, 1));
 
@@ -1684,8 +1758,8 @@ test('/auth switch labels resolve symlink-backed auth files', async (t) => {
   const authDir = installTempAuthFiles(t, rig.tempDir);
   const currentRealPath = path.join(authDir, 'personal-real.json');
   const targetRealPath = path.join(authDir, 'work-real.json');
-  fs.writeFileSync(currentRealPath, '{"account":"personal"}');
-  fs.writeFileSync(targetRealPath, '{"account":"work"}');
+  fs.writeFileSync(currentRealPath, `${JSON.stringify({ tokens: { account_id: 'acct-personal' }, last_refresh: new Date().toISOString() })}\n`);
+  fs.writeFileSync(targetRealPath, `${JSON.stringify({ tokens: { account_id: 'acct-work' }, last_refresh: new Date().toISOString() })}\n`);
   fs.rmSync(path.join(authDir, 'auth.json_a'), { force: true });
   fs.rmSync(path.join(authDir, 'auth.json_b'), { force: true });
   fs.unlinkSync(path.join(authDir, 'auth.json'));
@@ -1697,6 +1771,8 @@ test('/auth switch labels resolve symlink-backed auth files', async (t) => {
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
@@ -2420,6 +2496,8 @@ test('/auth add cancel restores previous auth', async (t) => {
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
 
   let restarts = 0;
   const calls: string[] = [];
@@ -2517,6 +2595,8 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
 
   let restarts = 0;
   const retryReadies: any[] = [];
@@ -2524,6 +2604,8 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
   (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any, options: any) => {
     retryReadies.push({ binding, options });
     return binding;
@@ -2600,13 +2682,17 @@ test('auth auto-rotation skips disabled candidates', async (t) => {
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
-  fs.writeFileSync(path.join(authDir, 'auth.json_c'), '{"account":"c"}');
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_c', 'acct-c', new Date().toISOString());
   rig.store.setCodexAuthCandidateDisabled('auth.json_b', true);
 
   let restarts = 0;
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
   (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
   (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any) => ({
     threadId: binding.threadId,
@@ -2649,10 +2735,14 @@ test('auth rotation retries on the scope that owns authRetry even with another b
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
-  installTempAuthFiles(t, rig.tempDir);
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
 
   const retryStarts: any[] = [];
   (rig.controller as any).app.restart = async () => {};
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
   (rig.controller as any).ensureThreadReady = async (scopeId: string, binding: any, options: any) => ({
     ...binding,
     scopeId,
@@ -2703,7 +2793,9 @@ test('auth retry stops instead of creating a replacement thread when original th
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
-  installTempAuthFiles(t, rig.tempDir);
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
 
   let restarts = 0;
   let retryStartCalls = 0;
@@ -2711,6 +2803,8 @@ test('auth retry stops instead of creating a replacement thread when original th
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
   (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any, options: any) => {
     retryReadies.push({ binding, options });
     throw new Error('thread not found');
@@ -4751,10 +4845,14 @@ test('weixin /setup and /auth include Chinese copy-paste commands, and /auth use
   const scope = 'weixin:acc1:wx-user-1';
   rig.store.setChatLocale(scope, 'zh');
   const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
   let restarts = 0;
   (rig.controller as any).app.restart = async () => {
     restarts += 1;
   };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
 
   await (rig.controller as any).handleCommand(createWeixinEvent('/setup'), 'zh', 'setup', []);
   assert.match(rig.sentHtmlMessages[0]!, /快捷命令：/);

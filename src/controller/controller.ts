@@ -348,6 +348,14 @@ interface CodexAuthSwitchResult {
   toLabel: string;
 }
 
+interface CodexAuthSwitchOutcome extends CodexAuthSwitchResult {
+  ok: boolean;
+  candidateName: string;
+  recovered: boolean;
+  error: string | null;
+  restoredPrevious: boolean;
+}
+
 interface CodexAuthRefreshAllResult {
   refreshed: string[];
   skipped: string[];
@@ -6517,9 +6525,8 @@ export class BridgeSessionCore {
     if (record.messageId !== null) {
       await this.editMessage(event.scopeId, record.messageId, switchingMessage, []);
     }
-    await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false, false);
+    const outcome = await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false, false);
     const state = await this.listCodexAuthState();
-    await this.refreshCurrentCodexAuthQuota(state);
     record.candidates = state.candidates;
     record.createdAt = Date.now();
     clampCodexAuthListOffset(record);
@@ -6527,7 +6534,10 @@ export class BridgeSessionCore {
       await this.editMessage(
         event.scopeId,
         record.messageId,
-        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        [
+          ...this.formatAuthSwitchValidationLines(locale, outcome),
+          renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        ].filter(Boolean).join('\n\n'),
         authChoiceKeyboard(locale, record),
       );
     }
@@ -6579,7 +6589,10 @@ export class BridgeSessionCore {
         ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
         error: formatShortStatusError(rotation.reason),
       }));
-      await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
+      const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
+      if (!outcome.ok) {
+        return false;
+      }
       if (rotation.retry) {
         await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
         return true;
@@ -6726,17 +6739,63 @@ export class BridgeSessionCore {
     candidate: CodexAuthCandidate,
     automatic: boolean,
     sendResult = true,
-  ): Promise<void> {
+  ): Promise<CodexAuthSwitchOutcome> {
+    const authDir = this.resolveAuthDir();
+    const initialState = await listCodexAuthState(new Set(), new Map(), authDir);
+    const authStat = await fs.lstat(initialState.authPath).catch(() => null);
+    const originalRegularAuth = authStat?.isFile()
+      ? await fs.readFile(initialState.authPath, 'utf8').catch(() => null)
+      : null;
     const recovered = await this.recoverCodexAuthCandidate(candidate.name, { crossNode: automatic });
-    const result = await switchCodexAuth(candidate.path, this.resolveAuthDir());
+    const result = await switchCodexAuth(candidate.path, authDir);
     this.authRotationFailedTargets.delete(candidate.path);
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
     await this.app.restart();
+    const validation = await this.validateCurrentCodexAuthCandidate(candidate);
+    if (!validation.ok) {
+      this.markCodexAuthCandidateNeedsRepair(candidate.name);
+      let restoredPrevious = false;
+      try {
+        await restoreCodexAuthTarget(initialState.authDir, initialState.authPath, initialState.currentTargetPath, originalRegularAuth);
+        this.pendingTurnErrors.clear();
+        this.attachedThreads.clear();
+        await this.app.restart();
+        restoredPrevious = true;
+      } catch (error) {
+        this.logger.warn('codex.auth_switch_restore_failed', {
+          candidate: candidate.name,
+          error: toErrorMeta(error),
+        });
+      }
+      const outcome: CodexAuthSwitchOutcome = {
+        ...result,
+        ok: false,
+        candidateName: candidate.name,
+        recovered,
+        error: validation.error,
+        restoredPrevious,
+      };
+      if (sendResult) {
+        const lines = this.formatAuthSwitchValidationLines(locale, outcome);
+        await this.sendMessage(scopeId, lines.join('\n'));
+      }
+      return outcome;
+    }
+
+    this.markCodexAuthCandidateActive(candidate.name);
     await this.syncCodexAuthCandidate(candidate.name);
+    const outcome: CodexAuthSwitchOutcome = {
+      ...result,
+      ok: true,
+      candidateName: candidate.name,
+      recovered,
+      error: null,
+      restoredPrevious: false,
+    };
 
     if (!sendResult) {
-      return;
+      return outcome;
     }
     const lines = [t(
       locale,
@@ -6748,6 +6807,59 @@ export class BridgeSessionCore {
     }
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
+    return outcome;
+  }
+
+  private async validateCurrentCodexAuthCandidate(candidate: CodexAuthCandidate): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      if (await isCodexApiKeyAuthCandidate(candidate.path)) {
+        const account = await this.app.readAccount(false);
+        if (!account) {
+          return { ok: false, error: 'Codex did not return account info after switch' };
+        }
+        return { ok: true };
+      }
+
+      const metadata = await readChatGptAuthMetadata(candidate.path);
+      if (!metadata) {
+        return { ok: false, error: 'candidate is not a readable ChatGPT auth file' };
+      }
+      if (!chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)) {
+        return { ok: false, error: 'candidate auth identity does not match candidate name' };
+      }
+
+      const [account, rateLimits] = await Promise.all([
+        this.app.readAccount(false),
+        this.app.readAccountRateLimits(),
+      ]);
+      if (!account) {
+        return { ok: false, error: 'Codex did not return account info after switch' };
+      }
+      if (account.type !== 'chatgpt') {
+        return { ok: false, error: `Codex account type is ${account.type || 'unknown'}, expected ChatGPT` };
+      }
+      const snapshot = selectCodexRateLimitSnapshot(rateLimits);
+      if (!snapshot) {
+        return { ok: false, error: 'Codex did not return ChatGPT rate limits after switch' };
+      }
+      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata, snapshot);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: formatUserError(error) };
+    }
+  }
+
+  private formatAuthSwitchValidationLines(locale: AppLocale, outcome: CodexAuthSwitchOutcome): string[] {
+    if (outcome.ok) {
+      return [];
+    }
+    return [
+      t(locale, 'auth_switch_validation_failed', {
+        value: outcome.candidateName,
+        error: outcome.error ?? t(locale, 'unknown'),
+      }),
+      outcome.restoredPrevious ? t(locale, 'auth_switch_validation_reverted') : '',
+    ].filter(Boolean);
   }
 
   private async recoverCodexAuthCandidate(candidateName: string, options: { crossNode?: boolean } = { crossNode: true }): Promise<boolean> {

@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.18 - 2026-06-08
+
+### 中文
+- `/auth` 面板按钮和 `/auth use <n>` 手动切换后会立即通过 Codex app-server 验证新 auth：ChatGPT 候选必须能返回 account 和 rate-limit usage，成功后马上写入该候选的额度快照，所以列表不再继续显示旧额度。
+- 如果切换后的 auth 无法读取、身份不匹配，或 Codex 没有返回有效 account/usage，FoxClaw 会把该候选标记为“需要登录修复”（`?`），恢复到切换前的 auth，并再次重启 Codex app-server，让当前 runtime 不停留在坏 auth 上。
+- 自动 auth 轮换也复用同一套切换后验证；验证失败的候选不会继续重试请求或参与后续轮询。
+
+### English
+- Manual auth switches from the `/auth` panel buttons and `/auth use <n>` now validate the newly selected auth through Codex app-server immediately. ChatGPT candidates must return account and rate-limit usage, and successful switches record a fresh quota snapshot so the list no longer keeps showing stale usage.
+- If the selected auth cannot be parsed, has an identity mismatch, or Codex does not return valid account/usage data, FoxClaw marks that candidate as “needs login repair” (`?`), restores the previous auth, and restarts Codex app-server again so the runtime does not remain on a bad auth.
+- Automatic auth rotation now uses the same post-switch validation; failed candidates are not used for retrying the request or for later polling.
+
 ## 0.5.17 - 2026-06-08
 
 ### 中文
