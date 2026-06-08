@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (isHelpCommand(command)) {
+  if (isHelpCommand(command) || hasHelpFlag()) {
     printUsage();
     return;
   }
@@ -197,6 +197,10 @@ function isVersionCommand(value: string): boolean {
 
 function isHelpCommand(value: string): boolean {
   return value === 'help' || value === '--help' || value === '-h';
+}
+
+function hasHelpFlag(): boolean {
+  return process.argv.slice(3).some(isHelpCommand);
 }
 
 function readPackageVersion(): string {

@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.17 - 2026-06-08
+
+### 中文
+- `foxclaw <subcommand> --help` / `-h` 现在只打印帮助，不再继续执行 `install-systemd`、`start`、`restart` 等带副作用的子命令，避免一次查帮助意外触发服务重启。
+
+### English
+- `foxclaw <subcommand> --help` / `-h` now prints usage and stops before running side-effecting subcommands such as `install-systemd`, `start`, or `restart`, preventing an accidental service restart while checking help.
+
 ## 0.5.16 - 2026-06-08
 
 ### 中文
