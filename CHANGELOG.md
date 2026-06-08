@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.14 - 2026-06-08
+
+### 中文
+- Linux `foxclaw start` / `foxclaw restart` / `install-systemd` 现在如果检测到自己正运行在 `foxclaw.service` cgroup 内，会通过一次性的 `systemd-run --user` helper 在服务外执行重启，避免命令执行者被自己重启时杀掉导致半截输出或不确定状态。
+- 继续保留 systemd 作为稳定守护层：主 service 仍由 `Restart=always`、`KillMode=control-group` 和 user linger 保活；重启编排则交给短生命周期 helper，避免再引入一个更脆弱的常驻 Node 守护进程。
+
+### English
+- On Linux, `foxclaw start`, `foxclaw restart`, and `install-systemd` now detect when they are running inside the `foxclaw.service` cgroup and delegate the actual restart to a one-shot `systemd-run --user` helper outside that cgroup, avoiding half-written output or uncertain state when the caller would otherwise kill itself.
+- systemd remains the stable supervisor with `Restart=always`, `KillMode=control-group`, and user linger; restart orchestration moves to a short-lived helper instead of adding another long-running Node watchdog.
+
 ## 0.5.13 - 2026-06-08
 
 ### 中文

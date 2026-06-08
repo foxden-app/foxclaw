@@ -22,7 +22,13 @@ import type { AuthSyncNotification } from './auth/cross_node_sync.js';
 import type { AppLocale } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
-import { buildFoxclawSystemdUnitText, refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
+import {
+  buildFoxclawSystemdUnitText,
+  buildSystemdRestartHelperArgs,
+  cgroupContainsSystemdUnit,
+  refreshFoxclawExecStartDropIns,
+  removeFoxclawExecStartDropIns,
+} from './systemd.js';
 import {
   createSelfUpdateRuntime,
   inferPnpmHomeFromEntryPoint,
@@ -1549,13 +1555,47 @@ function installSystemd(): void {
   ensureSystemdUserLingerEnabled();
   spawnChecked('systemctl', ['--user', 'daemon-reload']);
   spawnChecked('systemctl', ['--user', 'enable', unitName]);
+  restartSystemdUnit(unitName);
+  console.log(`Installed ${unitPath}`);
+  console.log(`Status: systemctl --user status ${unitName}`);
+  console.log(`Logs:   journalctl --user -u ${unitName} -f`);
+}
+
+function restartSystemdUnit(unitName: string): void {
+  if (isCurrentProcessInSystemdUnit(unitName)) {
+    const systemdRun = resolveCommand('systemd-run');
+    if (systemdRun) {
+      const helperUnitName = `foxclaw-restart-${process.pid}-${Date.now()}`;
+      const result = spawnSync(systemdRun, buildSystemdRestartHelperArgs({
+        unitName,
+        helperUnitName,
+        delaySeconds: 1,
+      }), { stdio: 'inherit' });
+      if (result.status === 0) {
+        console.log(`[OK] scheduled ${unitName} restart via transient systemd helper: ${helperUnitName}`);
+        return;
+      }
+      console.log('[WARN] transient systemd restart helper failed; falling back to direct restart.');
+    } else {
+      console.log('[WARN] systemd-run not found; falling back to direct restart.');
+    }
+  }
+
   const restarted = spawnSync('systemctl', ['--user', 'restart', unitName], { stdio: 'inherit' });
   if (restarted.status !== 0) {
     spawnChecked('systemctl', ['--user', 'start', unitName]);
   }
-  console.log(`Installed ${unitPath}`);
-  console.log(`Status: systemctl --user status ${unitName}`);
-  console.log(`Logs:   journalctl --user -u ${unitName} -f`);
+}
+
+function isCurrentProcessInSystemdUnit(unitName: string): boolean {
+  if (process.platform !== 'linux') {
+    return false;
+  }
+  try {
+    return cgroupContainsSystemdUnit(fs.readFileSync('/proc/self/cgroup', 'utf8'), unitName);
+  } catch {
+    return false;
+  }
 }
 
 function ensureSystemdUserLingerEnabled(): void {
