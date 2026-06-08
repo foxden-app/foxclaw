@@ -2063,6 +2063,92 @@ test('/auth panel can start device login from an inline action', async (t) => {
   assert.match(rig.sentMessages.at(-1)!, /Login completed/);
 });
 
+test('/auth marks repair candidates with a question action and can repair login', async (t) => {
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    authCandidateUpdated: async (runtimeId, candidateName) => {
+      events.push(`sync:${runtimeId}:${candidateName}`);
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  rig.store.setCodexAuthCandidateState('auth.json_b', 'needs_repair');
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.startDeviceLogin = async () => ({
+    type: 'chatgptDeviceCode',
+    loginId: 'login-repair',
+    verificationUrl: 'https://auth.example/device',
+    userCode: 'REPAIR-CODE',
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  assert.match(rig.sentMessages[0]!, /\|b \[needs login repair\]/);
+  assert.deepEqual(rig.sentKeyboards[0]?.[1], [
+    { text: '? —|—|b', callback_data: `auth:${list.localId}:repair:1` },
+    { text: '?', callback_data: `auth:${list.localId}:repair:1` },
+  ]);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:repair:1`, 1));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Repair actions');
+  assert.match(rig.editedMessages.at(-1)!, /b has been verified unusable/);
+  assert.deepEqual(rig.editedKeyboards.at(-1), [
+    [{ text: '🔑 Login repair', callback_data: `auth:${list.localId}:repair_login:1` }],
+    [{ text: '🗑️ Delete', callback_data: `auth:${list.localId}:repair_delete:1` }],
+    [{ text: '✖️ Cancel', callback_data: `auth:${list.localId}:repair_cancel:1` }],
+  ]);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:repair_login:1`, 1));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Device login started.');
+  assert.equal(restarts, 1);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.match(rig.sentMessages.at(-1)!, /REPAIR-CODE/);
+
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', '2026-06-08T01:00:00.000Z');
+  await (rig.controller as any).handleNotification({
+    method: 'account/login/completed',
+    params: { loginId: 'login-repair', success: true, error: null },
+  });
+
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'active');
+  assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], []);
+  assert.deepEqual(events, ['sync:default:auth.json_b']);
+  assert.match(rig.sentMessages.at(-1)!, /Auth candidate repaired: auth\.json_b/);
+});
+
+test('/auth repair menu can delete an unrecoverable candidate', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  rig.store.setCodexAuthCandidateState('auth.json_b', 'needs_repair');
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:repair:1`, 1));
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:repair_delete:1`, 1));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Auth deleted');
+  assert.equal(fs.existsSync(path.join(authDir, 'auth.json_b')), false);
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), undefined);
+  assert.match(rig.editedMessages.at(-1)!, /Deleted auth candidate: auth\.json_b/);
+  assert.doesNotMatch(rig.editedMessages.at(-1)!, /\|b \[/);
+});
+
 test('/auth refresh all command can refresh all ChatGPT candidates and keep an auth panel', async (t) => {
   const events: string[] = [];
   const rig = createControllerRig(null, {
@@ -2489,6 +2575,7 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
   assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth: auth\.json_a -> auth\.json_b/.test(message)));
   assert.ok(rig.sentMessages.includes('Retrying the same request with the new auth...'));
   assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_a'), 'needs_repair');
 
   await (rig.controller as any).handleNotification({
     method: 'error',
@@ -2503,6 +2590,7 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /no unused auth candidate is available/.test(message)));
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
 });
 
 test('auth auto-rotation skips disabled candidates', async (t) => {

@@ -429,6 +429,8 @@ async function runServeCli(): Promise<void> {
           && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
+        authCandidateDeleted: (_runtimeId: string, candidateName: string): Promise<void> =>
+          mirror.deleteCandidate(candidateName).then(() => undefined),
         recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
           const local = await mirror.recoverRuntimeCandidate(runtimeId, candidateName);
           if (local) return true;
@@ -645,6 +647,8 @@ async function runServeCli(): Promise<void> {
         && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
       authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
         singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
+      authCandidateDeleted: (_runtimeId: string, candidateName: string): Promise<void> =>
+        singleMirror?.deleteCandidate(candidateName).then(() => undefined) ?? Promise.resolve(),
       recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
         const local = await singleMirror?.recoverRuntimeCandidate(runtimeId, candidateName) ?? null;
         if (local) return true;

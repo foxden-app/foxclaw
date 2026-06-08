@@ -55,6 +55,25 @@ test('BridgeStore isolates disabled Codex auth candidates per runtime', () => {
   });
 });
 
+test('BridgeStore persists Codex auth repair state globally with runtime overrides', () => {
+  withStore((store) => {
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), undefined);
+    store.setCodexAuthCandidateState('auth.json_a', 'needs_repair');
+    assert.equal(store.listCodexAuthCandidateStates().get('auth.json_a'), 'needs_repair');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), 'needs_repair');
+
+    store.setCodexAuthCandidateState('auth.json_a', 'active', 'bot1');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), 'active');
+
+    store.setCodexAuthCandidateState('auth.json_a', 'active');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), 'active');
+
+    store.setCodexAuthCandidateState('auth.json_a', 'needs_repair');
+    store.deleteCodexAuthCandidate('auth.json_a');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), undefined);
+  });
+});
+
 test('BridgeStore shares Codex auth quota snapshots by quota identity id', () => {
   withStore((store) => {
     store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', 'acct-a:user-1', {

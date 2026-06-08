@@ -61,6 +61,8 @@ export interface CodexAuthQuotaSnapshotRecord {
   updatedAt: number;
 }
 
+export type CodexAuthCandidateState = 'active' | 'needs_repair';
+
 export class BridgeStore {
   private db: DatabaseSync;
 
@@ -229,12 +231,14 @@ export class BridgeStore {
       CREATE TABLE IF NOT EXISTS codex_auth_candidates (
         name TEXT PRIMARY KEY,
         disabled INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'active',
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS codex_auth_candidate_runtime (
         runtime_id TEXT NOT NULL,
         name TEXT NOT NULL,
         disabled INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'active',
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, name)
       );
@@ -267,6 +271,8 @@ export class BridgeStore {
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     this.ensureColumn('pending_user_inputs', 'status', "TEXT NOT NULL DEFAULT 'pending'");
     this.ensureColumn('pending_user_inputs', 'submitted_at', 'INTEGER');
+    this.ensureColumn('codex_auth_candidates', 'state', "TEXT NOT NULL DEFAULT 'active'");
+    this.ensureColumn('codex_auth_candidate_runtime', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
@@ -1121,20 +1127,62 @@ export class BridgeStore {
     return new Set(rows.map(row => String(row.name)));
   }
 
+  listCodexAuthCandidateStates(runtimeId = 'default'): Map<string, CodexAuthCandidateState> {
+    const states = new Map<string, CodexAuthCandidateState>();
+    const globalRows = this.db.prepare('SELECT name, state FROM codex_auth_candidates').all() as Array<{ name: string; state: unknown }>;
+    for (const row of globalRows) {
+      states.set(String(row.name), normalizeCodexAuthCandidateState(row.state));
+    }
+    if (runtimeId !== 'default') {
+      const runtimeRows = this.db.prepare('SELECT name, state FROM codex_auth_candidate_runtime WHERE runtime_id = ?').all(runtimeId) as Array<{ name: string; state: unknown }>;
+      for (const row of runtimeRows) {
+        states.set(String(row.name), normalizeCodexAuthCandidateState(row.state));
+      }
+    }
+    return states;
+  }
+
   setCodexAuthCandidateDisabled(name: string, disabled: boolean, runtimeId = 'default'): void {
     if (runtimeId !== 'default') {
       this.db.prepare(`
-        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, state, updated_at)
+        VALUES (?, ?, ?, 'active', ?)
         ON CONFLICT(runtime_id, name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
       `).run(runtimeId, name, disabled ? 1 : 0, Date.now());
       return;
     }
     this.db.prepare(`
-      INSERT INTO codex_auth_candidates (name, disabled, updated_at)
-      VALUES (?, ?, ?)
+      INSERT INTO codex_auth_candidates (name, disabled, state, updated_at)
+      VALUES (?, ?, 'active', ?)
       ON CONFLICT(name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
     `).run(name, disabled ? 1 : 0, Date.now());
+  }
+
+  setCodexAuthCandidateState(name: string, state: CodexAuthCandidateState, runtimeId = 'default'): void {
+    if (runtimeId !== 'default') {
+      this.db.prepare(`
+        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, state, updated_at)
+        VALUES (?, ?, 0, ?, ?)
+        ON CONFLICT(runtime_id, name) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
+      `).run(runtimeId, name, state, Date.now());
+      return;
+    }
+    this.db.prepare(`
+      INSERT INTO codex_auth_candidates (name, disabled, state, updated_at)
+      VALUES (?, 0, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
+    `).run(name, state, Date.now());
+    this.db.prepare(`
+      UPDATE codex_auth_candidate_runtime
+      SET state = ?, updated_at = ?
+      WHERE name = ?
+    `).run(state, Date.now(), name);
+  }
+
+  deleteCodexAuthCandidate(name: string): void {
+    this.db.prepare('DELETE FROM codex_auth_candidates WHERE name = ?').run(name);
+    this.db.prepare('DELETE FROM codex_auth_candidate_runtime WHERE name = ?').run(name);
+    this.db.prepare('DELETE FROM codex_auth_quota_snapshots WHERE candidate_name = ?').run(name);
   }
 
   setCodexAuthQuotaSnapshot(
@@ -1248,6 +1296,10 @@ function nullableNumber(value: unknown): number | null {
 
 function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function normalizeCodexAuthCandidateState(value: unknown): CodexAuthCandidateState {
+  return value === 'needs_repair' ? 'needs_repair' : 'active';
 }
 
 function normalizeCollaborationMode(value: unknown): CollaborationModeValue | null {

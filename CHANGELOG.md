@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.15 - 2026-06-08
+
+### 中文
+- `/auth` 现在会把已确认不可用、并且本机/跨节点同步恢复失败的候选标记为“需要登录修复”，用 `?` 按钮显示，并从自动轮换、主动刷新和 enabled 视图中排除。
+- 点击 `?` 会进入修复菜单，可选择“登录修复”对该候选执行设备码登录，成功后清除修复状态并重新参与轮换；也可选择“删除”，从 canonical 和所有本机 bot runtime 中删除该候选并清理额度缓存。
+- 删除 auth 候选现在走 auth mirror 统一删除，避免只删一个 runtime 后又被其他 runtime 或 canonical 副本恢复。
+
+### English
+- `/auth` now marks candidates that have been proven unusable and could not be recovered through local/cross-node sync as “needs login repair”, shows a `?` action, and excludes them from auto-rotation, proactive refresh, and the enabled filter.
+- Tapping `?` opens a repair menu: Login repair runs device-code login for that candidate and clears the repair state on success; Delete removes the candidate from canonical storage and all local bot runtimes while clearing quota cache.
+- Auth candidate deletion now flows through the auth mirror so deleting a candidate from one runtime is not undone by another runtime or canonical copy.
+
 ## 0.5.14 - 2026-06-08
 
 ### 中文

@@ -205,6 +205,27 @@ export class AuthCandidateMirror {
     return this.withActivity(() => this.propagateValidatedCandidate(runtime, candidateName));
   }
 
+  async deleteCandidate(candidateName: string): Promise<boolean> {
+    if (!isAuthCandidateName(candidateName)) return false;
+    return this.withActivity(async () => {
+      const directories = [
+        this.canonicalDir,
+        ...this.runtimes.map(runtime => runtime.authDir),
+      ];
+      for (const authDir of directories) {
+        await removeAuthCandidate(authDir, candidateName);
+      }
+      this.lastSyncedRefresh.delete(candidateName);
+      for (const key of [...this.lastValidationFailures.keys()]) {
+        if (key.endsWith(`:${candidateName}`)) {
+          this.lastValidationFailures.delete(key);
+        }
+      }
+      this.logger.info('auth.mirror.deleted', { candidateName });
+      return true;
+    });
+  }
+
   async syncAllRuntimeCandidates(): Promise<AuthMirrorSyncAllResult> {
     return this.withActivity(async () => {
       let synced = 0;
@@ -832,6 +853,25 @@ async function pointAuthSymlink(dir: string, candidateName: string): Promise<voi
   const temporary = path.join(dir, `.auth.json.${process.pid}.${Date.now()}.link`);
   await fs.symlink(path.join(dir, candidateName), temporary);
   await fs.rename(temporary, path.join(dir, 'auth.json'));
+}
+
+async function removeAuthCandidate(dir: string, candidateName: string): Promise<void> {
+  const candidatePath = path.join(dir, candidateName);
+  const authPath = path.join(dir, 'auth.json');
+  const currentTarget = await resolveCurrentAuthCandidatePath(authPath);
+  await fs.rm(candidatePath, { force: true }).catch(() => undefined);
+  if (currentTarget === candidatePath) {
+    await fs.rm(authPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function resolveCurrentAuthCandidatePath(authPath: string): Promise<string | null> {
+  const stat = await fs.lstat(authPath).catch(() => null);
+  if (!stat) return null;
+  if (stat.isSymbolicLink()) {
+    return resolveFinalPath(authPath);
+  }
+  return null;
 }
 
 async function removeValidationTempFiles(dir: string): Promise<void> {
