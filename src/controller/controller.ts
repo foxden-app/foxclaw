@@ -3635,6 +3635,7 @@ export class BridgeSessionCore {
         scopeId,
         threadId,
         messageId: previewMessageId,
+        isObserved: active.isObserved,
       });
     }
     this.updateStatus();
@@ -8379,6 +8380,7 @@ export class BridgeSessionCore {
     threadId: string;
     turnId: string;
     messageId: number;
+    isObserved: boolean;
   }): Promise<boolean> {
     if (this.getActiveTurn(preview.scopeId, preview.turnId)) {
       return true;
@@ -8414,7 +8416,7 @@ export class BridgeSessionCore {
       preview.threadId,
       preview.turnId,
       preview.messageId,
-      true,
+      preview.isObserved,
     );
     this.setActiveTurn(preview.scopeId, preview.turnId, active);
     const watcher: ObservedThreadWatcher = {
@@ -8442,6 +8444,7 @@ export class BridgeSessionCore {
       scopeId: preview.scopeId,
       threadId: preview.threadId,
       turnId: preview.turnId,
+      isObserved: preview.isObserved,
     });
     return true;
   }
@@ -8658,6 +8661,7 @@ export class BridgeSessionCore {
           scopeId: active.scopeId,
           threadId: active.threadId,
           messageId,
+          isObserved: active.isObserved,
         });
       } catch (error) {
         this.logger.warn('telegram.preview_send_failed', { error: String(error), turnId: active.turnId });

@@ -4279,14 +4279,80 @@ test('startup preview cleanup recovers still-live app-server turns', async (t) =
   (rig.controller as any).queueTurnRender = async () => {
     renders += 1;
   };
+  const steers: any[] = [];
+  (rig.controller as any).app.steerTurn = async (threadId: string, turnId: string, input: any[]) => {
+    steers.push({ threadId, turnId, input });
+    return { turnId };
+  };
 
   await (rig.controller as any).cleanupStaleTurnPreviews();
 
-  assert.ok(hasActiveTurnForTest(rig, 'turn-live'));
+  const active = getActiveTurnForTest(rig, 'telegram:99::root', 'turn-live');
+  assert.ok(active);
+  assert.equal(active.isObserved, false);
   assert.equal((rig.controller as any).observedThreadWatchers.get('telegram:99::root')?.activeTurnId, 'turn-live');
   assert.equal(rig.store.listActiveTurnPreviews().length, 1);
   assert.equal(rig.editedMessages.length, 0);
   assert.equal(renders, 1);
+
+  await (rig.controller as any).handleText(createEvent('continue after restart'));
+
+  assert.equal(steers.length, 1);
+  assert.equal(steers[0]?.threadId, 'thread-1');
+  assert.equal(steers[0]?.turnId, 'turn-live');
+  assert.equal(steers[0]?.input[0]?.text, 'continue after restart');
+});
+
+test('startup preview cleanup keeps observed recovered turns read-only', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-watch',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+    isObserved: true,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'live',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-watch',
+      status: 'inProgress',
+      error: null,
+      items: [],
+    }],
+  });
+  (rig.controller as any).queueTurnRender = async () => {};
+  let steers = 0;
+  (rig.controller as any).app.steerTurn = async () => {
+    steers += 1;
+    return { turnId: 'turn-watch' };
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  const active = getActiveTurnForTest(rig, 'telegram:99::root', 'turn-watch');
+  assert.ok(active);
+  assert.equal(active.isObserved, true);
+
+  await (rig.controller as any).handleText(createEvent('continue after restart'));
+
+  assert.equal(steers, 0);
+  assert.match(rig.sentMessages.at(-1)!, /watching that turn read-only/);
 });
 
 test('startup preview cleanup interrupts orphan waiting user-input turns', async (t) => {

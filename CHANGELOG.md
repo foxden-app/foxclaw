@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.16 - 2026-06-08
+
+### 中文
+- FoxClaw 重启后会把仍在运行的桥接自有 Codex turn 恢复为可继续操作的活动态，状态卡继续刷新，后续 Telegram 输入会继续 steer 或按聊天设置排队，不再退化成需要用户重新发消息的只读观察态。
+- `/watch` 产生的观察态 turn 会在状态卡中持久化只读标记，重启恢复后仍保持只读，避免把旁观线程误恢复成可操作任务。
+
+### English
+- After a FoxClaw restart, bridge-owned live Codex turns are restored as actionable active turns: their status cards keep updating, and later Telegram messages keep steering or queueing according to the chat setting instead of degrading into read-only watch mode.
+- `/watch`-created observed turns now persist their read-only marker, so restart recovery keeps watched threads read-only and does not accidentally promote them into actionable tasks.
+
 ## 0.5.15 - 2026-06-08
 
 ### 中文

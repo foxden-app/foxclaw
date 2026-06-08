@@ -25,6 +25,7 @@ export interface ActiveTurnPreviewRecord {
   scopeId: string;
   threadId: string;
   messageId: number;
+  isObserved: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -132,6 +133,7 @@ export class BridgeStore {
         scope_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         message_id INTEGER NOT NULL,
+        is_observed INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -271,6 +273,7 @@ export class BridgeStore {
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     this.ensureColumn('pending_user_inputs', 'status', "TEXT NOT NULL DEFAULT 'pending'");
     this.ensureColumn('pending_user_inputs', 'submitted_at', 'INTEGER');
+    this.ensureColumn('active_turn_previews', 'is_observed', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('codex_auth_candidates', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_candidate_runtime', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
@@ -580,18 +583,18 @@ export class BridgeStore {
     return Number(row.count);
   }
 
-  saveActiveTurnPreview(record: Pick<ActiveTurnPreviewRecord, 'turnId' | 'scopeId' | 'threadId' | 'messageId'>): void {
+  saveActiveTurnPreview(record: Pick<ActiveTurnPreviewRecord, 'turnId' | 'scopeId' | 'threadId' | 'messageId'> & { isObserved?: boolean }): void {
     const now = Date.now();
     this.db.prepare('DELETE FROM active_turn_previews WHERE turn_id = ? OR scope_id = ?').run(record.turnId, record.scopeId);
     this.db.prepare(`
-      INSERT INTO active_turn_previews (turn_id, scope_id, thread_id, message_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(record.turnId, record.scopeId, record.threadId, record.messageId, now, now);
+      INSERT INTO active_turn_previews (turn_id, scope_id, thread_id, message_id, is_observed, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(record.turnId, record.scopeId, record.threadId, record.messageId, record.isObserved ? 1 : 0, now, now);
   }
 
   listActiveTurnPreviews(): ActiveTurnPreviewRecord[] {
     const rows = this.db.prepare(`
-      SELECT turn_id, scope_id, thread_id, message_id, created_at, updated_at
+      SELECT turn_id, scope_id, thread_id, message_id, is_observed, created_at, updated_at
       FROM active_turn_previews
       ORDER BY created_at ASC
     `).all() as Array<Record<string, unknown>>;
@@ -600,6 +603,7 @@ export class BridgeStore {
       scopeId: String(row.scope_id),
       threadId: String(row.thread_id),
       messageId: Number(row.message_id),
+      isObserved: Boolean(row.is_observed),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     }));

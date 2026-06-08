@@ -448,6 +448,7 @@ test('BridgeStore persists active turn preview cleanup state', () => {
       scopeId: S4,
       threadId: 'thread-1',
       messageId: 41,
+      isObserved: false,
       createdAt: previews[0]!.createdAt,
       updatedAt: previews[0]!.updatedAt,
     });
@@ -457,12 +458,14 @@ test('BridgeStore persists active turn preview cleanup state', () => {
       scopeId: S4,
       threadId: 'thread-2',
       messageId: 42,
+      isObserved: true,
     });
 
     previews = store.listActiveTurnPreviews();
     assert.equal(previews.length, 1);
     assert.equal(previews[0]?.turnId, 'turn-2');
     assert.equal(previews[0]?.messageId, 42);
+    assert.equal(previews[0]?.isObserved, true);
 
     store.removeActiveTurnPreviewByMessage(S4, 42);
     assert.deepEqual(store.listActiveTurnPreviews(), []);
