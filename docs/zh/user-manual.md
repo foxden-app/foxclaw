@@ -359,7 +359,7 @@ FoxClaw 识别这些候选文件名：
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` 是 Codex 当前使用的文件。切换账号时，FoxClaw 会把 `auth.json` 指向某个候选文件。候选文件内容是 Codex CLI 生成的 JSON，不建议手写这些字段。多 bot 镜像只在账号标识一致、刷新时间更新，并且由当前 app-server 通过 ChatGPT 用量接口在线验证时复制候选，避免同名候选意外覆盖成另一个账号。切换或重载 auth 之前，FoxClaw 还会在其他 Codex home 中查找同账号 ID 的较新凭据，先恢复到发起操作的 runtime，再在重启后验证并镜像。
+`auth.json` 是 Codex 当前使用的文件。切换账号时，FoxClaw 会把 `auth.json` 指向某个候选文件。候选文件内容是 Codex CLI 生成的 JSON，不建议手写这些字段。多 bot 镜像只在账号标识和可识别的 ChatGPT 用户/邮箱身份兼容、刷新时间更新，并且由当前 app-server 通过 ChatGPT 用量接口在线验证时复制候选，避免同名候选意外覆盖成另一个账号或同一 Team 下的另一个 seat。切换或重载 auth 之前，FoxClaw 还会在其他 Codex home 中查找兼容的较新凭据，先恢复到发起操作的 runtime，再在重启后验证并镜像。
 
 如果你已经有一个可用的 `auth.json`，可以先备份成候选：
 
@@ -395,7 +395,7 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 `/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。面板每页显示 8 个候选，支持翻页、`全部 / 已启用 / 需关注` 筛选和 `/auth list <关键词>` 文件名搜索，适合管理较大的本地候选清单。面板文本和按钮会省略标准候选文件名中重复的 `auth.json_` 前缀，例如磁盘上的 `auth.json_personal` 显示为 `personal`；文件本身不会重命名，搜索和命令仍按原候选工作。命令 `/auth use <n>` 的编号始终对应完整候选列表，不会因为分页变化。
 
-文本列表中每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。按钮为了适配窄屏，只显示两个剩余百分比数字，例如 `20|25`；未知值显示为 `—`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
+文本列表中每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。按钮为了适配窄屏，只显示两个剩余百分比数字，例如 `20|25`；未知值显示为 `—`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 额度身份，FoxClaw 会按账号下已验证的用户/邮箱身份合并缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把同一个 Team account 里的不同 seat 混在一起。
 
 示意：
 
@@ -453,7 +453,7 @@ AUTH_SYNC_NODE_ID=workstation-a
 - Telegram 只承载密文；auth 文件内容、候选名、account id、`last_refresh` 都在 AES-256-GCM 加密 payload 内。
 - 只接收 `AUTH_SYNC_PEERS` 中 peer bot 发来的同步文件；密钥、cluster、nonce 或 payload 校验失败时不会写盘。
 - 远端导入必须等本机全局空闲，再临时切换到待验证 auth、重启 app-server、读取 usage 验证成功后才写入候选。
-- 同名候选如果已知属于不同 account id，永远拒绝覆盖。
+- 同名候选如果已知属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱，永远拒绝覆盖。
 - 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 9 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
 
 双主动流程：

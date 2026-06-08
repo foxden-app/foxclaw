@@ -105,7 +105,7 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 **Multi-account management:**
 - Codex account controls: `/account`, `/quota`, `/login_device`, `/auth add <name>`
 - Automatic auth rotation across local `auth.json_*` files when a usage limit is hit — seamless account switching
-- Paginated `/auth` panel to filter, enable, disable, search, and switch candidate accounts; quota uses observed window lengths, and multi-bot mode merges recent snapshots by account ID across runtimes
+- Paginated `/auth` panel to filter, enable, disable, search, and switch candidate accounts; quota uses observed window lengths, and multi-bot mode merges recent snapshots by ChatGPT quota identity across runtimes
 
 **Threads and sessions:**
 - `/threads`, `/open`, `/new`, `/where`, `/interrupt` — sticky chat-to-thread binding

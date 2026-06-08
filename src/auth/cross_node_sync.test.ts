@@ -21,9 +21,18 @@ const loggerStub = {
 
 const SHARED_KEY = '0123456789abcdef0123456789abcdef';
 
-function rawAuth(accountId: string, lastRefresh: string, expSeconds = Math.floor(Date.now() / 1000) + 3600): string {
+function rawAuth(
+  accountId: string,
+  lastRefresh: string,
+  expSeconds = Math.floor(Date.now() / 1000) + 3600,
+  identity: { userId?: string; email?: string } = {},
+): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    exp: expSeconds,
+    'https://api.openai.com/auth.chatgpt_user_id': identity.userId,
+    'https://api.openai.com/profile.email': identity.email,
+  })).toString('base64url');
   return `${JSON.stringify({
     tokens: {
       account_id: accountId,
@@ -33,12 +42,27 @@ function rawAuth(accountId: string, lastRefresh: string, expSeconds = Math.floor
   })}\n`;
 }
 
-function record(candidateName: string, accountId: string, lastRefresh: string): AuthMirrorCandidateRecord {
+function record(
+  candidateName: string,
+  accountId: string,
+  lastRefresh: string,
+  identity: { userId?: string; email?: string } = {},
+): AuthMirrorCandidateRecord {
+  const userId = identity.userId ?? null;
+  const email = identity.email ?? null;
+  const quotaIdentityId = userId
+    ? `${accountId}:user:${userId}`
+    : email
+      ? `${accountId}:email:${email.toLowerCase()}`
+      : accountId;
   return {
     candidateName,
     accountId,
+    quotaIdentityId,
+    userId,
+    email,
     lastRefreshMs: Date.parse(lastRefresh),
-    raw: rawAuth(accountId, lastRefresh),
+    raw: rawAuth(accountId, lastRefresh, Math.floor(Date.now() / 1000) + 3600, identity),
     sourceRuntimeId: 'runtime',
     sourceLabel: '@local',
   };
@@ -437,6 +461,60 @@ test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', asyn
       lastRefreshMs: Date.parse('2026-05-01T00:00:00.000Z'),
     }), true);
     assert.equal(imported, true);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
+test('CrossNodeAuthSync pull recovery ignores a different ChatGPT user on the same account', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-user-conflict-'));
+  try {
+    const otherUser = record('auth.json_work', 'acct-team', '2026-06-01T00:00:00.000Z', {
+      userId: 'user-b',
+      email: 'b@example.test',
+    });
+    const notificationsB: AuthSyncNotification[] = [];
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records: [otherUser] }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' });
+        },
+      },
+      callbacks({
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    assert.equal(await serviceB.requestRecovery('auth.json_work', {
+      accountId: 'acct-team',
+      quotaIdentityId: 'acct-team:user:user-a',
+      lastRefreshMs: Date.parse('2026-05-01T00:00:00.000Z'),
+    }), false);
+
+    assert.deepEqual(notificationsB.map(event => event.kind), [
+      'recovery_started',
+      'recovery_peer_empty',
+      'recovery_failed',
+    ]);
   } finally {
     await removeTempTree(root);
   }

@@ -431,6 +431,7 @@ async function runServeCli(): Promise<void> {
             ?? await mirror.readNewestCandidate(candidateName);
           return await authSync?.requestRecovery(candidateName, {
             accountId: current?.accountId ?? null,
+            quotaIdentityId: current?.quotaIdentityId ?? null,
             lastRefreshMs: current?.lastRefreshMs ?? null,
           }) ?? false;
         },
@@ -647,6 +648,7 @@ async function runServeCli(): Promise<void> {
           ?? null;
         return await singleAuthSync?.requestRecovery(candidateName, {
           accountId: current?.accountId ?? null,
+          quotaIdentityId: current?.quotaIdentityId ?? null,
           lastRefreshMs: current?.lastRefreshMs ?? null,
         }) ?? false;
       },

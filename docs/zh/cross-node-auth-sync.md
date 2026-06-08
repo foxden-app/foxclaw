@@ -33,7 +33,7 @@
 - 只接收 `AUTH_SYNC_PEERS` 中列出的 peer bot 发来的同步文件。
 - `AUTH_SYNC_KEY`、cluster、nonce 或 payload 校验失败时不会写盘。
 - 远端导入必须等本机全局空闲，再临时验证 usage；验证成功后才写入候选。
-- 同名候选如果已知属于不同 account id，永远拒绝覆盖。
+- 同名候选如果已知属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱，永远拒绝覆盖。
 - 同步包不会触发自动回复链路；FoxClaw 对包类型、nonce 和 peer allowlist 做过滤，避免 bot-to-bot 循环。
 
 Telegram 官方 Bot Features 文档说明：私聊 bot-to-bot 需要发送方和接收方都启用 Bot-to-Bot Communication Mode，并提醒开发者处理 loop prevention。参考：https://core.telegram.org/bots/features#bot-to-bot-communication
@@ -164,7 +164,7 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 确认待导入清单被处理，或候选已经出现/更新时间变新。
 
-注意：`/auth sync push all` 的“已发送”只代表本节点把加密包发给 Telegram 成功，不代表对端已经写盘。对端只有在全局空闲、usage 验证通过、同名候选 account id 一致，并且远端 `last_refresh` 比本地更新时才会覆盖文件。如果本地已经是相同或更新版本，文件不会变化，`最近导入` 也可能保持为空。
+注意：`/auth sync push all` 的“已发送”只代表本节点把加密包发给 Telegram 成功，不代表对端已经写盘。对端只有在全局空闲、usage 验证通过、同名候选 account id 一致且 ChatGPT 用户/邮箱身份兼容，并且远端 `last_refresh` 比本地更新时才会覆盖文件。如果本地已经是相同或更新版本，文件不会变化，`最近导入` 也可能保持为空。
 
 启用跨节点同步后，联系人 bot 的私聊会收到节点级通知：本机 auth 更新并开始发往哪些 peer、收到远端包后是排队还是立即验证、导入成功/跳过/失败原因、auth 恢复时正在查询哪些 peer、peer 回应了什么，以及所有 peer 都无法提供可用副本时的人工介入提示。通知不会包含 auth 内容、token 或同步密文。
 
@@ -198,7 +198,7 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 - 本机可能不是全局空闲；有 turn、审批、待输入、登录流程或镜像写入时会排队。
 - usage 验证失败会拒绝写盘。
-- 同名候选属于不同 account id 时会拒绝覆盖。
+- 同名候选属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱时会拒绝覆盖。
 - 执行 `/auth sync events <候选名>` 或 `/auth sync trace <requestId>`，查看 FoxClaw 记录的接收、验证、跳过或失败流水。
 
 **要不要定期 `/auth refresh all confirm` 保活**

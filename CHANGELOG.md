@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.12 - 2026-06-08
+
+### 中文
+- `/auth` 额度快照现在按 ChatGPT 额度身份合并，优先区分 `chatgpt_user_id`，其次区分 email，避免同一个 Team account 下不同 seat 显示成同一份额度。
+- 本机 auth mirror、跨节点 auth sync 和 `/auth refresh all` 会拒绝可识别为不同 ChatGPT 用户/邮箱的同名候选互相覆盖，即使它们共享同一个 account id。
+- 额度快照数据库新增 `quota_identity_id` 并自动兼容旧数据；文档同步说明 account id 与额度身份的区别。
+
+### English
+- `/auth` quota snapshots now merge by ChatGPT quota identity, preferring `chatgpt_user_id` and then email, so different seats under the same Team account do not display as one shared quota.
+- Same-node auth mirroring, cross-node auth sync, and `/auth refresh all` now refuse to overwrite same-name candidates when they are identifiable as different ChatGPT users/emails, even if they share the same account id.
+- Added a `quota_identity_id` quota-snapshot migration with backward compatibility for old data, and updated docs to distinguish account id from quota identity.
+
 ## 0.5.11 - 2026-06-08
 
 ### 中文

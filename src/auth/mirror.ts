@@ -42,6 +42,9 @@ export interface AuthMirrorValidationResult {
 
 export interface ChatGptAuthMetadata {
   accountId: string;
+  quotaIdentityId: string;
+  userId: string | null;
+  email: string | null;
   lastRefreshMs: number;
 }
 
@@ -234,7 +237,7 @@ export class AuthCandidateMirror {
       if (!destination) return null;
       const sources = await this.collectAuthRecords();
       const newest = sources
-        .filter(entry => entry.record.accountId === destination.accountId)
+        .filter(entry => authRecordsCompatible(entry.record, destination))
         .reduce<(typeof sources)[number] | null>((current, entry) => (
           !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
         ), null);
@@ -280,7 +283,7 @@ export class AuthCandidateMirror {
       for (const runtime of this.runtimes) {
         const destinationPath = path.join(runtime.authDir, name);
         const destination = await readChatGptAuthRecord(destinationPath);
-        if (destination && destination.accountId !== canonical.accountId) {
+        if (destination && !authRecordsCompatible(destination, canonical)) {
           skipped += 1;
           this.logger.warn('auth.mirror.distribution_conflict', { runtimeId: runtime.id, name });
           continue;
@@ -316,9 +319,9 @@ export class AuthCandidateMirror {
         }
         const existing = (await this.collectAuthRecords())
           .filter(entry => entry.candidateName === candidateName);
-        const conflicting = existing.find(entry => entry.record.accountId !== metadata.accountId);
+        const conflicting = existing.find(entry => !authRecordsCompatible(entry.record, metadata));
         if (conflicting) {
-          return { ok: false, imported: false, reason: 'same candidate belongs to a different account' };
+          return { ok: false, imported: false, reason: 'same candidate belongs to a different account or ChatGPT user' };
         }
         const newest = existing.reduce<(typeof existing)[number] | null>((current, entry) => (
           !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
@@ -372,7 +375,7 @@ export class AuthCandidateMirror {
       if (!record) return false;
       const canonicalPath = path.join(this.canonicalDir, name);
       const canonical = await readChatGptAuthRecord(canonicalPath);
-      if (canonical && canonical.accountId !== record.accountId) {
+      if (canonical && !authRecordsCompatible(canonical, record)) {
         this.logger.warn('auth.mirror.account_conflict', { runtimeId: runtime.id, name });
         return false;
       }
@@ -513,8 +516,8 @@ export class AuthCandidateMirror {
       record: await readChatGptAuthRecord(sourcePath),
     })))).filter((entry): entry is { sourcePath: string; record: ChatGptAuthRecord } => entry.record !== null);
     if (records.length === 0) return;
-    const accountIds = new Set(records.map((entry) => entry.record.accountId));
-    if (accountIds.size !== 1) {
+    const reference = records[0]!.record;
+    if (records.some(entry => !authRecordsCompatible(reference, entry.record))) {
       this.logger.warn('auth.mirror.startup_conflict', { name });
       return;
     }
@@ -647,13 +650,99 @@ export async function readChatGptAuthMetadata(filePath: string): Promise<ChatGpt
 export function parseChatGptAuthMetadata(raw: string): ChatGptAuthMetadata | null {
   try {
     const parsed = JSON.parse(raw) as {
-      tokens?: { account_id?: unknown };
+      tokens?: { account_id?: unknown; access_token?: unknown; id_token?: unknown };
       last_refresh?: unknown;
     };
     const accountId = typeof parsed.tokens?.account_id === 'string' ? parsed.tokens.account_id : '';
     const lastRefreshMs = typeof parsed.last_refresh === 'string' ? Date.parse(parsed.last_refresh) : NaN;
     if (!accountId || !Number.isFinite(lastRefreshMs)) return null;
-    return { accountId, lastRefreshMs };
+    const accessClaims = decodeJwtPayload(parsed.tokens?.access_token);
+    const idClaims = decodeJwtPayload(parsed.tokens?.id_token);
+    const userId = firstStringClaim(
+      accessClaims,
+      idClaims,
+      'https://api.openai.com/auth.chatgpt_user_id',
+      'https://api.openai.com/auth.user_id',
+    );
+    const email = firstStringClaim(
+      accessClaims,
+      idClaims,
+      'https://api.openai.com/profile.email',
+      'email',
+    );
+    return {
+      accountId,
+      quotaIdentityId: chatGptQuotaIdentityId(accountId, userId, email),
+      userId,
+      email,
+      lastRefreshMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function chatGptQuotaIdentityId(accountId: string, userId: string | null, email: string | null): string {
+  if (userId) {
+    return `${accountId}:user:${userId}`;
+  }
+  if (email) {
+    return `${accountId}:email:${email.toLowerCase()}`;
+  }
+  return accountId;
+}
+
+function authRecordsCompatible(
+  left: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+  right: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+): boolean {
+  if (left.accountId !== right.accountId) {
+    return false;
+  }
+  if (!isSpecificQuotaIdentity(left) || !isSpecificQuotaIdentity(right)) {
+    return true;
+  }
+  return left.quotaIdentityId === right.quotaIdentityId;
+}
+
+function isSpecificQuotaIdentity(metadata: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>): boolean {
+  return metadata.quotaIdentityId !== metadata.accountId;
+}
+
+function firstStringClaim(
+  primary: Record<string, unknown> | null,
+  secondary: Record<string, unknown> | null,
+  ...keys: string[]
+): string | null {
+  for (const claims of [primary, secondary]) {
+    if (!claims) {
+      continue;
+    }
+    for (const key of keys) {
+      const value = claims[key];
+      if (typeof value === 'string' && value.trim()) {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function decodeJwtPayload(token: unknown): Record<string, unknown> | null {
+  if (typeof token !== 'string') {
+    return null;
+  }
+  const parts = token.split('.');
+  if (parts.length < 2 || !parts[1]) {
+    return null;
+  }
+  try {
+    const base64 = parts[1].replaceAll('-', '+').replaceAll('_', '/');
+    const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
+    const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
   } catch {
     return null;
   }

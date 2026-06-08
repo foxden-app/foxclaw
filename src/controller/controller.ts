@@ -6,7 +6,7 @@ import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore, CodexAuthQuotaSnapshotRecord, PendingUserInputStoredRecord } from '../store/database.js';
-import { parseChatGptAuthMetadata, readChatGptAuthMetadata } from '../auth/mirror.js';
+import { parseChatGptAuthMetadata, readChatGptAuthMetadata, type ChatGptAuthMetadata } from '../auth/mirror.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -315,11 +315,17 @@ interface CodexAuthCandidate {
 interface CodexAuthQuotaSnapshot {
   capturedAtMs: number;
   accountId?: string | null;
+  quotaIdentityId?: string | null;
   planType: string | null;
   primaryWindowDurationMins: number | null;
   primaryRemainingPercent: number | null;
   secondaryWindowDurationMins: number | null;
   secondaryRemainingPercent: number | null;
+}
+
+interface CodexAuthQuotaIdentity {
+  accountId: string;
+  quotaIdentityId: string;
 }
 
 interface CodexAuthState {
@@ -6426,15 +6432,15 @@ export class BridgeSessionCore {
       this.resolveAuthDir(),
     );
     const snapshots = await this.readCodexAuthQuotaSnapshots();
-    const candidateAccountIds = await this.readCodexAuthCandidateAccountIds(state.candidates);
+    const candidateQuotaIdentities = await this.readCodexAuthCandidateQuotaIdentities(state.candidates);
     state.candidates.forEach((candidate) => {
-      const candidateAccountId = candidateAccountIds.get(candidate.name) ?? null;
+      const candidateQuotaIdentity = candidateQuotaIdentities.get(candidate.name) ?? null;
       const snapshot = snapshots[candidate.name] ?? null;
-      candidate.quota = this.codexAuthQuotaSnapshotMatchesAccount(snapshot, candidateAccountId)
+      candidate.quota = this.codexAuthQuotaSnapshotMatchesIdentity(snapshot, candidateQuotaIdentity)
         ? snapshot
         : null;
     });
-    await this.applySharedCodexAuthQuotaSnapshots(state, candidateAccountIds);
+    await this.applySharedCodexAuthQuotaSnapshots(state, candidateQuotaIdentities);
     return state;
   }
 
@@ -6561,13 +6567,13 @@ export class BridgeSessionCore {
             throw new Error('Codex did not return ChatGPT rate limits after refresh');
           }
           const after = await readChatGptAuthMetadata(candidate.path);
-          if (!after || after.accountId !== before.accountId) {
-            throw new Error('refreshed auth account id did not match the original candidate');
+          if (!after || !chatGptAuthMetadataCompatible(before, after)) {
+            throw new Error('refreshed auth identity did not match the original candidate');
           }
           if (after.lastRefreshMs <= before.lastRefreshMs) {
             throw new Error('Codex did not advance last_refresh');
           }
-          await this.recordCodexAuthQuotaSnapshot(candidate.name, after.accountId, snapshot);
+          await this.recordCodexAuthQuotaSnapshot(candidate.name, after, snapshot);
           await this.syncCodexAuthCandidate(candidate.name);
           result.refreshed.push(candidate.name);
         } catch (error) {
@@ -6804,9 +6810,13 @@ export class BridgeSessionCore {
       if (!snapshot) {
         return;
       }
-      const quota = authQuotaSnapshotFromRateLimit(snapshot, metadata?.accountId ?? null);
+      const quota = authQuotaSnapshotFromRateLimit(
+        snapshot,
+        metadata?.accountId ?? null,
+        metadata?.quotaIdentityId ?? null,
+      );
       candidate.quota = quota;
-      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata?.accountId ?? null, snapshot);
+      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata, snapshot);
       await this.applySharedCodexAuthQuotaSnapshots(state);
       await this.syncCodexAuthCandidate(candidate.name);
     } catch (error) {
@@ -6816,49 +6826,62 @@ export class BridgeSessionCore {
 
   private async applySharedCodexAuthQuotaSnapshots(
     state: CodexAuthState,
-    candidateAccountIds?: Map<string, string>,
+    candidateQuotaIdentities?: Map<string, CodexAuthQuotaIdentity>,
   ): Promise<void> {
-    const accountIds = candidateAccountIds ?? await this.readCodexAuthCandidateAccountIds(state.candidates);
-    const uniqueAccountIds = [...new Set(accountIds.values())];
-    if (uniqueAccountIds.length === 0) {
+    const quotaIdentities = candidateQuotaIdentities ?? await this.readCodexAuthCandidateQuotaIdentities(state.candidates);
+    const uniqueQuotaIdentityIds = [...new Set([...quotaIdentities.values()].map(identity => identity.quotaIdentityId))];
+    if (uniqueQuotaIdentityIds.length === 0) {
       return;
     }
-    const snapshotsByAccount = new Map<string, CodexAuthQuotaSnapshot>();
-    for (const record of this.store.listCodexAuthQuotaSnapshots(uniqueAccountIds)) {
+    const snapshotsByIdentity = new Map<string, CodexAuthQuotaSnapshot>();
+    for (const record of this.store.listCodexAuthQuotaSnapshots(uniqueQuotaIdentityIds)) {
       if (!isFiniteCodexAuthQuotaSnapshotRecord(record)) {
         continue;
       }
-      snapshotsByAccount.set(
-        record.accountId,
+      snapshotsByIdentity.set(
+        record.quotaIdentityId,
         mergeCodexAuthQuotaSnapshots(
-          snapshotsByAccount.get(record.accountId) ?? null,
+          snapshotsByIdentity.get(record.quotaIdentityId) ?? null,
           codexAuthQuotaSnapshotFromRecord(record),
         )!,
       );
     }
     for (const candidate of state.candidates) {
-      const accountId = accountIds.get(candidate.name);
-      if (!accountId) {
+      const quotaIdentity = quotaIdentities.get(candidate.name);
+      if (!quotaIdentity) {
         continue;
       }
-      candidate.quota = mergeCodexAuthQuotaSnapshots(candidate.quota, snapshotsByAccount.get(accountId) ?? null);
+      candidate.quota = mergeCodexAuthQuotaSnapshots(
+        candidate.quota,
+        snapshotsByIdentity.get(quotaIdentity.quotaIdentityId) ?? null,
+      );
     }
   }
 
   private async recordCodexAuthQuotaSnapshot(
     candidateName: string,
-    accountId: string | null,
+    metadata: ChatGptAuthMetadata | null,
     snapshot: CodexRateLimitSnapshot,
   ): Promise<void> {
-    const quota = authQuotaSnapshotFromRateLimit(snapshot, accountId);
+    const quota = authQuotaSnapshotFromRateLimit(
+      snapshot,
+      metadata?.accountId ?? null,
+      metadata?.quotaIdentityId ?? null,
+    );
     this.authQuotaSnapshots[candidateName] = quota;
-    if (accountId) {
-      this.store.setCodexAuthQuotaSnapshot(this.authRuntimeId(), candidateName, accountId, quota);
+    if (metadata) {
+      this.store.setCodexAuthQuotaSnapshot(
+        this.authRuntimeId(),
+        candidateName,
+        metadata.accountId,
+        metadata.quotaIdentityId,
+        quota,
+      );
     }
     await this.writeCodexAuthQuotaSnapshots();
   }
 
-  private async readCodexAuthCandidateAccountIds(candidates: CodexAuthCandidate[]): Promise<Map<string, string>> {
+  private async readCodexAuthCandidateQuotaIdentities(candidates: CodexAuthCandidate[]): Promise<Map<string, CodexAuthQuotaIdentity>> {
     const entries = await Promise.all(candidates.map(async (candidate) => {
       const metadata = await readChatGptAuthMetadata(candidate.path);
       candidate.credentialKind = metadata
@@ -6867,28 +6890,32 @@ export class BridgeSessionCore {
           ? 'api-key'
           : 'invalid';
       candidate.credentialLastRefreshMs = metadata?.lastRefreshMs ?? null;
-      return [candidate.name, metadata?.accountId ?? null] as const;
+      return [candidate.name, metadata ? {
+        accountId: metadata.accountId,
+        quotaIdentityId: metadata.quotaIdentityId,
+      } : null] as const;
     }));
-    const accountIds = new Map<string, string>();
-    for (const [name, accountId] of entries) {
-      if (accountId) {
-        accountIds.set(name, accountId);
+    const quotaIdentities = new Map<string, CodexAuthQuotaIdentity>();
+    for (const [name, quotaIdentity] of entries) {
+      if (quotaIdentity) {
+        quotaIdentities.set(name, quotaIdentity);
       }
     }
-    return accountIds;
+    return quotaIdentities;
   }
 
-  private codexAuthQuotaSnapshotMatchesAccount(
+  private codexAuthQuotaSnapshotMatchesIdentity(
     snapshot: CodexAuthQuotaSnapshot | null,
-    accountId: string | null,
+    identity: CodexAuthQuotaIdentity | null,
   ): snapshot is CodexAuthQuotaSnapshot {
     if (!snapshot) {
       return false;
     }
-    if (!snapshot.accountId) {
-      return accountId === null;
+    const snapshotIdentityId = snapshot.quotaIdentityId ?? snapshot.accountId ?? null;
+    if (!snapshotIdentityId) {
+      return identity === null;
     }
-    return accountId !== null && snapshot.accountId === accountId;
+    return identity !== null && snapshotIdentityId === identity.quotaIdentityId;
   }
 
   private async readCodexAuthQuotaSnapshots(): Promise<Record<string, CodexAuthQuotaSnapshot>> {
@@ -11080,10 +11107,15 @@ function formatRemainingUsagePercent(usedPercent: number): string {
   return remainingPercent === null ? '?' : formatUsagePercent(remainingPercent);
 }
 
-function authQuotaSnapshotFromRateLimit(snapshot: CodexRateLimitSnapshot, accountId: string | null = null): CodexAuthQuotaSnapshot {
+function authQuotaSnapshotFromRateLimit(
+  snapshot: CodexRateLimitSnapshot,
+  accountId: string | null = null,
+  quotaIdentityId: string | null = null,
+): CodexAuthQuotaSnapshot {
   return {
     capturedAtMs: Date.now(),
     accountId,
+    quotaIdentityId,
     planType: snapshot.planType,
     primaryWindowDurationMins: snapshot.primary?.windowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
@@ -11096,6 +11128,7 @@ function codexAuthQuotaSnapshotFromRecord(record: CodexAuthQuotaSnapshotRecord):
   return {
     capturedAtMs: record.capturedAtMs,
     accountId: record.accountId,
+    quotaIdentityId: record.quotaIdentityId,
     planType: record.planType,
     primaryWindowDurationMins: record.primaryWindowDurationMins,
     primaryRemainingPercent: record.primaryRemainingPercent,
@@ -11119,6 +11152,7 @@ function mergeCodexAuthQuotaSnapshots(
   return {
     ...freshest,
     accountId: freshest.accountId ?? older.accountId ?? null,
+    quotaIdentityId: freshest.quotaIdentityId ?? older.quotaIdentityId ?? null,
   };
 }
 
@@ -11175,6 +11209,7 @@ function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapsh
   return typeof snapshot.capturedAtMs === 'number'
     && Number.isFinite(snapshot.capturedAtMs)
     && (snapshot.accountId === undefined || snapshot.accountId === null || typeof snapshot.accountId === 'string')
+    && (snapshot.quotaIdentityId === undefined || snapshot.quotaIdentityId === null || typeof snapshot.quotaIdentityId === 'string')
     && (snapshot.planType === undefined || isNullableString(snapshot.planType))
     && (snapshot.primaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.primaryWindowDurationMins))
     && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
@@ -11186,12 +11221,26 @@ function normalizeCodexAuthQuotaSnapshot(snapshot: CodexAuthQuotaSnapshot): Code
   return {
     capturedAtMs: snapshot.capturedAtMs,
     accountId: snapshot.accountId ?? null,
+    quotaIdentityId: snapshot.quotaIdentityId ?? snapshot.accountId ?? null,
     planType: snapshot.planType ?? null,
     primaryWindowDurationMins: snapshot.primaryWindowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primaryRemainingPercent,
     secondaryWindowDurationMins: snapshot.secondaryWindowDurationMins ?? null,
     secondaryRemainingPercent: snapshot.secondaryRemainingPercent,
   };
+}
+
+function chatGptAuthMetadataCompatible(
+  left: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+  right: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+): boolean {
+  if (left.accountId !== right.accountId) {
+    return false;
+  }
+  if (left.quotaIdentityId === left.accountId || right.quotaIdentityId === right.accountId) {
+    return true;
+  }
+  return left.quotaIdentityId === right.quotaIdentityId;
 }
 
 function isNullableFiniteNumber(value: unknown): value is number | null {

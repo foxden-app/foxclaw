@@ -208,11 +208,30 @@ function installTempAuthFiles(t: TestContext, tempDir: string): string {
   return authDir;
 }
 
-function writeChatGptAuthCandidate(authDir: string, name: string, accountId: string, lastRefresh = '2026-01-01T00:00:00.000Z'): void {
+function writeChatGptAuthCandidate(
+  authDir: string,
+  name: string,
+  accountId: string,
+  lastRefresh = '2026-01-01T00:00:00.000Z',
+  identity: { userId?: string; email?: string } = {},
+): void {
+  const tokens: Record<string, string> = { account_id: accountId };
+  if (identity.userId || identity.email) {
+    tokens.access_token = fakeJwt({
+      'https://api.openai.com/auth.chatgpt_account_id': accountId,
+      'https://api.openai.com/auth.chatgpt_user_id': identity.userId,
+      'https://api.openai.com/profile.email': identity.email,
+    });
+  }
   fs.writeFileSync(path.join(authDir, name), `${JSON.stringify({
-    tokens: { account_id: accountId },
+    tokens,
     last_refresh: lastRefresh,
   })}\n`);
+}
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.sig`;
 }
 
 function installTempCodexHome(t: TestContext, tempDir: string): string {
@@ -1792,7 +1811,7 @@ test('/auth records and displays current candidate remaining quota without probi
   assert.match(rig.sentMessages[1]!, /5h:90\|7d:95\|b \* \[Plus · ready · refreshed 0m ago\]/);
 });
 
-test('/auth supplements quota snapshots from other runtimes by account id', async (t) => {
+test('/auth supplements quota snapshots from other runtimes by quota identity id', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     rig.store.close();
@@ -1803,7 +1822,7 @@ test('/auth supplements quota snapshots from other runtimes by account id', asyn
   writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a');
   writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b');
   fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
-  rig.store.setCodexAuthQuotaSnapshot('bot-other', 'auth.json_different_name', 'acct-b', {
+  rig.store.setCodexAuthQuotaSnapshot('bot-other', 'auth.json_different_name', 'acct-b', 'acct-b', {
     capturedAtMs: 10_000,
     planType: 'plus',
     primaryWindowDurationMins: 300,
@@ -1811,7 +1830,7 @@ test('/auth supplements quota snapshots from other runtimes by account id', asyn
     secondaryWindowDurationMins: 10080,
     secondaryRemainingPercent: 65,
   });
-  rig.store.setCodexAuthQuotaSnapshot('bot-conflict', 'auth.json_b', 'acct-c', {
+  rig.store.setCodexAuthQuotaSnapshot('bot-conflict', 'auth.json_b', 'acct-c', 'acct-c', {
     capturedAtMs: 20_000,
     planType: 'plus',
     primaryWindowDurationMins: 300,
@@ -1837,6 +1856,52 @@ test('/auth supplements quota snapshots from other runtimes by account id', asyn
   assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \* \[Plus · not recently refreshed · refreshed \d+d ago\]/);
   assert.match(rig.sentMessages[0]!, /5h:70\|7d:65\|b \[Plus · not recently refreshed · refreshed \d+d ago\]/);
   assert.doesNotMatch(rig.sentMessages[0]!, /5h:5\|7d:4\|b/);
+});
+
+test('/auth separates quota snapshots for ChatGPT users on the same account id', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  fs.rmSync(path.join(authDir, 'auth.json'), { force: true });
+  const refreshedAt = new Date().toISOString();
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-team', refreshedAt, {
+    userId: 'user-a',
+    email: 'a@example.test',
+  });
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-team', refreshedAt, {
+    userId: 'user-b',
+    email: 'b@example.test',
+  });
+  fs.symlinkSync(path.join(authDir, 'auth.json_a'), path.join(authDir, 'auth.json'));
+  rig.store.setCodexAuthQuotaSnapshot('bot-other', 'auth.json_b', 'acct-team', 'acct-team:user:user-b', {
+    capturedAtMs: Date.now(),
+    planType: 'team',
+    primaryWindowDurationMins: 300,
+    primaryRemainingPercent: 98,
+    secondaryWindowDurationMins: null,
+    secondaryRemainingPercent: null,
+  });
+  (rig.controller as any).app.readAccountRateLimits = async () => ({
+    rateLimits: {
+      limitId: 'codex',
+      limitName: null,
+      primary: { usedPercent: 14, windowDurationMins: 300, resetsAt: null },
+      secondary: null,
+      credits: null,
+      planType: 'team',
+      rateLimitReachedType: null,
+    },
+    rateLimitsByLimitId: null,
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+
+  assert.match(rig.sentMessages[0]!, /5h:86\|a \* \[Team · ready · refreshed 0m ago\]/);
+  assert.match(rig.sentMessages[0]!, /5h:98\|b \[Team · ready · refreshed 0m ago\]/);
+  assert.doesNotMatch(rig.sentMessages[0]!, /5h:86\|b/);
 });
 
 test('/auth panel paginates large inventories, filters attention candidates, and searches by filename', async (t) => {

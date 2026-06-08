@@ -55,9 +55,9 @@ test('BridgeStore isolates disabled Codex auth candidates per runtime', () => {
   });
 });
 
-test('BridgeStore shares Codex auth quota snapshots by account id', () => {
+test('BridgeStore shares Codex auth quota snapshots by quota identity id', () => {
   withStore((store) => {
-    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
+    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', 'acct-a:user-1', {
       capturedAtMs: 100,
       planType: 'free',
       primaryWindowDurationMins: 43200,
@@ -65,7 +65,7 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       secondaryWindowDurationMins: null,
       secondaryRemainingPercent: null,
     });
-    store.setCodexAuthQuotaSnapshot('bot2', 'auth.json_b', 'acct-b', {
+    store.setCodexAuthQuotaSnapshot('bot2', 'auth.json_b', 'acct-a', 'acct-a:user-2', {
       capturedAtMs: 200,
       planType: 'plus',
       primaryWindowDurationMins: 300,
@@ -73,7 +73,7 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       secondaryWindowDurationMins: 10080,
       secondaryRemainingPercent: 25,
     });
-    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
+    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', 'acct-a:user-1', {
       capturedAtMs: 300,
       planType: 'plus',
       primaryWindowDurationMins: 300,
@@ -82,10 +82,11 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       secondaryRemainingPercent: 65,
     });
 
-    assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-a']).map(record => ({
+    assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-a:user-1']).map(record => ({
       runtimeId: record.runtimeId,
       candidateName: record.candidateName,
       accountId: record.accountId,
+      quotaIdentityId: record.quotaIdentityId,
       capturedAtMs: record.capturedAtMs,
       planType: record.planType,
       primaryWindowDurationMins: record.primaryWindowDurationMins,
@@ -96,6 +97,7 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       runtimeId: 'bot1',
       candidateName: 'auth.json_a',
       accountId: 'acct-a',
+      quotaIdentityId: 'acct-a:user-1',
       capturedAtMs: 300,
       planType: 'plus',
       primaryWindowDurationMins: 300,
@@ -389,12 +391,16 @@ test('BridgeStore migrates old auth quota snapshots without plan and window meta
   const store = new BridgeStore(dbPath);
   try {
     assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-old']).map(record => ({
+      accountId: record.accountId,
+      quotaIdentityId: record.quotaIdentityId,
       planType: record.planType,
       primaryWindowDurationMins: record.primaryWindowDurationMins,
       primaryRemainingPercent: record.primaryRemainingPercent,
       secondaryWindowDurationMins: record.secondaryWindowDurationMins,
       secondaryRemainingPercent: record.secondaryRemainingPercent,
     })), [{
+      accountId: 'acct-old',
+      quotaIdentityId: 'acct-old',
       planType: null,
       primaryWindowDurationMins: null,
       primaryRemainingPercent: 80,

@@ -140,6 +140,7 @@ interface AuthSyncBundlePayload {
   requestId?: string | null;
   candidateName: string;
   accountId: string;
+  quotaIdentityId?: string | null;
   lastRefreshMs: number;
   rawAuth: string;
   authSha256: string;
@@ -147,7 +148,7 @@ interface AuthSyncBundlePayload {
 
 type AuthSyncPlainMessage =
   | ({ kind: 'push.bundle'; requestId?: string | null } & AuthSyncBundlePayload)
-  | { kind: 'pull.request'; requestId: string; candidateName: string; accountId: string | null; lastRefreshMs: number | null }
+  | { kind: 'pull.request'; requestId: string; candidateName: string; accountId: string | null; quotaIdentityId?: string | null; lastRefreshMs: number | null }
   | { kind: 'pull.response'; requestId: string; bundle: AuthSyncBundlePayload | null; reason?: string | null }
   | { kind: 'digest'; records: Array<{ candidateName: string; accountIdHash: string; lastRefreshMs: number }> }
   | { kind: 'test.ping'; requestId: string }
@@ -432,7 +433,10 @@ export class CrossNodeAuthSync {
     await this.sendToAll({ kind: 'digest', records });
   }
 
-  async requestRecovery(candidateName: string, current?: { accountId: string | null; lastRefreshMs: number | null }): Promise<boolean> {
+  async requestRecovery(
+    candidateName: string,
+    current?: { accountId: string | null; quotaIdentityId?: string | null; lastRefreshMs: number | null },
+  ): Promise<boolean> {
     if (!this.isReady() || !isAuthCandidateName(candidateName)) return false;
     const requestId = crypto.randomUUID();
     const peers = [...this.peers];
@@ -491,6 +495,7 @@ export class CrossNodeAuthSync {
         requestId,
         candidateName,
         accountId: current?.accountId ?? null,
+        quotaIdentityId: current?.quotaIdentityId ?? null,
         lastRefreshMs: current?.lastRefreshMs ?? null,
       }).catch((error) => {
         clearTimeout(timer);
@@ -736,6 +741,18 @@ export class CrossNodeAuthSync {
       });
       return;
     }
+    if (!quotaIdentitiesCompatible(record.accountId, record.quotaIdentityId, message.quotaIdentityId ?? null)) {
+      await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'quota identity mismatch' });
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'account_mismatch', peer, requestId: message.requestId, candidateName: message.candidateName, detail: 'quota identity mismatch' });
+      this.notify({
+        kind: 'pull_response_sent',
+        candidateName: message.candidateName,
+        peer,
+        result: 'account_mismatch',
+        reason: 'quota identity mismatch',
+      });
+      return;
+    }
     if (message.lastRefreshMs !== null && record.lastRefreshMs <= message.lastRefreshMs) {
       await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'not newer' });
       this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'not_newer', peer, requestId: message.requestId, candidateName: message.candidateName, detail: 'not newer' });
@@ -957,6 +974,9 @@ export class CrossNodeAuthSync {
     const metadata = parseChatGptAuthMetadata(bundle.rawAuth);
     if (!metadata || metadata.accountId !== bundle.accountId || metadata.lastRefreshMs !== bundle.lastRefreshMs) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle metadata mismatch for ${bundle.candidateName}`);
+    }
+    if (bundle.quotaIdentityId && metadata.quotaIdentityId !== bundle.quotaIdentityId) {
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle quota identity mismatch for ${bundle.candidateName}`);
     }
     if (sha256(bundle.rawAuth) !== bundle.authSha256) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle hash mismatch for ${bundle.candidateName}`);
@@ -1340,6 +1360,7 @@ function bundleFromRecord(record: AuthMirrorCandidateRecord): AuthSyncBundlePayl
   return {
     candidateName: record.candidateName,
     accountId: record.accountId,
+    quotaIdentityId: record.quotaIdentityId,
     lastRefreshMs: record.lastRefreshMs,
     rawAuth: record.raw,
     authSha256: sha256(record.raw),
@@ -1350,10 +1371,18 @@ function isValidBundle(value: AuthSyncBundlePayload): boolean {
   return typeof value.candidateName === 'string'
     && isAuthCandidateName(value.candidateName)
     && typeof value.accountId === 'string'
+    && (value.quotaIdentityId === undefined || value.quotaIdentityId === null || typeof value.quotaIdentityId === 'string')
     && typeof value.lastRefreshMs === 'number'
     && Number.isFinite(value.lastRefreshMs)
     && typeof value.rawAuth === 'string'
     && typeof value.authSha256 === 'string';
+}
+
+function quotaIdentitiesCompatible(accountId: string, left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right || left === accountId || right === accountId) {
+    return true;
+  }
+  return left === right;
 }
 
 function decodeSharedKey(raw: string): Buffer {

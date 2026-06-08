@@ -13,8 +13,20 @@ const loggerStub = {
   error(): void {},
 };
 
-function auth(accountId: string, lastRefresh: string): string {
-  return `${JSON.stringify({ tokens: { account_id: accountId }, last_refresh: lastRefresh })}\n`;
+function auth(accountId: string, lastRefresh: string, identity: { userId?: string; email?: string } = {}): string {
+  const tokens: Record<string, string> = { account_id: accountId };
+  if (identity.userId || identity.email) {
+    tokens.id_token = fakeJwt({
+      'https://api.openai.com/auth.chatgpt_user_id': identity.userId,
+      email: identity.email,
+    });
+  }
+  return `${JSON.stringify({ tokens, last_refresh: lastRefresh })}\n`;
+}
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none', typ: 'JWT' })}.${encode(payload)}.sig`;
 }
 
 test('AuthCandidateMirror propagates a newer validated refresh between runtimes', async () => {
@@ -90,6 +102,31 @@ test('AuthCandidateMirror rejects a same-name candidate belonging to a different
     const mirror = new AuthCandidateMirror(canonical, [{ id: 'bot1', authDir: runtime }], loggerStub as any);
     await mirror.initialize();
     await fs.writeFile(path.join(runtime, 'auth.json_work'), auth('acct-2', '2026-05-27T00:00:00.000Z'));
+
+    assert.equal(await mirror.syncRuntimeCandidate('bot1', 'auth.json_work'), false);
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), original);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('AuthCandidateMirror rejects a same-name candidate for a different ChatGPT user on the same account', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-user-conflict-'));
+  const canonical = path.join(root, 'canonical');
+  const runtime = path.join(root, 'bot1');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const original = auth('acct-team', '2026-05-01T00:00:00.000Z', {
+      userId: 'user-a',
+      email: 'a@example.test',
+    });
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), original);
+    const mirror = new AuthCandidateMirror(canonical, [{ id: 'bot1', authDir: runtime }], loggerStub as any);
+    await mirror.initialize();
+    await fs.writeFile(path.join(runtime, 'auth.json_work'), auth('acct-team', '2026-05-27T00:00:00.000Z', {
+      userId: 'user-b',
+      email: 'b@example.test',
+    }));
 
     assert.equal(await mirror.syncRuntimeCandidate('bot1', 'auth.json_work'), false);
     assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), original);
@@ -348,6 +385,35 @@ test('AuthCandidateMirror does not recover a newer credential from a different a
     ], loggerStub as any);
     await mirror.initialize();
     await fs.writeFile(path.join(a, 'auth.json_work'), auth('acct-2', '2026-05-27T00:00:00.000Z'));
+
+    assert.equal(await mirror.recoverRuntimeCandidate('bot2', 'auth.json_work'), null);
+    assert.equal(await fs.readFile(path.join(b, 'auth.json_work'), 'utf8'), original);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('AuthCandidateMirror does not recover a newer credential from a different ChatGPT user on the same account', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-recover-user-conflict-'));
+  const canonical = path.join(root, 'canonical');
+  const a = path.join(root, 'bot1');
+  const b = path.join(root, 'bot2');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const original = auth('acct-team', '2026-05-01T00:00:00.000Z', {
+      userId: 'user-a',
+      email: 'a@example.test',
+    });
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), original);
+    const mirror = new AuthCandidateMirror(canonical, [
+      { id: 'bot1', authDir: a },
+      { id: 'bot2', authDir: b },
+    ], loggerStub as any);
+    await mirror.initialize();
+    await fs.writeFile(path.join(a, 'auth.json_personal'), auth('acct-team', '2026-05-27T00:00:00.000Z', {
+      userId: 'user-b',
+      email: 'b@example.test',
+    }));
 
     assert.equal(await mirror.recoverRuntimeCandidate('bot2', 'auth.json_work'), null);
     assert.equal(await fs.readFile(path.join(b, 'auth.json_work'), 'utf8'), original);

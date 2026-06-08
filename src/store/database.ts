@@ -51,6 +51,7 @@ export interface CodexAuthQuotaSnapshotRecord {
   runtimeId: string;
   candidateName: string;
   accountId: string;
+  quotaIdentityId: string;
   capturedAtMs: number;
   planType: string | null;
   primaryWindowDurationMins: number | null;
@@ -241,6 +242,7 @@ export class BridgeStore {
         runtime_id TEXT NOT NULL,
         candidate_name TEXT NOT NULL,
         account_id TEXT NOT NULL,
+        quota_identity_id TEXT NOT NULL DEFAULT '',
         captured_at_ms INTEGER NOT NULL,
         plan_type TEXT,
         primary_window_duration_mins REAL,
@@ -268,6 +270,16 @@ export class BridgeStore {
     this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
+    this.ensureColumn('codex_auth_quota_snapshots', 'quota_identity_id', "TEXT NOT NULL DEFAULT ''");
+    this.db.prepare(`
+      UPDATE codex_auth_quota_snapshots
+      SET quota_identity_id = account_id
+      WHERE quota_identity_id = ''
+    `).run();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS codex_auth_quota_snapshots_quota_identity_idx
+        ON codex_auth_quota_snapshots(quota_identity_id);
+    `);
     migrateLegacyBridgeScopeIds(this.db);
   }
 
@@ -1129,6 +1141,7 @@ export class BridgeStore {
     runtimeId: string,
     candidateName: string,
     accountId: string,
+    quotaIdentityId: string,
     snapshot: Pick<
       CodexAuthQuotaSnapshotRecord,
       | 'capturedAtMs'
@@ -1144,6 +1157,7 @@ export class BridgeStore {
         runtime_id,
         candidate_name,
         account_id,
+        quota_identity_id,
         captured_at_ms,
         plan_type,
         primary_window_duration_mins,
@@ -1152,9 +1166,10 @@ export class BridgeStore {
         secondary_remaining_percent,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(runtime_id, candidate_name) DO UPDATE SET
         account_id = excluded.account_id,
+        quota_identity_id = excluded.quota_identity_id,
         captured_at_ms = excluded.captured_at_ms,
         plan_type = excluded.plan_type,
         primary_window_duration_mins = excluded.primary_window_duration_mins,
@@ -1166,6 +1181,7 @@ export class BridgeStore {
       runtimeId,
       candidateName,
       accountId,
+      quotaIdentityId,
       snapshot.capturedAtMs,
       snapshot.planType,
       snapshot.primaryWindowDurationMins,
@@ -1176,17 +1192,18 @@ export class BridgeStore {
     );
   }
 
-  listCodexAuthQuotaSnapshots(accountIds: string[]): CodexAuthQuotaSnapshotRecord[] {
-    const uniqueAccountIds = [...new Set(accountIds.filter(Boolean))];
-    if (uniqueAccountIds.length === 0) {
+  listCodexAuthQuotaSnapshots(quotaIdentityIds: string[]): CodexAuthQuotaSnapshotRecord[] {
+    const uniqueQuotaIdentityIds = [...new Set(quotaIdentityIds.filter(Boolean))];
+    if (uniqueQuotaIdentityIds.length === 0) {
       return [];
     }
-    const placeholders = uniqueAccountIds.map(() => '?').join(', ');
+    const placeholders = uniqueQuotaIdentityIds.map(() => '?').join(', ');
     const rows = this.db.prepare(`
       SELECT
         runtime_id,
         candidate_name,
         account_id,
+        quota_identity_id,
         captured_at_ms,
         plan_type,
         primary_window_duration_mins,
@@ -1195,12 +1212,13 @@ export class BridgeStore {
         secondary_remaining_percent,
         updated_at
       FROM codex_auth_quota_snapshots
-      WHERE account_id IN (${placeholders})
-    `).all(...uniqueAccountIds) as Array<Record<string, unknown>>;
+      WHERE quota_identity_id IN (${placeholders})
+    `).all(...uniqueQuotaIdentityIds) as Array<Record<string, unknown>>;
     return rows.map(row => ({
       runtimeId: String(row.runtime_id),
       candidateName: String(row.candidate_name),
       accountId: String(row.account_id),
+      quotaIdentityId: String(row.quota_identity_id),
       capturedAtMs: Number(row.captured_at_ms),
       planType: nullableString(row.plan_type),
       primaryWindowDurationMins: nullableNumber(row.primary_window_duration_mins),

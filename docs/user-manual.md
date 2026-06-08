@@ -359,7 +359,7 @@ FoxClaw recognizes candidate names in these forms:
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity matches, its refresh timestamp is newer, and the active app-server verifies it against the ChatGPT usage endpoint, preventing a same-name candidate from overwriting a different account. Before an auth switch or reload, FoxClaw also searches the other Codex homes for a newer credential with the same account ID, restores it into the requesting runtime, then verifies and mirrors it after restart.
+`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity and identifiable ChatGPT user/email identity are compatible, its refresh timestamp is newer, and the active app-server verifies it against the ChatGPT usage endpoint, preventing a same-name candidate from overwriting a different account or Team seat. Before an auth switch or reload, FoxClaw also searches the other Codex homes for a newer compatible credential, restores it into the requesting runtime, then verifies and mirrors it after restart.
 
 If you already have a working `auth.json`, you can save it as a candidate:
 
@@ -395,7 +395,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 `/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The panel shows 8 candidates per page and supports paging, `All / Enabled / Attention` filters, and `/auth list <keyword>` filename search for large local inventories. Panel text and buttons omit the repeated `auth.json_` prefix from standard candidate filenames, so `auth.json_personal` on disk renders as `personal`; files are not renamed, and search and commands still operate on the original candidates. `/auth use <n>` always uses the full-list candidate number, independent of panel paging.
 
-Candidate rows are prefixed with observed `window:remaining-percent` values. For example, a Plus account may show `5h:20|7d:25`, while an account with one monthly window may show `30d:97`. Buttons use a compact two-number `primary|secondary` form such as `20|25`; unknown values render as `—`. The current auth quota is refreshed when the panel opens; other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
+Candidate rows are prefixed with observed `window:remaining-percent` values. For example, a Plus account may show `5h:20|7d:25`, while an account with one monthly window may show `30d:97`. Buttons use a compact two-number `primary|secondary` form such as `20|25`; unknown values render as `—`. The current auth quota is refreshed when the panel opens; other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT quota identity, FoxClaw combines their cached quota snapshots by verified user/email identity under the account, so one bot's `/auth` panel can show quota information learned by another bot without mixing different seats on the same Team account.
 
 Approximation:
 
@@ -453,7 +453,7 @@ Safety boundaries:
 - Telegram only carries ciphertext. Auth contents, candidate names, account ids, and `last_refresh` live inside the AES-256-GCM encrypted payload.
 - FoxClaw only accepts sync files from bots listed in `AUTH_SYNC_PEERS`; wrong key, cluster, nonce, or payload validation never writes files.
 - Remote imports wait for global local idleness, temporarily switch to the candidate for app-server usage validation, and only then write the candidate.
-- A same-name candidate known to belong to a different account id is never overwritten.
+- A same-name candidate known to belong to a different account id, or to a different identifiable ChatGPT user/email under the same account, is never overwritten.
 - Cross-node recovery only pulls an already-held valid peer copy and does not rotate refresh tokens during recovery. If no peer has a usable copy, it stops and asks you to maintain auth manually. The background 9-day proactive refresh separately requests the cross-node refresh lease and skips that cycle if the lease is not granted.
 
 Dual-active behavior:
