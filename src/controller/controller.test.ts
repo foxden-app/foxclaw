@@ -4622,6 +4622,150 @@ test('startup preview cleanup recovers still-live app-server turns', async (t) =
   assert.equal(steers[0]?.input[0]?.text, 'continue after restart');
 });
 
+test('startup preview cleanup auto-resumes interrupted owned turns after restart', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-interrupted',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'interrupted',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [],
+  });
+  const started: any[] = [];
+  (rig.controller as any).app.startTurn = async (options: any) => {
+    started.push(options);
+    return { id: 'turn-resumed', status: 'inProgress' };
+  };
+  let renders = 0;
+  (rig.controller as any).queueTurnRender = async () => {
+    renders += 1;
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal(started.length, 1);
+  assert.equal(started[0]?.threadId, 'thread-1');
+  assert.match(started[0]?.input[0]?.text, /previous turn was running/);
+  assert.equal(started[0]?.cwd, rig.tempDir);
+  const active = getActiveTurnForTest(rig, 'telegram:99::root', 'turn-resumed');
+  assert.ok(active);
+  assert.equal(active.previewMessageId, 123);
+  assert.equal(rig.store.listActiveTurnPreviews()[0]?.turnId, 'turn-resumed');
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal(renders, 1);
+});
+
+test('startup preview cleanup reattaches an existing replacement live turn instead of auto-resuming', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-old',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'replacement live',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-current',
+      status: 'inProgress',
+      error: null,
+      items: [],
+    }],
+  });
+  let starts = 0;
+  (rig.controller as any).app.startTurn = async () => {
+    starts += 1;
+    return { id: 'turn-should-not-start', status: 'inProgress' };
+  };
+  (rig.controller as any).queueTurnRender = async () => {};
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal(starts, 0);
+  assert.ok(getActiveTurnForTest(rig, 'telegram:99::root', 'turn-current'));
+  assert.equal(rig.store.listActiveTurnPreviews()[0]?.turnId, 'turn-current');
+  assert.equal(rig.editedMessages.length, 0);
+});
+
+test('startup preview cleanup does not auto-resume completed turns after restart', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-completed',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'done',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'idle',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-completed',
+      status: 'completed',
+      error: null,
+      items: [],
+    }],
+  });
+  let starts = 0;
+  (rig.controller as any).app.startTurn = async () => {
+    starts += 1;
+    return { id: 'turn-should-not-start', status: 'inProgress' };
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal(starts, 0);
+  assert.equal((rig.controller as any).activeTurns.size, 0);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 0);
+  assert.equal(rig.editedMessages[0], 'Completed. See the reply below.');
+});
+
 test('startup preview cleanup keeps observed recovered turns read-only', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

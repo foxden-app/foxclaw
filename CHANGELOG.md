@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.25 - 2026-06-09
+
+### 中文
+- FoxClaw 重启后会优先重新接管 Codex app-server 中仍在运行的 live turn，包括 turn id 已变化但线程仍有 live turn 的情况，避免误开第二个续跑任务。
+- 如果重启前记录的活动 turn 已被 app-server 中断且没有完成结果，FoxClaw 会自动在同一线程启动一个“继续中断工作”的新 turn，并复用原 Telegram 状态卡继续更新，不再要求用户手动发送“继续”。
+- 如果旧 turn 已经完成，FoxClaw 只收尾旧状态卡，不会误触发自动续跑。
+
+### English
+- After a FoxClaw restart, live Codex app-server turns are reattached first, including cases where the live turn id changed but the thread still has an active turn, avoiding a duplicate resume turn.
+- If the previously tracked active turn was interrupted by the app-server restart and has no completed result, FoxClaw automatically starts a continuation turn in the same thread and reuses the existing Telegram status card.
+- If the old turn already completed, FoxClaw only retires the old status card and does not auto-resume it.
+
 ## 0.5.24 - 2026-06-09
 
 ### 中文

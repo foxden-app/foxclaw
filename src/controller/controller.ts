@@ -43,6 +43,7 @@ import type {
   CodexThreadGoal,
   CollaborationModeValue,
   GuidedPlanSessionRecord,
+  AppThreadSnapshot,
   AppTurnSnapshot,
   ModelInfo,
   PendingAttachmentBatchRecord,
@@ -8734,16 +8735,44 @@ export class BridgeSessionCore {
       return false;
     }
     const liveTurn = findLiveTurn(snapshot);
-    if (!liveTurn || liveTurn.turnId !== preview.turnId) {
+    if (liveTurn) {
+      if (
+        liveTurn.turnId === preview.turnId
+        && snapshot.activeFlags.includes('waitingOnUserInput')
+        && !this.hasPendingUserInputForTurn(preview.scopeId, preview.turnId)
+      ) {
+        return this.interruptOrphanWaitingUserInput(preview);
+      }
+      return this.attachRecoveredTurnPreview(preview, target, snapshot, liveTurn);
+    }
+    const previousTurn = snapshot.turns.find(turn => turn.turnId === preview.turnId) ?? null;
+    if (previousTurn && previousTurn.status !== 'inProgress') {
+      await this.retirePreviewMessage(
+        preview.scopeId,
+        preview.messageId,
+        t(this.localeForChat(preview.scopeId), 'completed_see_reply_below'),
+        preview.turnId,
+      );
+      return true;
+    }
+    if (preview.isObserved) {
       return false;
     }
-    if (
-      snapshot.activeFlags.includes('waitingOnUserInput')
-      && !this.hasPendingUserInputForTurn(preview.scopeId, preview.turnId)
-    ) {
-      return this.interruptOrphanWaitingUserInput(preview);
-    }
+    return this.resumeInterruptedTurnAfterRestart(preview, target);
+  }
 
+  private async attachRecoveredTurnPreview(
+    preview: {
+      scopeId: string;
+      threadId: string;
+      turnId: string;
+      messageId: number;
+      isObserved: boolean;
+    },
+    target: { chatId: string; chatType: string; topicId: number | null },
+    snapshot: AppThreadSnapshot,
+    liveTurn: AppTurnSnapshot,
+  ): Promise<boolean> {
     await this.stopWatchingScopeThread(preview.scopeId, preview.threadId);
     const active = this.createActiveTurnState(
       preview.scopeId,
@@ -8751,11 +8780,18 @@ export class BridgeSessionCore {
       target.chatType,
       target.topicId,
       preview.threadId,
-      preview.turnId,
+      liveTurn.turnId,
       preview.messageId,
       preview.isObserved,
     );
-    this.setActiveTurn(preview.scopeId, preview.turnId, active);
+    this.setActiveTurn(preview.scopeId, liveTurn.turnId, active);
+    this.store.saveActiveTurnPreview({
+      turnId: liveTurn.turnId,
+      scopeId: preview.scopeId,
+      threadId: preview.threadId,
+      messageId: preview.messageId,
+      isObserved: preview.isObserved,
+    });
     const watcher: ObservedThreadWatcher = {
       scopeId: preview.scopeId,
       chatId: target.chatId,
@@ -8765,7 +8801,7 @@ export class BridgeSessionCore {
       mode: 'app_snapshot',
       timer: null,
       cursor: seedObservedTurnCursor(liveTurn),
-      activeTurnId: preview.turnId,
+      activeTurnId: liveTurn.turnId,
       waitingOnApproval: snapshot.activeFlags.includes('waitingOnApproval'),
       sessionPath: null,
       sessionOffset: -1,
@@ -8780,10 +8816,76 @@ export class BridgeSessionCore {
     this.logger.info('telegram.preview_recovered', {
       scopeId: preview.scopeId,
       threadId: preview.threadId,
-      turnId: preview.turnId,
+      turnId: liveTurn.turnId,
+      previousTurnId: preview.turnId,
       isObserved: preview.isObserved,
     });
     return true;
+  }
+
+  private async resumeInterruptedTurnAfterRestart(
+    preview: {
+      scopeId: string;
+      threadId: string;
+      turnId: string;
+      messageId: number;
+    },
+    target: { chatId: string; chatType: string; topicId: number | null },
+  ): Promise<boolean> {
+    const locale = this.localeForChat(preview.scopeId);
+    const binding = {
+      threadId: preview.threadId,
+      cwd: this.store.getBinding(preview.scopeId)?.cwd ?? this.config.defaultCwd,
+    };
+    const input: TurnInput[] = [{
+      type: 'text',
+      text: t(locale, 'restart_auto_resume_prompt'),
+      text_elements: [],
+    }];
+    try {
+      await this.sendTyping(preview.scopeId);
+      const turnState = await this.startTurnWithRecovery(preview.scopeId, binding, input, {
+        recoverMissingThread: false,
+      });
+      if (turnState.collaborationMode === 'plan') {
+        this.store.setChatCollaborationMode(preview.scopeId, DEFAULT_COLLABORATION_MODE);
+      }
+      await this.registerActiveTurn(
+        preview.scopeId,
+        target.chatId,
+        target.chatType,
+        target.topicId,
+        turnState.threadId,
+        turnState.turnId,
+        preview.messageId,
+        {
+          input,
+          threadId: turnState.threadId,
+          cwd: binding.cwd,
+          chatId: target.chatId,
+          chatType: target.chatType,
+          topicId: target.topicId,
+          collaborationMode: turnState.collaborationMode,
+          failedAuthTargets: new Set(),
+        },
+        turnState.collaborationMode,
+      );
+      this.logger.info('telegram.preview_auto_resumed_after_restart', {
+        scopeId: preview.scopeId,
+        threadId: preview.threadId,
+        previousTurnId: preview.turnId,
+        turnId: turnState.turnId,
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn('telegram.preview_auto_resume_after_restart_failed', {
+        scopeId: preview.scopeId,
+        threadId: preview.threadId,
+        turnId: preview.turnId,
+        error: toErrorMeta(error),
+      });
+      return false;
+    }
   }
 
   private async interruptOrphanWaitingUserInput(preview: {
