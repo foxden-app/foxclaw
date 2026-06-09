@@ -3248,7 +3248,11 @@ export class BridgeSessionCore {
     scopeId: string,
     binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
     input: TurnInput[],
-    overrides: { collaborationMode?: CollaborationModeValue | null | undefined; recoverMissingThread?: boolean | undefined } = {},
+    overrides: {
+      collaborationMode?: CollaborationModeValue | null | undefined;
+      recoverMissingThread?: boolean | undefined;
+      notifyMissingThread?: boolean | undefined;
+    } = {},
   ): Promise<{ threadId: string; turnId: string; collaborationMode: CollaborationModeValue }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
@@ -3280,7 +3284,9 @@ export class BridgeSessionCore {
       }
       this.logger.warn('codex.turn_thread_not_found', { scopeId, threadId: binding.threadId });
       const replacement = await this.createBinding(scopeId, binding.cwd ?? this.config.defaultCwd);
-      await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
+      if (overrides.notifyMissingThread !== false) {
+        await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
+      }
       const nextSettings = this.store.getChatSettings(scopeId);
       const nextAccess = this.resolveEffectiveAccess(scopeId, nextSettings);
       const replacementCwd = replacement.cwd ?? this.config.defaultCwd;
@@ -8839,7 +8845,7 @@ export class BridgeSessionCore {
     }
     const snapshot = await this.app.readThreadSnapshot(preview.threadId);
     if (!snapshot) {
-      return false;
+      return preview.isObserved ? false : this.resumeInterruptedTurnAfterRestart(preview, target);
     }
     const liveTurn = findLiveTurn(snapshot);
     if (liveTurn) {
@@ -8955,7 +8961,7 @@ export class BridgeSessionCore {
     try {
       await this.sendTyping(preview.scopeId);
       const turnState = await this.startTurnWithRecovery(preview.scopeId, binding, input, {
-        recoverMissingThread: false,
+        notifyMissingThread: false,
       });
       if (turnState.collaborationMode === 'plan') {
         this.store.setChatCollaborationMode(preview.scopeId, DEFAULT_COLLABORATION_MODE);

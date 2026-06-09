@@ -4714,6 +4714,65 @@ test('startup preview cleanup defers recovery when restarted app-server thread i
   assert.equal((rig.controller as any).activeTurns.size, 0);
 });
 
+test('startup preview cleanup auto-resumes on a replacement thread when the old thread is gone', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearRestartPreviewRecoveryTimers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-interrupted',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'interrupted',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [],
+  });
+  const starts: any[] = [];
+  (rig.controller as any).app.startTurn = async (options: any) => {
+    starts.push(options);
+    if (options.threadId === 'thread-1') {
+      throw new Error('thread not found: thread-1');
+    }
+    return { id: 'turn-resumed', status: 'inProgress' };
+  };
+  let renders = 0;
+  (rig.controller as any).queueTurnRender = async () => {
+    renders += 1;
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal(starts.length, 2);
+  assert.equal(starts[0]?.threadId, 'thread-1');
+  assert.equal(starts[1]?.threadId, 'thread-new');
+  assert.match(starts[1]?.input[0]?.text, /previous thread context is unavailable/);
+  const active = getActiveTurnForTest(rig, 'telegram:99::root', 'turn-resumed');
+  assert.ok(active);
+  assert.equal(active.threadId, 'thread-new');
+  assert.equal(active.previewMessageId, 123);
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-new');
+  assert.equal(rig.store.listActiveTurnPreviews()[0]?.turnId, 'turn-resumed');
+  assert.equal(rig.sentMessages.length, 0);
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal((rig.controller as any).restartPreviewRecoveryTimers.size, 0);
+  assert.equal(renders, 1);
+});
+
 test('startup preview cleanup reattaches an existing replacement live turn instead of auto-resuming', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

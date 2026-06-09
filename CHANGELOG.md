@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.29 - 2026-06-09
+
+### 中文
+- 重启自动续接遇到旧 Codex thread 永久 `thread not found` 时，会静默创建 replacement thread 并复用原 Telegram 状态卡继续跑，不再只反复等待旧 thread 恢复。
+- 自动续接提示补充了无上下文兜底指令：如果旧线程上下文不可用，会检查当前工作目录、git 状态、服务日志和运行状态后完成收尾总结。
+
+### English
+- Restart auto-resume now silently creates a replacement thread when the old Codex thread remains `thread not found`, reusing the original Telegram status card instead of only waiting for the old thread to recover.
+- The auto-resume prompt now includes a no-context fallback: inspect the current working directory, git status, service logs, and runtime state before finishing the user-facing summary.
+
 ## 0.5.28 - 2026-06-09
 
 ### 中文
