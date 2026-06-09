@@ -1588,6 +1588,41 @@ test('/auth switch validates selected candidate and marks unusable auth for repa
   ]);
 });
 
+test('/auth switch does not mark quota-limited candidates for repair or auto-delete', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).config.authAutoDeleteNeedsRepair = true;
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => {
+    throw new Error("You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro).");
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:1`, 1));
+
+  assert.equal(restarts, 2);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.equal(fs.existsSync(path.join(authDir, 'auth.json_b')), true);
+  assert.notEqual(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
+  assert.equal(rig.store.getCodexAuthPoolStats().deletedInvalid, 0);
+  assert.match(rig.editedMessages.at(-1)!, /Selected auth hit a Codex usage limit/);
+  assert.match(rig.editedMessages.at(-1)!, /It was not marked invalid/);
+  assert.match(rig.editedMessages.at(-1)!, /Restored the previous auth after the failed switch/);
+});
+
 test('/auth sync commands report status, test peers, and push all', async (t) => {
   let pushed = false;
   let tested = false;

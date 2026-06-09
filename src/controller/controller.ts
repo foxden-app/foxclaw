@@ -361,6 +361,7 @@ interface CodexAuthSwitchOutcome extends CodexAuthSwitchResult {
   candidateName: string;
   recovered: boolean;
   error: string | null;
+  validationFailureKind: CodexAuthRotationReason | null;
   restoredPrevious: boolean;
   autoDeleted: boolean;
   deleteRestarted: boolean;
@@ -6920,13 +6921,19 @@ export class BridgeSessionCore {
           error: toErrorMeta(error),
         });
       }
-      const repairDisposition = await this.markCodexAuthCandidateNeedsRepair(candidate.name);
+      const validationFailureKind: CodexAuthRotationReason = isCodexQuotaLimitError(validation.error)
+        ? 'quota_limited'
+        : 'auth_invalid';
+      const repairDisposition = validationFailureKind === 'auth_invalid'
+        ? await this.markCodexAuthCandidateNeedsRepair(candidate.name)
+        : { deleted: false, restarted: false };
       const outcome: CodexAuthSwitchOutcome = {
         ...result,
         ok: false,
         candidateName: candidate.name,
         recovered,
         error: validation.error,
+        validationFailureKind,
         restoredPrevious,
         autoDeleted: repairDisposition.deleted,
         deleteRestarted: repairDisposition.restarted,
@@ -6946,6 +6953,7 @@ export class BridgeSessionCore {
       candidateName: candidate.name,
       recovered,
       error: null,
+      validationFailureKind: null,
       restoredPrevious: false,
       autoDeleted: false,
       deleteRestarted: false,
@@ -7014,7 +7022,9 @@ export class BridgeSessionCore {
     if (outcome.ok) {
       return [];
     }
-    const validationKey = outcome.autoDeleted && this.config.authAutoDeleteNeedsRepair
+    const validationKey = outcome.validationFailureKind === 'quota_limited'
+      ? 'auth_switch_validation_quota_limited'
+      : outcome.autoDeleted && this.config.authAutoDeleteNeedsRepair
       ? 'auth_switch_validation_auto_deleted_quiet'
       : outcome.autoDeleted
         ? 'auth_switch_validation_auto_deleted'

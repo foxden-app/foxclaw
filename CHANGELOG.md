@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.23 - 2026-06-09
+
+### 中文
+- 补齐切换后验证路径：如果目标候选在验证 rate-limit usage 时返回 usage/rate/quota/billing/credits limit，FoxClaw 会恢复到原 auth，但不会把目标候选标记为 `?`，也不会触发自动剔除。
+- 这让额度耗尽在自动轮换、手动切换和验证失败提示里都保持同一语义：它只是暂时没额度，不是凭据失效。
+
+### English
+- Completed the post-switch validation path: if the selected candidate returns a usage/rate/quota/billing/credits limit while validating rate-limit usage, FoxClaw restores the previous auth but does not mark the selected candidate `?` or auto-delete it.
+- Quota exhaustion now has the same meaning across automatic rotation, manual switching, and validation failure messages: temporarily out of quota, not an invalid credential.
+
 ## 0.5.22 - 2026-06-09
 
 ### 中文
