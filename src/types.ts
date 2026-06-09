@@ -476,6 +476,17 @@ export interface RuntimeStatus {
       detail: string | null;
     }>;
   } | null;
+  authProactiveRefresh?: {
+    state: 'running' | 'completed' | 'lease_failed' | 'failed';
+    startedAt: string;
+    finishedAt: string | null;
+    candidates: string[];
+    refreshed: number;
+    skipped: number;
+    failed: number;
+    error: string | null;
+    details: string[];
+  } | null;
   lastUpdate?: {
     state: string;
     fromVersion: string;

@@ -25,7 +25,7 @@ import {
   type AuthRefreshNotificationAggregator,
 } from './auth/notifications.js';
 import type { CodexAuthPoolStats } from './store/database.js';
-import type { AppLocale } from './types.js';
+import type { AppLocale, RuntimeStatus } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 import {
@@ -360,6 +360,7 @@ async function runServeCli(): Promise<void> {
           validate: async (context) => validateRefreshedAuthCandidate(runtime, context.candidateName),
           notify: createAuthMirrorNotifier(store!, runtime.id, runtime.bot, authNotificationAggregator, {
             quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+            suppressBackgroundNotifications: () => true,
           }),
         })),
         logger,
@@ -389,6 +390,7 @@ async function runServeCli(): Promise<void> {
       const writeAggregateStatus = (running = true): void => {
         const statuses = runtimes.map((runtime) => runtime.core.getRuntimeStatus());
         const weixinStatus = activeWeixinCore?.getRuntimeStatus() ?? null;
+        const authProactiveRefresh = newestAuthProactiveRefreshStatus([...statuses, ...(weixinStatus ? [weixinStatus] : [])]);
         const first = statuses[0] ?? null;
         writeRuntimeStatus(config.statusPath, {
           running,
@@ -426,6 +428,7 @@ async function runServeCli(): Promise<void> {
           } : {}),
           authMirror: mirror.getStatus(),
           authSync: authSync?.getStatus() ?? null,
+          authProactiveRefresh,
           lastUpdate: lastSelfUpdate,
         });
       };
@@ -493,6 +496,10 @@ async function runServeCli(): Promise<void> {
           } : {}),
           authMirror: mirror.getStatus(),
           authSync: authSync?.getStatus() ?? null,
+          authProactiveRefresh: newestAuthProactiveRefreshStatus([
+            ...runtimes.map(runtime => runtime.core.getRuntimeStatus()),
+            ...(activeWeixinCore ? [activeWeixinCore.getRuntimeStatus()] : []),
+          ]),
           lastUpdate: lastSelfUpdate,
         }),
         selfUpdateCompleted: (status: import('./update.js').SelfUpdateStatus): void => {
@@ -583,6 +590,7 @@ async function runServeCli(): Promise<void> {
             isIdle: authSyncLocalIdle,
             notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot, authNotificationAggregator, {
               quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+              suppressBackgroundNotifications: () => true,
             }),
           },
         );
@@ -776,6 +784,7 @@ async function runServeCli(): Promise<void> {
           isIdle: singleAuthSyncLocalIdle,
           notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator, {
             quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+            suppressBackgroundNotifications: () => true,
           }),
         },
       );
@@ -865,10 +874,12 @@ interface AuthSyncNotifyStore {
 
 interface AuthSyncNotifierOptions {
   quietAuthPoolMode?: () => boolean;
+  suppressBackgroundNotifications?: () => boolean;
 }
 
 interface AuthMirrorNotifierOptions {
   quietAuthPoolMode?: () => boolean;
+  suppressBackgroundNotifications?: () => boolean;
 }
 
 interface AuthMirrorNotifyBot {
@@ -883,6 +894,7 @@ function createAuthMirrorNotifier(
   options: AuthMirrorNotifierOptions = {},
 ): (event: AuthMirrorNotification) => Promise<void> {
   return async (event: AuthMirrorNotification): Promise<void> => {
+    if (options.suppressBackgroundNotifications?.()) return;
     if (options.quietAuthPoolMode?.()) return;
     const privateScope = store.getTelegramPrivateScope(botId);
     if (!privateScope) return;
@@ -931,6 +943,7 @@ function createAuthSyncNotifier(
   };
 
   return async (event: AuthSyncNotification): Promise<void> => {
+    if (options.suppressBackgroundNotifications?.()) return;
     if (!bot.identity) return;
     const privateScope = store.getTelegramPrivateScope(bot.identity);
     if (!privateScope) return;
@@ -961,6 +974,20 @@ function formatAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): st
   return locale === 'zh'
     ? `auth 池：历史 ${stats.totalSeen}，存活 ${stats.alive}，因失效剔除 ${stats.deletedInvalid}。`
     : `Auth pool: total seen ${stats.totalSeen}, alive ${stats.alive}, invalid-deleted ${stats.deletedInvalid}.`;
+}
+
+function newestAuthProactiveRefreshStatus(
+  statuses: RuntimeStatus[],
+): NonNullable<RuntimeStatus['authProactiveRefresh']> | null {
+  const entries = statuses
+    .map(status => status.authProactiveRefresh ?? null)
+    .filter((status): status is NonNullable<RuntimeStatus['authProactiveRefresh']> => status !== null);
+  if (entries.length === 0) return null;
+  return entries.reduce((newest, status) => {
+    const newestTime = newest.finishedAt ?? newest.startedAt;
+    const statusTime = status.finishedAt ?? status.startedAt;
+    return Date.parse(statusTime) >= Date.parse(newestTime) ? status : newest;
+  });
 }
 
 function isQuietAuthPoolNotification(event: AuthSyncNotification): boolean {

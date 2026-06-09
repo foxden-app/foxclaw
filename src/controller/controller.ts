@@ -135,6 +135,8 @@ import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
 const AUTH_DELETE_REASON_NEEDS_REPAIR = 'needs_repair';
 
+type AuthProactiveRefreshStatus = NonNullable<RuntimeStatus['authProactiveRefresh']>;
+
 export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
@@ -152,6 +154,7 @@ export interface CoreCoordinator {
     weixinRuntime?: RuntimeStatus['weixinRuntime'];
     authMirror?: RuntimeStatus['authMirror'];
     authSync?: RuntimeStatus['authSync'];
+    authProactiveRefresh?: AuthProactiveRefreshStatus | null;
     lastUpdate?: SelfUpdateStatus | null;
   }>;
   selfUpdateCompleted?: (status: SelfUpdateStatus) => void;
@@ -573,7 +576,7 @@ export class BridgeSessionCore {
   private selfUpdatePollTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshInProgress = false;
-  private proactiveAuthRefreshStatusMessage: { chatId: string; messageId: number } | null = null;
+  private proactiveAuthRefreshStatus: AuthProactiveRefreshStatus | null = null;
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -729,6 +732,7 @@ export class BridgeSessionCore {
         telegram: this.ownsTelegramRuntime,
         weixin: Boolean(this.config.wxEnabled && this.messaging.hasWeixinTransport),
       },
+      authProactiveRefresh: this.proactiveAuthRefreshStatus,
     };
   }
 
@@ -928,6 +932,11 @@ export class BridgeSessionCore {
                   .join('; '),
               }));
             }
+          }
+          if (serviceStatus.authProactiveRefresh) {
+            lines.push(t(locale, 'status_auth_proactive_refresh', {
+              value: formatAuthProactiveRefreshStatus(locale, serviceStatus.authProactiveRefresh),
+            }));
           }
           if (serviceStatus.lastUpdate) {
             lines.push(t(locale, 'status_last_update', {
@@ -5438,61 +5447,71 @@ export class BridgeSessionCore {
     }
 
     this.proactiveAuthRefreshInProgress = true;
-    const locale = this.proactiveAuthRefreshLocale();
-    await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_starting', {
-      value: dueCandidates.map(candidate => candidate.name).join(', '),
-    }));
+    const startedAt = new Date().toISOString();
+    const dueCandidateNames = dueCandidates.map(candidate => candidate.name);
+    this.recordProactiveAuthRefreshStatus({
+      state: 'running',
+      startedAt,
+      finishedAt: null,
+      candidates: dueCandidateNames,
+      refreshed: 0,
+      skipped: 0,
+      failed: 0,
+      error: null,
+      details: [],
+    });
     let lease: { ok: boolean; leaseId: string | null; reason?: string | null } | undefined;
     try {
-      lease = await this.coordinator?.acquireAuthRefreshLease?.(`proactive auth refresh: ${dueCandidates.map(candidate => candidate.name).join(', ')}`);
+      lease = await this.coordinator?.acquireAuthRefreshLease?.(`proactive auth refresh: ${dueCandidateNames.join(', ')}`);
       if (lease && !lease.ok) {
         this.logger.warn('codex.auth_proactive_refresh_lease_failed', { reason: lease.reason });
-        await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_lease_failed', {
-          error: lease.reason ?? t(locale, 'unknown'),
-        }), true);
+        this.recordProactiveAuthRefreshStatus({
+          state: 'lease_failed',
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          candidates: dueCandidateNames,
+          refreshed: 0,
+          skipped: 0,
+          failed: 0,
+          error: lease.reason ?? 'unknown',
+          details: [],
+        });
         return;
       }
-      const result = await this.refreshCodexAuthCandidates(new Set(dueCandidates.map(candidate => candidate.name)));
-      await this.notifyProactiveAuthRefresh(locale, formatAuthRefreshAllResult(locale, result, 'proactive'), true);
+      const result = await this.refreshCodexAuthCandidates(new Set(dueCandidateNames));
+      this.recordProactiveAuthRefreshStatus({
+        state: 'completed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        candidates: dueCandidateNames,
+        refreshed: result.refreshed.length,
+        skipped: result.skipped.length,
+        failed: result.failed.length,
+        error: result.failed.length > 0 ? `${result.failed.length} failed` : null,
+        details: result.failed.slice(0, 5).map(failure => `${failure.name}: ${failure.error}`),
+      });
+    } catch (error) {
+      this.recordProactiveAuthRefreshStatus({
+        state: 'failed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        candidates: dueCandidateNames,
+        refreshed: 0,
+        skipped: 0,
+        failed: dueCandidateNames.length,
+        error: formatUserError(error),
+        details: [],
+      });
+      throw error;
     } finally {
       await this.coordinator?.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
       this.proactiveAuthRefreshInProgress = false;
     }
   }
 
-  private proactiveAuthRefreshLocale(): AppLocale {
-    const identity = this.bot.identity;
-    if (!identity) return 'en';
-    const privateScope = this.store.getTelegramPrivateScope(identity);
-    if (!privateScope) return 'en';
-    return this.localeForChat(privateScope.scopeId);
-  }
-
-  private async notifyProactiveAuthRefresh(locale: AppLocale, message: string, final = false): Promise<void> {
-    const identity = this.bot.identity;
-    if (!identity) return;
-    const privateScope = this.store.getTelegramPrivateScope(identity);
-    if (!privateScope) return;
-    const previous = this.proactiveAuthRefreshStatusMessage;
-    if (previous?.chatId === privateScope.chatId) {
-      try {
-        await this.bot.editMessage(privateScope.chatId, previous.messageId, message, []);
-        if (final) {
-          this.proactiveAuthRefreshStatusMessage = null;
-        }
-        return;
-      } catch (error) {
-        this.logger.warn('codex.auth_proactive_refresh_notify_edit_failed', { error: toErrorMeta(error) });
-      }
-    }
-    await this.bot.sendMessage(privateScope.chatId, message).then((messageId) => {
-      this.proactiveAuthRefreshStatusMessage = final ? null : { chatId: privateScope.chatId, messageId };
-    }).catch((error) => {
-      if (final) {
-        this.proactiveAuthRefreshStatusMessage = null;
-      }
-      this.logger.warn('codex.auth_proactive_refresh_notify_failed', { error: toErrorMeta(error) });
-    });
+  private recordProactiveAuthRefreshStatus(status: AuthProactiveRefreshStatus): void {
+    this.proactiveAuthRefreshStatus = status;
+    this.updateStatus();
   }
 
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -5550,7 +5569,11 @@ export class BridgeSessionCore {
   private async handleAuthSyncCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase() ?? 'status';
     if (action === 'status') {
-      await this.sendMessage(scopeId, formatAuthSyncStatus(locale, this.coordinator?.getAuthSyncStatus?.() ?? null));
+      await this.sendMessage(scopeId, formatAuthSyncStatus(
+        locale,
+        this.coordinator?.getAuthSyncStatus?.() ?? null,
+        this.getRuntimeStatus().authProactiveRefresh ?? null,
+      ));
       return;
     }
     if (action === 'events') {
@@ -10948,7 +10971,11 @@ function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshA
   return lines.join('\n');
 }
 
-function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync']): string {
+function formatAuthSyncStatus(
+  locale: AppLocale,
+  status: RuntimeStatus['authSync'],
+  proactiveRefresh: AuthProactiveRefreshStatus | null = null,
+): string {
   if (!status?.enabled) {
     return t(locale, 'auth_sync_disabled');
   }
@@ -10976,6 +11003,11 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
   }
   if (status.lastError) {
     lines.push(t(locale, 'auth_sync_status_error', { value: status.lastError }));
+  }
+  if (proactiveRefresh) {
+    lines.push(t(locale, 'auth_sync_status_proactive_refresh', {
+      value: formatAuthProactiveRefreshStatus(locale, proactiveRefresh),
+    }));
   }
   if (status.peerStatuses?.length) {
     lines.push(t(locale, 'auth_sync_status_peer_activity'));
@@ -11006,6 +11038,60 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
     }
   }
   return lines.join('\n');
+}
+
+function formatAuthProactiveRefreshStatus(
+  locale: AppLocale,
+  status: AuthProactiveRefreshStatus,
+): string {
+  const time = status.finishedAt ?? status.startedAt;
+  const candidates = formatLimitedList(status.candidates, 3);
+  const state = formatAuthProactiveRefreshState(locale, status.state);
+  const result = locale === 'zh'
+    ? `已刷新 ${status.refreshed}，已跳过 ${status.skipped}，失败 ${status.failed}`
+    : `refreshed ${status.refreshed}, skipped ${status.skipped}, failed ${status.failed}`;
+  const parts = [
+    `${state} @ ${time}`,
+    locale === 'zh' ? `候选 ${candidates}` : `candidates ${candidates}`,
+    result,
+  ];
+  if (status.error) {
+    parts.push(locale === 'zh'
+      ? `原因 ${formatShortStatusError(status.error)}`
+      : `reason ${formatShortStatusError(status.error)}`);
+  }
+  if (status.details.length > 0) {
+    parts.push(locale === 'zh'
+      ? `明细 ${formatLimitedList(status.details.map(formatShortStatusError), 2)}`
+      : `details ${formatLimitedList(status.details.map(formatShortStatusError), 2)}`);
+  }
+  return parts.join('; ');
+}
+
+function formatAuthProactiveRefreshState(
+  locale: AppLocale,
+  state: AuthProactiveRefreshStatus['state'],
+): string {
+  if (locale === 'zh') {
+    switch (state) {
+      case 'running': return '进行中';
+      case 'completed': return '已完成';
+      case 'lease_failed': return '锁未授予';
+      case 'failed': return '失败';
+    }
+  }
+  switch (state) {
+    case 'running': return 'running';
+    case 'completed': return 'completed';
+    case 'lease_failed': return 'lease not granted';
+    case 'failed': return 'failed';
+  }
+}
+
+function formatLimitedList(values: readonly string[], limit: number): string {
+  if (values.length === 0) return '-';
+  const shown = values.slice(0, limit).join(', ');
+  return values.length > limit ? `${shown}, +${values.length - limit}` : shown;
 }
 
 type AuthSyncRuntimeStatus = NonNullable<RuntimeStatus['authSync']>;

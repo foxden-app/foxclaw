@@ -2369,6 +2369,24 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
     authCandidateUpdated: async (runtimeId, candidateName) => {
       events.push(`sync:${runtimeId}:${candidateName}`);
     },
+    getAuthSyncStatus: () => ({
+      enabled: true,
+      nodeId: 'node-a',
+      transportLabel: '@botA',
+      peers: ['@botB'],
+      pendingImports: 0,
+      lastSentAt: null,
+      lastReceivedAt: null,
+      lastImportedAt: null,
+      lastImportCandidate: null,
+      lastPullAt: null,
+      lastPullCandidate: null,
+      lastError: null,
+      activeLeaseId: null,
+      peerStatuses: [],
+      candidateFailures: [],
+      recentEvents: [],
+    }),
   });
   t.after(() => {
     rig.store.close();
@@ -2419,11 +2437,45 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
     'sync:default:auth.json_a',
     'release:lease-proactive',
   ]);
-  assert.match(rig.sentMessages[0]!, /Proactive auth refresh started/);
-  assert.match(rig.editedMessages.at(-1)!, /Proactive auth refresh complete: 1 refreshed, 0 skipped, 0 failed/);
+  assert.equal(rig.sentMessages.length, 0);
+  assert.equal(rig.editedMessages.length, 0);
+  const proactiveStatus = (rig.controller as any).getRuntimeStatus().authProactiveRefresh;
+  assert.equal(proactiveStatus.state, 'completed');
+  assert.deepEqual(proactiveStatus.candidates, ['auth.json_a']);
+  assert.equal(proactiveStatus.refreshed, 1);
+  assert.equal(proactiveStatus.skipped, 0);
+  assert.equal(proactiveStatus.failed, 0);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_c'), 'utf8'), /2026-02-01T00:00:00.000Z/);
+
+  await (rig.controller as any).handleCommand(createEvent('/auth sync status'), 'en', 'auth', ['sync', 'status']);
+  assert.match(rig.sentMessages[0]!, /Recent proactive refresh:/);
+  assert.match(rig.sentMessages[0]!, /completed/);
+  assert.match(rig.sentMessages[0]!, /auth\.json_a/);
+});
+
+test('proactive auth refresh lease failures are stored for status without pushing messages', async (t) => {
+  const rig = createControllerRig(null, {
+    acquireAuthRefreshLease: async () => ({ ok: false, leaseId: null, reason: '@botB: runtime is not idle' }),
+    releaseAuthRefreshLease: async () => {},
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.store.rememberTelegramPrivateScope('bot1', 'telegram:99::root', '99');
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', '2026-01-01T00:00:00.000Z');
+
+  await (rig.controller as any).runProactiveAuthRefresh();
+
+  assert.equal(rig.sentMessages.length, 0);
+  assert.equal(rig.editedMessages.length, 0);
+  const proactiveStatus = (rig.controller as any).getRuntimeStatus().authProactiveRefresh;
+  assert.equal(proactiveStatus.state, 'lease_failed');
+  assert.deepEqual(proactiveStatus.candidates, ['auth.json_a']);
+  assert.equal(proactiveStatus.error, '@botB: runtime is not idle');
 });
 
 test('plain messages wait while external auth validation restarts app-server', async (t) => {
