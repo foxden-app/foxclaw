@@ -4770,6 +4770,63 @@ test('startup preview cleanup auto-resumes completed empty turns after restart',
   assert.equal(rig.editedMessages.length, 0);
 });
 
+test('startup preview cleanup auto-resumes completed turns with only commentary after restart', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-completed',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'progress only',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'idle',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [{
+      turnId: 'turn-completed',
+      status: 'completed',
+      error: null,
+      items: [{
+        itemId: 'item-1',
+        type: 'agentMessage',
+        phase: 'commentary',
+        text: 'Now upgrading the local FoxClaw service.',
+        command: null,
+        status: null,
+        aggregatedOutput: null,
+      }],
+    }],
+  });
+  const started: any[] = [];
+  (rig.controller as any).app.startTurn = async (options: any) => {
+    started.push(options);
+    return { id: 'turn-resumed', status: 'inProgress' };
+  };
+  (rig.controller as any).queueTurnRender = async () => {};
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal(started.length, 1);
+  assert.equal(started[0]?.threadId, 'thread-1');
+  assert.match(started[0]?.input[0]?.text, /previous turn was running/);
+  assert.ok(getActiveTurnForTest(rig, 'telegram:99::root', 'turn-resumed'));
+  assert.equal(rig.store.listActiveTurnPreviews()[0]?.turnId, 'turn-resumed');
+  assert.equal(rig.editedMessages.length, 0);
+});
+
 test('startup preview cleanup does not auto-resume completed turns with output after restart', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

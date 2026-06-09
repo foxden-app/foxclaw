@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.27 - 2026-06-09
+
+### 中文
+- 重启续接的完成判定进一步收窄：只有 final/final_answer 类 assistant 输出、plan 输出或明确错误才算已有完成结果。
+- 如果旧 turn 只有 commentary 进度消息，例如“正在升级本机服务”，重启后仍会自动续跑，避免状态卡显示“已完成”但没有真正收尾回复。
+
+### English
+- Tightened restart recovery completion detection: only final/final_answer assistant output, plan output, or an explicit error now counts as a completed result.
+- If the previous turn only had commentary progress such as "upgrading the local service", FoxClaw still auto-resumes it after restart instead of retiring the status card as completed without a real final reply.
+
 ## 0.5.26 - 2026-06-09
 
 ### 中文

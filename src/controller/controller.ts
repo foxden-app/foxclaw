@@ -10132,10 +10132,17 @@ function turnHasRelayableOutcome(turn: AppTurnSnapshot): boolean {
   }
   return turn.items.some((item) => {
     const type = item.type.toLowerCase();
-    return (
-      (type === 'agentmessage' || type === 'assistantmessage' || type === 'plan')
-      && Boolean(item.text?.trim())
-    );
+    if (!item.text?.trim()) {
+      return false;
+    }
+    if (type === 'plan') {
+      return true;
+    }
+    if (type !== 'agentmessage' && type !== 'assistantmessage') {
+      return false;
+    }
+    const phase = item.phase?.toLowerCase() ?? null;
+    return phase === null || phase.startsWith('final');
   });
 }
 
