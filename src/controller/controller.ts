@@ -8747,6 +8747,9 @@ export class BridgeSessionCore {
     }
     const previousTurn = snapshot.turns.find(turn => turn.turnId === preview.turnId) ?? null;
     if (previousTurn && previousTurn.status !== 'inProgress') {
+      if (!turnHasRelayableOutcome(previousTurn)) {
+        return this.resumeInterruptedTurnAfterRestart(preview, target);
+      }
       await this.retirePreviewMessage(
         preview.scopeId,
         preview.messageId,
@@ -10121,6 +10124,19 @@ function summarizeTurnItems(items: AppTurnSnapshot['items']): string {
     .slice(0, 8)
     .map(([type, count]) => `${type}=${count}`)
     .join(', ');
+}
+
+function turnHasRelayableOutcome(turn: AppTurnSnapshot): boolean {
+  if (turn.error?.trim()) {
+    return true;
+  }
+  return turn.items.some((item) => {
+    const type = item.type.toLowerCase();
+    return (
+      (type === 'agentmessage' || type === 'assistantmessage' || type === 'plan')
+      && Boolean(item.text?.trim())
+    );
+  });
 }
 
 function mapGoalNotification(raw: any): CodexThreadGoal | null {

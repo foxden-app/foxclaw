@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.26 - 2026-06-09
+
+### 中文
+- 修正重启续接判定：如果 Codex app-server 把被重启打断的旧 turn 标成 completed，但没有任何可转发的 assistant/plan 输出或错误内容，FoxClaw 会把它当作中断任务自动续跑，而不是把 Telegram 状态卡误改成“已完成”。
+- 已经有明确输出或错误结果的 completed turn 仍按完成处理，避免对真实完成的任务重复续跑。
+
+### English
+- Fixed restart recovery detection: if the Codex app-server marks a restart-interrupted turn as completed but it has no relayable assistant/plan output or error, FoxClaw now treats it as interrupted and auto-resumes it instead of retiring the Telegram status card as completed.
+- Completed turns that do have output or an error are still treated as finished, avoiding duplicate resume runs for truly completed work.
+
 ## 0.5.25 - 2026-06-09
 
 ### 中文
