@@ -437,9 +437,12 @@ interface AuthRetryContext {
   failedAuthTargets: Set<string>;
 }
 
+type CodexAuthRotationReason = 'auth_invalid' | 'quota_limited';
+
 interface PendingAuthRotation {
   scopeId: string;
   reason: string;
+  reasonKind: CodexAuthRotationReason;
   retry: AuthRetryContext | null;
 }
 
@@ -1939,7 +1942,8 @@ export class BridgeSessionCore {
       : threadId
         ? this.findActiveTurnsByThreadId(threadId)
         : [];
-    const isAuthRotationError = isCodexAuthRotationError(params);
+    const authRotationReason = classifyCodexAuthRotationError(params);
+    const isAuthRotationError = authRotationReason !== null;
     const willRetry = params?.willRetry === true;
     const active = isAuthRotationError
       ? activeTurns.find(turn => turn.authRetry !== null) ?? activeTurns.find(turn => !turn.isObserved) ?? activeTurns[0] ?? null
@@ -1952,12 +1956,13 @@ export class BridgeSessionCore {
     } else if (turnId) {
       this.pendingTurnErrors.set(turnId, message);
     }
-    if (isAuthRotationError && !willRetry && active?.authRetry) {
+    if (authRotationReason && !willRetry && active?.authRetry) {
       const scopeId = active.scopeId;
       if (scopeId) {
         this.pendingAuthRotation = {
           scopeId,
           reason: message,
+          reasonKind: authRotationReason,
           retry: cloneAuthRetryContext(active.authRetry),
         };
       }
@@ -6696,7 +6701,7 @@ export class BridgeSessionCore {
       const failedTargets = rotation.retry?.failedAuthTargets ?? this.authRotationFailedTargets;
       const locale = this.localeForChat(rotation.scopeId);
       const current = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
-      if (current) {
+      if (current && rotation.reasonKind === 'auth_invalid') {
         const recoveredCurrent = await this.recoverCodexAuthCandidate(current.name);
         if (recoveredCurrent) {
           await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_recovered_current', {
@@ -6720,19 +6725,22 @@ export class BridgeSessionCore {
       }
       const selection = await this.selectNextCodexAuthCandidate(failedTargets);
       if (!selection) {
-        await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_no_candidate', {
+        await this.sendMessage(rotation.scopeId, t(locale, rotation.reasonKind === 'quota_limited' ? 'auth_quota_no_candidate' : 'auth_auto_no_candidate', {
           error: formatShortStatusError(rotation.reason),
         }));
         return false;
       }
       const { candidate, fromLabel, toLabel } = selection;
+      const switchingKey = rotation.reasonKind === 'quota_limited'
+        ? (this.config.authAutoDeleteNeedsRepair ? 'auth_quota_switching_quiet' : 'auth_quota_switching')
+        : (this.config.authAutoDeleteNeedsRepair ? 'auth_auto_switching_quiet' : 'auth_auto_switching');
       await this.sendMessage(rotation.scopeId, this.config.authAutoDeleteNeedsRepair
-        ? t(locale, 'auth_auto_switching_quiet', { error: formatShortStatusError(rotation.reason) })
-        : t(locale, 'auth_auto_switching', {
+        ? t(locale, switchingKey, { error: formatShortStatusError(rotation.reason) })
+        : t(locale, switchingKey, {
           ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
           error: formatShortStatusError(rotation.reason),
         }));
-      const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
+      const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true, true, rotation.reasonKind);
       if (!outcome.ok) {
         return false;
       }
@@ -6883,6 +6891,7 @@ export class BridgeSessionCore {
     candidate: CodexAuthCandidate,
     automatic: boolean,
     sendResult = true,
+    automaticReason: CodexAuthRotationReason = 'auth_invalid',
   ): Promise<CodexAuthSwitchOutcome> {
     const authDir = this.resolveAuthDir();
     const initialState = await listCodexAuthState(new Set(), new Map(), authDir);
@@ -6945,11 +6954,13 @@ export class BridgeSessionCore {
     if (!sendResult) {
       return outcome;
     }
+    const doneKey = automaticReason === 'quota_limited' ? 'auth_quota_done' : 'auth_auto_done';
+    const doneQuietKey = automaticReason === 'quota_limited' ? 'auth_quota_done_quiet' : 'auth_auto_done_quiet';
     const lines = [automatic && this.config.authAutoDeleteNeedsRepair
-      ? t(locale, 'auth_auto_done_quiet')
+      ? t(locale, doneQuietKey)
       : t(
         locale,
-        automatic ? 'auth_auto_done' : 'auth_switch_done',
+        automatic ? doneKey : 'auth_switch_done',
         this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
       )];
     if (recovered) {
@@ -11111,16 +11122,37 @@ function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {
   };
 }
 
-function isCodexAuthRotationError(params: any): boolean {
-  if (isChatGptBackendAccessBlocked(collectCodexErrorText(params))) {
-    return false;
+function classifyCodexAuthRotationError(params: any): CodexAuthRotationReason | null {
+  const collected = collectCodexErrorText(params);
+  if (isChatGptBackendAccessBlocked(collected)) {
+    return null;
   }
   const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
-  if (code && /usageLimitExceeded|auth|unauthorized|forbidden|login/i.test(code)) {
-    return true;
-  }
   const message = stringOrNull(params?.error?.message) ?? '';
-  return /(usage limit|rate limit|not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message);
+  const text = `${code ?? ''}\n${message}\n${collected}`;
+  if (isCodexQuotaLimitError(text)) {
+    return 'quota_limited';
+  }
+  if (code && /auth|unauthorized|forbidden|login/i.test(code)) {
+    return 'auth_invalid';
+  }
+  return /(not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message)
+    ? 'auth_invalid'
+    : null;
+}
+
+function isCodexQuotaLimitError(text: string): boolean {
+  return /usageLimitExceeded/i.test(text)
+    || /you['’]?ve hit your usage limit/i.test(text)
+    || /\busage limit(?:s)?\b/i.test(text)
+    || /\brate limit(?:ed|s)?\b/i.test(text)
+    || /\btoo many requests\b/i.test(text)
+    || /\binsufficient[_\s-]?quota\b/i.test(text)
+    || /\bquota exceeded\b/i.test(text)
+    || /\bbilling hard limit\b/i.test(text)
+    || /\bcredits? exhausted\b/i.test(text)
+    || /\bout of credits?\b/i.test(text)
+    || /\bcredits? limit\b/i.test(text);
 }
 
 function formatCodexNotificationError(params: any): string {

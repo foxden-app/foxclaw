@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.22 - 2026-06-09
+
+### 中文
+- Codex 报 `usageLimitExceeded`、`You've hit your usage limit`、usage/rate/quota/billing/credits limit 这类额度耗尽时，不再把当前 auth 候选标记为需要修复，也不会触发 `AUTH_AUTO_DELETE_NEEDS_REPAIR` 的自动剔除和跨节点删除。
+- 额度耗尽仍会临时避开当前候选，切到另一个维护中的候选重试；提示文案改为“Codex 额度限制”，不再误写成 “Codex auth 问题”。
+
+### English
+- Codex quota exhaustion such as `usageLimitExceeded`, `You've hit your usage limit`, usage/rate/quota/billing/credits limit is no longer treated as an invalid auth candidate, so it does not mark `needs_repair` or trigger `AUTH_AUTO_DELETE_NEEDS_REPAIR` auto-delete / cross-node delete.
+- Quota exhaustion still temporarily skips the current candidate and retries with another maintained candidate; notifications now call this a Codex usage limit instead of an auth problem.
+
 ## 0.5.21 - 2026-06-09
 
 ### 中文

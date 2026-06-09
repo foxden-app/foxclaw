@@ -2639,7 +2639,7 @@ test('auth auto-rotation first tries to recover the current candidate', async (t
   assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
 });
 
-test('usage limit errors auto-rotate auth after a final auth error', async (t) => {
+test('usage limit errors rotate auth without marking candidates for repair', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     rig.store.close();
@@ -2705,10 +2705,11 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
     overrides: { collaborationMode: undefined, recoverMissingThread: false },
   }]);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
-  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth: auth\.json_a -> auth\.json_b/.test(message)));
+  assert.ok(rig.sentMessages.some(message => /Codex usage limit detected/.test(message)));
+  assert.ok(rig.sentMessages.some(message => /Switched Codex auth after usage limit: auth\.json_a -> auth\.json_b/.test(message)));
   assert.ok(rig.sentMessages.includes('Retrying the same request with the new auth...'));
   assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
-  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_a'), 'needs_repair');
+  assert.notEqual(rig.store.listCodexAuthCandidateStates().get('auth.json_a'), 'needs_repair');
 
   await (rig.controller as any).handleNotification({
     method: 'error',
@@ -2723,7 +2724,59 @@ test('usage limit errors auto-rotate auth after a final auth error', async (t) =
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.ok(rig.sentMessages.some(message => /no unused auth candidate is available/.test(message)));
-  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'active');
+});
+
+test('usage limit errors do not auto-delete candidates in quiet auth pool mode', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).config.authAutoDeleteNeedsRepair = true;
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+
+  (rig.controller as any).app.restart = async () => {};
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => codexRateLimits();
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any) => ({
+    threadId: binding.threadId,
+    turnId: 'turn-2',
+  });
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro).", codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+
+  assert.equal(fs.existsSync(path.join(authDir, 'auth.json_a')), true);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.notEqual(rig.store.listCodexAuthCandidateStates().get('auth.json_a'), 'needs_repair');
+  assert.equal(rig.store.getCodexAuthPoolStats().deletedInvalid, 0);
+  assert.ok(rig.sentMessages.some(message => /Codex usage limit detected/.test(message)));
 });
 
 test('auth auto-rotation skips disabled candidates', async (t) => {
@@ -2777,7 +2830,7 @@ test('auth auto-rotation skips disabled candidates', async (t) => {
 
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_c'));
-  assert.ok(rig.sentMessages.some(message => /Auto-switched Codex auth: auth\.json_a -> auth\.json_c/.test(message)));
+  assert.ok(rig.sentMessages.some(message => /Switched Codex auth after usage limit: auth\.json_a -> auth\.json_c/.test(message)));
 });
 
 test('auth rotation retries on the scope that owns authRetry even with another bound scope active', async (t) => {
