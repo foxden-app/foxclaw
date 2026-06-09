@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.30 - 2026-06-09
+
+### 中文
+- 修正重启自动续接路径：自动恢复现在会先像用户手动发送“继续”一样 `resumeThread` 原 Codex thread，再在原 thread 上启动续接 turn。
+- 如果原 thread 暂时无法恢复，FoxClaw 会保留状态卡并重试；不会静默切到 replacement thread，避免丢失原线程上下文。
+
+### English
+- Fixed restart auto-resume to match the manual "continue" path: FoxClaw now resumes the original Codex thread first, then starts the continuation turn on that same thread.
+- If the original thread cannot be resumed yet, FoxClaw keeps the status card and retries instead of silently switching to a replacement thread and losing context.
+
 ## 0.5.29 - 2026-06-09
 
 ### 中文

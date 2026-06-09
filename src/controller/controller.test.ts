@@ -402,6 +402,23 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       reasoningEffort: 'medium',
       cwd: options.cwd,
     }),
+    resumeThread: async (options: { threadId: string; cwd?: string | null }) => ({
+      thread: {
+        threadId: options.threadId,
+        name: null,
+        preview: 'resumed',
+        cwd: options.cwd ?? tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: options.cwd ?? tempDir,
+    }),
     steerTurn: async () => ({ turnId: 'turn-1' }),
     startDeviceLogin: async () => ({
       type: 'chatgptDeviceCode',
@@ -4714,7 +4731,7 @@ test('startup preview cleanup defers recovery when restarted app-server thread i
   assert.equal((rig.controller as any).activeTurns.size, 0);
 });
 
-test('startup preview cleanup auto-resumes on a replacement thread when the old thread is gone', async (t) => {
+test('startup preview cleanup resumes the original thread before restart auto-resume', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     (rig.controller as any).clearRestartPreviewRecoveryTimers();
@@ -4729,25 +4746,31 @@ test('startup preview cleanup auto-resumes on a replacement thread when the old 
     threadId: 'thread-1',
     messageId: 123,
   });
-  (rig.controller as any).app.readThreadSnapshot = async () => ({
-    threadId: 'thread-1',
-    name: null,
-    preview: 'interrupted',
-    cwd: rig.tempDir,
-    modelProvider: 'openai',
-    source: 'app',
-    path: null,
-    status: 'active',
-    activeFlags: [],
-    updatedAt: 1,
-    turns: [],
-  });
+  (rig.controller as any).app.readThreadSnapshot = async () => null;
+  const resumes: any[] = [];
+  (rig.controller as any).app.resumeThread = async (options: any) => {
+    resumes.push(options);
+    return {
+      thread: {
+        threadId: options.threadId,
+        name: null,
+        preview: 'resumed',
+        cwd: rig.tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: rig.tempDir,
+    };
+  };
   const starts: any[] = [];
   (rig.controller as any).app.startTurn = async (options: any) => {
     starts.push(options);
-    if (options.threadId === 'thread-1') {
-      throw new Error('thread not found: thread-1');
-    }
     return { id: 'turn-resumed', status: 'inProgress' };
   };
   let renders = 0;
@@ -4757,20 +4780,64 @@ test('startup preview cleanup auto-resumes on a replacement thread when the old 
 
   await (rig.controller as any).cleanupStaleTurnPreviews();
 
-  assert.equal(starts.length, 2);
+  assert.equal(resumes.length, 1);
+  assert.equal(resumes[0]?.threadId, 'thread-1');
+  assert.equal(starts.length, 1);
   assert.equal(starts[0]?.threadId, 'thread-1');
-  assert.equal(starts[1]?.threadId, 'thread-new');
-  assert.match(starts[1]?.input[0]?.text, /previous thread context is unavailable/);
+  assert.match(starts[0]?.input[0]?.text, /previous turn was running/);
   const active = getActiveTurnForTest(rig, 'telegram:99::root', 'turn-resumed');
   assert.ok(active);
-  assert.equal(active.threadId, 'thread-new');
+  assert.equal(active.threadId, 'thread-1');
   assert.equal(active.previewMessageId, 123);
-  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-new');
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-1');
   assert.equal(rig.store.listActiveTurnPreviews()[0]?.turnId, 'turn-resumed');
   assert.equal(rig.sentMessages.length, 0);
   assert.equal(rig.editedMessages.length, 0);
   assert.equal((rig.controller as any).restartPreviewRecoveryTimers.size, 0);
   assert.equal(renders, 1);
+});
+
+test('startup preview cleanup retries instead of replacing when original thread resume fails', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearRestartPreviewRecoveryTimers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-interrupted',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => null;
+  let resumes = 0;
+  let startThreads = 0;
+  let starts = 0;
+  (rig.controller as any).app.resumeThread = async () => {
+    resumes += 1;
+    throw new Error('thread not found: thread-1');
+  };
+  (rig.controller as any).app.startThread = async () => {
+    startThreads += 1;
+    throw new Error('startThread should not run during restart auto-resume');
+  };
+  (rig.controller as any).app.startTurn = async () => {
+    starts += 1;
+    return { id: 'turn-should-not-start', status: 'inProgress' };
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal(resumes, 1);
+  assert.equal(startThreads, 0);
+  assert.equal(starts, 0);
+  assert.equal((rig.controller as any).restartPreviewRecoveryTimers.size, 1);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal((rig.controller as any).activeTurns.size, 0);
 });
 
 test('startup preview cleanup reattaches an existing replacement live turn instead of auto-resuming', async (t) => {

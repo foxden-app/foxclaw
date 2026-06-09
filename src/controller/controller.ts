@@ -3251,7 +3251,6 @@ export class BridgeSessionCore {
     overrides: {
       collaborationMode?: CollaborationModeValue | null | undefined;
       recoverMissingThread?: boolean | undefined;
-      notifyMissingThread?: boolean | undefined;
     } = {},
   ): Promise<{ threadId: string; turnId: string; collaborationMode: CollaborationModeValue }> {
     const settings = this.store.getChatSettings(scopeId);
@@ -3284,9 +3283,7 @@ export class BridgeSessionCore {
       }
       this.logger.warn('codex.turn_thread_not_found', { scopeId, threadId: binding.threadId });
       const replacement = await this.createBinding(scopeId, binding.cwd ?? this.config.defaultCwd);
-      if (overrides.notifyMissingThread !== false) {
-        await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
-      }
+      await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
       const nextSettings = this.store.getChatSettings(scopeId);
       const nextAccess = this.resolveEffectiveAccess(scopeId, nextSettings);
       const replacementCwd = replacement.cwd ?? this.config.defaultCwd;
@@ -8949,10 +8946,15 @@ export class BridgeSessionCore {
     target: { chatId: string; chatType: string; topicId: number | null },
   ): Promise<boolean> {
     const locale = this.localeForChat(preview.scopeId);
-    const binding = {
-      threadId: preview.threadId,
-      cwd: this.store.getBinding(preview.scopeId)?.cwd ?? this.config.defaultCwd,
-    };
+    const storedBinding = this.store.getBinding(preview.scopeId);
+    const binding: ThreadBinding = storedBinding?.threadId === preview.threadId
+      ? storedBinding
+      : {
+          chatId: preview.scopeId,
+          threadId: preview.threadId,
+          cwd: storedBinding?.cwd ?? this.config.defaultCwd,
+          updatedAt: Date.now(),
+        };
     const input: TurnInput[] = [{
       type: 'text',
       text: t(locale, 'restart_auto_resume_prompt'),
@@ -8960,9 +8962,13 @@ export class BridgeSessionCore {
     }];
     try {
       await this.sendTyping(preview.scopeId);
-      const turnState = await this.startTurnWithRecovery(preview.scopeId, binding, input, {
-        notifyMissingThread: false,
+      const readyBinding = await this.ensureThreadReady(preview.scopeId, binding, {
+        recoverMissingThread: false,
       });
+      const turnState = await this.startTurnWithRecovery(preview.scopeId, readyBinding, input, {
+        recoverMissingThread: false,
+      });
+      const cwd = readyBinding.cwd ?? this.store.getBinding(preview.scopeId)?.cwd ?? this.config.defaultCwd;
       if (turnState.collaborationMode === 'plan') {
         this.store.setChatCollaborationMode(preview.scopeId, DEFAULT_COLLABORATION_MODE);
       }
@@ -8977,7 +8983,7 @@ export class BridgeSessionCore {
         {
           input,
           threadId: turnState.threadId,
-          cwd: binding.cwd,
+          cwd,
           chatId: target.chatId,
           chatType: target.chatType,
           topicId: target.topicId,
