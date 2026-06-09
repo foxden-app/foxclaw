@@ -2937,6 +2937,69 @@ test('auth auto-rotation skips disabled candidates', async (t) => {
   assert.ok(rig.sentMessages.some(message => /Switched Codex auth after usage limit: auth\.json_a -> auth\.json_c/.test(message)));
 });
 
+test('auth auto-rotation keeps polling candidates after switch validation fails', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_c', 'acct-c', new Date().toISOString());
+
+  let restarts = 0;
+  const retryStarts: any[] = [];
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => {
+    const current = fs.readlinkSync(path.join(authDir, 'auth.json'));
+    if (current.endsWith('auth.json_b')) {
+      throw new Error('failed to fetch codex rate limits: 401 Unauthorized; token_invalidated');
+    }
+    return codexRateLimits();
+  };
+  (rig.controller as any).ensureThreadReady = async (_scopeId: string, binding: any) => binding;
+  (rig.controller as any).startTurnWithRecovery = async (_scopeId: string, binding: any, input: any[]) => {
+    retryStarts.push({ binding, input });
+    return { threadId: binding.threadId, turnId: 'turn-2' };
+  };
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  (rig.controller as any).clearObservedTurnWatcher = () => {};
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.authRetry = {
+    input: [{ type: 'text', text: 'try this', text_elements: [] }],
+    threadId: 'thread-1',
+    cwd: rig.tempDir,
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    failedAuthTargets: new Set(),
+  };
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: {
+      error: { message: 'Usage limit exceeded', codexErrorInfo: 'usageLimitExceeded' },
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      willRetry: false,
+    },
+  });
+
+  assert.equal(restarts, 3);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_c'));
+  assert.equal(retryStarts.length, 1);
+  assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
+  assert.ok(rig.sentMessages.some(message => /Selected auth hit a Codex usage limit: failed to fetch codex rate limits/.test(message)));
+  assert.ok(rig.sentMessages.some(message => /Switched Codex auth after usage limit: auth\.json_a -> auth\.json_c/.test(message)));
+});
+
 test('auth rotation retries on the scope that owns authRetry even with another bound scope active', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

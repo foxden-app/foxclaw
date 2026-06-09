@@ -6755,32 +6755,35 @@ export class BridgeSessionCore {
           await this.sendMessage(rotation.scopeId, formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()));
         }
       }
-      const selection = await this.selectNextCodexAuthCandidate(failedTargets);
-      if (!selection) {
-        await this.sendMessage(rotation.scopeId, t(locale, rotation.reasonKind === 'quota_limited' ? 'auth_quota_no_candidate' : 'auth_auto_no_candidate', {
-          error: formatShortStatusError(rotation.reason),
-        }));
+      while (true) {
+        const selection = await this.selectNextCodexAuthCandidate(failedTargets);
+        if (!selection) {
+          await this.sendMessage(rotation.scopeId, t(locale, rotation.reasonKind === 'quota_limited' ? 'auth_quota_no_candidate' : 'auth_auto_no_candidate', {
+            error: formatShortStatusError(rotation.reason),
+          }));
+          return false;
+        }
+        const { candidate, fromLabel, toLabel } = selection;
+        const switchingKey = rotation.reasonKind === 'quota_limited'
+          ? (this.config.authAutoDeleteNeedsRepair ? 'auth_quota_switching_quiet' : 'auth_quota_switching')
+          : (this.config.authAutoDeleteNeedsRepair ? 'auth_auto_switching_quiet' : 'auth_auto_switching');
+        await this.sendMessage(rotation.scopeId, this.config.authAutoDeleteNeedsRepair
+          ? t(locale, switchingKey, { error: formatShortStatusError(rotation.reason) })
+          : t(locale, switchingKey, {
+            ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
+            error: formatShortStatusError(rotation.reason),
+          }));
+        const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true, true, rotation.reasonKind);
+        if (!outcome.ok) {
+          failedTargets.add(candidate.path);
+          continue;
+        }
+        if (rotation.retry) {
+          await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
+          return true;
+        }
         return false;
       }
-      const { candidate, fromLabel, toLabel } = selection;
-      const switchingKey = rotation.reasonKind === 'quota_limited'
-        ? (this.config.authAutoDeleteNeedsRepair ? 'auth_quota_switching_quiet' : 'auth_quota_switching')
-        : (this.config.authAutoDeleteNeedsRepair ? 'auth_auto_switching_quiet' : 'auth_auto_switching');
-      await this.sendMessage(rotation.scopeId, this.config.authAutoDeleteNeedsRepair
-        ? t(locale, switchingKey, { error: formatShortStatusError(rotation.reason) })
-        : t(locale, switchingKey, {
-          ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
-          error: formatShortStatusError(rotation.reason),
-        }));
-      const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true, true, rotation.reasonKind);
-      if (!outcome.ok) {
-        return false;
-      }
-      if (rotation.retry) {
-        await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
-        return true;
-      }
-      return false;
     } catch (error) {
       await this.handleAsyncError('codex.auth_rotation', error, rotation.scopeId);
       return false;

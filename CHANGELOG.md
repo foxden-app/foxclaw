@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.31 - 2026-06-09
+
+### 中文
+- 修复自动 auth 轮转：目标候选切换后如果在 account/usage 验证阶段失败，会把该候选加入本次失败集合并继续轮询后续候选，而不是恢复原 auth 后停止。
+- 新增回归测试覆盖候选池中间账号验证失败时继续切到下一个可用账号并重试原请求。
+
+### English
+- Fixed automatic auth rotation so a candidate that fails account/usage validation after switching is added to the current failure set and FoxClaw keeps polling later candidates instead of stopping after restoring the previous auth.
+- Added regression coverage for continuing to the next usable account and retrying the original request when a middle candidate fails validation.
+
 ## 0.5.30 - 2026-06-09
 
 ### 中文
