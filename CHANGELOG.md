@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.28 - 2026-06-09
+
+### 中文
+- 重启续接恢复失败时不再立刻把 Telegram 状态卡改成“桥接重启、请手动继续”；FoxClaw 会保留 active preview 并在后台短间隔重试几分钟。
+- 这修复了 Codex app-server 刚重启时线程短暂 `thread not found`，导致自动续跑错过窗口、没有最终总结消息的问题。
+
+### English
+- Restart recovery no longer immediately retires the Telegram status card as "bridge restarted, continue manually" when the first recovery attempt fails. FoxClaw keeps the active preview and retries in the background for several minutes.
+- This fixes cases where the Codex app-server briefly reports `thread not found` right after restart, causing auto-resume to miss its window and never send the final summary.
+
 ## 0.5.27 - 2026-06-09
 
 ### 中文

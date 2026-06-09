@@ -4674,6 +4674,46 @@ test('startup preview cleanup auto-resumes interrupted owned turns after restart
   assert.equal(renders, 1);
 });
 
+test('startup preview cleanup defers recovery when restarted app-server thread is not ready', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearRestartPreviewRecoveryTimers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-interrupted',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  (rig.controller as any).app.readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'interrupted',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'active',
+    activeFlags: [],
+    updatedAt: 1,
+    turns: [],
+  });
+  (rig.controller as any).app.startTurn = async () => {
+    throw new Error('thread not found: thread-1');
+  };
+
+  await (rig.controller as any).cleanupStaleTurnPreviews();
+
+  assert.equal((rig.controller as any).restartPreviewRecoveryTimers.size, 1);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal((rig.controller as any).activeTurns.size, 0);
+});
+
 test('startup preview cleanup reattaches an existing replacement live turn instead of auto-resuming', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

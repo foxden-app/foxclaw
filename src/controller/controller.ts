@@ -6,6 +6,7 @@ import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type {
+  ActiveTurnPreviewRecord,
   BridgeStore,
   CodexAuthCandidateState,
   CodexAuthPoolStats,
@@ -135,6 +136,7 @@ import { writeRuntimeStatus } from '../runtime.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
 const AUTH_DELETE_REASON_NEEDS_REPAIR = 'needs_repair';
+const RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS = [3000, 7000, 15_000, 30_000, 45_000, 60_000, 60_000, 60_000];
 
 type AuthProactiveRefreshStatus = NonNullable<RuntimeStatus['authProactiveRefresh']>;
 
@@ -574,6 +576,7 @@ export class BridgeSessionCore {
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
+  private restartPreviewRecoveryTimers = new Map<string, NodeJS.Timeout>();
   private selfUpdatePollTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshInProgress = false;
@@ -709,6 +712,7 @@ export class BridgeSessionCore {
       clearTimeout(timer);
     }
     this.submittedUserInputTimers.clear();
+    this.clearRestartPreviewRecoveryTimers();
     this.clearSelfUpdateStatusPoll();
     this.clearProactiveAuthRefreshTimer();
     await this.app.stop({ terminateServer: false });
@@ -8704,13 +8708,116 @@ export class BridgeSessionCore {
           error: toErrorMeta(error),
         });
       }
-      await this.retirePreviewMessage(
-        preview.scopeId,
-        preview.messageId,
-        t(this.localeForChat(preview.scopeId), 'stale_preview_restarted', { threadId: preview.threadId }),
-        preview.turnId,
-      );
+      this.scheduleRestartPreviewRecovery(preview, 0);
     }
+  }
+
+  private scheduleRestartPreviewRecovery(preview: ActiveTurnPreviewRecord, attempt: number): void {
+    const key = restartPreviewRecoveryKey(preview);
+    if (this.restartPreviewRecoveryTimers.has(key)) {
+      return;
+    }
+    const delayMs = RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS[attempt];
+    if (delayMs === undefined) {
+      void this.retireStaleRestartPreview(preview).catch((error) => {
+        this.logger.warn('telegram.preview_stale_retire_failed', {
+          scopeId: preview.scopeId,
+          threadId: preview.threadId,
+          turnId: preview.turnId,
+          error: toErrorMeta(error),
+        });
+      });
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.restartPreviewRecoveryTimers.delete(key);
+      void this.retryRestartPreviewRecovery(preview, attempt + 1).catch((error) => {
+        this.logger.warn('telegram.preview_recovery_retry_failed', {
+          scopeId: preview.scopeId,
+          threadId: preview.threadId,
+          turnId: preview.turnId,
+          attempt: attempt + 1,
+          error: toErrorMeta(error),
+        });
+        this.scheduleRestartPreviewRecovery(preview, attempt + 1);
+      });
+    }, delayMs);
+    timer.unref?.();
+    this.restartPreviewRecoveryTimers.set(key, timer);
+    this.logger.info('telegram.preview_recovery_deferred', {
+      scopeId: preview.scopeId,
+      threadId: preview.threadId,
+      turnId: preview.turnId,
+      attempt: attempt + 1,
+      delayMs,
+    });
+  }
+
+  private async retryRestartPreviewRecovery(preview: ActiveTurnPreviewRecord, attempt: number): Promise<void> {
+    const current = this.store.listActiveTurnPreviews().find((record) => (
+      record.scopeId === preview.scopeId
+      && record.turnId === preview.turnId
+      && record.messageId === preview.messageId
+    ));
+    if (!current) {
+      return;
+    }
+    if (!this.ownsScope(current.scopeId)) {
+      return;
+    }
+    if (!this.messaging.canSendToScope(current.scopeId)) {
+      this.store.removeActiveTurnPreview(current.turnId);
+      this.logger.info('telegram.preview_dropped_disabled_channel', {
+        scopeId: current.scopeId,
+        threadId: current.threadId,
+        turnId: current.turnId,
+      });
+      return;
+    }
+    try {
+      if (await this.recoverLiveTurnPreview(current)) {
+        this.logger.info('telegram.preview_recovery_retry_succeeded', {
+          scopeId: current.scopeId,
+          threadId: current.threadId,
+          turnId: current.turnId,
+          attempt,
+        });
+        return;
+      }
+    } catch (error) {
+      this.logger.warn('telegram.preview_recovery_retry_failed', {
+        scopeId: current.scopeId,
+        threadId: current.threadId,
+        turnId: current.turnId,
+        attempt,
+        error: toErrorMeta(error),
+      });
+    }
+    this.scheduleRestartPreviewRecovery(current, attempt);
+  }
+
+  private async retireStaleRestartPreview(preview: ActiveTurnPreviewRecord): Promise<void> {
+    const current = this.store.listActiveTurnPreviews().find((record) => (
+      record.scopeId === preview.scopeId
+      && record.turnId === preview.turnId
+      && record.messageId === preview.messageId
+    ));
+    if (!current) {
+      return;
+    }
+    await this.retirePreviewMessage(
+      current.scopeId,
+      current.messageId,
+      t(this.localeForChat(current.scopeId), 'stale_preview_restarted', { threadId: current.threadId }),
+      current.turnId,
+    );
+  }
+
+  private clearRestartPreviewRecoveryTimers(): void {
+    for (const timer of this.restartPreviewRecoveryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.restartPreviewRecoveryTimers.clear();
   }
 
   private async recoverLiveTurnPreview(preview: {
@@ -10346,6 +10453,10 @@ function resolveScopeMessageTarget(scopeId: string): { chatId: string; chatType:
   } catch {
     return null;
   }
+}
+
+function restartPreviewRecoveryKey(preview: Pick<ActiveTurnPreviewRecord, 'scopeId' | 'turnId' | 'messageId'>): string {
+  return `${preview.scopeId}:${preview.turnId}:${preview.messageId}`;
 }
 
 function seedObservedTurnCursor(turn: AppTurnSnapshot): ObservedTurnCursor {
