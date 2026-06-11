@@ -5,6 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildFoxclawSystemdUnitText,
+  buildSystemdRestartHelperArgs,
+  cgroupContainsSystemdUnit,
   refreshFoxclawExecStartDropIns,
   refreshFoxclawExecStartText,
   removeFoxclawExecStartDropIns,
@@ -24,6 +26,28 @@ test('buildFoxclawSystemdUnitText stops the full service control group', () => {
 
   assert.match(unit, /^KillMode=control-group$/m);
   assert.doesNotMatch(unit, /^KillMode=process$/m);
+});
+
+test('cgroupContainsSystemdUnit detects direct and escaped systemd unit cgroups', () => {
+  assert.equal(cgroupContainsSystemdUnit('0::/user.slice/user-1000.slice/user@1000.service/app.slice/foxclaw.service\n', 'foxclaw.service'), true);
+  assert.equal(cgroupContainsSystemdUnit('0::/user.slice/user-1000.slice/user@1000.service/app.slice/foxclaw\\x2drestart.service\n', 'foxclaw-restart.service'), true);
+  assert.equal(cgroupContainsSystemdUnit('0::/user.slice/user-1000.slice/user@1000.service/app.slice/other.service\n', 'foxclaw.service'), false);
+});
+
+test('buildSystemdRestartHelperArgs schedules delayed restart outside the main service cgroup', () => {
+  assert.deepEqual(buildSystemdRestartHelperArgs({
+    unitName: 'foxclaw.service',
+    helperUnitName: 'foxclaw-restart-test',
+    delaySeconds: 1,
+  }), [
+    '--user',
+    '--collect',
+    '--unit=foxclaw-restart-test',
+    '--description=Restart FoxClaw service outside foxclaw.service cgroup',
+    '/bin/sh',
+    '-lc',
+    'sleep 1; exec systemctl --user restart foxclaw.service',
+  ]);
 });
 
 test('refreshFoxclawExecStartText updates proxychains drop-in ExecStart', () => {

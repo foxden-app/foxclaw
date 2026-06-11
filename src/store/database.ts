@@ -8,7 +8,13 @@ import type {
   CachedThread,
   ChatSessionSettings,
   CollaborationModeValue,
+  GuidedPlanSessionRecord,
+  GuidedPlanSessionState,
+  PendingAttachmentBatchRecord,
+  PendingAttachmentBatchStatus,
   PendingApprovalRecord,
+  QueuedTurnInputRecord,
+  QueuedTurnInputStatus,
   ReasoningEffortValue,
   ThreadBinding,
 } from '../types.js';
@@ -19,6 +25,7 @@ export interface ActiveTurnPreviewRecord {
   scopeId: string;
   threadId: string;
   messageId: number;
+  isObserved: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -45,6 +52,7 @@ export interface CodexAuthQuotaSnapshotRecord {
   runtimeId: string;
   candidateName: string;
   accountId: string;
+  quotaIdentityId: string;
   capturedAtMs: number;
   planType: string | null;
   primaryWindowDurationMins: number | null;
@@ -53,6 +61,14 @@ export interface CodexAuthQuotaSnapshotRecord {
   secondaryRemainingPercent: number | null;
   updatedAt: number;
 }
+
+export interface CodexAuthPoolStats {
+  totalSeen: number;
+  alive: number;
+  deletedInvalid: number;
+}
+
+export type CodexAuthCandidateState = 'active' | 'needs_repair';
 
 export class BridgeStore {
   private db: DatabaseSync;
@@ -123,6 +139,7 @@ export class BridgeStore {
         scope_id TEXT NOT NULL,
         thread_id TEXT NOT NULL,
         message_id INTEGER NOT NULL,
+        is_observed INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -151,6 +168,61 @@ export class BridgeStore {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (input_local_id, question_index, message_kind)
       );
+      CREATE TABLE IF NOT EXISTS queued_turn_inputs (
+        queue_id TEXT PRIMARY KEY,
+        scope_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        chat_type TEXT NOT NULL,
+        topic_id INTEGER,
+        thread_id TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        source_summary TEXT NOT NULL,
+        message_id INTEGER,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS queued_turn_inputs_scope_status_idx
+        ON queued_turn_inputs(scope_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS pending_attachment_batches (
+        batch_id TEXT PRIMARY KEY,
+        scope_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        chat_type TEXT NOT NULL,
+        topic_id INTEGER,
+        thread_id TEXT NOT NULL,
+        cwd TEXT,
+        media_group_id TEXT,
+        attachments_json TEXT NOT NULL,
+        caption TEXT NOT NULL,
+        message_id INTEGER,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS pending_attachment_batches_scope_status_idx
+        ON pending_attachment_batches(scope_id, status, updated_at);
+      CREATE TABLE IF NOT EXISTS guided_plan_sessions (
+        session_id TEXT PRIMARY KEY,
+        scope_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        chat_type TEXT NOT NULL,
+        topic_id INTEGER,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        cwd TEXT,
+        plan_markdown TEXT NOT NULL,
+        message_id INTEGER,
+        state TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        resolved_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS guided_plan_sessions_scope_state_idx
+        ON guided_plan_sessions(scope_id, state, updated_at);
       CREATE TABLE IF NOT EXISTS audit_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         direction TEXT NOT NULL,
@@ -167,12 +239,14 @@ export class BridgeStore {
       CREATE TABLE IF NOT EXISTS codex_auth_candidates (
         name TEXT PRIMARY KEY,
         disabled INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'active',
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS codex_auth_candidate_runtime (
         runtime_id TEXT NOT NULL,
         name TEXT NOT NULL,
         disabled INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL DEFAULT 'active',
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, name)
       );
@@ -180,6 +254,7 @@ export class BridgeStore {
         runtime_id TEXT NOT NULL,
         candidate_name TEXT NOT NULL,
         account_id TEXT NOT NULL,
+        quota_identity_id TEXT NOT NULL DEFAULT '',
         captured_at_ms INTEGER NOT NULL,
         plan_type TEXT,
         primary_window_duration_mins REAL,
@@ -191,6 +266,14 @@ export class BridgeStore {
       );
       CREATE INDEX IF NOT EXISTS codex_auth_quota_snapshots_account_idx
         ON codex_auth_quota_snapshots(account_id);
+      CREATE TABLE IF NOT EXISTS codex_auth_pool_history (
+        name TEXT PRIMARY KEY,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        delete_reason TEXT,
+        invalid_delete_count INTEGER NOT NULL DEFAULT 0
+      );
     `);
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
@@ -204,9 +287,23 @@ export class BridgeStore {
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     this.ensureColumn('pending_user_inputs', 'status', "TEXT NOT NULL DEFAULT 'pending'");
     this.ensureColumn('pending_user_inputs', 'submitted_at', 'INTEGER');
+    this.ensureColumn('active_turn_previews', 'is_observed', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('codex_auth_candidates', 'state', "TEXT NOT NULL DEFAULT 'active'");
+    this.ensureColumn('codex_auth_candidate_runtime', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
+    this.ensureColumn('codex_auth_quota_snapshots', 'quota_identity_id', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('codex_auth_pool_history', 'invalid_delete_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.db.prepare(`
+      UPDATE codex_auth_quota_snapshots
+      SET quota_identity_id = account_id
+      WHERE quota_identity_id = ''
+    `).run();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS codex_auth_quota_snapshots_quota_identity_idx
+        ON codex_auth_quota_snapshots(quota_identity_id);
+    `);
     migrateLegacyBridgeScopeIds(this.db);
   }
 
@@ -501,18 +598,18 @@ export class BridgeStore {
     return Number(row.count);
   }
 
-  saveActiveTurnPreview(record: Pick<ActiveTurnPreviewRecord, 'turnId' | 'scopeId' | 'threadId' | 'messageId'>): void {
+  saveActiveTurnPreview(record: Pick<ActiveTurnPreviewRecord, 'turnId' | 'scopeId' | 'threadId' | 'messageId'> & { isObserved?: boolean }): void {
     const now = Date.now();
     this.db.prepare('DELETE FROM active_turn_previews WHERE turn_id = ? OR scope_id = ?').run(record.turnId, record.scopeId);
     this.db.prepare(`
-      INSERT INTO active_turn_previews (turn_id, scope_id, thread_id, message_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(record.turnId, record.scopeId, record.threadId, record.messageId, now, now);
+      INSERT INTO active_turn_previews (turn_id, scope_id, thread_id, message_id, is_observed, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(record.turnId, record.scopeId, record.threadId, record.messageId, record.isObserved ? 1 : 0, now, now);
   }
 
   listActiveTurnPreviews(): ActiveTurnPreviewRecord[] {
     const rows = this.db.prepare(`
-      SELECT turn_id, scope_id, thread_id, message_id, created_at, updated_at
+      SELECT turn_id, scope_id, thread_id, message_id, is_observed, created_at, updated_at
       FROM active_turn_previews
       ORDER BY created_at ASC
     `).all() as Array<Record<string, unknown>>;
@@ -521,6 +618,7 @@ export class BridgeStore {
       scopeId: String(row.scope_id),
       threadId: String(row.thread_id),
       messageId: Number(row.message_id),
+      isObserved: Boolean(row.is_observed),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
     }));
@@ -626,6 +724,271 @@ export class BridgeStore {
     return Number(row?.count ?? 0);
   }
 
+  saveQueuedTurnInput(record: QueuedTurnInputRecord): void {
+    this.db.prepare(`
+      INSERT INTO queued_turn_inputs (
+        queue_id, scope_id, chat_id, chat_type, topic_id, thread_id, input_json, source_summary,
+        message_id, status, error, created_at, updated_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(queue_id) DO UPDATE SET
+        scope_id = excluded.scope_id,
+        chat_id = excluded.chat_id,
+        chat_type = excluded.chat_type,
+        topic_id = excluded.topic_id,
+        thread_id = excluded.thread_id,
+        input_json = excluded.input_json,
+        source_summary = excluded.source_summary,
+        message_id = excluded.message_id,
+        status = excluded.status,
+        error = excluded.error,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        resolved_at = excluded.resolved_at
+    `).run(
+      record.queueId,
+      record.scopeId,
+      record.chatId,
+      record.chatType,
+      record.topicId,
+      record.threadId,
+      record.inputJson,
+      record.sourceSummary,
+      record.messageId,
+      record.status,
+      record.error,
+      record.createdAt,
+      record.updatedAt,
+      record.resolvedAt,
+    );
+  }
+
+  getQueuedTurnInput(queueId: string): QueuedTurnInputRecord | null {
+    const row = this.db.prepare('SELECT * FROM queued_turn_inputs WHERE queue_id = ?').get(queueId) as Record<string, unknown> | undefined;
+    return row ? this.mapQueuedTurnInput(row) : null;
+  }
+
+  peekQueuedTurnInput(scopeId: string): QueuedTurnInputRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM queued_turn_inputs
+      WHERE scope_id = ? AND status = 'queued'
+      ORDER BY created_at ASC
+      LIMIT 1
+    `).get(scopeId) as Record<string, unknown> | undefined;
+    return row ? this.mapQueuedTurnInput(row) : null;
+  }
+
+  listQueuedTurnInputs(scopeId?: string): QueuedTurnInputRecord[] {
+    const sql = scopeId
+      ? `SELECT * FROM queued_turn_inputs WHERE scope_id = ? AND status IN ('queued', 'processing') ORDER BY created_at ASC`
+      : `SELECT * FROM queued_turn_inputs WHERE status IN ('queued', 'processing') ORDER BY created_at ASC`;
+    const rows = scopeId
+      ? this.db.prepare(sql).all(scopeId) as Array<Record<string, unknown>>
+      : this.db.prepare(sql).all() as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapQueuedTurnInput(row));
+  }
+
+  countQueuedTurnInputs(scopeId?: string): number {
+    const row = scopeId
+      ? this.db.prepare(`SELECT COUNT(*) AS count FROM queued_turn_inputs WHERE scope_id = ? AND status IN ('queued', 'processing')`).get(scopeId) as { count: number } | undefined
+      : this.db.prepare(`SELECT COUNT(*) AS count FROM queued_turn_inputs WHERE status IN ('queued', 'processing')`).get() as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
+  updateQueuedTurnInputStatus(queueId: string, status: QueuedTurnInputStatus, error: string | null = null): void {
+    const resolvedAt = status === 'queued' || status === 'processing' ? null : Date.now();
+    this.db.prepare(`
+      UPDATE queued_turn_inputs
+      SET status = ?, error = ?, updated_at = ?, resolved_at = ?
+      WHERE queue_id = ?
+    `).run(status, error, Date.now(), resolvedAt, queueId);
+  }
+
+  cancelQueuedTurnInputs(scopeId: string): number {
+    const result = this.db.prepare(`
+      UPDATE queued_turn_inputs
+      SET status = 'cancelled', updated_at = ?, resolved_at = ?
+      WHERE scope_id = ? AND status = 'queued'
+    `).run(Date.now(), Date.now(), scopeId);
+    return Number(result.changes ?? 0);
+  }
+
+  requeueInterruptedQueuedTurnInputs(): number {
+    const result = this.db.prepare(`
+      UPDATE queued_turn_inputs
+      SET status = 'queued', error = NULL, updated_at = ?, resolved_at = NULL
+      WHERE status = 'processing'
+    `).run(Date.now());
+    return Number(result.changes ?? 0);
+  }
+
+  savePendingAttachmentBatch(record: PendingAttachmentBatchRecord): void {
+    this.db.prepare(`
+      INSERT INTO pending_attachment_batches (
+        batch_id, scope_id, chat_id, chat_type, topic_id, thread_id, cwd, media_group_id,
+        attachments_json, caption, message_id, status, created_at, updated_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(batch_id) DO UPDATE SET
+        scope_id = excluded.scope_id,
+        chat_id = excluded.chat_id,
+        chat_type = excluded.chat_type,
+        topic_id = excluded.topic_id,
+        thread_id = excluded.thread_id,
+        cwd = excluded.cwd,
+        media_group_id = excluded.media_group_id,
+        attachments_json = excluded.attachments_json,
+        caption = excluded.caption,
+        message_id = excluded.message_id,
+        status = excluded.status,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        resolved_at = excluded.resolved_at
+    `).run(
+      record.batchId,
+      record.scopeId,
+      record.chatId,
+      record.chatType,
+      record.topicId,
+      record.threadId,
+      record.cwd,
+      record.mediaGroupId,
+      record.attachmentsJson,
+      record.caption,
+      record.messageId,
+      record.status,
+      record.createdAt,
+      record.updatedAt,
+      record.resolvedAt,
+    );
+  }
+
+  getPendingAttachmentBatch(batchId: string): PendingAttachmentBatchRecord | null {
+    const row = this.db.prepare('SELECT * FROM pending_attachment_batches WHERE batch_id = ?').get(batchId) as Record<string, unknown> | undefined;
+    return row ? this.mapPendingAttachmentBatch(row) : null;
+  }
+
+  findPendingAttachmentBatchByMediaGroup(scopeId: string, mediaGroupId: string): PendingAttachmentBatchRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM pending_attachment_batches
+      WHERE scope_id = ? AND media_group_id = ? AND status = 'pending'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(scopeId, mediaGroupId) as Record<string, unknown> | undefined;
+    return row ? this.mapPendingAttachmentBatch(row) : null;
+  }
+
+  getLatestPendingAttachmentBatch(scopeId: string): PendingAttachmentBatchRecord | null {
+    const row = this.db.prepare(`
+      SELECT * FROM pending_attachment_batches
+      WHERE scope_id = ? AND status = 'pending'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(scopeId) as Record<string, unknown> | undefined;
+    return row ? this.mapPendingAttachmentBatch(row) : null;
+  }
+
+  updatePendingAttachmentBatchMessage(batchId: string, messageId: number): void {
+    this.db.prepare('UPDATE pending_attachment_batches SET message_id = ?, updated_at = ? WHERE batch_id = ?').run(messageId, Date.now(), batchId);
+  }
+
+  resolvePendingAttachmentBatch(batchId: string, status: PendingAttachmentBatchStatus): void {
+    this.db.prepare(`
+      UPDATE pending_attachment_batches
+      SET status = ?, updated_at = ?, resolved_at = ?
+      WHERE batch_id = ?
+    `).run(status, Date.now(), Date.now(), batchId);
+  }
+
+  clearPendingAttachmentBatches(scopeId: string): number {
+    const result = this.db.prepare(`
+      UPDATE pending_attachment_batches
+      SET status = 'cleared', updated_at = ?, resolved_at = ?
+      WHERE scope_id = ? AND status = 'pending'
+    `).run(Date.now(), Date.now(), scopeId);
+    return Number(result.changes ?? 0);
+  }
+
+  saveGuidedPlanSession(record: GuidedPlanSessionRecord): void {
+    this.db.prepare(`
+      INSERT INTO guided_plan_sessions (
+        session_id, scope_id, chat_id, chat_type, topic_id, thread_id, turn_id, cwd,
+        plan_markdown, message_id, state, created_at, updated_at, resolved_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        scope_id = excluded.scope_id,
+        chat_id = excluded.chat_id,
+        chat_type = excluded.chat_type,
+        topic_id = excluded.topic_id,
+        thread_id = excluded.thread_id,
+        turn_id = excluded.turn_id,
+        cwd = excluded.cwd,
+        plan_markdown = excluded.plan_markdown,
+        message_id = excluded.message_id,
+        state = excluded.state,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        resolved_at = excluded.resolved_at
+    `).run(
+      record.sessionId,
+      record.scopeId,
+      record.chatId,
+      record.chatType,
+      record.topicId,
+      record.threadId,
+      record.turnId,
+      record.cwd,
+      record.planMarkdown,
+      record.messageId,
+      record.state,
+      record.createdAt,
+      record.updatedAt,
+      record.resolvedAt,
+    );
+  }
+
+  getGuidedPlanSession(sessionId: string): GuidedPlanSessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM guided_plan_sessions WHERE session_id = ?').get(sessionId) as Record<string, unknown> | undefined;
+    return row ? this.mapGuidedPlanSession(row) : null;
+  }
+
+  findOpenGuidedPlanSession(scopeId: string, turnId?: string): GuidedPlanSessionRecord | null {
+    const row = turnId
+      ? this.db.prepare(`
+          SELECT * FROM guided_plan_sessions
+          WHERE scope_id = ? AND turn_id = ? AND state = 'awaiting_confirmation'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `).get(scopeId, turnId) as Record<string, unknown> | undefined
+      : this.db.prepare(`
+          SELECT * FROM guided_plan_sessions
+          WHERE scope_id = ? AND state = 'awaiting_confirmation'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `).get(scopeId) as Record<string, unknown> | undefined;
+    return row ? this.mapGuidedPlanSession(row) : null;
+  }
+
+  listOpenGuidedPlanSessions(): GuidedPlanSessionRecord[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM guided_plan_sessions
+      WHERE state = 'awaiting_confirmation'
+      ORDER BY updated_at ASC
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map((row) => this.mapGuidedPlanSession(row));
+  }
+
+  updateGuidedPlanSessionMessage(sessionId: string, messageId: number): void {
+    this.db.prepare('UPDATE guided_plan_sessions SET message_id = ?, updated_at = ? WHERE session_id = ?').run(messageId, Date.now(), sessionId);
+  }
+
+  updateGuidedPlanSessionState(sessionId: string, state: GuidedPlanSessionState): void {
+    const resolvedAt = state === 'awaiting_confirmation' || state === 'executing' ? null : Date.now();
+    this.db.prepare(`
+      UPDATE guided_plan_sessions
+      SET state = ?, updated_at = ?, resolved_at = ?
+      WHERE session_id = ?
+    `).run(state, Date.now(), resolvedAt, sessionId);
+  }
+
   insertAudit(direction: 'inbound' | 'outbound', chatId: string, eventType: string, summary: string): void {
     this.db.prepare('INSERT INTO audit_logs (direction, chat_id, event_type, summary, created_at) VALUES (?, ?, ?, ?, ?)').run(direction, chatId, eventType, summary, Date.now());
   }
@@ -670,6 +1033,64 @@ export class BridgeStore {
       status: row.status === null ? 'pending' : String(row.status),
       createdAt: Number(row.created_at),
       submittedAt: row.submitted_at === null ? null : Number(row.submitted_at),
+      resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at),
+    };
+  }
+
+  private mapQueuedTurnInput(row: Record<string, unknown>): QueuedTurnInputRecord {
+    return {
+      queueId: String(row.queue_id),
+      scopeId: String(row.scope_id),
+      chatId: String(row.chat_id),
+      chatType: String(row.chat_type),
+      topicId: row.topic_id === null ? null : Number(row.topic_id),
+      threadId: String(row.thread_id),
+      inputJson: String(row.input_json),
+      sourceSummary: String(row.source_summary),
+      messageId: row.message_id === null ? null : Number(row.message_id),
+      status: normalizeQueuedTurnInputStatus(row.status),
+      error: row.error === null ? null : String(row.error),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at),
+    };
+  }
+
+  private mapPendingAttachmentBatch(row: Record<string, unknown>): PendingAttachmentBatchRecord {
+    return {
+      batchId: String(row.batch_id),
+      scopeId: String(row.scope_id),
+      chatId: String(row.chat_id),
+      chatType: String(row.chat_type),
+      topicId: row.topic_id === null ? null : Number(row.topic_id),
+      threadId: String(row.thread_id),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      mediaGroupId: row.media_group_id === null ? null : String(row.media_group_id),
+      attachmentsJson: String(row.attachments_json),
+      caption: String(row.caption ?? ''),
+      messageId: row.message_id === null ? null : Number(row.message_id),
+      status: normalizePendingAttachmentBatchStatus(row.status),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at),
+    };
+  }
+
+  private mapGuidedPlanSession(row: Record<string, unknown>): GuidedPlanSessionRecord {
+    return {
+      sessionId: String(row.session_id),
+      scopeId: String(row.scope_id),
+      chatId: String(row.chat_id),
+      chatType: String(row.chat_type),
+      topicId: row.topic_id === null ? null : Number(row.topic_id),
+      threadId: String(row.thread_id),
+      turnId: String(row.turn_id),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      planMarkdown: String(row.plan_markdown),
+      messageId: row.message_id === null ? null : Number(row.message_id),
+      state: normalizeGuidedPlanSessionState(row.state),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
       resolvedAt: row.resolved_at === null ? null : Number(row.resolved_at),
     };
   }
@@ -725,26 +1146,150 @@ export class BridgeStore {
     return new Set(rows.map(row => String(row.name)));
   }
 
+  listCodexAuthCandidateStates(runtimeId = 'default'): Map<string, CodexAuthCandidateState> {
+    const states = new Map<string, CodexAuthCandidateState>();
+    const globalRows = this.db.prepare('SELECT name, state FROM codex_auth_candidates').all() as Array<{ name: string; state: unknown }>;
+    for (const row of globalRows) {
+      states.set(String(row.name), normalizeCodexAuthCandidateState(row.state));
+    }
+    if (runtimeId !== 'default') {
+      const runtimeRows = this.db.prepare('SELECT name, state FROM codex_auth_candidate_runtime WHERE runtime_id = ?').all(runtimeId) as Array<{ name: string; state: unknown }>;
+      for (const row of runtimeRows) {
+        states.set(String(row.name), normalizeCodexAuthCandidateState(row.state));
+      }
+    }
+    return states;
+  }
+
   setCodexAuthCandidateDisabled(name: string, disabled: boolean, runtimeId = 'default'): void {
     if (runtimeId !== 'default') {
       this.db.prepare(`
-        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, state, updated_at)
+        VALUES (?, ?, ?, 'active', ?)
         ON CONFLICT(runtime_id, name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
       `).run(runtimeId, name, disabled ? 1 : 0, Date.now());
       return;
     }
     this.db.prepare(`
-      INSERT INTO codex_auth_candidates (name, disabled, updated_at)
-      VALUES (?, ?, ?)
+      INSERT INTO codex_auth_candidates (name, disabled, state, updated_at)
+      VALUES (?, ?, 'active', ?)
       ON CONFLICT(name) DO UPDATE SET disabled = excluded.disabled, updated_at = excluded.updated_at
     `).run(name, disabled ? 1 : 0, Date.now());
+  }
+
+  setCodexAuthCandidateState(name: string, state: CodexAuthCandidateState, runtimeId = 'default'): void {
+    if (runtimeId !== 'default') {
+      this.db.prepare(`
+        INSERT INTO codex_auth_candidate_runtime (runtime_id, name, disabled, state, updated_at)
+        VALUES (?, ?, 0, ?, ?)
+        ON CONFLICT(runtime_id, name) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
+      `).run(runtimeId, name, state, Date.now());
+      return;
+    }
+    this.db.prepare(`
+      INSERT INTO codex_auth_candidates (name, disabled, state, updated_at)
+      VALUES (?, 0, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at
+    `).run(name, state, Date.now());
+    this.db.prepare(`
+      UPDATE codex_auth_candidate_runtime
+      SET state = ?, updated_at = ?
+      WHERE name = ?
+    `).run(state, Date.now(), name);
+  }
+
+  deleteCodexAuthCandidate(name: string): void {
+    this.db.prepare('DELETE FROM codex_auth_candidates WHERE name = ?').run(name);
+    this.db.prepare('DELETE FROM codex_auth_candidate_runtime WHERE name = ?').run(name);
+    this.db.prepare('DELETE FROM codex_auth_quota_snapshots WHERE candidate_name = ?').run(name);
+  }
+
+  recordCodexAuthPoolInventory(names: string[]): void {
+    if (names.length === 0) {
+      return;
+    }
+    const now = Date.now();
+    const upsert = this.db.prepare(`
+      INSERT INTO codex_auth_pool_history (name, first_seen_at, last_seen_at, deleted_at, delete_reason, invalid_delete_count)
+      VALUES (?, ?, ?, NULL, NULL, 0)
+      ON CONFLICT(name) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        deleted_at = NULL,
+        delete_reason = NULL
+    `);
+    const seen = new Set(names);
+    this.db.exec('BEGIN');
+    try {
+      for (const name of seen) {
+        upsert.run(name, now, now);
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  recordCodexAuthCandidateInvalidDelete(name: string, reason: string | null = null): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO codex_auth_pool_history (
+        name,
+        first_seen_at,
+        last_seen_at,
+        deleted_at,
+        delete_reason,
+        invalid_delete_count
+      )
+      VALUES (?, ?, ?, ?, ?, 1)
+      ON CONFLICT(name) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        deleted_at = excluded.deleted_at,
+        delete_reason = excluded.delete_reason,
+        invalid_delete_count = codex_auth_pool_history.invalid_delete_count
+          + CASE WHEN codex_auth_pool_history.deleted_at IS NULL THEN 1 ELSE 0 END
+    `).run(name, now, now, now, reason);
+  }
+
+  recordCodexAuthCandidateRemoved(name: string, reason: string | null = null): void {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO codex_auth_pool_history (
+        name,
+        first_seen_at,
+        last_seen_at,
+        deleted_at,
+        delete_reason,
+        invalid_delete_count
+      )
+      VALUES (?, ?, ?, ?, ?, 0)
+      ON CONFLICT(name) DO UPDATE SET
+        last_seen_at = excluded.last_seen_at,
+        deleted_at = excluded.deleted_at,
+        delete_reason = excluded.delete_reason
+    `).run(name, now, now, now, reason);
+  }
+
+  getCodexAuthPoolStats(): CodexAuthPoolStats {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total_seen,
+        COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS alive,
+        COALESCE(SUM(invalid_delete_count), 0) AS deleted_invalid
+      FROM codex_auth_pool_history
+    `).get() as { total_seen: number; alive: number; deleted_invalid: number } | undefined;
+    return {
+      totalSeen: Number(row?.total_seen ?? 0),
+      alive: Number(row?.alive ?? 0),
+      deletedInvalid: Number(row?.deleted_invalid ?? 0),
+    };
   }
 
   setCodexAuthQuotaSnapshot(
     runtimeId: string,
     candidateName: string,
     accountId: string,
+    quotaIdentityId: string,
     snapshot: Pick<
       CodexAuthQuotaSnapshotRecord,
       | 'capturedAtMs'
@@ -760,6 +1305,7 @@ export class BridgeStore {
         runtime_id,
         candidate_name,
         account_id,
+        quota_identity_id,
         captured_at_ms,
         plan_type,
         primary_window_duration_mins,
@@ -768,9 +1314,10 @@ export class BridgeStore {
         secondary_remaining_percent,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(runtime_id, candidate_name) DO UPDATE SET
         account_id = excluded.account_id,
+        quota_identity_id = excluded.quota_identity_id,
         captured_at_ms = excluded.captured_at_ms,
         plan_type = excluded.plan_type,
         primary_window_duration_mins = excluded.primary_window_duration_mins,
@@ -782,6 +1329,7 @@ export class BridgeStore {
       runtimeId,
       candidateName,
       accountId,
+      quotaIdentityId,
       snapshot.capturedAtMs,
       snapshot.planType,
       snapshot.primaryWindowDurationMins,
@@ -792,17 +1340,18 @@ export class BridgeStore {
     );
   }
 
-  listCodexAuthQuotaSnapshots(accountIds: string[]): CodexAuthQuotaSnapshotRecord[] {
-    const uniqueAccountIds = [...new Set(accountIds.filter(Boolean))];
-    if (uniqueAccountIds.length === 0) {
+  listCodexAuthQuotaSnapshots(quotaIdentityIds: string[]): CodexAuthQuotaSnapshotRecord[] {
+    const uniqueQuotaIdentityIds = [...new Set(quotaIdentityIds.filter(Boolean))];
+    if (uniqueQuotaIdentityIds.length === 0) {
       return [];
     }
-    const placeholders = uniqueAccountIds.map(() => '?').join(', ');
+    const placeholders = uniqueQuotaIdentityIds.map(() => '?').join(', ');
     const rows = this.db.prepare(`
       SELECT
         runtime_id,
         candidate_name,
         account_id,
+        quota_identity_id,
         captured_at_ms,
         plan_type,
         primary_window_duration_mins,
@@ -811,12 +1360,13 @@ export class BridgeStore {
         secondary_remaining_percent,
         updated_at
       FROM codex_auth_quota_snapshots
-      WHERE account_id IN (${placeholders})
-    `).all(...uniqueAccountIds) as Array<Record<string, unknown>>;
+      WHERE quota_identity_id IN (${placeholders})
+    `).all(...uniqueQuotaIdentityIds) as Array<Record<string, unknown>>;
     return rows.map(row => ({
       runtimeId: String(row.runtime_id),
       candidateName: String(row.candidate_name),
       accountId: String(row.account_id),
+      quotaIdentityId: String(row.quota_identity_id),
       capturedAtMs: Number(row.captured_at_ms),
       planType: nullableString(row.plan_type),
       primaryWindowDurationMins: nullableNumber(row.primary_window_duration_mins),
@@ -848,10 +1398,30 @@ function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+function normalizeCodexAuthCandidateState(value: unknown): CodexAuthCandidateState {
+  return value === 'needs_repair' ? 'needs_repair' : 'active';
+}
+
 function normalizeCollaborationMode(value: unknown): CollaborationModeValue | null {
   return value === 'default' || value === 'plan' ? value : null;
 }
 
 function normalizeActiveTurnMessageMode(value: unknown): ActiveTurnMessageMode | null {
   return value === 'steer' || value === 'queue' ? value : null;
+}
+
+function normalizeQueuedTurnInputStatus(value: unknown): QueuedTurnInputStatus {
+  return value === 'processing' || value === 'completed' || value === 'cancelled' || value === 'failed'
+    ? value
+    : 'queued';
+}
+
+function normalizePendingAttachmentBatchStatus(value: unknown): PendingAttachmentBatchStatus {
+  return value === 'consumed' || value === 'cleared' ? value : 'pending';
+}
+
+function normalizeGuidedPlanSessionState(value: unknown): GuidedPlanSessionState {
+  return value === 'executing' || value === 'cancelled' || value === 'completed'
+    ? value
+    : 'awaiting_confirmation';
 }

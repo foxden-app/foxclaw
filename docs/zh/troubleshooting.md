@@ -14,6 +14,13 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
+如果 FoxClaw 是 macOS launchd 服务，再看：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
 ## Doctor 检查失败
 
 | 现象 | 含义 | 处理方式 |
@@ -137,6 +144,13 @@ systemctl --user is-active foxclaw.service
 pgrep -af foxclaw
 ```
 
+macOS 上用：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+pgrep -af foxclaw
+```
+
 停掉多余进程或服务后，重启 FoxClaw：
 
 ```bash
@@ -201,10 +215,16 @@ tail -f ~/.foxclaw/logs/codex-app-server-bot<id>.log
 
 如果 Telegram 里看到 `ChatGPT backend 403 Forbidden`，或者 app-server 日志里出现 `Unable to load site`、`cf-ray`、`chatgpt.com/backend-api`，通常不是 `auth.json` 文件坏了，而是服务进程访问 ChatGPT 后端时没有走正确网络。
 
-常见原因是：你在 shell 里配置了代理，或者项目 `.env` 里有代理，但 systemd/launchd 服务实际读的是另一个 env 文件。先看服务用的是哪个 env：
+常见原因是：你在 shell 里配置了代理，或者项目 `.env` 里有代理，但 systemd/launchd 服务实际读的是另一个 env 文件。Linux 先看服务用的是哪个 env：
 
 ```bash
 systemctl --user cat foxclaw.service
+```
+
+macOS 看 launchd plist 里的 `FOXCLAW_ENV`：
+
+```bash
+plutil -p ~/Library/LaunchAgents/app.foxden.foxclaw.plist | grep FOXCLAW_ENV -A1
 ```
 
 `foxclaw init` 会检测当前 shell 里的代理环境变量，并询问是否保存到 FoxClaw `.env`。如果你跳过了这一步，`foxclaw doctor` 会在发现“shell 有代理，但 FoxClaw env 没有代理”时给出 `[WARN]`。
@@ -244,6 +264,8 @@ FoxClaw 会把 proxychains 写进主 service，并清理旧的 FoxClaw `ExecStar
 
 systemd 安装脚本会记录当时正在运行的 Node 绝对路径，不依赖 systemd 去加载 `nvm.sh` 或其它 shell 初始化脚本。无论你用 nvm、fnm、asdf、mise、Volta、Homebrew 还是系统 Node，原则都是：从 Node 24+ 的 shell 里执行 `foxclaw start`，服务之后就固定使用这个 Node 24+ 路径。
 
+macOS launchd 也是同样原则：plist 会记录执行 `foxclaw start` 时的 Node 绝对路径，不依赖登录 shell 初始化脚本。
+
 如果你从 Node 22 或更旧版本的 shell 里安装过服务，请从 Node 24+ 的 shell 重新安装。nvm 用户示例：
 
 ```bash
@@ -252,7 +274,15 @@ foxclaw start
 systemctl --user status foxclaw.service
 ```
 
-状态输出里应该能看到 Node 24+ 的路径。`foxclaw doctor` 也会检查已安装服务里的 Node 路径，如果发现路径不存在或版本低于 24，会提示重新运行 `foxclaw start`。
+macOS 用户示例：
+
+```bash
+nvm use 24
+foxclaw start
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+```
+
+状态输出里应该能看到 Node 24+ 的路径。`foxclaw doctor` 也会检查已安装 systemd/launchd 服务里的 Node 路径，如果发现路径不存在或版本低于 24，会提示重新运行 `foxclaw start`。
 
 ## 重启后是否会自动运行
 

@@ -28,6 +28,64 @@ export interface ChatSessionSettings {
   updatedAt: number;
 }
 
+export type QueuedTurnInputStatus = 'queued' | 'processing' | 'completed' | 'cancelled' | 'failed';
+
+export interface QueuedTurnInputRecord {
+  queueId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  inputJson: string;
+  sourceSummary: string;
+  messageId: number | null;
+  status: QueuedTurnInputStatus;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
+export type PendingAttachmentBatchStatus = 'pending' | 'consumed' | 'cleared';
+
+export interface PendingAttachmentBatchRecord {
+  batchId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  cwd: string | null;
+  mediaGroupId: string | null;
+  attachmentsJson: string;
+  caption: string;
+  messageId: number | null;
+  status: PendingAttachmentBatchStatus;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
+export type GuidedPlanSessionState = 'awaiting_confirmation' | 'executing' | 'cancelled' | 'completed';
+
+export interface GuidedPlanSessionRecord {
+  sessionId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  turnId: string;
+  cwd: string | null;
+  planMarkdown: string;
+  messageId: number | null;
+  state: GuidedPlanSessionState;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
 export interface CachedThread {
   index: number;
   threadId: string;
@@ -353,6 +411,7 @@ export interface RuntimeStatus {
   currentBindings: number;
   pendingApprovals: number;
   pendingUserInputs: number;
+  queuedTurns: number;
   activeTurns: number;
   lastError: string | null;
   updatedAt: string;
@@ -416,6 +475,17 @@ export interface RuntimeStatus {
       candidateName: string | null;
       detail: string | null;
     }>;
+  } | null;
+  authProactiveRefresh?: {
+    state: 'running' | 'completed' | 'lease_failed' | 'failed';
+    startedAt: string;
+    finishedAt: string | null;
+    candidates: string[];
+    refreshed: number;
+    skipped: number;
+    failed: number;
+    error: string | null;
+    details: string[];
   } | null;
   lastUpdate?: {
     state: string;

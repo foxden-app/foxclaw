@@ -47,6 +47,7 @@ DEFAULT_CWD=<把绝对工作目录粘贴在这里>
 8. 让我在每个已配置的 Telegram bot 私聊里发送 /help、/status 和 /auth；确认 /auth 显示对应 bot runtime。
 9. 验证最终状态：
    - Linux 上 foxclaw.service 处于 active/enabled
+   - macOS 上 app.foxden.foxclaw launchd job 已加载，并且 ~/.foxclaw/logs/launchd.err.log 没有启动错误
    - foxclaw status 可以正常输出
 10. 汇报执行过的命令、最终状态和后续看日志的命令。请隐藏 TG_BOT_TOKENS，不要打印完整 token 或完整 .env。
 11. 如果启用了多个 bot，确认 foxclaw status 列出独立 app-server；群聊测试必须点名或回复目标 bot。

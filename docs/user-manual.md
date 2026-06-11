@@ -145,7 +145,14 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-On macOS, `foxclaw start` manages launchd. For foreground debugging, stop the background service and run:
+On macOS, `foxclaw start` manages launchd. Check launchd state and startup logs with:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
+For foreground debugging, stop the background service and run:
 
 ```bash
 foxclaw stop
@@ -359,7 +366,7 @@ FoxClaw recognizes candidate names in these forms:
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity matches, its refresh timestamp is newer, and the active app-server verifies it against the ChatGPT usage endpoint, preventing a same-name candidate from overwriting a different account. Before an auth switch or reload, FoxClaw also searches the other Codex homes for a newer credential with the same account ID, restores it into the requesting runtime, then verifies and mirrors it after restart.
+`auth.json` is what Codex currently uses. When switching accounts, FoxClaw points `auth.json` at one candidate. Candidate contents are Codex-generated JSON and should not be hand-written. In multi-bot mode, FoxClaw mirrors a candidate only when its account identity and identifiable ChatGPT user/email identity are compatible, its refresh timestamp is newer, and the active app-server verifies it against the ChatGPT usage endpoint, preventing a same-name candidate from overwriting a different account or Team seat. Before an auth switch or reload, FoxClaw also searches the other Codex homes for a newer compatible credential, restores it into the requesting runtime, then verifies and mirrors it after restart.
 
 If you already have a working `auth.json`, you can save it as a candidate:
 
@@ -395,7 +402,7 @@ If the login is cancelled or fails, FoxClaw tries to restore the previous auth t
 
 `/auth` lists candidate accounts, the current account, and the auth directory. It also provides buttons for switching, disabling, login, and reload. In multi-bot mode the panel names the `@botname` runtime being managed, because private chats, groups, and topics on one bot share that bot's current auth. The panel shows 8 candidates per page and supports paging, `All / Enabled / Attention` filters, and `/auth list <keyword>` filename search for large local inventories. Panel text and buttons omit the repeated `auth.json_` prefix from standard candidate filenames, so `auth.json_personal` on disk renders as `personal`; files are not renamed, and search and commands still operate on the original candidates. `/auth use <n>` always uses the full-list candidate number, independent of panel paging.
 
-Candidate rows are prefixed with observed `window:remaining-percent` values. For example, a Plus account may show `5h:20|7d:25`, while an account with one monthly window may show `30d:97`. Buttons use a compact two-number `primary|secondary` form such as `20|25`; unknown values render as `—`. The current auth quota is refreshed when the panel opens; other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT account, FoxClaw combines their cached quota snapshots by verified account ID, so one bot's `/auth` panel can show quota information learned by another bot without mixing different accounts.
+Candidate rows are prefixed with observed `window:remaining-percent` values. For example, a Plus account may show `5h:20|7d:25`, while an account with one monthly window may show `30d:97`. Buttons use a compact two-number `primary|secondary` form such as `20|25`; unknown values render as `—`. The current auth quota is refreshed when the panel opens; other candidates are not switched merely to query quota. When multiple bot runtimes have recently used the same ChatGPT quota identity, FoxClaw combines their cached quota snapshots by verified user/email identity under the account, so one bot's `/auth` panel can show quota information learned by another bot without mixing different seats on the same Team account.
 
 Approximation:
 
@@ -415,15 +422,17 @@ Quota remaining: window:percent|auth
 [🔄 Reload auth]
 ```
 
-The right-side `✅` / `⏸️` button controls whether the candidate participates in auto-rotation. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--` means no quota snapshot has been observed for that candidate yet. Health summaries distinguish ready, low quota, quota exhausted, quota unknown, not recently refreshed, API key, and invalid auth file states.
+The right-side `✅` / `⏸️` button controls whether the candidate participates in auto-rotation. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--` means no quota snapshot has been observed for that candidate yet. Health summaries distinguish ready, low quota, quota exhausted, quota unknown, not recently refreshed, API key, invalid auth file, and needs login repair states.
+
+When an auth candidate has already failed while in use and FoxClaw cannot recover a newer same-account credential from local mirror or cross-node sync, it is marked as `needs login repair`. These candidates are skipped by auto-rotation and proactive refresh, and are hidden from the `Enabled` filter. Their row shows a `?` action. Tapping it opens two choices: Login repair starts device-code login with that candidate selected; Delete removes the candidate from canonical storage and all local bot runtimes, and clears cached quota for it.
 
 `/auth refresh all` is a command-only maintenance action because ChatGPT refresh tokens are rotated. It is allowed only when every Telegram runtime, the Weixin runtime, approvals, inputs, logins, and auth mirroring are idle. The command first shows a risk confirmation: if OpenAI/Codex consumes an old refresh token but the new token cannot be saved because of network, process, or disk failure, that candidate may require device login or phone verification again. After confirmation, FoxClaw visits every ChatGPT candidate, asks Codex to force-refresh tokens with `account/read refreshToken=true`, verifies the result through the usage endpoint, mirrors successful candidates, restores the original current auth, and shows a summary.
 
-OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token replay grace period. Codex refreshes automatically when an access token approaches expiry; when it cannot parse the access-token `exp`, current Codex uses a `last_refresh` fallback of about 8 days. The panel labels candidates without a refresh record in that interval as `not recently refreshed`. FoxClaw also checks once per hour in the background: if an enabled ChatGPT candidate has a `last_refresh` older than 9 days, FoxClaw proactively refreshes that batch only when every runtime is idle, no approvals/inputs/logins/auth mirror writes are active, and the node holds the cross-node refresh lease. The private bot chat reports the proactive refresh result, and newer candidates continue through same-node mirroring and cross-node sync.
+OpenAI does not publish a fixed ChatGPT refresh-token lifetime or an old-token replay grace period. Codex refreshes automatically when an access token approaches expiry; when it cannot parse the access-token `exp`, current Codex uses a `last_refresh` fallback of about 8 days. The panel labels candidates without a refresh record in that interval as `not recently refreshed`. FoxClaw also checks once per hour in the background: if an enabled ChatGPT candidate has a `last_refresh` older than 9 days, FoxClaw proactively refreshes that batch only when every runtime is idle, no approvals/inputs/logins/auth mirror writes are active, and the node holds the cross-node refresh lease. The private bot chat shows one proactive-refresh status message and edits it to the final result. Newer candidates continue through same-node mirroring and cross-node sync, and bursty mirror/cross-node refresh notices are grouped into short summary messages.
 
 ### 6.4 Cross-Node Auth Sync
 
-Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`. The contact bot private chat reports send, receive, queue, import, failure, recovery-query, and manual-intervention states; per-candidate validation failures are shown as candidate failures instead of overwriting the sync-system last error. Recent bot-to-bot traffic is also kept in an event ring so `/auth sync events [filter]` and `/auth sync trace <requestId>` can explain a specific candidate, peer, or request.
+Cross-node auth sync is disabled by default. It is for multiple machines you control that share the same legally owned ChatGPT auth candidate pool, so a token refreshed by Codex on one node can be copied to the others. v1 uses Telegram Bot-to-Bot private messages to carry encrypted files, so it does not require public IPs or FRP. The recommended default is one contact bot per node; other bots on the same node keep using local auth mirroring. In multi-bot mode, the default contact is the first token in `TG_BOT_TOKENS`. The contact bot private chat reports send, receive, queue, import, failure, recovery-query, and manual-intervention states; refresh/send/import bursts are grouped into summaries, while recovery and manual-intervention notices remain explicit. Remote import validation temporarily restarts the local Codex app-server; FoxClaw marks that window non-idle, and ordinary messages received during it get a short retry notice instead of running against a restarting bridge. Per-candidate validation failures are shown as candidate failures instead of overwriting the sync-system last error. Recent bot-to-bot traffic is also kept in an event ring so `/auth sync events [filter]` and `/auth sync trace <requestId>` can explain a specific candidate, peer, or request.
 
 For the full design, safety boundaries, `.env` examples, and troubleshooting, read the [Cross-Node Auth Sync Setup Guide](./cross-node-auth-sync.md).
 
@@ -446,6 +455,8 @@ AUTH_SYNC_PEERS=@other_node_bot,@third_node_bot
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 # Optional; FoxClaw generates and persists a local node id when omitted.
 AUTH_SYNC_NODE_ID=workstation-a
+# Optional resource-rich mode: auto-delete unrecoverable candidates across peers.
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 Safety boundaries:
@@ -453,8 +464,9 @@ Safety boundaries:
 - Telegram only carries ciphertext. Auth contents, candidate names, account ids, and `last_refresh` live inside the AES-256-GCM encrypted payload.
 - FoxClaw only accepts sync files from bots listed in `AUTH_SYNC_PEERS`; wrong key, cluster, nonce, or payload validation never writes files.
 - Remote imports wait for global local idleness, temporarily switch to the candidate for app-server usage validation, and only then write the candidate.
-- A same-name candidate known to belong to a different account id is never overwritten.
+- A same-name candidate known to belong to a different account id, or to a different identifiable ChatGPT user/email under the same account, is never overwritten.
 - Cross-node recovery only pulls an already-held valid peer copy and does not rotate refresh tokens during recovery. If no peer has a usable copy, it stops and asks you to maintain auth manually. The background 9-day proactive refresh separately requests the cross-node refresh lease and skips that cycle if the lease is not granted.
+- When `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` is enabled, or the same option is turned on in `/config`, unrecoverable candidates are deleted and propagated to peers with a delete tombstone. Private notifications collapse to an auth-pool summary: total seen, alive, and invalid-deleted.
 
 Dual-active behavior:
 

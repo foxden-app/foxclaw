@@ -53,6 +53,11 @@ test('CLI version and help commands do not enter serve mode', () => {
   assert.match(help.stdout, /foxclaw status/);
   assert.match(help.stdout, /foxclaw update/);
   assert.equal(help.stderr, '');
+
+  const subcommandHelp = runFoxclawCli('install-systemd', '--help');
+  assert.equal(subcommandHelp.status, 0);
+  assert.match(subcommandHelp.stdout, /Usage:/);
+  assert.doesNotMatch(subcommandHelp.stdout + subcommandHelp.stderr, /Installed /);
 });
 
 test('CLI unknown commands show usage instead of starting the bridge', () => {

@@ -33,7 +33,7 @@ Safety boundaries:
 - FoxClaw only accepts sync files from bots listed in `AUTH_SYNC_PEERS`.
 - Wrong `AUTH_SYNC_KEY`, cluster, nonce, or payload validation never writes files.
 - Remote imports wait for global local idleness, then run temporary usage validation before writing a candidate.
-- A same-name candidate known to belong to a different account id is never overwritten.
+- A same-name candidate known to belong to a different account id, or to a different identifiable ChatGPT user/email under the same account, is never overwritten.
 - Sync packets do not create reply chains. FoxClaw filters by packet type, nonce, and peer allowlist to avoid bot-to-bot loops.
 
 Telegram's official Bot Features documentation says private bot-to-bot messaging requires Bot-to-Bot Communication Mode on both sender and recipient, and it calls out loop-prevention requirements. See https://core.telegram.org/bots/features#bot-to-bot-communication
@@ -92,6 +92,7 @@ AUTH_SYNC_KEY=<shared key with at least 32 bytes>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 AUTH_SYNC_NODE_ID=workstation-a
 AUTH_SYNC_PEERS=@foxclaw_node_b_bot
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 Node B:
@@ -103,6 +104,7 @@ AUTH_SYNC_KEY=<shared key with at least 32 bytes>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 AUTH_SYNC_NODE_ID=workstation-b
 AUTH_SYNC_PEERS=@foxclaw_node_a_bot
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 For more peers, separate bot usernames with commas:
@@ -164,9 +166,11 @@ If it shows `Missing replies: @peer_bot`, Telegram delivery may have succeeded, 
 
 Confirm that pending imports were processed, or that the candidate exists or has a newer timestamp.
 
-Note: `/auth sync push all` saying “sent” only means this node successfully handed encrypted packages to Telegram. It does not prove the peer wrote files. The peer imports only when it is globally idle, usage validation succeeds, same-name candidates belong to the same account id, and the remote `last_refresh` is newer than the local copy. If the local file is already equal or newer, it will not change and `Last import` may remain empty.
+Note: `/auth sync push all` saying “sent” only means this node successfully handed encrypted packages to Telegram. It does not prove the peer wrote files. The peer imports only when it is globally idle, usage validation succeeds, same-name candidates belong to the same account id and compatible ChatGPT user/email identity, and the remote `last_refresh` is newer than the local copy. If the local file is already equal or newer, it will not change and `Last import` may remain empty.
 
-When cross-node sync is enabled, the contact bot private chat receives node-level notifications: local auth updates and the peers being contacted, received remote bundles and whether they were queued or immediately validated, import success/skip/failure reasons, recovery peer queries and peer replies, and a manual-intervention notice when every peer lacks an importable copy. Notifications never include auth contents, tokens, or encrypted bundle payloads.
+When cross-node sync is enabled, the contact bot private chat receives node-level notifications: local auth updates and the peers being contacted, received remote bundles and whether they were queued or immediately validated, import success/skip/failure reasons, recovery peer queries and peer replies, and a manual-intervention notice when every peer lacks an importable copy. Refresh/send/import bursts are grouped into short summaries so one candidate update does not produce separate start, receive, mirror-write, and completion messages. Recovery and manual-intervention notices remain explicit. Remote import validation temporarily restarts the local Codex app-server; during that restart window FoxClaw treats the runtime as non-idle and asks ordinary messages to be resent shortly instead of running them against a restarting bridge. Notifications never include auth contents, tokens, or encrypted bundle payloads.
+
+For a resource-rich pool where individual candidate maintenance is not important, enable `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` or toggle it with `/config auth_auto_delete on`. Candidates that cannot be recovered and would otherwise be marked for repair are deleted locally, a delete tombstone is sent to peers, and candidate-level sync/delete chatter is collapsed into an auth-pool summary.
 
 Starting in 0.5.2, `/auth sync status` separates sync-system `Last error` from per-auth `Candidate failures`. For example, a remote candidate that returns `token_invalidated` or has an expired access token is recorded under that candidate name only; current `auth.json` health is still determined by validating the current auth usage. `local candidate is already newer or equal` is a normal skip, not an error.
 
@@ -198,7 +202,7 @@ With cross-node sync enabled, this command first requests a cross-node refresh l
 
 - The local node may not be globally idle. Active turns, approvals, inputs, login flows, and mirror writes make imports wait.
 - Usage validation failure rejects the write.
-- Same-name candidates from different account ids are refused.
+- Same-name candidates from different account ids, or from different identifiable ChatGPT users/emails under the same account, are refused.
 - Run `/auth sync events <candidate>` or `/auth sync trace <requestId>` to see the receive, validation, skip, or failure records kept by FoxClaw.
 
 **Should I periodically run `/auth refresh all confirm` as keepalive?**

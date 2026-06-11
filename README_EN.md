@@ -39,6 +39,7 @@ FoxClaw is more than message forwarding. It provides Telegram panels for Codex w
 - Already installed and want the full command guide for `/help`, `/setup`, `/threads`, `/watch`, `/auth`, and auth rotation? Read the [User Manual](./docs/user-manual.md).
 - Want to sync the same legally owned ChatGPT auth candidate pool across multiple machines? Read the [Cross-Node Auth Sync Setup Guide](./docs/cross-node-auth-sync.md).
 - Want to see what changed in each release? Read the [Changelog](./CHANGELOG.md).
+- Maintaining a release? Use the [Release Runbook](./docs/release.md).
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
@@ -104,7 +105,7 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 **Multi-account management:**
 - Codex account controls: `/account`, `/quota`, `/login_device`, `/auth add <name>`
 - Automatic auth rotation across local `auth.json_*` files when a usage limit is hit — seamless account switching
-- Paginated `/auth` panel to filter, enable, disable, search, and switch candidate accounts; quota uses observed window lengths, and multi-bot mode merges recent snapshots by account ID across runtimes
+- Paginated `/auth` panel to filter, enable, disable, search, and switch candidate accounts; quota uses observed window lengths, and multi-bot mode merges recent snapshots by ChatGPT quota identity across runtimes
 
 **Threads and sessions:**
 - `/threads`, `/open`, `/new`, `/where`, `/interrupt` — sticky chat-to-thread binding
@@ -152,6 +153,13 @@ It installs or restarts the Linux user systemd service, or loads/reloads launchd
 ```bash
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
+```
+
+To inspect macOS launchd state and startup logs:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
 ```
 
 You can also use the wrapper commands:
@@ -215,7 +223,7 @@ TG_BOT_TOKEN=123456:token_a
 
 FoxClaw remains one system service. By default, it starts an independent `codex app-server` and `CODEX_HOME` for each bot. While bot A is running a turn, bot B can switch its own `/auth` selection. Candidate credentials are mirrored only after online-validated login or refresh; before switching or reloading, FoxClaw also restores a newer same-account credential from another Codex home when available. Current selections remain independent. Send `/help` and `/status` in a private chat with each bot after installation; `/auth` names the runtime being managed, and `/status` summarizes every bot's connection, runtime type, selected auth, and active turns.
 
-When multiple machines share the same legally owned account pool, optional cross-node auth sync can be enabled with `AUTH_SYNC_ENABLED=true`, `AUTH_SYNC_KEY`, and `AUTH_SYNC_PEERS=@peer_contact_bot`. The recommended topology is one contact bot per node; other bots on the same node continue to use local auth mirroring. In multi-bot mode, the first token in `TG_BOT_TOKENS` is the default contact bot. FoxClaw sends encrypted auth bundles through Telegram Bot-to-Bot private messages. A locally verified refresh is pushed to peers, and a node with a bad local candidate can pull an already-held valid peer copy. The contact bot private chat reports send, receive, queue, import, failure, and manual-intervention states. `/auth sync events [filter]` and `/auth sync trace <requestId>` inspect recent traffic. Cross-node recovery never auto-refreshes tokens; `/auth refresh all confirm` first requests a cross-node refresh lease. For full config, `@BotFather` operations, and verification steps, read the [Cross-Node Auth Sync Setup Guide](./docs/cross-node-auth-sync.md).
+When multiple machines share the same legally owned account pool, optional cross-node auth sync can be enabled with `AUTH_SYNC_ENABLED=true`, `AUTH_SYNC_KEY`, and `AUTH_SYNC_PEERS=@peer_contact_bot`. The recommended topology is one contact bot per node; other bots on the same node continue to use local auth mirroring. In multi-bot mode, the first token in `TG_BOT_TOKENS` is the default contact bot. FoxClaw sends encrypted auth bundles through Telegram Bot-to-Bot private messages. A locally verified refresh is pushed to peers, and a node with a bad local candidate can pull an already-held valid peer copy. The contact bot private chat reports grouped send, receive, queue, import, failure, and manual-intervention states. `/auth sync events [filter]` and `/auth sync trace <requestId>` inspect recent traffic. Cross-node recovery never auto-refreshes tokens; `/auth refresh all confirm` first requests a cross-node refresh lease. For full config, `@BotFather` operations, and verification steps, read the [Cross-Node Auth Sync Setup Guide](./docs/cross-node-auth-sync.md).
 
 To keep one Telegram bot interoperable with terminal Codex sessions, put the same token in both `TG_BOT_TOKENS` and `TG_BOT_TOKEN`. That bot uses the default `CODEX_HOME` (usually `~/.codex` when unset) and default auth, so it can see local terminal sessions. It no longer has the isolated runtime guarantee: `/auth` switches also affect the terminal and other default runtimes.
 
@@ -318,6 +326,7 @@ foxclaw restart
 foxclaw update
 foxclaw stop
 foxclaw uninstall-systemd
+foxclaw uninstall-launchd
 ```
 
 ## Contributing

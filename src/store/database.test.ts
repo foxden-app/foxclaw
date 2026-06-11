@@ -55,9 +55,81 @@ test('BridgeStore isolates disabled Codex auth candidates per runtime', () => {
   });
 });
 
-test('BridgeStore shares Codex auth quota snapshots by account id', () => {
+test('BridgeStore persists Codex auth repair state globally with runtime overrides', () => {
   withStore((store) => {
-    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), undefined);
+    store.setCodexAuthCandidateState('auth.json_a', 'needs_repair');
+    assert.equal(store.listCodexAuthCandidateStates().get('auth.json_a'), 'needs_repair');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), 'needs_repair');
+
+    store.setCodexAuthCandidateState('auth.json_a', 'active', 'bot1');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), 'active');
+
+    store.setCodexAuthCandidateState('auth.json_a', 'active');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), 'active');
+
+    store.setCodexAuthCandidateState('auth.json_a', 'needs_repair');
+    store.deleteCodexAuthCandidate('auth.json_a');
+    assert.equal(store.listCodexAuthCandidateStates('bot1').get('auth.json_a'), undefined);
+  });
+});
+
+test('BridgeStore tracks Codex auth pool history and invalid deletes', () => {
+  withStore((store) => {
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 0,
+      alive: 0,
+      deletedInvalid: 0,
+    });
+
+    store.recordCodexAuthPoolInventory(['auth.json_a', 'auth.json_b', 'auth.json_a']);
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 2,
+      deletedInvalid: 0,
+    });
+
+    store.recordCodexAuthCandidateInvalidDelete('auth.json_a', 'needs_repair');
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthCandidateRemoved('auth.json_b', null);
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 0,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthPoolInventory(['auth.json_b']);
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthCandidateInvalidDelete('auth.json_a', 'needs_repair');
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 1,
+    });
+
+    store.recordCodexAuthPoolInventory(['auth.json_a']);
+    store.recordCodexAuthCandidateInvalidDelete('auth.json_a', 'needs_repair');
+    assert.deepEqual(store.getCodexAuthPoolStats(), {
+      totalSeen: 2,
+      alive: 1,
+      deletedInvalid: 2,
+    });
+  });
+});
+
+test('BridgeStore shares Codex auth quota snapshots by quota identity id', () => {
+  withStore((store) => {
+    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', 'acct-a:user-1', {
       capturedAtMs: 100,
       planType: 'free',
       primaryWindowDurationMins: 43200,
@@ -65,7 +137,7 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       secondaryWindowDurationMins: null,
       secondaryRemainingPercent: null,
     });
-    store.setCodexAuthQuotaSnapshot('bot2', 'auth.json_b', 'acct-b', {
+    store.setCodexAuthQuotaSnapshot('bot2', 'auth.json_b', 'acct-a', 'acct-a:user-2', {
       capturedAtMs: 200,
       planType: 'plus',
       primaryWindowDurationMins: 300,
@@ -73,7 +145,7 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       secondaryWindowDurationMins: 10080,
       secondaryRemainingPercent: 25,
     });
-    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', {
+    store.setCodexAuthQuotaSnapshot('bot1', 'auth.json_a', 'acct-a', 'acct-a:user-1', {
       capturedAtMs: 300,
       planType: 'plus',
       primaryWindowDurationMins: 300,
@@ -82,10 +154,11 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       secondaryRemainingPercent: 65,
     });
 
-    assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-a']).map(record => ({
+    assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-a:user-1']).map(record => ({
       runtimeId: record.runtimeId,
       candidateName: record.candidateName,
       accountId: record.accountId,
+      quotaIdentityId: record.quotaIdentityId,
       capturedAtMs: record.capturedAtMs,
       planType: record.planType,
       primaryWindowDurationMins: record.primaryWindowDurationMins,
@@ -96,6 +169,7 @@ test('BridgeStore shares Codex auth quota snapshots by account id', () => {
       runtimeId: 'bot1',
       candidateName: 'auth.json_a',
       accountId: 'acct-a',
+      quotaIdentityId: 'acct-a:user-1',
       capturedAtMs: 300,
       planType: 'plus',
       primaryWindowDurationMins: 300,
@@ -389,12 +463,16 @@ test('BridgeStore migrates old auth quota snapshots without plan and window meta
   const store = new BridgeStore(dbPath);
   try {
     assert.deepEqual(store.listCodexAuthQuotaSnapshots(['acct-old']).map(record => ({
+      accountId: record.accountId,
+      quotaIdentityId: record.quotaIdentityId,
       planType: record.planType,
       primaryWindowDurationMins: record.primaryWindowDurationMins,
       primaryRemainingPercent: record.primaryRemainingPercent,
       secondaryWindowDurationMins: record.secondaryWindowDurationMins,
       secondaryRemainingPercent: record.secondaryRemainingPercent,
     })), [{
+      accountId: 'acct-old',
+      quotaIdentityId: 'acct-old',
       planType: null,
       primaryWindowDurationMins: null,
       primaryRemainingPercent: 80,
@@ -423,6 +501,7 @@ test('BridgeStore persists active turn preview cleanup state', () => {
       scopeId: S4,
       threadId: 'thread-1',
       messageId: 41,
+      isObserved: false,
       createdAt: previews[0]!.createdAt,
       updatedAt: previews[0]!.updatedAt,
     });
@@ -432,15 +511,121 @@ test('BridgeStore persists active turn preview cleanup state', () => {
       scopeId: S4,
       threadId: 'thread-2',
       messageId: 42,
+      isObserved: true,
     });
 
     previews = store.listActiveTurnPreviews();
     assert.equal(previews.length, 1);
     assert.equal(previews[0]?.turnId, 'turn-2');
     assert.equal(previews[0]?.messageId, 42);
+    assert.equal(previews[0]?.isObserved, true);
 
     store.removeActiveTurnPreviewByMessage(S4, 42);
     assert.deepEqual(store.listActiveTurnPreviews(), []);
+  });
+});
+
+test('BridgeStore persists queued turns in FIFO order', () => {
+  withStore((store) => {
+    const now = Date.now();
+    store.saveQueuedTurnInput({
+      queueId: 'queue-1',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      inputJson: JSON.stringify([{ type: 'text', text: 'first', text_elements: [] }]),
+      sourceSummary: 'first',
+      messageId: 1,
+      status: 'queued',
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+    store.saveQueuedTurnInput({
+      queueId: 'queue-2',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      inputJson: JSON.stringify([{ type: 'text', text: 'second', text_elements: [] }]),
+      sourceSummary: 'second',
+      messageId: 2,
+      status: 'queued',
+      error: null,
+      createdAt: now + 1,
+      updatedAt: now + 1,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.peekQueuedTurnInput(S1)?.queueId, 'queue-1');
+    assert.deepEqual(store.listQueuedTurnInputs(S1).map(record => record.queueId), ['queue-1', 'queue-2']);
+    store.updateQueuedTurnInputStatus('queue-1', 'processing');
+    assert.equal(store.peekQueuedTurnInput(S1)?.queueId, 'queue-2');
+    store.requeueInterruptedQueuedTurnInputs();
+    assert.equal(store.peekQueuedTurnInput(S1)?.queueId, 'queue-1');
+    store.cancelQueuedTurnInputs(S1);
+    assert.equal(store.countQueuedTurnInputs(S1), 0);
+  });
+});
+
+test('BridgeStore persists pending attachment batches', () => {
+  withStore((store) => {
+    const now = Date.now();
+    store.savePendingAttachmentBatch({
+      batchId: 'batch-1',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      cwd: '/repo',
+      mediaGroupId: 'album-1',
+      attachmentsJson: JSON.stringify([{ kind: 'photo', fileName: 'a.jpg', localPath: '/repo/a.jpg', relativePath: 'a.jpg' }]),
+      caption: 'caption',
+      messageId: null,
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.findPendingAttachmentBatchByMediaGroup(S1, 'album-1')?.batchId, 'batch-1');
+    store.updatePendingAttachmentBatchMessage('batch-1', 42);
+    assert.equal(store.getPendingAttachmentBatch('batch-1')?.messageId, 42);
+    store.resolvePendingAttachmentBatch('batch-1', 'consumed');
+    assert.equal(store.getLatestPendingAttachmentBatch(S1), null);
+  });
+});
+
+test('BridgeStore persists guided plan sessions', () => {
+  withStore((store) => {
+    const now = Date.now();
+    store.saveGuidedPlanSession({
+      sessionId: 'plan-1',
+      scopeId: S1,
+      chatId: 'chat-1',
+      chatType: 'private',
+      topicId: null,
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      cwd: '/repo',
+      planMarkdown: '- patch',
+      messageId: null,
+      state: 'awaiting_confirmation',
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.findOpenGuidedPlanSession(S1, 'turn-1')?.sessionId, 'plan-1');
+    store.updateGuidedPlanSessionMessage('plan-1', 77);
+    assert.equal(store.getGuidedPlanSession('plan-1')?.messageId, 77);
+    store.updateGuidedPlanSessionState('plan-1', 'completed');
+    assert.equal(store.findOpenGuidedPlanSession(S1, 'turn-1'), null);
   });
 });
 

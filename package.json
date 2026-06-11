@@ -1,6 +1,6 @@
 {
   "name": "@foxden-app/foxclaw",
-  "version": "0.5.9",
+  "version": "0.5.32",
   "description": "Foxden local execution claw for controlling Codex from trusted chat interfaces.",
   "type": "module",
   "main": "dist/main.js",
@@ -48,6 +48,7 @@
     "install-systemd": "node dist/main.js install-systemd",
     "uninstall-systemd": "node dist/main.js uninstall-systemd",
     "install-launchd": "node dist/main.js install-launchd",
+    "uninstall-launchd": "node dist/main.js uninstall-launchd",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node --test --import tsx $(find src -name '*.test.ts' -print)",

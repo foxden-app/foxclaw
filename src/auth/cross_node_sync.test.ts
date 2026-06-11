@@ -21,9 +21,18 @@ const loggerStub = {
 
 const SHARED_KEY = '0123456789abcdef0123456789abcdef';
 
-function rawAuth(accountId: string, lastRefresh: string, expSeconds = Math.floor(Date.now() / 1000) + 3600): string {
+function rawAuth(
+  accountId: string,
+  lastRefresh: string,
+  expSeconds = Math.floor(Date.now() / 1000) + 3600,
+  identity: { userId?: string; email?: string } = {},
+): string {
   const header = Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    exp: expSeconds,
+    'https://api.openai.com/auth.chatgpt_user_id': identity.userId,
+    'https://api.openai.com/profile.email': identity.email,
+  })).toString('base64url');
   return `${JSON.stringify({
     tokens: {
       account_id: accountId,
@@ -33,12 +42,27 @@ function rawAuth(accountId: string, lastRefresh: string, expSeconds = Math.floor
   })}\n`;
 }
 
-function record(candidateName: string, accountId: string, lastRefresh: string): AuthMirrorCandidateRecord {
+function record(
+  candidateName: string,
+  accountId: string,
+  lastRefresh: string,
+  identity: { userId?: string; email?: string } = {},
+): AuthMirrorCandidateRecord {
+  const userId = identity.userId ?? null;
+  const email = identity.email ?? null;
+  const quotaIdentityId = userId
+    ? `${accountId}:user:${userId}`
+    : email
+      ? `${accountId}:email:${email.toLowerCase()}`
+      : accountId;
   return {
     candidateName,
     accountId,
+    quotaIdentityId,
+    userId,
+    email,
     lastRefreshMs: Date.parse(lastRefresh),
-    raw: rawAuth(accountId, lastRefresh),
+    raw: rawAuth(accountId, lastRefresh, Math.floor(Date.now() / 1000) + 3600, identity),
     sourceRuntimeId: 'runtime',
     sourceLabel: '@local',
   };
@@ -127,6 +151,72 @@ test('CrossNodeAuthSync pushes encrypted newer auth to an allowed peer', async (
       'remote_bundle_received',
       'remote_import_imported',
     ]);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
+test('CrossNodeAuthSync propagates candidate deletion tombstones', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-delete-'));
+  try {
+    const notificationsA: AuthSyncNotification[] = [];
+    const notificationsB: AuthSyncNotification[] = [];
+    let deleted: { candidateName: string; source: string; reason: string | null } | null = null;
+    const services: { b?: CrossNodeAuthSync } = {};
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({
+        deleteLocalCandidate: async (candidateName, source) => {
+          deleted = { candidateName, source: source.nodeId, reason: source.reason ?? null };
+          return { ok: true, deleted: true, reason: source.reason ?? null };
+        },
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({
+        notify: async (event) => {
+          notificationsA.push(event);
+        },
+      }),
+    );
+    await serviceB.initialize();
+    await serviceA.initialize();
+
+    assert.equal(await serviceA.publishCandidateDeletion('auth.json_work', 'needs_repair'), true);
+    await waitFor(() => notificationsB.some(event => event.kind === 'remote_delete_deleted'));
+    assert.deepEqual(deleted, {
+      candidateName: 'auth.json_work',
+      source: 'node-a',
+      reason: 'needs_repair',
+    });
+    assert.deepEqual(notificationsA.map(event => event.kind), ['candidate_delete_sent']);
+    assert.deepEqual(notificationsB.map(event => event.kind), [
+      'remote_delete_received',
+      'remote_delete_deleted',
+    ]);
+    assert.equal(serviceA.getStatus().recentEvents.some(event =>
+      event.kind === 'delete.candidate'
+      && event.stage === 'sent'
+      && event.candidateName === 'auth.json_work'
+    ), true);
+    assert.equal(serviceB.getStatus().recentEvents.some(event =>
+      event.kind === 'delete.candidate'
+      && event.stage === 'deleted'
+      && event.candidateName === 'auth.json_work'
+    ), true);
   } finally {
     await removeTempTree(root);
   }
@@ -442,6 +532,60 @@ test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', asyn
   }
 });
 
+test('CrossNodeAuthSync pull recovery ignores a different ChatGPT user on the same account', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-user-conflict-'));
+  try {
+    const otherUser = record('auth.json_work', 'acct-team', '2026-06-01T00:00:00.000Z', {
+      userId: 'user-b',
+      email: 'b@example.test',
+    });
+    const notificationsB: AuthSyncNotification[] = [];
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records: [otherUser] }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' });
+        },
+      },
+      callbacks({
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    assert.equal(await serviceB.requestRecovery('auth.json_work', {
+      accountId: 'acct-team',
+      quotaIdentityId: 'acct-team:user:user-a',
+      lastRefreshMs: Date.parse('2026-05-01T00:00:00.000Z'),
+    }), false);
+
+    assert.deepEqual(notificationsB.map(event => event.kind), [
+      'recovery_started',
+      'recovery_peer_empty',
+      'recovery_failed',
+    ]);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync recovery notifies when all peers lack a usable candidate', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-empty-'));
   try {
@@ -549,6 +693,7 @@ function callbacks(options: {
   isIdle?: () => boolean;
   validate?: AuthSyncImportCallbacks['validateCandidate'];
   importCandidate?: AuthSyncImportCallbacks['importCandidate'];
+  deleteLocalCandidate?: AuthSyncImportCallbacks['deleteLocalCandidate'];
   notify?: AuthSyncImportCallbacks['notify'];
 }): AuthSyncImportCallbacks {
   const records = options.records ?? [];
@@ -559,6 +704,9 @@ function callbacks(options: {
     importCandidate: options.importCandidate ?? (async () => ({ ok: true, imported: true })),
     isIdle: options.isIdle ?? (() => true),
   };
+  if (options.deleteLocalCandidate) {
+    result.deleteLocalCandidate = options.deleteLocalCandidate;
+  }
   if (options.notify) {
     result.notify = options.notify;
   }

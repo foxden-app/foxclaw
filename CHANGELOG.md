@@ -2,6 +2,256 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.32 - 2026-06-11
+
+### 中文
+- 补齐 macOS launchd 适配检查：`doctor` 现在会检查已安装 plist 中记录的 Node 路径是否存在且为 Node 24+，并新增 `uninstall-launchd` 命令。
+- 新增 launchd plist 生成/解析的单元测试，并补充 macOS 服务状态、日志、代理和 Node 路径排障文档。
+
+### English
+- Filled macOS launchd adaptation gaps: `doctor` now checks that the Node path recorded in the installed plist exists and is Node 24+, and `uninstall-launchd` is available.
+- Added unit coverage for launchd plist generation/parsing and expanded macOS service status, log, proxy, and Node-path troubleshooting docs.
+
+## 0.5.31 - 2026-06-09
+
+### 中文
+- 修复自动 auth 轮转：目标候选切换后如果在 account/usage 验证阶段失败，会把该候选加入本次失败集合并继续轮询后续候选，而不是恢复原 auth 后停止。
+- 新增回归测试覆盖候选池中间账号验证失败时继续切到下一个可用账号并重试原请求。
+
+### English
+- Fixed automatic auth rotation so a candidate that fails account/usage validation after switching is added to the current failure set and FoxClaw keeps polling later candidates instead of stopping after restoring the previous auth.
+- Added regression coverage for continuing to the next usable account and retrying the original request when a middle candidate fails validation.
+
+## 0.5.30 - 2026-06-09
+
+### 中文
+- 修正重启自动续接路径：自动恢复现在会先像用户手动发送“继续”一样 `resumeThread` 原 Codex thread，再在原 thread 上启动续接 turn。
+- 如果原 thread 暂时无法恢复，FoxClaw 会保留状态卡并重试；不会静默切到 replacement thread，避免丢失原线程上下文。
+
+### English
+- Fixed restart auto-resume to match the manual "continue" path: FoxClaw now resumes the original Codex thread first, then starts the continuation turn on that same thread.
+- If the original thread cannot be resumed yet, FoxClaw keeps the status card and retries instead of silently switching to a replacement thread and losing context.
+
+## 0.5.29 - 2026-06-09
+
+### 中文
+- 重启自动续接遇到旧 Codex thread 永久 `thread not found` 时，会静默创建 replacement thread 并复用原 Telegram 状态卡继续跑，不再只反复等待旧 thread 恢复。
+- 自动续接提示补充了无上下文兜底指令：如果旧线程上下文不可用，会检查当前工作目录、git 状态、服务日志和运行状态后完成收尾总结。
+
+### English
+- Restart auto-resume now silently creates a replacement thread when the old Codex thread remains `thread not found`, reusing the original Telegram status card instead of only waiting for the old thread to recover.
+- The auto-resume prompt now includes a no-context fallback: inspect the current working directory, git status, service logs, and runtime state before finishing the user-facing summary.
+
+## 0.5.28 - 2026-06-09
+
+### 中文
+- 重启续接恢复失败时不再立刻把 Telegram 状态卡改成“桥接重启、请手动继续”；FoxClaw 会保留 active preview 并在后台短间隔重试几分钟。
+- 这修复了 Codex app-server 刚重启时线程短暂 `thread not found`，导致自动续跑错过窗口、没有最终总结消息的问题。
+
+### English
+- Restart recovery no longer immediately retires the Telegram status card as "bridge restarted, continue manually" when the first recovery attempt fails. FoxClaw keeps the active preview and retries in the background for several minutes.
+- This fixes cases where the Codex app-server briefly reports `thread not found` right after restart, causing auto-resume to miss its window and never send the final summary.
+
+## 0.5.27 - 2026-06-09
+
+### 中文
+- 重启续接的完成判定进一步收窄：只有 final/final_answer 类 assistant 输出、plan 输出或明确错误才算已有完成结果。
+- 如果旧 turn 只有 commentary 进度消息，例如“正在升级本机服务”，重启后仍会自动续跑，避免状态卡显示“已完成”但没有真正收尾回复。
+
+### English
+- Tightened restart recovery completion detection: only final/final_answer assistant output, plan output, or an explicit error now counts as a completed result.
+- If the previous turn only had commentary progress such as "upgrading the local service", FoxClaw still auto-resumes it after restart instead of retiring the status card as completed without a real final reply.
+
+## 0.5.26 - 2026-06-09
+
+### 中文
+- 修正重启续接判定：如果 Codex app-server 把被重启打断的旧 turn 标成 completed，但没有任何可转发的 assistant/plan 输出或错误内容，FoxClaw 会把它当作中断任务自动续跑，而不是把 Telegram 状态卡误改成“已完成”。
+- 已经有明确输出或错误结果的 completed turn 仍按完成处理，避免对真实完成的任务重复续跑。
+
+### English
+- Fixed restart recovery detection: if the Codex app-server marks a restart-interrupted turn as completed but it has no relayable assistant/plan output or error, FoxClaw now treats it as interrupted and auto-resumes it instead of retiring the Telegram status card as completed.
+- Completed turns that do have output or an error are still treated as finished, avoiding duplicate resume runs for truly completed work.
+
+## 0.5.25 - 2026-06-09
+
+### 中文
+- FoxClaw 重启后会优先重新接管 Codex app-server 中仍在运行的 live turn，包括 turn id 已变化但线程仍有 live turn 的情况，避免误开第二个续跑任务。
+- 如果重启前记录的活动 turn 已被 app-server 中断且没有完成结果，FoxClaw 会自动在同一线程启动一个“继续中断工作”的新 turn，并复用原 Telegram 状态卡继续更新，不再要求用户手动发送“继续”。
+- 如果旧 turn 已经完成，FoxClaw 只收尾旧状态卡，不会误触发自动续跑。
+
+### English
+- After a FoxClaw restart, live Codex app-server turns are reattached first, including cases where the live turn id changed but the thread still has an active turn, avoiding a duplicate resume turn.
+- If the previously tracked active turn was interrupted by the app-server restart and has no completed result, FoxClaw automatically starts a continuation turn in the same thread and reuses the existing Telegram status card.
+- If the old turn already completed, FoxClaw only retires the old status card and does not auto-resume it.
+
+## 0.5.24 - 2026-06-09
+
+### 中文
+- 后台主动 auth 刷新不再向私聊推送开始、跳过、完成或失败消息；最近一次刷新状态会写入 runtime status，并可在 `/status` 和 `/auth sync status` 主动查看。
+- 本机 auth mirror 和跨节点 auth sync 的刷新/导入/同步摘要也默认静默，不再推送 `auth 刷新/同步汇总` 或候选已同步提示，减少后台维护对注意力的打扰。
+
+### English
+- Background proactive auth refresh no longer pushes private start, skipped, completed, or failed messages. The latest refresh state is stored in runtime status and can be checked with `/status` and `/auth sync status`.
+- Same-node auth mirroring and cross-node auth sync refresh/import/sync summaries are quiet by default, so background maintenance no longer pushes auth refresh/sync summaries or per-candidate synced notices.
+
+## 0.5.23 - 2026-06-09
+
+### 中文
+- 补齐切换后验证路径：如果目标候选在验证 rate-limit usage 时返回 usage/rate/quota/billing/credits limit，FoxClaw 会恢复到原 auth，但不会把目标候选标记为 `?`，也不会触发自动剔除。
+- 这让额度耗尽在自动轮换、手动切换和验证失败提示里都保持同一语义：它只是暂时没额度，不是凭据失效。
+
+### English
+- Completed the post-switch validation path: if the selected candidate returns a usage/rate/quota/billing/credits limit while validating rate-limit usage, FoxClaw restores the previous auth but does not mark the selected candidate `?` or auto-delete it.
+- Quota exhaustion now has the same meaning across automatic rotation, manual switching, and validation failure messages: temporarily out of quota, not an invalid credential.
+
+## 0.5.22 - 2026-06-09
+
+### 中文
+- Codex 报 `usageLimitExceeded`、`You've hit your usage limit`、usage/rate/quota/billing/credits limit 这类额度耗尽时，不再把当前 auth 候选标记为需要修复，也不会触发 `AUTH_AUTO_DELETE_NEEDS_REPAIR` 的自动剔除和跨节点删除。
+- 额度耗尽仍会临时避开当前候选，切到另一个维护中的候选重试；提示文案改为“Codex 额度限制”，不再误写成 “Codex auth 问题”。
+
+### English
+- Codex quota exhaustion such as `usageLimitExceeded`, `You've hit your usage limit`, usage/rate/quota/billing/credits limit is no longer treated as an invalid auth candidate, so it does not mark `needs_repair` or trigger `AUTH_AUTO_DELETE_NEEDS_REPAIR` auto-delete / cross-node delete.
+- Quota exhaustion still temporarily skips the current candidate and retries with another maintained candidate; notifications now call this a Codex usage limit instead of an auth problem.
+
+## 0.5.21 - 2026-06-09
+
+### 中文
+- 新增资源富裕 auth 池模式：`AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 或 `/config auth_auto_delete on` 会把原本要标记为 `?`/需要登录修复、且无法恢复的候选自动剔除。
+- 自动剔除会通过跨节点 auth sync 发送删除 tombstone，peer 收到后删除同名候选，并优先处理删除，避免待导入队列把坏候选复活。
+- `/status` 和 `/config` 现在显示 auth 池摘要：历史见过的候选数、当前存活数、因失效自动剔除数；`/config` 的开关会写回当前 FoxClaw `.env`。
+- 开启自动剔除后，auth mirror / auth sync 的候选级同步、导入、删除和恢复通知会静默或汇总为池子摘要；同步发送/导入失败、删除失败和系统级 `sync_error` 仍会明确提示。
+
+### English
+- Added a resource-rich auth pool mode: `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` or `/config auth_auto_delete on` automatically deletes unrecoverable candidates that would otherwise be marked `?` / needs login repair.
+- Auto-delete now publishes a cross-node auth-sync delete tombstone, so peers delete the same candidate and process deletes before pending imports to avoid resurrecting bad candidates.
+- `/status` and `/config` now show an auth-pool summary: total candidates seen, currently alive, and invalid-deleted count. The `/config` toggle writes back to the active FoxClaw `.env`.
+- When auto-delete is enabled, candidate-level auth mirror / auth sync publish, import, delete, and recovery chatter is silenced or collapsed into pool summaries; sync send/import failures, delete failures, and system-level `sync_error` still notify explicitly.
+
+## 0.5.20 - 2026-06-08
+
+### 中文
+- 修复跨节点 auth 同步远端导入验证和普通消息并发时的竞态：验证远端候选会临时重启 Codex app-server，现在这段窗口会标记为非空闲。
+- 如果普通消息刚好在远端验证重启期间进入，FoxClaw 会提示稍后重发，不再把这条消息送进正在重启的 bridge 并报 `Codex app bridge stopped`。
+- 普通对话启动过程现在也计入非空闲状态，避免 auth 同步验证插入到新 turn 建立中的窗口。
+
+### English
+- Fixed a race between cross-node auth remote-import validation and ordinary messages. Remote candidate validation temporarily restarts Codex app-server, and that window is now marked non-idle.
+- If an ordinary message arrives during the validation restart window, FoxClaw asks the user to resend it shortly instead of sending it into a restarting bridge and reporting `Codex app bridge stopped`.
+- Starting an ordinary turn now also counts as non-idle, preventing auth sync validation from entering the small window while a new turn is being established.
+
+## 0.5.19 - 2026-06-08
+
+### 中文
+- 主动后台 auth 刷新现在只保留一条私聊状态消息：开始时发送，完成或拿不到刷新锁时编辑为最终结果，减少开始/完成两条消息的打扰。
+- 本机 auth 镜像和跨节点 auth 同步的刷新 burst 现在会短窗口汇总，把候选镜像、跨节点发送、收到远端包、导入/跳过/失败合成摘要；恢复失败和人工介入提示仍会明确发出。
+
+### English
+- Background proactive auth refresh now keeps one private status message: it sends the starting state and edits that message to the final result or lease failure, reducing separate start/done notifications.
+- Same-node auth mirroring and cross-node auth sync now group refresh bursts into short summaries covering mirror writes, peer sends, received remote bundles, import/skip/failure results, while recovery failures and manual-intervention notices remain explicit.
+
+## 0.5.18 - 2026-06-08
+
+### 中文
+- `/auth` 面板按钮和 `/auth use <n>` 手动切换后会立即通过 Codex app-server 验证新 auth：ChatGPT 候选必须能返回 account 和 rate-limit usage，成功后马上写入该候选的额度快照，所以列表不再继续显示旧额度。
+- 如果切换后的 auth 无法读取、身份不匹配，或 Codex 没有返回有效 account/usage，FoxClaw 会把该候选标记为“需要登录修复”（`?`），恢复到切换前的 auth，并再次重启 Codex app-server，让当前 runtime 不停留在坏 auth 上。
+- 自动 auth 轮换也复用同一套切换后验证；验证失败的候选不会继续重试请求或参与后续轮询。
+
+### English
+- Manual auth switches from the `/auth` panel buttons and `/auth use <n>` now validate the newly selected auth through Codex app-server immediately. ChatGPT candidates must return account and rate-limit usage, and successful switches record a fresh quota snapshot so the list no longer keeps showing stale usage.
+- If the selected auth cannot be parsed, has an identity mismatch, or Codex does not return valid account/usage data, FoxClaw marks that candidate as “needs login repair” (`?`), restores the previous auth, and restarts Codex app-server again so the runtime does not remain on a bad auth.
+- Automatic auth rotation now uses the same post-switch validation; failed candidates are not used for retrying the request or for later polling.
+
+## 0.5.17 - 2026-06-08
+
+### 中文
+- `foxclaw <subcommand> --help` / `-h` 现在只打印帮助，不再继续执行 `install-systemd`、`start`、`restart` 等带副作用的子命令，避免一次查帮助意外触发服务重启。
+
+### English
+- `foxclaw <subcommand> --help` / `-h` now prints usage and stops before running side-effecting subcommands such as `install-systemd`, `start`, or `restart`, preventing an accidental service restart while checking help.
+
+## 0.5.16 - 2026-06-08
+
+### 中文
+- FoxClaw 重启后会把仍在运行的桥接自有 Codex turn 恢复为可继续操作的活动态，状态卡继续刷新，后续 Telegram 输入会继续 steer 或按聊天设置排队，不再退化成需要用户重新发消息的只读观察态。
+- `/watch` 产生的观察态 turn 会在状态卡中持久化只读标记，重启恢复后仍保持只读，避免把旁观线程误恢复成可操作任务。
+
+### English
+- After a FoxClaw restart, bridge-owned live Codex turns are restored as actionable active turns: their status cards keep updating, and later Telegram messages keep steering or queueing according to the chat setting instead of degrading into read-only watch mode.
+- `/watch`-created observed turns now persist their read-only marker, so restart recovery keeps watched threads read-only and does not accidentally promote them into actionable tasks.
+
+## 0.5.15 - 2026-06-08
+
+### 中文
+- `/auth` 现在会把已确认不可用、并且本机/跨节点同步恢复失败的候选标记为“需要登录修复”，用 `?` 按钮显示，并从自动轮换、主动刷新和 enabled 视图中排除。
+- 点击 `?` 会进入修复菜单，可选择“登录修复”对该候选执行设备码登录，成功后清除修复状态并重新参与轮换；也可选择“删除”，从 canonical 和所有本机 bot runtime 中删除该候选并清理额度缓存。
+- 删除 auth 候选现在走 auth mirror 统一删除，避免只删一个 runtime 后又被其他 runtime 或 canonical 副本恢复。
+
+### English
+- `/auth` now marks candidates that have been proven unusable and could not be recovered through local/cross-node sync as “needs login repair”, shows a `?` action, and excludes them from auto-rotation, proactive refresh, and the enabled filter.
+- Tapping `?` opens a repair menu: Login repair runs device-code login for that candidate and clears the repair state on success; Delete removes the candidate from canonical storage and all local bot runtimes while clearing quota cache.
+- Auth candidate deletion now flows through the auth mirror so deleting a candidate from one runtime is not undone by another runtime or canonical copy.
+
+## 0.5.14 - 2026-06-08
+
+### 中文
+- Linux `foxclaw start` / `foxclaw restart` / `install-systemd` 现在如果检测到自己正运行在 `foxclaw.service` cgroup 内，会通过一次性的 `systemd-run --user` helper 在服务外执行重启，避免命令执行者被自己重启时杀掉导致半截输出或不确定状态。
+- 继续保留 systemd 作为稳定守护层：主 service 仍由 `Restart=always`、`KillMode=control-group` 和 user linger 保活；重启编排则交给短生命周期 helper，避免再引入一个更脆弱的常驻 Node 守护进程。
+
+### English
+- On Linux, `foxclaw start`, `foxclaw restart`, and `install-systemd` now detect when they are running inside the `foxclaw.service` cgroup and delegate the actual restart to a one-shot `systemd-run --user` helper outside that cgroup, avoiding half-written output or uncertain state when the caller would otherwise kill itself.
+- systemd remains the stable supervisor with `Restart=always`, `KillMode=control-group`, and user linger; restart orchestration moves to a short-lived helper instead of adding another long-running Node watchdog.
+
+## 0.5.13 - 2026-06-08
+
+### 中文
+- `auth.json_team_<localpart>` 候选现在会校验文件内 ChatGPT email localpart 是否匹配候选名；不匹配时 `/auth` 标为无效，避免继续显示另一位 seat 的额度。
+- 本机 auth mirror 不再传播 team 候选名与文件身份不一致的 auth，并会在启动 reconcile 时用仍然匹配候选名的 runtime 副本修复错误副本。
+- `/auth refresh all` 和当前候选额度刷新会跳过身份与 `team_` 候选名不匹配的文件，避免脏额度快照再次写入。
+
+### English
+- `auth.json_team_<localpart>` candidates now verify that the ChatGPT email local part inside the auth file matches the candidate name; mismatches are marked invalid in `/auth` instead of displaying another seat's quota.
+- The local auth mirror no longer propagates team candidates whose filename identity and auth payload disagree, and startup reconciliation can repair bad copies from a runtime copy that still matches the candidate name.
+- `/auth refresh all` and current-candidate quota refresh now skip files whose identity does not match the `team_` candidate name, preventing dirty quota snapshots from being recorded again.
+
+## 0.5.12 - 2026-06-08
+
+### 中文
+- `/auth` 额度快照现在按 ChatGPT 额度身份合并，优先区分 `chatgpt_user_id`，其次区分 email，避免同一个 Team account 下不同 seat 显示成同一份额度。
+- 本机 auth mirror、跨节点 auth sync 和 `/auth refresh all` 会拒绝可识别为不同 ChatGPT 用户/邮箱的同名候选互相覆盖，即使它们共享同一个 account id。
+- 额度快照数据库新增 `quota_identity_id` 并自动兼容旧数据；文档同步说明 account id 与额度身份的区别。
+
+### English
+- `/auth` quota snapshots now merge by ChatGPT quota identity, preferring `chatgpt_user_id` and then email, so different seats under the same Team account do not display as one shared quota.
+- Same-node auth mirroring, cross-node auth sync, and `/auth refresh all` now refuse to overwrite same-name candidates when they are identifiable as different ChatGPT users/emails, even if they share the same account id.
+- Added a `quota_identity_id` quota-snapshot migration with backward compatibility for old data, and updated docs to distinguish account id from quota identity.
+
+## 0.5.11 - 2026-06-08
+
+### 中文
+- `/auth` 面板的 `Bot runtime` 现在显示 Telegram bot id，例如 `@WuguiAI2_Bot (bot8949529424)`，便于和 `~/.foxclaw/codex/telegram/<botid>/home` 对应。
+- `/auth` 面板新增“安全同步”按钮，并支持 `/auth sync safe`，可在全局空闲时安全打平本机多 bot auth，并把已校验的候选推送到跨节点 peer。
+- 本机 auth mirror 新增全量安全同步路径：只传播通过既有在线校验的刷新候选，同时补齐 canonical 中已知、同账号且更新的 runtime 副本。
+
+### English
+- The `/auth` panel now shows the Telegram bot id in `Bot runtime`, for example `@WuguiAI2_Bot (bot8949529424)`, making it easy to match the runtime with `~/.foxclaw/codex/telegram/<botid>/home`.
+- Added a Safe sync button to the `/auth` panel, plus `/auth sync safe`, to flatten same-node multi-bot auth while globally idle and push validated candidates to cross-node peers.
+- Added a full safe-sync path for the local auth mirror: it only propagates candidates that pass the existing online validation and fills runtime copies from newer same-account canonical candidates.
+
+## 0.5.10 - 2026-06-08
+
+### 中文
+- Telegram 输入队列改为 SQLite 持久化 FIFO，FoxClaw 重启后不再丢失排队中的 Codex 请求，并在 `/status` 中显示排队数量。
+- Telegram 图片和文件会先进入附件暂存区，支持媒体组归并、下一条文字自动带附件发给 Codex，以及“分析 / 清空”按钮操作。
+- 引导式 Plan 会话现在会持久化并在重启后恢复，减少长任务或确认流程被服务重启打断的风险。
+- `/update` 完成回报会从已安装包的 `CHANGELOG.md` 读取当前版本更新内容，让 Telegram 里直接看到这次升级改了什么。
+
+### English
+- Replaced the in-memory Telegram prompt queue with a persisted SQLite FIFO so queued Codex requests survive FoxClaw restarts, and `/status` now reports queued turn count.
+- Telegram photos and files are staged before dispatch, with media-group merging, next-message attachment consumption, and Analyze/Clear buttons.
+- Guided Plan sessions are persisted and restored after restart, reducing interruption risk for long-running or confirmation-based flows.
+- `/update` completion reports now read the installed package `CHANGELOG.md` entry for the target version so Telegram shows what changed in the upgrade.
+
 ## 0.5.9 - 2026-06-07
 
 ### 中文

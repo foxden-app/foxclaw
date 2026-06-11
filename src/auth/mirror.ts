@@ -7,7 +7,7 @@ export interface AuthMirrorRuntime {
   id: string;
   label?: string;
   authDir: string;
-  notify?: (message: string) => Promise<void>;
+  notify?: (event: AuthMirrorNotification) => Promise<void>;
   validate?: (context: AuthMirrorValidationContext) => Promise<AuthMirrorValidationResult | boolean>;
 }
 
@@ -42,6 +42,9 @@ export interface AuthMirrorValidationResult {
 
 export interface ChatGptAuthMetadata {
   accountId: string;
+  quotaIdentityId: string;
+  userId: string | null;
+  email: string | null;
   lastRefreshMs: number;
 }
 
@@ -67,9 +70,18 @@ export interface AuthMirrorSyncedEvent {
   record: AuthMirrorCandidateRecord;
 }
 
+export interface AuthMirrorSyncAllResult {
+  synced: number;
+  skipped: number;
+}
+
 export interface AuthMirrorHooks {
   onSynced?: (event: AuthMirrorSyncedEvent) => Promise<void> | void;
 }
+
+export type AuthMirrorNotification =
+  | { kind: 'local_synced'; candidateName: string; sourceRuntimeId: string; sourceLabel: string }
+  | { kind: 'remote_imported'; candidateName: string; sourceNodeId: string; sourceLabel: string };
 
 const AUTH_SCAN_INTERVAL_MS = 5_000;
 
@@ -197,6 +209,49 @@ export class AuthCandidateMirror {
     return this.withActivity(() => this.propagateValidatedCandidate(runtime, candidateName));
   }
 
+  async deleteCandidate(candidateName: string): Promise<boolean> {
+    if (!isAuthCandidateName(candidateName)) return false;
+    return this.withActivity(async () => {
+      const directories = [
+        this.canonicalDir,
+        ...this.runtimes.map(runtime => runtime.authDir),
+      ];
+      for (const authDir of directories) {
+        await removeAuthCandidate(authDir, candidateName);
+      }
+      this.lastSyncedRefresh.delete(candidateName);
+      for (const key of [...this.lastValidationFailures.keys()]) {
+        if (key.endsWith(`:${candidateName}`)) {
+          this.lastValidationFailures.delete(key);
+        }
+      }
+      this.logger.info('auth.mirror.deleted', { candidateName });
+      return true;
+    });
+  }
+
+  async syncAllRuntimeCandidates(): Promise<AuthMirrorSyncAllResult> {
+    return this.withActivity(async () => {
+      let synced = 0;
+      let skipped = 0;
+      for (const runtime of this.runtimes) {
+        const names = await listAuthCandidateNames(runtime.authDir);
+        for (const name of names) {
+          if (await this.propagateValidatedCandidate(runtime, name)) {
+            synced += 1;
+          } else {
+            skipped += 1;
+          }
+        }
+      }
+      const distributed = await this.distributeCanonicalCandidates();
+      return {
+        synced: synced + distributed.synced,
+        skipped: skipped + distributed.skipped,
+      };
+    });
+  }
+
   async recoverRuntimeCandidate(runtimeId: string, candidateName: string): Promise<AuthMirrorRecovery | null> {
     if (!isAuthCandidateName(candidateName)) return null;
     const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
@@ -205,9 +260,18 @@ export class AuthCandidateMirror {
       const destinationPath = path.join(runtime.authDir, candidateName);
       const destination = await readChatGptAuthRecord(destinationPath);
       if (!destination) return null;
+      const destinationMatchesName = chatGptAuthMetadataMatchesCandidateName(candidateName, destination);
       const sources = await this.collectAuthRecords();
       const newest = sources
-        .filter(entry => entry.record.accountId === destination.accountId)
+        .filter((entry) => {
+          if (!chatGptAuthMetadataMatchesCandidateName(candidateName, entry.record)) {
+            return false;
+          }
+          if (!destinationMatchesName) {
+            return entry.candidateName === candidateName;
+          }
+          return authRecordsCompatible(entry.record, destination);
+        })
         .reduce<(typeof sources)[number] | null>((current, entry) => (
           !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
         ), null);
@@ -241,6 +305,43 @@ export class AuthCandidateMirror {
     });
   }
 
+  private async distributeCanonicalCandidates(): Promise<AuthMirrorSyncAllResult> {
+    let synced = 0;
+    let skipped = 0;
+    for (const name of await listAuthCandidateNames(this.canonicalDir)) {
+      const canonical = await readChatGptAuthRecord(path.join(this.canonicalDir, name));
+      if (!canonical) {
+        skipped += this.runtimes.length;
+        continue;
+      }
+      if (!chatGptAuthMetadataMatchesCandidateName(name, canonical)) {
+        skipped += this.runtimes.length;
+        this.logger.warn('auth.mirror.distribution_identity_mismatch', { name });
+        continue;
+      }
+      for (const runtime of this.runtimes) {
+        const destinationPath = path.join(runtime.authDir, name);
+        const destination = await readChatGptAuthRecord(destinationPath);
+        if (
+          destination
+          && chatGptAuthMetadataMatchesCandidateName(name, destination)
+          && !authRecordsCompatible(destination, canonical)
+        ) {
+          skipped += 1;
+          this.logger.warn('auth.mirror.distribution_conflict', { runtimeId: runtime.id, name });
+          continue;
+        }
+        if (destination && destination.lastRefreshMs >= canonical.lastRefreshMs) {
+          skipped += 1;
+          continue;
+        }
+        await atomicWrite(destinationPath, canonical.raw);
+        synced += 1;
+      }
+    }
+    return { synced, skipped };
+  }
+
   async importExternalCandidate(
     candidateName: string,
     raw: string,
@@ -259,11 +360,14 @@ export class AuthCandidateMirror {
         if (!metadata) {
           return { ok: false, imported: false, reason: 'invalid ChatGPT auth payload' };
         }
+        if (!chatGptAuthMetadataMatchesCandidateName(candidateName, metadata)) {
+          return { ok: false, imported: false, reason: 'candidate auth identity does not match candidate name' };
+        }
         const existing = (await this.collectAuthRecords())
-          .filter(entry => entry.candidateName === candidateName);
-        const conflicting = existing.find(entry => entry.record.accountId !== metadata.accountId);
+          .filter(entry => entry.candidateName === candidateName && chatGptAuthMetadataMatchesCandidateName(candidateName, entry.record));
+        const conflicting = existing.find(entry => !authRecordsCompatible(entry.record, metadata));
         if (conflicting) {
-          return { ok: false, imported: false, reason: 'same candidate belongs to a different account' };
+          return { ok: false, imported: false, reason: 'same candidate belongs to a different account or ChatGPT user' };
         }
         const newest = existing.reduce<(typeof existing)[number] | null>((current, entry) => (
           !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
@@ -287,8 +391,13 @@ export class AuthCandidateMirror {
         };
         await writeMirrorStatus(this.statusPath, this.lastStatus);
         this.logger.info('auth.mirror.remote_imported', { candidateName, sourceNodeId: source.nodeId });
-        const message = `${candidateName} has been synchronized from remote node ${sourceLabel}.`;
-        await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+        const notification: AuthMirrorNotification = {
+          kind: 'remote_imported',
+          candidateName,
+          sourceNodeId: source.nodeId,
+          sourceLabel,
+        };
+        await Promise.allSettled(this.runtimes.map((target) => target.notify?.(notification)));
         return {
           ok: true,
           imported: true,
@@ -315,9 +424,17 @@ export class AuthCandidateMirror {
       const sourcePath = path.join(runtime.authDir, name);
       const record = await readChatGptAuthRecord(sourcePath);
       if (!record) return false;
+      if (!chatGptAuthMetadataMatchesCandidateName(name, record)) {
+        this.logger.warn('auth.mirror.identity_mismatch', { runtimeId: runtime.id, name });
+        return false;
+      }
       const canonicalPath = path.join(this.canonicalDir, name);
       const canonical = await readChatGptAuthRecord(canonicalPath);
-      if (canonical && canonical.accountId !== record.accountId) {
+      if (
+        canonical
+        && chatGptAuthMetadataMatchesCandidateName(name, canonical)
+        && !authRecordsCompatible(canonical, record)
+      ) {
         this.logger.warn('auth.mirror.account_conflict', { runtimeId: runtime.id, name });
         return false;
       }
@@ -344,7 +461,17 @@ export class AuthCandidateMirror {
       await atomicWrite(canonicalPath, record.raw);
       for (const target of this.runtimes) {
         if (target.id !== runtime.id) {
-          await atomicWrite(path.join(target.authDir, name), record.raw);
+          const targetPath = path.join(target.authDir, name);
+          const targetRecord = await readChatGptAuthRecord(targetPath);
+          if (
+            targetRecord
+            && chatGptAuthMetadataMatchesCandidateName(name, targetRecord)
+            && !authRecordsCompatible(targetRecord, record)
+          ) {
+            this.logger.warn('auth.mirror.target_conflict', { sourceRuntimeId: runtime.id, targetRuntimeId: target.id, name });
+            continue;
+          }
+          await atomicWrite(targetPath, record.raw);
         }
       }
       this.lastSyncedRefresh.set(name, record.lastRefreshMs);
@@ -357,8 +484,13 @@ export class AuthCandidateMirror {
       };
       await writeMirrorStatus(this.statusPath, this.lastStatus);
       this.logger.info('auth.mirror.synced', { sourceRuntimeId: runtime.id, name });
-      const message = `${name} has been refreshed by ${sourceLabel} and synchronized to the other Codex homes.`;
-      await Promise.allSettled(this.runtimes.map((target) => target.notify?.(message)));
+      const notification: AuthMirrorNotification = {
+        kind: 'local_synced',
+        candidateName: name,
+        sourceRuntimeId: runtime.id,
+        sourceLabel,
+      };
+      await Promise.allSettled(this.runtimes.map((target) => target.notify?.(notification)));
       await this.hooks.onSynced?.({
         status: this.lastStatus,
         record: {
@@ -458,12 +590,17 @@ export class AuthCandidateMirror {
       record: await readChatGptAuthRecord(sourcePath),
     })))).filter((entry): entry is { sourcePath: string; record: ChatGptAuthRecord } => entry.record !== null);
     if (records.length === 0) return;
-    const accountIds = new Set(records.map((entry) => entry.record.accountId));
-    if (accountIds.size !== 1) {
+    const trustedRecords = records.filter(entry => chatGptAuthMetadataMatchesCandidateName(name, entry.record));
+    if (trustedRecords.length === 0) {
+      this.logger.warn('auth.mirror.startup_identity_mismatch', { name });
+      return;
+    }
+    const reference = trustedRecords[0]!.record;
+    if (trustedRecords.some(entry => !authRecordsCompatible(reference, entry.record))) {
       this.logger.warn('auth.mirror.startup_conflict', { name });
       return;
     }
-    const newest = records.reduce((current, entry) => (
+    const newest = trustedRecords.reduce((current, entry) => (
       entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
     ));
     this.lastSyncedRefresh.set(name, newest.record.lastRefreshMs);
@@ -592,13 +729,124 @@ export async function readChatGptAuthMetadata(filePath: string): Promise<ChatGpt
 export function parseChatGptAuthMetadata(raw: string): ChatGptAuthMetadata | null {
   try {
     const parsed = JSON.parse(raw) as {
-      tokens?: { account_id?: unknown };
+      tokens?: { account_id?: unknown; access_token?: unknown; id_token?: unknown };
       last_refresh?: unknown;
     };
     const accountId = typeof parsed.tokens?.account_id === 'string' ? parsed.tokens.account_id : '';
     const lastRefreshMs = typeof parsed.last_refresh === 'string' ? Date.parse(parsed.last_refresh) : NaN;
     if (!accountId || !Number.isFinite(lastRefreshMs)) return null;
-    return { accountId, lastRefreshMs };
+    const accessClaims = decodeJwtPayload(parsed.tokens?.access_token);
+    const idClaims = decodeJwtPayload(parsed.tokens?.id_token);
+    const userId = firstStringClaim(
+      accessClaims,
+      idClaims,
+      'https://api.openai.com/auth.chatgpt_user_id',
+      'https://api.openai.com/auth.user_id',
+    );
+    const email = firstStringClaim(
+      accessClaims,
+      idClaims,
+      'https://api.openai.com/profile.email',
+      'email',
+    );
+    return {
+      accountId,
+      quotaIdentityId: chatGptQuotaIdentityId(accountId, userId, email),
+      userId,
+      email,
+      lastRefreshMs,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function chatGptAuthMetadataMatchesCandidateName(
+  candidateName: string,
+  metadata: Pick<ChatGptAuthMetadata, 'email'>,
+): boolean {
+  const expectedLocalPart = expectedTeamCandidateEmailLocalPart(candidateName);
+  if (!expectedLocalPart || !metadata.email) {
+    return true;
+  }
+  const actualLocalPart = metadata.email.split('@', 1)[0]?.trim().toLowerCase() ?? '';
+  return actualLocalPart === expectedLocalPart;
+}
+
+function expectedTeamCandidateEmailLocalPart(candidateName: string): string | null {
+  const prefix = 'auth.json_team_';
+  if (!candidateName.startsWith(prefix)) {
+    return null;
+  }
+  const raw = candidateName.slice(prefix.length).trim().toLowerCase();
+  if (!raw || raw.includes('/') || raw.includes('\\')) {
+    return null;
+  }
+  const localPart = raw.includes('@') ? raw.split('@', 1)[0]! : raw;
+  return /^[a-z0-9][a-z0-9._+-]*$/.test(localPart) ? localPart : null;
+}
+
+function chatGptQuotaIdentityId(accountId: string, userId: string | null, email: string | null): string {
+  if (userId) {
+    return `${accountId}:user:${userId}`;
+  }
+  if (email) {
+    return `${accountId}:email:${email.toLowerCase()}`;
+  }
+  return accountId;
+}
+
+function authRecordsCompatible(
+  left: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+  right: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+): boolean {
+  if (left.accountId !== right.accountId) {
+    return false;
+  }
+  if (!isSpecificQuotaIdentity(left) || !isSpecificQuotaIdentity(right)) {
+    return true;
+  }
+  return left.quotaIdentityId === right.quotaIdentityId;
+}
+
+function isSpecificQuotaIdentity(metadata: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>): boolean {
+  return metadata.quotaIdentityId !== metadata.accountId;
+}
+
+function firstStringClaim(
+  primary: Record<string, unknown> | null,
+  secondary: Record<string, unknown> | null,
+  ...keys: string[]
+): string | null {
+  for (const claims of [primary, secondary]) {
+    if (!claims) {
+      continue;
+    }
+    for (const key of keys) {
+      const value = claims[key];
+      if (typeof value === 'string' && value.trim()) {
+        return value;
+      }
+    }
+  }
+  return null;
+}
+
+function decodeJwtPayload(token: unknown): Record<string, unknown> | null {
+  if (typeof token !== 'string') {
+    return null;
+  }
+  const parts = token.split('.');
+  if (parts.length < 2 || !parts[1]) {
+    return null;
+  }
+  try {
+    const base64 = parts[1].replaceAll('-', '+').replaceAll('_', '/');
+    const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
+    const parsed = JSON.parse(Buffer.from(padded, 'base64').toString('utf8')) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
   } catch {
     return null;
   }
@@ -619,6 +867,25 @@ async function pointAuthSymlink(dir: string, candidateName: string): Promise<voi
   const temporary = path.join(dir, `.auth.json.${process.pid}.${Date.now()}.link`);
   await fs.symlink(path.join(dir, candidateName), temporary);
   await fs.rename(temporary, path.join(dir, 'auth.json'));
+}
+
+async function removeAuthCandidate(dir: string, candidateName: string): Promise<void> {
+  const candidatePath = path.join(dir, candidateName);
+  const authPath = path.join(dir, 'auth.json');
+  const currentTarget = await resolveCurrentAuthCandidatePath(authPath);
+  await fs.rm(candidatePath, { force: true }).catch(() => undefined);
+  if (currentTarget === candidatePath) {
+    await fs.rm(authPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function resolveCurrentAuthCandidatePath(authPath: string): Promise<string | null> {
+  const stat = await fs.lstat(authPath).catch(() => null);
+  if (!stat) return null;
+  if (stat.isSymbolicLink()) {
+    return resolveFinalPath(authPath);
+  }
+  return null;
 }
 
 async function removeValidationTempFiles(dir: string): Promise<void> {
