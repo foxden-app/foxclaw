@@ -29,6 +29,10 @@ import type { AppLocale, RuntimeStatus } from './types.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 import {
+  buildFoxclawLaunchdPlistText,
+  extractNodePathFromLaunchdPlist,
+} from './launchd.js';
+import {
   buildFoxclawSystemdUnitText,
   buildSystemdRestartHelperArgs,
   cgroupContainsSystemdUnit,
@@ -160,6 +164,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'uninstall-launchd') {
+    uninstallLaunchd();
+    return;
+  }
+
   if (command === 'install-launchd') {
     requireNode24(command);
     installLaunchd();
@@ -229,7 +238,7 @@ Usage:
   foxclaw start|restart|stop
   foxclaw update
   foxclaw install-systemd|uninstall-systemd
-  foxclaw install-launchd
+  foxclaw install-launchd|uninstall-launchd
   foxclaw weixin-login [account-id]
   foxclaw --version
   foxclaw --help`);
@@ -1637,6 +1646,7 @@ function runDoctorChecks(): boolean {
   warnIfProxyEnvMissingFromLoadedEnv();
   warnIfProxyConfigNeedsAttention();
   warnIfInstalledServiceNodeLooksWrong();
+  warnIfInstalledLaunchdNodeLooksWrong();
   warnIfSystemdUserLingerDisabled();
   return passed;
 }
@@ -1665,7 +1675,11 @@ function warnIfProxyConfigNeedsAttention(): void {
     return;
   }
   console.log('[WARN] Only ALL_PROXY/all_proxy is configured. Node service proxying works best with HTTP_PROXY/HTTPS_PROXY.');
-  console.log('[WARN] For SOCKS-only hosts, set FOXCLAW_PROXYCHAINS_CONF=/absolute/path/to/proxychains.conf and run foxclaw restart.');
+  if (process.platform === 'linux') {
+    console.log('[WARN] For SOCKS-only hosts, set FOXCLAW_PROXYCHAINS_CONF=/absolute/path/to/proxychains.conf and run foxclaw restart.');
+  } else {
+    console.log('[WARN] On macOS launchd, prefer HTTP_PROXY/HTTPS_PROXY; FOXCLAW_PROXYCHAINS_CONF is Linux-only.');
+  }
 }
 
 function warnIfProxyEnvMissingFromLoadedEnv(): void {
@@ -1709,6 +1723,37 @@ function warnIfInstalledServiceNodeLooksWrong(): void {
   }
   console.log(`[WARN] installed service node is older than 24: ${nodePath}${version ? ` (${version})` : ''}`);
   console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the service unit.');
+}
+
+function warnIfInstalledLaunchdNodeLooksWrong(): void {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+  const plistPath = launchdPlistPath();
+  let text = '';
+  try {
+    text = fs.readFileSync(plistPath, 'utf8');
+  } catch {
+    return;
+  }
+  const nodePath = extractNodePathFromLaunchdPlist(text);
+  if (!nodePath) {
+    return;
+  }
+  if (!fs.existsSync(nodePath)) {
+    console.log(`[WARN] installed launchd node is missing: ${nodePath}`);
+    console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the launchd plist.');
+    return;
+  }
+  const result = spawnSync(nodePath, ['-p', 'process.versions.node'], { encoding: 'utf8' });
+  const version = result.status === 0 ? result.stdout.trim() : '';
+  const major = Number.parseInt(version.split('.')[0] ?? '', 10);
+  if (Number.isFinite(major) && major >= 24) {
+    console.log(`[OK] launchd node >= 24: ${nodePath}`);
+    return;
+  }
+  console.log(`[WARN] installed launchd node is older than 24: ${nodePath}${version ? ` (${version})` : ''}`);
+  console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the launchd plist.');
 }
 
 function warnIfSystemdUserLingerDisabled(): void {
@@ -1887,56 +1932,30 @@ function installLaunchd(): void {
     process.exit(1);
   }
   const home = process.env.HOME || '';
-  const plist = path.join(home, 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
+  const plist = launchdPlistPath();
   const envPath = serviceEnvPath();
   const configDir = path.dirname(envPath);
   const nodeProxyArgs = hasStandardNodeProxyEnv() ? ['--use-env-proxy'] : [];
-  const nodeProxyArgXml = nodeProxyArgs.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join('\n');
-  const proxyEnvXml = buildLaunchdProxyEnvironmentXml();
   fs.mkdirSync(path.dirname(plist), { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
   fs.writeFileSync(
     plist,
-    `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>app.foxden.foxclaw</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${xmlEscape(process.execPath)}</string>
-${nodeProxyArgXml ? `${nodeProxyArgXml}\n` : ''}    <string>${xmlEscape(entryPoint)}</string>
-    <string>serve</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${xmlEscape(configDir)}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${xmlEscape(process.env.PATH || '')}</string>
-    <key>HOME</key>
-    <string>${xmlEscape(home)}</string>
-    <key>USER</key>
-    <string>${xmlEscape(process.env.USER || '')}</string>
-    <key>LOGNAME</key>
-    <string>${xmlEscape(process.env.LOGNAME || process.env.USER || '')}</string>
-    <key>FOXCLAW_ENV</key>
-    <string>${xmlEscape(envPath)}</string>
-${proxyEnvXml}
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${xmlEscape(path.join(APP_HOME, 'logs', 'launchd.out.log'))}</string>
-  <key>StandardErrorPath</key>
-  <string>${xmlEscape(path.join(APP_HOME, 'logs', 'launchd.err.log'))}</string>
-</dict>
-</plist>
-`,
+    buildFoxclawLaunchdPlistText({
+      label: 'app.foxden.foxclaw',
+      nodePath: process.execPath,
+      nodeArgs: nodeProxyArgs,
+      entryPoint,
+      workingDirectory: configDir,
+      pathValue: process.env.PATH || '',
+      home,
+      user: process.env.USER || '',
+      logname: process.env.LOGNAME || process.env.USER || '',
+      envPath,
+      proxyEnv: launchdProxyEnvironment(),
+      stdoutPath: path.join(APP_HOME, 'logs', 'launchd.out.log'),
+      stderrPath: path.join(APP_HOME, 'logs', 'launchd.err.log'),
+    }),
   );
   spawnSync('launchctl', ['unload', plist], { stdio: 'ignore' });
   spawnChecked('launchctl', ['load', plist]);
@@ -1951,13 +1970,28 @@ function stopLaunchd(): void {
     console.error('launchd stop is only available on macOS');
     process.exit(1);
   }
-  const plist = path.join(process.env.HOME || '', 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
+  const plist = launchdPlistPath();
   if (!fs.existsSync(plist)) {
     console.error(`launchd plist not found: ${plist}`);
     process.exit(1);
   }
   spawnChecked('launchctl', ['unload', plist]);
   console.log(`Stopped ${plist}`);
+}
+
+function uninstallLaunchd(): void {
+  if (process.platform !== 'darwin') {
+    console.error('launchd uninstall is only available on macOS');
+    process.exit(1);
+  }
+  const plist = launchdPlistPath();
+  spawnSync('launchctl', ['unload', plist], { stdio: 'ignore' });
+  fs.rmSync(plist, { force: true });
+  console.log(`Removed ${plist}`);
+}
+
+function launchdPlistPath(): string {
+  return path.join(process.env.HOME || '', 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
 }
 
 function buildServicePath(nodeDir: string): string {
@@ -2026,15 +2060,14 @@ function proxyEnvValue(key: string): string {
   return process.env[key]?.trim() || '';
 }
 
-function buildLaunchdProxyEnvironmentXml(): string {
-  const entries: string[] = [];
+function launchdProxyEnvironment(): Record<string, string> {
+  const entries: Record<string, string> = {};
   for (const key of PROXY_ENV_KEYS) {
     const value = proxyEnvValue(key);
     if (!value) continue;
-    entries.push(`    <key>${xmlEscape(key)}</key>`);
-    entries.push(`    <string>${xmlEscape(value)}</string>`);
+    entries[key] = value;
   }
-  return entries.length > 0 ? `${entries.join('\n')}\n` : '';
+  return entries;
 }
 
 function spawnChecked(commandName: string, args: string[]): void {
@@ -2050,15 +2083,6 @@ function systemdEscape(value: string): string {
 
 function systemdUnescape(value: string): string {
   return value.replace(/\\x20/g, ' ').replace(/\\\\/g, '\\');
-}
-
-function xmlEscape(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
 }
 
 async function runWeixinLoginCli(): Promise<void> {

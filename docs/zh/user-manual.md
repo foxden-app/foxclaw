@@ -145,7 +145,14 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-macOS 上 `foxclaw start` 会管理 launchd。前台排障时，先停后台服务，再运行：
+macOS 上 `foxclaw start` 会管理 launchd。查看 launchd 状态和启动日志：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
+前台排障时，先停后台服务，再运行：
 
 ```bash
 foxclaw stop

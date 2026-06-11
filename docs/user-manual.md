@@ -145,7 +145,14 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-On macOS, `foxclaw start` manages launchd. For foreground debugging, stop the background service and run:
+On macOS, `foxclaw start` manages launchd. Check launchd state and startup logs with:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
+For foreground debugging, stop the background service and run:
 
 ```bash
 foxclaw stop

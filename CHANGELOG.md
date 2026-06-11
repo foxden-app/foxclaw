@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.32 - 2026-06-11
+
+### 中文
+- 补齐 macOS launchd 适配检查：`doctor` 现在会检查已安装 plist 中记录的 Node 路径是否存在且为 Node 24+，并新增 `uninstall-launchd` 命令。
+- 新增 launchd plist 生成/解析的单元测试，并补充 macOS 服务状态、日志、代理和 Node 路径排障文档。
+
+### English
+- Filled macOS launchd adaptation gaps: `doctor` now checks that the Node path recorded in the installed plist exists and is Node 24+, and `uninstall-launchd` is available.
+- Added unit coverage for launchd plist generation/parsing and expanded macOS service status, log, proxy, and Node-path troubleshooting docs.
+
 ## 0.5.31 - 2026-06-09
 
 ### 中文

@@ -148,11 +148,18 @@ FoxClaw 的一大特色是自动多账号切换。当一个账号触发用量限
 foxclaw start
 ```
 
-Linux 上会安装/重启用户级 systemd 服务，macOS 上安装/重载 launchd。查看状态：
+Linux 上会安装/重启用户级 systemd 服务，macOS 上安装/重载 launchd。Linux 查看状态：
 
 ```bash
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
+```
+
+macOS 查看状态和启动日志：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
 ```
 
 也可以直接用包装命令：
@@ -319,6 +326,7 @@ foxclaw restart
 foxclaw update
 foxclaw stop
 foxclaw uninstall-systemd
+foxclaw uninstall-launchd
 ```
 
 ## 贡献

@@ -155,6 +155,13 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
+To inspect macOS launchd state and startup logs:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
 You can also use the wrapper commands:
 
 ```bash
@@ -319,6 +326,7 @@ foxclaw restart
 foxclaw update
 foxclaw stop
 foxclaw uninstall-systemd
+foxclaw uninstall-launchd
 ```
 
 ## Contributing
