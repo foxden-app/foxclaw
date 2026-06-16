@@ -281,11 +281,15 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
   const sentMessages: string[] = [];
   const sentKeyboards: any[] = [];
   const sentHtmlMessages: string[] = [];
+  const sentRichMessages: string[] = [];
   const editedMessages: string[] = [];
   const editedKeyboards: any[] = [];
   const editedHtmlMessages: string[] = [];
+  const editedRichMessages: string[] = [];
   const sentHtmlKeyboards: any[] = [];
+  const sentRichKeyboards: any[] = [];
   const editedHtmlKeyboards: any[] = [];
+  const editedRichKeyboards: any[] = [];
   const callbackAnswers: string[] = [];
   const deletedMessageIds: number[] = [];
   const bot = {
@@ -301,6 +305,11 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       sentHtmlKeyboards.push(keyboard ?? []);
       return 1000 + sentHtmlMessages.length;
     },
+    sendRichMessage: async (_chatId: string, richMessage: any, keyboard?: any) => {
+      sentRichMessages.push(richMessage.html ?? JSON.stringify(richMessage));
+      sentRichKeyboards.push(keyboard ?? []);
+      return 2000 + sentRichMessages.length;
+    },
     editMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
       editedMessages.push(text);
       editedKeyboards.push(keyboard ?? []);
@@ -308,6 +317,10 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     editHtmlMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
       editedHtmlMessages.push(text);
       editedHtmlKeyboards.push(keyboard ?? []);
+    },
+    editRichMessage: async (_chatId: string, _messageId: number, richMessage: any, keyboard?: any) => {
+      editedRichMessages.push(richMessage.html ?? JSON.stringify(richMessage));
+      editedRichKeyboards.push(keyboard ?? []);
     },
     deleteMessage: async (_chatId: string, messageId: number) => {
       deletedMessageIds.push(messageId);
@@ -495,13 +508,18 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     sentMessages,
     sentKeyboards,
     sentHtmlMessages,
+    sentRichMessages,
     editedMessages,
     editedKeyboards,
     editedHtmlMessages,
+    editedRichMessages,
     sentHtmlKeyboards,
+    sentRichKeyboards,
     editedHtmlKeyboards,
+    editedRichKeyboards,
     callbackAnswers,
     deletedMessageIds,
+    bot,
     tempDir,
   };
 }
@@ -1332,6 +1350,38 @@ test('/help pins important commands and sorts the rest by recent use', async (t)
   assert.deepEqual(lines.slice(1, 6), ['/help', '/setup', '/status', '/threads [query]', '/auth']);
   assert.equal(lines[6], '/features');
   assert.equal(lines[7], '/watch');
+});
+
+test('/rich sends a Telegram RichMessage demo', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/rich'), 'en', 'rich', []);
+
+  assert.equal(rig.sentRichMessages.length, 1);
+  assert.match(rig.sentRichMessages[0]!, /<h2>FoxClaw RichMessage<\/h2>/);
+  assert.match(rig.sentRichMessages[0]!, /<table bordered striped>/);
+  assert.equal(rig.sentHtmlMessages.length, 0);
+});
+
+test('/rich falls back to Telegram HTML if RichMessage send fails', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.bot.sendRichMessage = async () => {
+    throw new Error('rich unavailable');
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/rich'), 'en', 'rich', []);
+
+  assert.equal(rig.sentRichMessages.length, 0);
+  assert.match(rig.sentHtmlMessages[0]!, /<b>FoxClaw RichMessage<\/b>/);
+  assert.match(rig.sentHtmlMessages[0]!, /sendRichMessage/);
 });
 
 test('/status includes local Codex token history from session logs', async (t) => {

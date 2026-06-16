@@ -105,6 +105,15 @@ import {
   chunkTelegramStreamMessage,
   clipTelegramDraftMessage,
 } from '../telegram/text.js';
+import {
+  escapeTelegramHtml,
+  telegramBold,
+  telegramDetails,
+  telegramExpandableBlockquote,
+  telegramPre,
+  telegramPreCode,
+} from '../telegram/html.js';
+import { TELEGRAM_RICH_MESSAGE_TEXT_LIMIT } from '../telegram/rich.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
@@ -496,6 +505,7 @@ const PINNED_HELP_COMMANDS: HelpCommandEntry[] = [
 const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
   { key: 'fast', line: '/fast <on|off|toggle>' },
   { key: 'active', line: '/active <steer|queue>' },
+  { key: 'rich', line: '/rich' },
   { key: 'account', line: '/account' },
   { key: 'quota', line: '/quota' },
   { key: 'update', line: '/update' },
@@ -1169,6 +1179,10 @@ export class BridgeSessionCore {
       }
       case 'review': {
         await this.handleReviewCommand(event, locale, args);
+        return;
+      }
+      case 'rich': {
+        await this.handleRichCommand(scopeId, locale);
         return;
       }
       case 'diff': {
@@ -4205,6 +4219,20 @@ export class BridgeSessionCore {
     return this.messaging.sendHtml(scopeId, text, inlineKeyboard);
   }
 
+  private async sendRichHtmlMessage(
+    scopeId: string,
+    html: string,
+    fallbackHtml: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    try {
+      return await this.messaging.sendRichHtml(scopeId, html, fallbackHtml, inlineKeyboard);
+    } catch (error) {
+      this.logger.warn('telegram.rich_message_send_failed', { scopeId, error: toErrorMeta(error) });
+      return this.sendHtmlMessage(scopeId, fallbackHtml, inlineKeyboard);
+    }
+  }
+
   private async editMessage(
     scopeId: string,
     messageId: number,
@@ -4223,6 +4251,21 @@ export class BridgeSessionCore {
     await this.messaging.editHtml(scopeId, messageId, text, inlineKeyboard);
   }
 
+  private async editRichHtmlMessage(
+    scopeId: string,
+    messageId: number,
+    html: string,
+    fallbackHtml: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    try {
+      await this.messaging.editRichHtml(scopeId, messageId, html, fallbackHtml, inlineKeyboard);
+    } catch (error) {
+      this.logger.warn('telegram.rich_message_edit_failed', { scopeId, messageId, error: toErrorMeta(error) });
+      await this.editHtmlMessage(scopeId, messageId, fallbackHtml, inlineKeyboard);
+    }
+  }
+
   private async deleteMessage(scopeId: string, messageId: number): Promise<void> {
     await this.messaging.deleteMessage(scopeId, messageId);
   }
@@ -4236,8 +4279,8 @@ export class BridgeSessionCore {
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index]!;
       const body = index === 0
-        ? `<b>${escapeTelegramHtml(OBSERVED_CLI_USER_LABEL)}</b>\n<pre>${escapeTelegramHtml(chunk)}</pre>`
-        : `<pre>${escapeTelegramHtml(chunk)}</pre>`;
+        ? `${telegramBold(OBSERVED_CLI_USER_LABEL)}\n${telegramPre(chunk)}`
+        : telegramPre(chunk);
       await this.sendHtmlMessage(scopeId, body);
     }
   }
@@ -6134,13 +6177,25 @@ export class BridgeSessionCore {
     }
   }
 
+  private async handleRichCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    await this.sendRichHtmlMessage(
+      scopeId,
+      formatRichDemoMessage(locale),
+      formatRichDemoFallbackMessage(locale),
+    );
+  }
+
   private async handleDiffCommand(scopeId: string, locale: AppLocale): Promise<void> {
     const diff = this.latestTurnDiffs.get(scopeId);
     if (!diff?.diff.trim()) {
       await this.sendMessage(scopeId, t(locale, 'diff_unavailable'));
       return;
     }
-    await this.sendMessage(scopeId, formatDiffMessage(locale, diff.diff));
+    await this.sendRichHtmlMessage(
+      scopeId,
+      formatRichDiffMessage(locale, diff.diff),
+      formatDiffMessage(locale, diff.diff),
+    );
   }
 
   private async handleLoadedCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -9623,10 +9678,9 @@ function renderArchivedToolBatchStatus(
     return { text, html: null };
   }
   const heading = formatToolBatchHeading(locale, counts, false);
-  const detailLines = actionLines.slice(0, 12).map(line => escapeTelegramHtml(line));
   const html = [
-    `<b>${escapeTelegramHtml(heading)}</b>`,
-    `<blockquote expandable>${detailLines.join('\n')}</blockquote>`,
+    telegramBold(heading),
+    telegramExpandableBlockquote(actionLines.slice(0, 12).join('\n')),
   ].join('\n');
   return { text, html };
 }
@@ -9781,13 +9835,6 @@ function truncateInline(value: string, limit: number): string {
   return `${value.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-function escapeTelegramHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
-
 function parseReviewTarget(args: string[]): ReviewTarget | null {
   if (args.length === 0) {
     return { type: 'uncommittedChanges' };
@@ -9909,7 +9956,101 @@ function formatMcpResourceMessage(
 
 function formatDiffMessage(locale: AppLocale, diff: string): string {
   const clipped = diff.length > 3500 ? `${diff.slice(0, 3500)}\n...` : diff;
-  return `${t(locale, 'diff_title')}\n${clipped}`;
+  return [
+    telegramBold(t(locale, 'diff_title')),
+    telegramExpandableBlockquote(clipped),
+  ].join('\n');
+}
+
+function formatRichDiffMessage(locale: AppLocale, diff: string): string {
+  const clipped = clipRichMessageText(diff, Math.min(24_000, TELEGRAM_RICH_MESSAGE_TEXT_LIMIT - 1024));
+  const summary = locale === 'zh' ? '展开 diff' : 'Expand diff';
+  const footer = locale === 'zh'
+    ? 'FoxClaw · sendRichMessage · details/pre/code'
+    : 'FoxClaw · sendRichMessage · details/pre/code';
+  return [
+    `<h3>${escapeTelegramHtml(t(locale, 'diff_title'))}</h3>`,
+    telegramDetails(summary, telegramPreCode(clipped, 'diff')),
+    `<footer>${escapeTelegramHtml(footer)}</footer>`,
+  ].join('\n');
+}
+
+function formatRichDemoMessage(locale: AppLocale): string {
+  const title = 'FoxClaw RichMessage';
+  const intro = locale === 'zh'
+    ? '这条消息通过 Telegram Bot API sendRichMessage 发送，用来验证 Rich Message 在真实客户端里的渲染。'
+    : 'This message is sent through Telegram Bot API sendRichMessage to verify Rich Message rendering in a real client.';
+  const detailsSummary = locale === 'zh' ? '展开 details + pre 示例' : 'Open details + pre sample';
+  const diffSample = [
+    'diff --git a/src/telegram/rich.ts b/src/telegram/rich.ts',
+    '+ sendRichMessage({ rich_message: { html } })',
+    '+ <details><summary>Expandable</summary>...</details>',
+    '+ <table bordered striped>...</table>',
+  ].join('\n');
+  const tableCaption = locale === 'zh' ? 'FoxClaw 可用 rich 面' : 'FoxClaw rich surfaces';
+  const surfaceHeader = locale === 'zh' ? '功能面' : 'Surface';
+  const richHeader = locale === 'zh' ? 'Rich 用法' : 'Rich usage';
+  const tableRows: Array<[string, string]> = locale === 'zh'
+    ? [
+        ['`/diff`', 'details + pre/code'],
+        ['工具状态', 'details/list'],
+        ['`/status`', 'table'],
+      ]
+    : [
+        ['`/diff`', 'details + pre/code'],
+        ['Tool status', 'details/list'],
+        ['`/status`', 'table'],
+      ];
+  const listItems = locale === 'zh'
+    ? ['Gateway 已接入 sendRichMessage', '/diff 已优先使用 RichMessage', '失败会回退到 Telegram HTML']
+    : ['Gateway now supports sendRichMessage', '/diff prefers RichMessage', 'Failures fall back to Telegram HTML'];
+  const detailBody = [
+    `<p>${escapeTelegramHtml(locale === 'zh' ? '下面是 rich pre/code block，客户端支持时会按代码块渲染。' : 'This is a rich pre/code block rendered as code by supported clients.')}</p>`,
+    telegramPreCode(diffSample, 'diff'),
+  ].join('\n');
+  return [
+    `<h2>${escapeTelegramHtml(title)}</h2>`,
+    `<p><b>Bot API 10.1</b> ${escapeTelegramHtml(intro)}</p>`,
+    '<hr/>',
+    '<table bordered striped>',
+    `<caption>${escapeTelegramHtml(tableCaption)}</caption>`,
+    `<tr><th>${escapeTelegramHtml(surfaceHeader)}</th><th>${escapeTelegramHtml(richHeader)}</th></tr>`,
+    ...tableRows.map(([surface, usage]) => `<tr><td>${escapeTelegramHtml(surface)}</td><td>${escapeTelegramHtml(usage)}</td></tr>`),
+    '</table>',
+    telegramDetails(detailsSummary, detailBody, true),
+    '<ul>',
+    ...listItems.map(item => `<li>${escapeTelegramHtml(item)}</li>`),
+    '</ul>',
+    '<footer>FoxClaw · sendRichMessage</footer>',
+  ].join('\n');
+}
+
+function formatRichDemoFallbackMessage(locale: AppLocale): string {
+  const lines = locale === 'zh'
+    ? [
+        'RichMessage fallback 预览',
+        'Gateway 已接入 sendRichMessage',
+        '/diff 已优先使用 RichMessage',
+        '如果你看到这条 HTML fallback，说明 Telegram rich API 返回了失败，正常功能仍可用。',
+      ]
+    : [
+        'RichMessage fallback preview',
+        'Gateway now supports sendRichMessage',
+        '/diff prefers RichMessage',
+        'If you see this HTML fallback, Telegram rich API failed but normal messaging still works.',
+      ];
+  return [
+    telegramBold('FoxClaw RichMessage'),
+    telegramExpandableBlockquote(lines.join('\n')),
+    telegramPreCode('sendRichMessage({ rich_message: { html } })', 'typescript'),
+  ].join('\n');
+}
+
+function clipRichMessageText(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, limit - 4))}\n...`;
 }
 
 function formatLoadedThreadsMessage(locale: AppLocale, threadIds: string[]): string {

@@ -265,6 +265,10 @@ It controls:
 
 Telegram renders the HTML and buttons. This text block approximates the real panel:
 
+For the Telegram Rich Message inventory and rollout plan, see [Telegram Rich Message Adaptation Check](./telegram-rich-messages.md). The default path still favors Telegram HTML for compatibility.
+
+Send `/rich` to view a RichMessage demo in the current Telegram client. `/diff` also prefers RichMessage details plus a diff code block, with automatic Telegram HTML fallback.
+
 ```text
 Session preferences
 Current: gpt-5.5 · high · fast=off · default · Agent · Steer current turn

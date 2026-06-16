@@ -2,6 +2,7 @@ import { parseTelegramTargetFromBridgeScope } from '../../core/bridge_scope.js';
 import type { ChannelPort } from '../../core/channel_port.js';
 import type { TelegramGateway } from '../../telegram/gateway.js';
 import type { TelegramRemoteFile } from '../../telegram/api.js';
+import { telegramRichHtml } from '../../telegram/rich.js';
 
 export type InlineKeyboard = Array<Array<{ text: string; callback_data: string }>>;
 
@@ -29,6 +30,20 @@ export class TelegramMessagingPort implements ChannelPort {
     return this.gateway.sendHtmlMessage(target.chatId, text, inlineKeyboard, target.topicId);
   }
 
+  async sendRichHtml(
+    bridgeScopeId: string,
+    html: string,
+    inlineKeyboard?: InlineKeyboard,
+  ): Promise<number> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    return this.gateway.sendRichMessage(
+      target.chatId,
+      telegramRichHtml(html, { skipEntityDetection: true }),
+      inlineKeyboard,
+      target.topicId,
+    );
+  }
+
   async editPlain(
     bridgeScopeId: string,
     messageId: number,
@@ -47,6 +62,21 @@ export class TelegramMessagingPort implements ChannelPort {
   ): Promise<void> {
     const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
     await this.gateway.editHtmlMessage(target.chatId, messageId, text, inlineKeyboard);
+  }
+
+  async editRichHtml(
+    bridgeScopeId: string,
+    messageId: number,
+    html: string,
+    inlineKeyboard?: InlineKeyboard,
+  ): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    await this.gateway.editRichMessage(
+      target.chatId,
+      messageId,
+      telegramRichHtml(html, { skipEntityDetection: true }),
+      inlineKeyboard,
+    );
   }
 
   async deleteMessage(bridgeScopeId: string, messageId: number): Promise<void> {

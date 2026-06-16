@@ -13,8 +13,10 @@ function stubTelegram(): TelegramMessagingPort {
   return {
     sendPlain: async () => 1,
     sendHtml: async () => 2,
+    sendRichHtml: async () => 3,
     editPlain: async () => {},
     editHtml: async () => {},
+    editRichHtml: async () => {},
     deleteMessage: async () => {},
     sendTypingInScope: async () => {},
     clearInlineKeyboard: async () => {},
@@ -76,6 +78,38 @@ test('BridgeMessagingRouter does not fall back to Telegram for disabled Weixin s
     /Weixin channel is disabled/,
   );
   assert.deepEqual(tgCalls, []);
+});
+
+test('BridgeMessagingRouter sends rich HTML to Telegram and fallback HTML to Weixin', async () => {
+  const calls: string[] = [];
+  const tg = {
+    ...stubTelegram(),
+    sendRichHtml: async (scopeId: string, html: string) => {
+      calls.push(`tg:${scopeId}:${html}`);
+      return 30;
+    },
+  } as unknown as TelegramMessagingPort;
+  const wx = {
+    sendPlain: async () => 20,
+    sendHtml: async (scopeId: string, html: string) => {
+      calls.push(`wx:${scopeId}:${html}`);
+      return 40;
+    },
+    editPlain: async () => {},
+    editHtml: async () => {},
+    deleteMessage: async () => {},
+    sendTypingInScope: async () => {},
+    clearInlineKeyboard: async () => {},
+    sendDraft: async () => {},
+  } as unknown as WeixinMessagingPort;
+  const router = new BridgeMessagingRouter(tg, wx);
+
+  assert.equal(await router.sendRichHtml('telegram:1::root', '<h2>Rich</h2>', '<b>Fallback</b>'), 30);
+  assert.equal(await router.sendRichHtml('weixin:acc1:user9', '<h2>Rich</h2>', '<b>Fallback</b>'), 40);
+  assert.deepEqual(calls, [
+    'tg:telegram:1::root:<h2>Rich</h2>',
+    'wx:weixin:acc1:user9:<b>Fallback</b>',
+  ]);
 });
 
 test('saveWeixinAccount and loadWeixinAccount round-trip JSON shape', (t) => {

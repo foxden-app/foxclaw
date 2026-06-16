@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { t } from '../i18n.js';
+import { escapeTelegramHtml } from '../telegram/html.js';
 import type {
   AccessPresetValue,
   ActiveTurnMessageMode,
@@ -814,13 +815,6 @@ function formatRelativeTime(locale: AppLocale, unixSeconds: number): string {
 function formatIsoTime(locale: AppLocale, unixSeconds: number): string {
   if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) return t(locale, 'unknown');
   return new Date(unixSeconds * 1000).toISOString();
-}
-
-function escapeTelegramHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
 }
 
 function chunkButtons(buttons: InlineButton[], width: number): InlineButton[][] {

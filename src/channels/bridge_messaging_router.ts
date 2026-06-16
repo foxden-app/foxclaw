@@ -46,6 +46,13 @@ export class BridgeMessagingRouter {
     return this.telegram.sendHtml(scopeId, text, keyboard);
   }
 
+  sendRichHtml(scopeId: string, html: string, fallbackHtml: string, keyboard?: InlineKeyboard): Promise<number> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).sendHtml(scopeId, fallbackHtml, keyboard);
+    }
+    return this.telegram.sendRichHtml(scopeId, html, keyboard);
+  }
+
   editPlain(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
       return this.requireWeixinTransport(scopeId).editPlain(scopeId, messageId, text, keyboard);
@@ -58,6 +65,13 @@ export class BridgeMessagingRouter {
       return this.requireWeixinTransport(scopeId).editHtml(scopeId, messageId, text, keyboard);
     }
     return this.telegram.editHtml(scopeId, messageId, text, keyboard);
+  }
+
+  editRichHtml(scopeId: string, messageId: number, html: string, fallbackHtml: string, keyboard?: InlineKeyboard): Promise<void> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).editHtml(scopeId, messageId, fallbackHtml, keyboard);
+    }
+    return this.telegram.editRichHtml(scopeId, messageId, html, keyboard);
   }
 
   deleteMessage(scopeId: string, messageId: number): Promise<void> {

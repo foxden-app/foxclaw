@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.33 - 2026-06-16
+
+### 中文
+- 新增 Telegram Rich Message 适配专项盘点，明确现有 HTML 通道、Bot API 10.1 rich message 能力、FoxClaw 可用功能面和分阶段接入路线。
+- 接入 `sendRichMessage` / rich HTML 发送链路，新增 `/rich` 诊断命令用于在 Telegram 客户端直接查看 heading、table、details、pre/code、list 的 RichMessage 渲染效果。
+- 集中 Telegram HTML 转义与常用标签 helper，并把 `/diff` 改为优先使用 RichMessage details + diff code block；发送失败时回退到原 Telegram HTML 折叠展示。
+
+### English
+- Added a Telegram Rich Message adaptation check covering the current HTML path, Bot API 10.1 rich message capabilities, FoxClaw candidate surfaces, and a phased rollout plan.
+- Wired the `sendRichMessage` / rich HTML send path and added `/rich` as a diagnostic command for checking heading, table, details, pre/code, and list rendering in Telegram clients.
+- Centralized Telegram HTML escaping/tag helpers and changed `/diff` to prefer RichMessage details plus a diff code block, falling back to the previous Telegram HTML collapsible rendering if rich sending fails.
+
 ## 0.5.32 - 2026-06-11
 
 ### 中文

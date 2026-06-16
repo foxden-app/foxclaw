@@ -265,6 +265,10 @@ TG_ALLOWED_TOPIC_ID=42
 
 Telegram 会把 HTML 和按钮渲染出来。这里用等宽框模拟实际面板：
 
+Telegram Rich Message 能力的专项盘点和后续接入路线见 [Telegram Rich Message 适配专项检查](./telegram-rich-messages.md)。当前默认通道仍优先使用兼容性更稳的 Telegram HTML。
+
+可以发送 `/rich` 在当前 Telegram 客户端查看 RichMessage demo。`/diff` 也会优先用 RichMessage 展示 details 和 diff code block，失败时自动回退到 Telegram HTML。
+
 ```text
 会话偏好
 当前：gpt-5.5 · high · fast=off · default · Agent · Steer current turn
