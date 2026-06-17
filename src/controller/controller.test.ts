@@ -215,14 +215,15 @@ function writeChatGptAuthCandidate(
   name: string,
   accountId: string,
   lastRefresh = '2026-01-01T00:00:00.000Z',
-  identity: { userId?: string; email?: string } = {},
+  identity: { userId?: string; email?: string; expiresAtMs?: number } = {},
 ): void {
   const tokens: Record<string, string> = { account_id: accountId };
-  if (identity.userId || identity.email) {
+  if (identity.userId || identity.email || identity.expiresAtMs !== undefined) {
     tokens.access_token = fakeJwt({
       'https://api.openai.com/auth.chatgpt_account_id': accountId,
       'https://api.openai.com/auth.chatgpt_user_id': identity.userId,
       'https://api.openai.com/profile.email': identity.email,
+      exp: identity.expiresAtMs === undefined ? undefined : Math.floor(identity.expiresAtMs / 1000),
     });
   }
   fs.writeFileSync(path.join(authDir, name), `${JSON.stringify({
@@ -1665,8 +1666,9 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
-  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
-  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
+  const expiresAtMs = Date.parse('2026-06-18T10:20:00.000Z');
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString(), { expiresAtMs });
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString(), { expiresAtMs });
 
   let restarts = 0;
   (rig.controller as any).app.restart = async () => {
@@ -1684,7 +1686,10 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
 
   assert.equal(rig.sentRichMessages.length, 1);
   assert.match(rig.sentRichMessages[0]!, /<h3>\/auth<\/h3>/);
-  assert.match(rig.sentRichMessages[0]!, /<table bordered striped>|<ul>/);
+  assert.match(rig.sentRichMessages[0]!, /<th>Quota A<\/th><th>Quota B<\/th><th>Auth<\/th>/);
+  assert.match(rig.sentRichMessages[0]!, /<th>Last refresh<\/th><th>Expiry<\/th><th>Risk<\/th>/);
+  assert.match(rig.sentRichMessages[0]!, /<td>5h 20%<\/td><td>7d 25%<\/td><td>a<\/td><td>yes<\/td>/);
+  assert.match(rig.sentRichMessages[0]!, /<td>expires 2026-06-18 10:20Z<\/td>/);
   assert.match(rig.sentMessages[0]!, /Codex auth files:/);
   assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \*/);
   assert.match(rig.sentMessages[0]!, /\|b/);
@@ -1698,7 +1703,7 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
   assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
   assert.match(rig.editedMessages.at(-1)!, /Current auth: b/);
-  assert.match(rig.editedMessages.at(-1)!, /5h:90\|7d:95\|b \* \[Plus · ready · refreshed 0m ago\]/);
+  assert.match(rig.editedMessages.at(-1)!, /5h:90\|7d:95\|b \* \[Plus · ready · refreshed 0m ago · expires 2026-06-18 10:20Z\]/);
   assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'active');
   assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
   assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ 90\|95\|b/);

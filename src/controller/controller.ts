@@ -16,9 +16,11 @@ import type {
 import {
   chatGptAuthMetadataMatchesCandidateName,
   parseChatGptAuthMetadata,
+  readChatGptAuthRecord,
   readChatGptAuthMetadata,
   type ChatGptAuthMetadata,
 } from '../auth/mirror.js';
+import { readAccessTokenExpiresAtMs } from '../auth/cross_node_sync.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -343,6 +345,7 @@ interface CodexAuthCandidate {
   mtimeMs: number;
   credentialKind: 'chatgpt' | 'api-key' | 'invalid';
   credentialLastRefreshMs: number | null;
+  credentialExpiresAtMs: number | null;
   quota: CodexAuthQuotaSnapshot | null;
 }
 
@@ -7592,19 +7595,20 @@ export class BridgeSessionCore {
 
   private async readCodexAuthCandidateQuotaIdentities(candidates: CodexAuthCandidate[]): Promise<Map<string, CodexAuthQuotaIdentity>> {
     const entries = await Promise.all(candidates.map(async (candidate) => {
-      const metadata = await readChatGptAuthMetadata(candidate.path);
-      const metadataMatchesName = metadata
-        ? chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)
+      const record = await readChatGptAuthRecord(candidate.path);
+      const metadataMatchesName = record
+        ? chatGptAuthMetadataMatchesCandidateName(candidate.name, record)
         : false;
-      candidate.credentialKind = metadata && metadataMatchesName
+      candidate.credentialKind = record && metadataMatchesName
         ? 'chatgpt'
         : await isCodexApiKeyAuthCandidate(candidate.path)
           ? 'api-key'
           : 'invalid';
-      candidate.credentialLastRefreshMs = metadata && metadataMatchesName ? metadata.lastRefreshMs : null;
-      return [candidate.name, metadata && metadataMatchesName ? {
-        accountId: metadata.accountId,
-        quotaIdentityId: metadata.quotaIdentityId,
+      candidate.credentialLastRefreshMs = record && metadataMatchesName ? record.lastRefreshMs : null;
+      candidate.credentialExpiresAtMs = record && metadataMatchesName ? readAccessTokenExpiresAtMs(record.raw) : null;
+      return [candidate.name, record && metadataMatchesName ? {
+        accountId: record.accountId,
+        quotaIdentityId: record.quotaIdentityId,
       } : null] as const;
     }));
     const quotaIdentities = new Map<string, CodexAuthQuotaIdentity>();
@@ -10199,6 +10203,20 @@ function splitRichInternalSections(text: string): string[][] {
 }
 
 function formatRichInternalSection(lines: string[]): string {
+  const candidateRows = lines
+    .map(parseRichAuthCandidateRow)
+    .filter((row): row is RichAuthCandidateRow => row !== null);
+  if (candidateRows.length > 0) {
+    const nonCandidateLines = lines.filter(line => parseRichAuthCandidateRow(line) === null);
+    return [
+      nonCandidateLines.length > 0 ? formatRichInternalSectionWithoutCandidates(nonCandidateLines) : '',
+      formatRichAuthCandidateTable(candidateRows),
+    ].filter(Boolean).join('\n');
+  }
+  return formatRichInternalSectionWithoutCandidates(lines);
+}
+
+function formatRichInternalSectionWithoutCandidates(lines: string[]): string {
   const rows = lines
     .map(parseRichInternalKeyValue)
     .filter((row): row is [string, string] => row !== null);
@@ -10216,6 +10234,125 @@ function formatRichInternalSection(lines: string[]): string {
     ...lines.map(line => `<li>${formatRichInternalValue(line.replace(/^\s*[-*]\s+/, '').replace(/^\s*\d+[.)]\s+/, ''))}</li>`),
     '</ul>',
   ].join('\n');
+}
+
+interface RichAuthCandidateRow {
+  index: string;
+  quotaA: string;
+  quotaB: string;
+  name: string;
+  current: boolean;
+  plan: string;
+  health: string;
+  refresh: string;
+  expiry: string;
+  risk: string;
+}
+
+function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
+  const match = line.match(/^\s*(\d+)\.\s+(.+)$/);
+  if (!match) {
+    return null;
+  }
+  let body = match[2]!.trim();
+  let status = '';
+  const statusMatch = body.match(/^(.*?)\s+(\[[^\]]+\])$/);
+  if (statusMatch) {
+    body = statusMatch[1]!.trim();
+    status = statusMatch[2]!.replace(/^\[|\]$/g, '');
+  }
+  const current = body.endsWith(' *');
+  if (current) {
+    body = body.slice(0, -2).trimEnd();
+  }
+  const parts = body.split('|');
+  const name = parts.pop()?.trim() ?? '';
+  if (!name) {
+    return null;
+  }
+  const quotas = parts.map(formatRichAuthQuotaCell);
+  const statusParts = splitRichAuthStatus(status);
+  return {
+    index: match[1]!,
+    quotaA: quotas[0] ?? '-',
+    quotaB: quotas[1] ?? '-',
+    name,
+    current,
+    ...statusParts,
+  };
+}
+
+function formatRichAuthCandidateTable(rows: RichAuthCandidateRow[]): string {
+  return [
+    '<table bordered striped>',
+    '<tr><th>#</th><th>Quota A</th><th>Quota B</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th></tr>',
+    ...rows.map(row => [
+      '<tr>',
+      `<td>${escapeTelegramHtml(row.index)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaA)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaB)}</td>`,
+      `<td>${escapeTelegramHtml(row.name)}</td>`,
+      `<td>${row.current ? 'yes' : '-'}</td>`,
+      `<td>${escapeTelegramHtml(row.plan)}</td>`,
+      `<td>${escapeTelegramHtml(row.health)}</td>`,
+      `<td>${escapeTelegramHtml(row.refresh)}</td>`,
+      `<td>${escapeTelegramHtml(row.expiry)}</td>`,
+      `<td>${escapeTelegramHtml(row.risk)}</td>`,
+      '</tr>',
+    ].join('')),
+    '</table>',
+  ].join('\n');
+}
+
+function splitRichAuthStatus(status: string): Pick<RichAuthCandidateRow, 'plan' | 'health' | 'refresh' | 'expiry' | 'risk'> {
+  const parts = status.split(' · ').map(part => part.trim()).filter(Boolean);
+  const refreshIndex = parts.findIndex(part => /^(refreshed|刷新于)\b/i.test(part));
+  const refresh = refreshIndex >= 0 ? parts.splice(refreshIndex, 1)[0]! : '-';
+  const expiryIndex = parts.findIndex(part => /^(expires|过期于)\b/i.test(part));
+  const expiry = expiryIndex >= 0 ? parts.splice(expiryIndex, 1)[0]! : '-';
+  const plan = parts.length > 1 ? parts.shift()! : '-';
+  const health = parts.shift() ?? '-';
+  return {
+    plan,
+    health,
+    refresh,
+    expiry,
+    risk: formatRichAuthRisk(health),
+  };
+}
+
+function formatRichAuthRisk(health: string): string {
+  if (/not recently refreshed|长期未刷新/i.test(health)) {
+    return `stale >${CODEX_AUTH_STALE_CREDENTIAL_DAYS}d`;
+  }
+  if (/needs login repair|需要登录修复/i.test(health)) {
+    return 'repair';
+  }
+  if (/quota exhausted|额度耗尽/i.test(health)) {
+    return 'quota exhausted';
+  }
+  if (/invalid|无效/i.test(health)) {
+    return 'invalid';
+  }
+  if (/\blow\b|偏低|低/i.test(health)) {
+    return 'low quota';
+  }
+  if (/unknown|未知/i.test(health)) {
+    return 'unknown';
+  }
+  return '-';
+}
+
+function formatRichAuthQuotaCell(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '--' || trimmed === '—') {
+    return '-';
+  }
+  const [windowLabel, percent] = trimmed.split(':');
+  if (!windowLabel || percent === undefined) {
+    return trimmed;
+  }
+  return `${windowLabel} ${percent}%`;
 }
 
 function parseRichInternalKeyValue(line: string): [string, string] | null {
@@ -11077,6 +11214,7 @@ async function listCodexAuthState(
       mtimeMs: stat.mtimeMs,
       credentialKind: 'invalid',
       credentialLastRefreshMs: null,
+      credentialExpiresAtMs: null,
       quota: null,
     });
   }
@@ -11508,6 +11646,11 @@ function formatCodexAuthCandidateStatus(locale: AppLocale, candidate: CodexAuthC
   if (candidate.credentialLastRefreshMs !== null) {
     details.push(t(locale, 'auth_candidate_last_refresh', {
       value: formatCompactAge(locale, Date.now() - candidate.credentialLastRefreshMs),
+    }));
+  }
+  if (candidate.credentialExpiresAtMs !== null) {
+    details.push(t(locale, 'auth_candidate_expires_at', {
+      value: formatUtcDateTime(candidate.credentialExpiresAtMs),
     }));
   }
   return `[${details.join(' · ')}]`;
@@ -12451,6 +12594,13 @@ function formatCompactAge(locale: AppLocale, ageMs: number): string {
   }
   const roundedMinutes = Math.floor(minutes);
   return locale === 'zh' ? `${roundedMinutes}分钟前` : `${roundedMinutes}m ago`;
+}
+
+function formatUtcDateTime(timestampMs: number): string {
+  if (!Number.isFinite(timestampMs)) {
+    return '-';
+  }
+  return `${new Date(timestampMs).toISOString().slice(0, 16).replace('T', ' ')}Z`;
 }
 
 function formatUsagePercent(value: number): string {

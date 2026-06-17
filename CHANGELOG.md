@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.36 - 2026-06-17
+
+### 中文
+- `/auth` 的 Telegram RichMessage 候选区从旧的竖线分隔文本整理为横向表格，拆出额度窗口、auth 名称、当前标记、套餐、健康状态、最近刷新、过期时间和风险提示列。
+- ChatGPT auth 候选会从 access token `exp` 读取过期时间，并以 UTC `YYYY-MM-DD HH:mmZ` 展示；拿不到过期字段时保持 `-`，原始文本 fallback 仍可展开查看。
+
+### English
+- Refined the Telegram RichMessage `/auth` candidate area from pipe-delimited text into a horizontally scrollable table with quota windows, auth name, current marker, plan, health, last refresh, expiry, and risk columns.
+- ChatGPT auth candidates now read the access token `exp` value and display expiry as UTC `YYYY-MM-DD HH:mmZ`; candidates without an expiry field show `-`, with the expandable plain-text fallback preserved.
+
 ## 0.5.35 - 2026-06-17
 
 ### 中文
