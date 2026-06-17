@@ -102,6 +102,13 @@ export class BridgeMessagingRouter {
     return this.telegram.sendDraft(scopeId, draftId, text);
   }
 
+  sendRichDraft(scopeId: string, draftId: number, html: string, fallbackText: string): Promise<void> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).sendDraft(scopeId, draftId, fallbackText);
+    }
+    return this.telegram.sendRichDraft(scopeId, draftId, html);
+  }
+
   answerCallback(callbackQueryId: string, text: string): Promise<void> {
     return this.telegram.answerCallback(callbackQueryId, text);
   }

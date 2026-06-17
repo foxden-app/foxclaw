@@ -286,6 +286,8 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
   const editedKeyboards: any[] = [];
   const editedHtmlMessages: string[] = [];
   const editedRichMessages: string[] = [];
+  const sentDraftMessages: string[] = [];
+  const sentRichDraftMessages: string[] = [];
   const sentHtmlKeyboards: any[] = [];
   const sentRichKeyboards: any[] = [];
   const editedHtmlKeyboards: any[] = [];
@@ -321,6 +323,12 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     editRichMessage: async (_chatId: string, _messageId: number, richMessage: any, keyboard?: any) => {
       editedRichMessages.push(richMessage.html ?? JSON.stringify(richMessage));
       editedRichKeyboards.push(keyboard ?? []);
+    },
+    sendMessageDraft: async (_chatId: string, _draftId: number, text: string) => {
+      sentDraftMessages.push(text);
+    },
+    sendRichMessageDraft: async (_chatId: string, _draftId: number, richMessage: any) => {
+      sentRichDraftMessages.push(richMessage.html ?? JSON.stringify(richMessage));
     },
     deleteMessage: async (_chatId: string, messageId: number) => {
       deletedMessageIds.push(messageId);
@@ -513,6 +521,8 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     editedKeyboards,
     editedHtmlMessages,
     editedRichMessages,
+    sentDraftMessages,
+    sentRichDraftMessages,
     sentHtmlKeyboards,
     sentRichKeyboards,
     editedHtmlKeyboards,
@@ -1382,6 +1392,77 @@ test('/rich falls back to Telegram HTML if RichMessage send fails', async (t) =>
   assert.equal(rig.sentRichMessages.length, 0);
   assert.match(rig.sentHtmlMessages[0]!, /<b>FoxClaw RichMessage<\/b>/);
   assert.match(rig.sentHtmlMessages[0]!, /sendRichMessage/);
+});
+
+test('completed Codex stream output is promoted to Telegram RichMessage', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  const segment = {
+    itemId: 'item-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: '# Done\n\n- **Changed** `src/app.ts`\n- See [docs](https://example.com/docs)',
+    completed: false,
+    messages: [],
+  };
+  active.segments = [segment];
+
+  await (rig.controller as any).syncSegmentTimeline(active, segment);
+  assert.equal(rig.sentMessages[0], segment.text);
+  assert.equal(rig.editedRichMessages.length, 0);
+
+  segment.completed = true;
+  await (rig.controller as any).syncSegmentTimeline(active, segment);
+
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal(rig.editedRichMessages.length, 1);
+  assert.match(rig.editedRichMessages[0]!, /<h2>Done<\/h2>/);
+  assert.match(rig.editedRichMessages[0]!, /<b>Changed<\/b>/);
+  assert.match(rig.editedRichMessages[0]!, /<code>src\/app\.ts<\/code>/);
+  assert.match(rig.editedRichMessages[0]!, /<a href="https:\/\/example\.com\/docs">docs<\/a>/);
+});
+
+test('draft stream uses Telegram RichMessage draft and falls back to plain draft', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.renderRoute.currentRenderer = 'draft_stream';
+  active.segments = [{
+    itemId: 'item-1',
+    phase: 'commentary',
+    outputKind: 'commentary',
+    isPlan: false,
+    text: '**Streaming** `draft`',
+    completed: false,
+    messages: [],
+  }];
+
+  await (rig.controller as any).syncDraftTurnStream(active, true);
+
+  assert.equal(rig.sentDraftMessages.length, 0);
+  assert.equal(rig.sentRichDraftMessages.length, 1);
+  assert.match(rig.sentRichDraftMessages[0]!, /<b>Streaming<\/b>/);
+  assert.match(rig.sentRichDraftMessages[0]!, /<code>draft<\/code>/);
+
+  rig.bot.sendRichMessageDraft = async () => {
+    throw new Error('rich draft unavailable');
+  };
+  active.draftText = null;
+  active.segments[0].text = '**Fallback**';
+  await (rig.controller as any).syncDraftTurnStream(active, true);
+
+  assert.equal(rig.sentDraftMessages.at(-1), '**Fallback**');
+  assert.equal(active.richDraftDisabled, true);
 });
 
 test('/status includes local Codex token history from session logs', async (t) => {

@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.34 - 2026-06-17
+
+### 中文
+- 普通 Codex 输出接入 Telegram RichMessage：流式阶段继续稳定发送纯文本，segment 完成后自动把已发消息编辑为富文本，支持标题、列表、引用、代码块、行内 code、粗体和安全链接。
+- draft 流式路径优先使用官方 `sendRichMessageDraft`，发送失败时对当前 turn 自动熔断回原纯文本 draft，避免影响实时输出。
+- 新增 Markdown 到 RichMessage HTML 的安全转换与回归测试，保留 Telegram/微信 fallback：RichMessage 失败时不会破坏原纯文本输出，微信继续使用原 HTML/plain 降级通道。
+
+### English
+- Wired normal Codex output into Telegram RichMessage: live streaming still sends stable plain text, then completed segments are edited into rich text with headings, lists, quotes, fenced code, inline code, bold text, and safe links.
+- Draft streaming now prefers the official `sendRichMessageDraft` API and automatically disables rich drafts for the current turn if it fails, preserving the previous plain draft behavior.
+- Added a safe Markdown-to-RichMessage HTML renderer with regression coverage while preserving Telegram/Weixin fallbacks so RichMessage failures do not break existing output.
+
 ## 0.5.33 - 2026-06-16
 
 ### 中文

@@ -99,6 +99,16 @@ export class TelegramMessagingPort implements ChannelPort {
     await this.gateway.sendMessageDraft(target.chatId, draftId, text, target.topicId);
   }
 
+  async sendRichDraft(bridgeScopeId: string, draftId: number, html: string): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    await this.gateway.sendRichMessageDraft(
+      target.chatId,
+      draftId,
+      telegramRichHtml(html, { skipEntityDetection: true }),
+      target.topicId,
+    );
+  }
+
   answerCallback(callbackQueryId: string, text: string): Promise<void> {
     return this.gateway.answerCallback(callbackQueryId, text);
   }

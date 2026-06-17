@@ -114,6 +114,7 @@ import {
   telegramPreCode,
 } from '../telegram/html.js';
 import { TELEGRAM_RICH_MESSAGE_TEXT_LIMIT } from '../telegram/rich.js';
+import { renderTelegramMarkdownRichHtml } from '../telegram/rich_markdown.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
@@ -175,6 +176,8 @@ export interface CoreCoordinator {
 interface RenderedTelegramMessage {
   messageId: number;
   text: string;
+  richHtml?: string | null;
+  richFailedForText?: string | null;
 }
 
 interface ActiveTurnSegment {
@@ -227,6 +230,7 @@ interface ActiveTurn {
   previewActive: boolean;
   draftId: number | null;
   draftText: string | null;
+  richDraftDisabled: boolean;
   buffer: string;
   finalText: string | null;
   interruptRequested: boolean;
@@ -3755,6 +3759,7 @@ export class BridgeSessionCore {
       previewActive: previewMessageId > 0,
       draftId: null,
       draftText: null,
+      richDraftDisabled: false,
       buffer: '',
       finalText: null,
       interruptRequested: false,
@@ -3972,7 +3977,7 @@ export class BridgeSessionCore {
         const fallbackKey = active.interruptRequested ? 'interrupted' : 'completed';
         const finalChunks = chunkTelegramMessage(active.finalText || active.buffer, undefined, t(locale, fallbackKey));
         for (const chunk of finalChunks) {
-          await this.sendMessage(active.scopeId, chunk);
+          await this.sendRichMarkdownMessage(active.scopeId, chunk);
         }
       }
       shouldMarkPartialOutput = active.interruptRequested
@@ -4231,6 +4236,19 @@ export class BridgeSessionCore {
       this.logger.warn('telegram.rich_message_send_failed', { scopeId, error: toErrorMeta(error) });
       return this.sendHtmlMessage(scopeId, fallbackHtml, inlineKeyboard);
     }
+  }
+
+  private async sendRichMarkdownMessage(
+    scopeId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    return this.sendRichHtmlMessage(
+      scopeId,
+      renderTelegramMarkdownRichHtml(text),
+      escapeTelegramHtml(text),
+      inlineKeyboard,
+    );
   }
 
   private async editMessage(
@@ -9239,6 +9257,10 @@ export class BridgeSessionCore {
     await this.messaging.sendDraft(scopeId, draftId, text);
   }
 
+  private async sendRichDraft(scopeId: string, draftId: number, html: string, fallbackText: string): Promise<void> {
+    await this.messaging.sendRichDraft(scopeId, draftId, html, fallbackText);
+  }
+
   private renderActiveStatus(active: ActiveTurn): string {
     const locale = this.localeForChat(active.scopeId);
     return renderActiveTurnStatus(locale, {
@@ -9502,11 +9524,36 @@ export class BridgeSessionCore {
       active.draftId = crypto.randomInt(1, 2_147_483_647);
     }
     try {
-      await this.sendDraft(active.scopeId, active.draftId, draftText);
+      if (active.richDraftDisabled) {
+        await this.sendDraft(active.scopeId, active.draftId, draftText);
+      } else {
+        await this.sendRichDraft(
+          active.scopeId,
+          active.draftId,
+          renderTelegramMarkdownRichHtml(draftText),
+          draftText,
+        );
+      }
       active.draftText = draftText;
     } catch (error) {
+      let finalError: unknown = error;
+      if (!active.richDraftDisabled) {
+        active.richDraftDisabled = true;
+        this.logger.warn('telegram.rich_draft_send_failed', {
+          error: String(finalError),
+          turnId: active.turnId,
+          draftId: active.draftId,
+        });
+        try {
+          await this.sendDraft(active.scopeId, active.draftId, draftText);
+          active.draftText = draftText;
+          return;
+        } catch (fallbackError) {
+          finalError = fallbackError;
+        }
+      }
       this.logger.warn('telegram.draft_send_failed', {
-        error: String(error),
+        error: String(finalError),
         turnId: active.turnId,
         draftId: active.draftId,
       });
@@ -9546,7 +9593,7 @@ export class BridgeSessionCore {
       if (!existing) {
         try {
           const messageId = await this.sendMessage(active.scopeId, chunk);
-          segment.messages.push({ messageId, text: chunk });
+          segment.messages.push({ messageId, text: chunk, richHtml: null, richFailedForText: null });
           active.statusNeedsRebase = true;
         } catch (error) {
           this.logger.warn('telegram.stream_send_failed', {
@@ -9568,6 +9615,8 @@ export class BridgeSessionCore {
       try {
         await this.editMessage(active.scopeId, existing.messageId, chunk);
         existing.text = chunk;
+        existing.richHtml = null;
+        existing.richFailedForText = null;
         index += 1;
       } catch (error) {
         if (isTelegramMessageGone(error)) {
@@ -9602,6 +9651,53 @@ export class BridgeSessionCore {
             messageId: stale.messageId,
           });
         }
+      }
+    }
+
+    if (this.shouldPromoteSegmentToRich(active, segment)) {
+      await this.promoteSegmentMessagesToRich(active, segment, chunks);
+    }
+  }
+
+  private shouldPromoteSegmentToRich(active: ActiveTurn, segment: ActiveTurnSegment): boolean {
+    return !active.scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)
+      && segment.completed
+      && segment.outputKind !== 'error'
+      && Boolean(segment.text.trim());
+  }
+
+  private async promoteSegmentMessagesToRich(
+    active: ActiveTurn,
+    segment: ActiveTurnSegment,
+    chunks: string[],
+  ): Promise<void> {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index]!;
+      const existing = segment.messages[index];
+      if (!existing || !chunk.trim()) {
+        continue;
+      }
+      const richHtml = renderTelegramMarkdownRichHtml(chunk);
+      if (existing.richHtml === richHtml || existing.richFailedForText === chunk) {
+        continue;
+      }
+      try {
+        await this.messaging.editRichHtml(active.scopeId, existing.messageId, richHtml, escapeTelegramHtml(chunk));
+        existing.richHtml = richHtml;
+        existing.richFailedForText = null;
+      } catch (error) {
+        if (isTelegramMessageGone(error)) {
+          segment.messages.splice(index);
+          return;
+        }
+        existing.richFailedForText = chunk;
+        this.logger.warn('telegram.stream_rich_edit_failed', {
+          error: String(error),
+          turnId: active.turnId,
+          itemId: segment.itemId,
+          messageId: existing.messageId,
+          chunkIndex: index,
+        });
       }
     }
   }
