@@ -175,6 +175,8 @@ export interface CoreCoordinator {
   selfUpdateCompleted?: (status: SelfUpdateStatus) => void;
 }
 
+type ServiceRuntimeStatus = NonNullable<Awaited<ReturnType<NonNullable<CoreCoordinator['getServiceStatus']>>>>;
+
 interface RenderedTelegramMessage {
   messageId: number;
   text: string;
@@ -5399,7 +5401,7 @@ export class BridgeSessionCore {
       return;
     }
     if (!this.isIdleForServiceUpdate() || this.store.countPendingApprovals() > 0 || this.store.countPendingUserInputs() > 0 || (this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate())) {
-      await this.sendMessage(scopeId, t(locale, 'update_blocked_active'));
+      await this.sendRichInternalMessage(scopeId, '/update', await this.formatSelfUpdateBlockedMessage(locale));
       return;
     }
     const status = await this.selfUpdater.readStatus();
@@ -5418,6 +5420,131 @@ export class BridgeSessionCore {
     } catch (error) {
       await this.selfUpdater.clearStatus().catch(() => undefined);
       await this.sendMessage(scopeId, t(locale, 'update_failed', { error: formatUserError(error) }));
+    }
+  }
+
+  private async formatSelfUpdateBlockedMessage(locale: AppLocale): Promise<string> {
+    const blockers = await this.collectSelfUpdateBlockers(locale);
+    if (locale === 'zh') {
+      return [
+        '现在不能从 Telegram 里升级 FoxClaw，因为后台仍有活动：',
+        '',
+        ...(blockers.length > 0 ? blockers.map((blocker) => `- ${blocker}`) : [`- ${t(locale, 'update_blocked_active')}`]),
+        '',
+        '说明：远端 auth 候选导入队列不等于本机 auth 文件数量；它可能来自其他节点还没清理或没收到删除广播的旧 team 账号。',
+        '处理：普通 Codex 回复可用 /interrupt；auth 同步队列请等待消化，或在远端清理旧候选后补发删除/安全同步。终端 foxclaw update 不受这个聊天保护限制。',
+      ].join('\n');
+    }
+    return [
+      'FoxClaw cannot be updated from Telegram because background work is still active:',
+      '',
+      ...(blockers.length > 0 ? blockers.map((blocker) => `- ${blocker}`) : [`- ${t(locale, 'update_blocked_active')}`]),
+      '',
+      'Note: remote auth import backlog is not the same as the number of local auth files; it can come from stale team accounts on another node.',
+      'Action: use /interrupt for normal Codex turns; let auth sync drain, or clean the remote stale candidates and resend delete/safe-sync events. Terminal foxclaw update bypasses this chat guard.',
+    ].join('\n');
+  }
+
+  private async collectSelfUpdateBlockers(locale: AppLocale): Promise<string[]> {
+    const blockers: string[] = [];
+    const pendingApprovals = this.pendingApprovalMessages.size + this.store.countPendingApprovals();
+    const pendingUserInputs = this.pendingUserInputs.size + this.store.countPendingUserInputs();
+    const localLabels = locale === 'zh'
+      ? {
+          activeTurns: '当前 runtime 活跃回复',
+          approvals: '待处理审批',
+          userInputs: '待回答问题',
+          mcp: '待处理 MCP 交互',
+          logins: '登录流程',
+          rotation: 'auth 自动轮换',
+          refreshAll: 'auth 全量刷新',
+          validation: '远端 auth 校验',
+          turnStart: '回复启动中',
+          otherRuntime: '其他 runtime 活跃',
+          weixin: '微信 runtime 活跃回复',
+          authQueue: '远端 auth 候选导入队列',
+          received: '最近收到',
+          imported: '最近导入',
+          failed: '最近失败',
+          lease: 'auth 同步租约',
+          error: 'auth 同步错误',
+          coordinator: '服务协调器报告仍忙',
+        }
+      : {
+          activeTurns: 'Current runtime active turns',
+          approvals: 'Pending approvals',
+          userInputs: 'Pending questions',
+          mcp: 'Pending MCP interactions',
+          logins: 'Login flows',
+          rotation: 'Auth rotation',
+          refreshAll: 'Auth refresh-all',
+          validation: 'Remote auth validation',
+          turnStart: 'Turn startup',
+          otherRuntime: 'Other runtime active turns',
+          weixin: 'Weixin runtime active turns',
+          authQueue: 'Remote auth candidate import queue',
+          received: 'last received',
+          imported: 'last imported',
+          failed: 'recent failure',
+          lease: 'Auth sync lease',
+          error: 'Auth sync error',
+          coordinator: 'Service coordinator reports busy',
+        };
+
+    if (this.activeTurns.size > 0) blockers.push(`${localLabels.activeTurns}: ${this.activeTurns.size}`);
+    if (pendingApprovals > 0) blockers.push(`${localLabels.approvals}: ${pendingApprovals}`);
+    if (pendingUserInputs > 0) blockers.push(`${localLabels.userInputs}: ${pendingUserInputs}`);
+    if (this.pendingMcpElicitations.size > 0) blockers.push(`${localLabels.mcp}: ${this.pendingMcpElicitations.size}`);
+    if (this.pendingLoginsByScope.size > 0) blockers.push(`${localLabels.logins}: ${this.pendingLoginsByScope.size}`);
+    if (this.authRotationInProgress) blockers.push(localLabels.rotation);
+    if (this.authRefreshAllInProgress) blockers.push(localLabels.refreshAll);
+    if (this.externalAuthValidationInProgress) blockers.push(localLabels.validation);
+    if (this.turnStartInProgress > 0) blockers.push(`${localLabels.turnStart}: ${this.turnStartInProgress}`);
+
+    const serviceStatus = await this.readServiceStatusForUpdateBlockers();
+    if (serviceStatus) {
+      const activeBots = serviceStatus.bots
+        .filter((runtime) => runtime.activeTurns > 0)
+        .map((runtime) => `${runtime.username ? `@${runtime.username}` : runtime.id} ${runtime.activeTurns}`);
+      if (activeBots.length > 0) {
+        blockers.push(`${localLabels.otherRuntime}: ${activeBots.join(', ')}`);
+      }
+      if ((serviceStatus.weixinRuntime?.activeTurns ?? 0) > 0) {
+        blockers.push(`${localLabels.weixin}: ${serviceStatus.weixinRuntime!.activeTurns}`);
+      }
+      const authSync = serviceStatus.authSync;
+      if (authSync?.enabled) {
+        if (authSync.pendingImports > 0) {
+          const details = [
+            authSync.lastReceivedAt ? `${localLabels.received} ${authSync.lastReceivedAt}` : null,
+            authSync.lastImportedAt ? `${localLabels.imported} ${authSync.lastImportCandidate ?? authSync.lastImportedAt}` : null,
+          ].filter(Boolean);
+          blockers.push(`${localLabels.authQueue}: ${authSync.pendingImports}${details.length > 0 ? ` (${details.join('; ')})` : ''}`);
+        }
+        const latestFailure = authSync.candidateFailures?.[0] ?? null;
+        if (latestFailure) {
+          const source = latestFailure.sourceLabel ?? latestFailure.peer ?? latestFailure.sourceNodeId;
+          blockers.push(`${localLabels.failed}: ${latestFailure.candidateName}: ${latestFailure.reason}${source ? ` (${source})` : ''}`);
+        }
+        if (authSync.activeLeaseId) blockers.push(`${localLabels.lease}: ${authSync.activeLeaseId}`);
+        if (authSync.lastError) blockers.push(`${localLabels.error}: ${authSync.lastError}`);
+      }
+    } else if (this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate()) {
+      blockers.push(localLabels.coordinator);
+    }
+    if (blockers.length === 0 && this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate()) {
+      blockers.push(localLabels.coordinator);
+    }
+    return blockers;
+  }
+
+  private async readServiceStatusForUpdateBlockers(): Promise<ServiceRuntimeStatus | null> {
+    if (!this.coordinator?.getServiceStatus) return null;
+    try {
+      return await this.coordinator.getServiceStatus();
+    } catch (error) {
+      this.logger.warn('self_update.service_status_failed', { error: toErrorMeta(error) });
+      return null;
     }
   }
 

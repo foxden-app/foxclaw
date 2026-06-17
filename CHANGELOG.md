@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.39 - 2026-06-17
+
+### 中文
+- `/update` 被运行时活动或 auth 同步挡住时，Telegram 现在会用 RichMessage 展示具体阻塞清单，包括活跃 runtime、远端 auth 候选导入队列、最近收到时间、最近失败候选和失败原因。
+- 阻塞提示明确说明“远端 auth 候选导入队列”不等于本机 auth 文件数量，方便识别其他节点残留旧 team 账号或删除广播未同步的问题。
+
+### English
+- `/update` now reports concrete blockers as a Telegram RichMessage when runtime work or auth sync prevents a chat-driven update, including active runtimes, remote auth import backlog, last receive time, recent failed candidate, and failure reason.
+- The blocked-update message clarifies that remote auth candidate imports are not the same as local auth file count, making stale team accounts or missed delete broadcasts on another node easier to diagnose.
+
 ## 0.5.38 - 2026-06-17
 
 ### 中文

@@ -1352,6 +1352,69 @@ test('/update reports terminal fallback when self-update is unavailable', async 
   assert.match(rig.sentMessages[0]!, /foxclaw update/);
 });
 
+test('/update explains auth sync import backlog when self-update is blocked', async (t) => {
+  const updater: SelfUpdateRuntime = {
+    async launch() {},
+    async readStatus() {
+      return null;
+    },
+    async clearStatus() {},
+  };
+  const rig = createControllerRig(updater, {
+    canSelfUpdate: () => false,
+    getServiceStatus: async () => ({
+      bots: [
+        {
+          id: 'bot8949529424',
+          username: 'WuguiAI2_Bot',
+          connected: true,
+          activeTurns: 1,
+          runtimeKind: 'isolated',
+          currentAuth: 'auth.json_local',
+        },
+      ],
+      authSync: {
+        enabled: true,
+        nodeId: 'local-node',
+        transportLabel: '@localbot',
+        peers: ['@waxiaoshebot'],
+        pendingImports: 188,
+        lastSentAt: null,
+        lastReceivedAt: '2026-06-17T07:18:25.218Z',
+        lastImportedAt: null,
+        lastImportCandidate: null,
+        lastPullAt: null,
+        lastPullCandidate: null,
+        lastError: null,
+        candidateFailures: [
+          {
+            candidateName: 'auth.json_team_ava',
+            reason: 'token_invalidated',
+            sourceNodeId: 'workstation-16p-wsl',
+            sourceLabel: '@waxiaoshebot',
+            peer: '@waxiaoshebot',
+            mode: 'push',
+            updatedAt: '2026-06-17T07:18:26.000Z',
+          },
+        ],
+        activeLeaseId: null,
+      },
+      authMirror: null,
+    }),
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/update'), 'zh', 'update', []);
+
+  assert.match(rig.sentMessages[0]!, /远端 auth 候选导入队列: 188/);
+  assert.match(rig.sentMessages[0]!, /@WuguiAI2_Bot 1/);
+  assert.match(rig.sentMessages[0]!, /auth\.json_team_ava: token_invalidated/);
+  assert.match(rig.sentMessages[0]!, /不等于本机 auth 文件数量/);
+});
+
 test('/help pins important commands and sorts the rest by recent use', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
