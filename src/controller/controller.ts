@@ -10247,6 +10247,7 @@ interface RichAuthCandidateRow {
   refresh: string;
   expiry: string;
   risk: string;
+  enabled: boolean | null;
 }
 
 function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
@@ -10278,6 +10279,9 @@ function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
     quotaB: quotas[1] ?? '-',
     name,
     current,
+    enabled: statusParts.health === 'disabled' || statusParts.health === '已禁用'
+      ? false
+      : statusParts.health === '-' ? null : true,
     ...statusParts,
   };
 }
@@ -10285,19 +10289,20 @@ function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
 function formatRichAuthCandidateTable(rows: RichAuthCandidateRow[]): string {
   return [
     '<table bordered striped>',
-    '<tr><th>#</th><th>Quota A</th><th>Quota B</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th></tr>',
+    '<tr><th>#</th><th>Quota A</th><th>Quota B</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th><th>Command</th></tr>',
     ...rows.map(row => [
       '<tr>',
       `<td>${escapeTelegramHtml(row.index)}</td>`,
       `<td>${escapeTelegramHtml(row.quotaA)}</td>`,
       `<td>${escapeTelegramHtml(row.quotaB)}</td>`,
-      `<td>${escapeTelegramHtml(row.name)}</td>`,
+      `<td>${formatRichAuthCommandLink(`/auth use ${row.index}`, row.name)}</td>`,
       `<td>${row.current ? 'yes' : '-'}</td>`,
       `<td>${escapeTelegramHtml(row.plan)}</td>`,
       `<td>${escapeTelegramHtml(row.health)}</td>`,
       `<td>${escapeTelegramHtml(row.refresh)}</td>`,
       `<td>${escapeTelegramHtml(row.expiry)}</td>`,
       `<td>${escapeTelegramHtml(row.risk)}</td>`,
+      `<td>${formatRichAuthCommandCell(row)}</td>`,
       '</tr>',
     ].join('')),
     '</table>',
@@ -10353,6 +10358,21 @@ function formatRichAuthQuotaCell(value: string): string {
     return trimmed;
   }
   return `${percent}%`;
+}
+
+function formatRichAuthCommandCell(row: RichAuthCandidateRow): string {
+  const commands = [formatRichAuthCommandLink(`/auth use ${row.index}`, 'use')];
+  if (row.enabled === true) {
+    commands.push(formatRichAuthCommandLink(`/auth disable ${row.index}`, 'disable'));
+  } else if (row.enabled === false) {
+    commands.push(formatRichAuthCommandLink(`/auth enable ${row.index}`, 'enable'));
+  }
+  return commands.join(' ');
+}
+
+function formatRichAuthCommandLink(command: string, label: string): string {
+  const url = `tg://msg?text=${encodeURIComponent(command)}`;
+  return `<a href="${escapeTelegramHtml(url)}">${escapeTelegramHtml(label)}</a>`;
 }
 
 function parseRichInternalKeyValue(line: string): [string, string] | null {

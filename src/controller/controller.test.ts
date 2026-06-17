@@ -1687,8 +1687,9 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(rig.sentRichMessages.length, 1);
   assert.match(rig.sentRichMessages[0]!, /<h3>\/auth<\/h3>/);
   assert.match(rig.sentRichMessages[0]!, /<th>Quota A<\/th><th>Quota B<\/th><th>Auth<\/th>/);
-  assert.match(rig.sentRichMessages[0]!, /<th>Last refresh<\/th><th>Expiry<\/th><th>Risk<\/th>/);
-  assert.match(rig.sentRichMessages[0]!, /<td>20%<\/td><td>25%<\/td><td>a<\/td><td>yes<\/td>/);
+  assert.match(rig.sentRichMessages[0]!, /<th>Last refresh<\/th><th>Expiry<\/th><th>Risk<\/th><th>Command<\/th>/);
+  assert.match(rig.sentRichMessages[0]!, /<td>20%<\/td><td>25%<\/td><td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">a<\/a><\/td><td>yes<\/td>/);
+  assert.match(rig.sentRichMessages[0]!, /<td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">use<\/a> <a href="tg:\/\/msg\?text=%2Fauth%20disable%201">disable<\/a><\/td>/);
   assert.match(rig.sentRichMessages[0]!, /<td>expires 2026-06-18 10:20Z<\/td>/);
   assert.match(rig.sentMessages[0]!, /Codex auth files:/);
   assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \*/);

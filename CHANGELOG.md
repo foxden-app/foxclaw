@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.38 - 2026-06-17
+
+### 中文
+- `/auth` RichMessage 候选表新增可点击的命令链接试验：auth 名称链接到 `/auth use N`，并新增 `Command` 列展示 `use` 与 enable/disable 命令链接。
+- 为避免动作能力倒退，原 inline callback 按钮仍保留；这版用于观察 Telegram 客户端对 rich command links 的真实体验。
+
+### English
+- Added an experimental command-link layer to the `/auth` RichMessage candidate table: auth names link to `/auth use N`, and a new `Command` column exposes `use` plus enable/disable command links.
+- The existing inline callback buttons remain in place to avoid losing reliable actions; this release is for observing the real Telegram client behavior of rich command links.
+
 ## 0.5.37 - 2026-06-17
 
 ### 中文
