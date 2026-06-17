@@ -308,9 +308,12 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       return 1000 + sentHtmlMessages.length;
     },
     sendRichMessage: async (_chatId: string, richMessage: any, keyboard?: any) => {
-      sentRichMessages.push(richMessage.html ?? JSON.stringify(richMessage));
+      const text = richMessage.html ?? JSON.stringify(richMessage);
+      sentRichMessages.push(text);
+      sentMessages.push(text.replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&'));
       sentRichKeyboards.push(keyboard ?? []);
-      return 2000 + sentRichMessages.length;
+      sentKeyboards.push(keyboard ?? []);
+      return sentMessages.length;
     },
     editMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
       editedMessages.push(text);
@@ -1185,6 +1188,9 @@ test('/status includes Codex account usage without exposing email', async (t) =>
 
   await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
 
+  assert.equal(rig.sentRichMessages.length, 1);
+  assert.match(rig.sentRichMessages[0]!, /<h3>\/status<\/h3>/);
+  assert.match(rig.sentRichMessages[0]!, /<table bordered striped>/);
   assert.equal(rig.sentMessages.length, 1);
   assert.match(rig.sentMessages[0]!, /Codex account: ChatGPT/);
   assert.ok(rig.sentMessages[0]!.includes(`CWD: ${rig.tempDir}`));
@@ -1676,6 +1682,9 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
 
+  assert.equal(rig.sentRichMessages.length, 1);
+  assert.match(rig.sentRichMessages[0]!, /<h3>\/auth<\/h3>/);
+  assert.match(rig.sentRichMessages[0]!, /<table bordered striped>|<ul>/);
   assert.match(rig.sentMessages[0]!, /Codex auth files:/);
   assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \*/);
   assert.match(rig.sentMessages[0]!, /\|b/);

@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.35 - 2026-06-17
+
+### 中文
+- `/status`、`/auth`、`/auth sync status/events/trace` 在 Telegram 上优先使用 RichMessage 展示，内部状态会自动整理成标题、表格、列表和可展开原文。
+- 保留微信和 RichMessage 失败 fallback：微信继续走原文本通道，Telegram rich 发送失败时退回原 HTML/plain 内容，不影响按钮和回调。
+
+### English
+- `/status`, `/auth`, and `/auth sync status/events/trace` now prefer RichMessage on Telegram, rendering internal diagnostics as headings, tables, lists, and expandable plain-text details.
+- Weixin and RichMessage failure fallbacks are preserved: Weixin keeps the previous text path, and Telegram falls back without breaking buttons or callbacks.
+
 ## 0.5.34 - 2026-06-17
 
 ### 中文

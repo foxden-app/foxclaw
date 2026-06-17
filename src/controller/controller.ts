@@ -973,7 +973,7 @@ export class BridgeSessionCore {
         }
         lines.push(...codexUsageLines);
         lines.push(...codexLocalUsageLines);
-        await this.sendMessage(scopeId, lines.join('\n'));
+        await this.sendRichInternalMessage(scopeId, '/status', lines.join('\n'));
         return;
       }
       case 'account': {
@@ -4251,6 +4251,23 @@ export class BridgeSessionCore {
     );
   }
 
+  private async sendRichInternalMessage(
+    scopeId: string,
+    title: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      return this.sendMessage(scopeId, text, inlineKeyboard);
+    }
+    return this.sendRichHtmlMessage(
+      scopeId,
+      formatRichInternalMessage(title, text),
+      escapeTelegramHtml(text),
+      inlineKeyboard,
+    );
+  }
+
   private async editMessage(
     scopeId: string,
     messageId: number,
@@ -5627,9 +5644,11 @@ export class BridgeSessionCore {
     await this.refreshCurrentCodexAuthQuota(state);
     const record = createPendingAuthChoiceList(scopeId, state.candidates, listRequest);
     this.pendingAuthChoiceLists.set(record.localId, record);
-    const messageId = await this.sendMessage(
+    const authListMessage = renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null, record);
+    const messageId = await this.sendRichInternalMessage(
       scopeId,
-      renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null, record),
+      '/auth',
+      authListMessage,
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
@@ -5638,19 +5657,21 @@ export class BridgeSessionCore {
   private async handleAuthSyncCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase() ?? 'status';
     if (action === 'status') {
-      await this.sendMessage(scopeId, formatAuthSyncStatus(
+      const message = formatAuthSyncStatus(
         locale,
         this.coordinator?.getAuthSyncStatus?.() ?? null,
         this.getRuntimeStatus().authProactiveRefresh ?? null,
-      ));
+      );
+      await this.sendRichInternalMessage(scopeId, '/auth sync status', message);
       return;
     }
     if (action === 'events') {
-      await this.sendMessage(scopeId, formatAuthSyncEvents(
+      const message = formatAuthSyncEvents(
         locale,
         this.coordinator?.getAuthSyncStatus?.() ?? null,
         args.slice(1).join(' ').trim() || null,
-      ));
+      );
+      await this.sendRichInternalMessage(scopeId, '/auth sync events', message);
       return;
     }
     if (action === 'trace') {
@@ -5659,7 +5680,11 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_trace_missing'));
         return;
       }
-      await this.sendMessage(scopeId, formatAuthSyncTrace(locale, this.coordinator?.getAuthSyncStatus?.() ?? null, requestId));
+      await this.sendRichInternalMessage(
+        scopeId,
+        '/auth sync trace',
+        formatAuthSyncTrace(locale, this.coordinator?.getAuthSyncStatus?.() ?? null, requestId),
+      );
       return;
     }
     if (action === 'test') {
@@ -10140,6 +10165,76 @@ function formatRichDemoFallbackMessage(locale: AppLocale): string {
     telegramExpandableBlockquote(lines.join('\n')),
     telegramPreCode('sendRichMessage({ rich_message: { html } })', 'typescript'),
   ].join('\n');
+}
+
+function formatRichInternalMessage(title: string, text: string): string {
+  const sections = splitRichInternalSections(text);
+  const body = sections.map(formatRichInternalSection).filter(Boolean).join('\n');
+  return [
+    `<h3>${escapeTelegramHtml(title)}</h3>`,
+    body || `<p>${escapeTelegramHtml(text)}</p>`,
+    telegramDetails('Plain text', telegramPreCode(text, 'text')),
+    '<footer>FoxClaw · RichMessage</footer>',
+  ].join('\n');
+}
+
+function splitRichInternalSections(text: string): string[][] {
+  const sections: string[][] = [];
+  let current: string[] = [];
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) {
+      if (current.length > 0) {
+        sections.push(current);
+        current = [];
+      }
+      continue;
+    }
+    current.push(line);
+  }
+  if (current.length > 0) {
+    sections.push(current);
+  }
+  return sections;
+}
+
+function formatRichInternalSection(lines: string[]): string {
+  const rows = lines
+    .map(parseRichInternalKeyValue)
+    .filter((row): row is [string, string] => row !== null);
+  if (rows.length >= Math.max(2, Math.floor(lines.length * 0.6))) {
+    return [
+      '<table bordered striped>',
+      ...rows.map(([key, value]) => (
+        `<tr><td>${escapeTelegramHtml(key)}</td><td>${formatRichInternalValue(value)}</td></tr>`
+      )),
+      '</table>',
+    ].join('\n');
+  }
+  return [
+    '<ul>',
+    ...lines.map(line => `<li>${formatRichInternalValue(line.replace(/^\s*[-*]\s+/, '').replace(/^\s*\d+[.)]\s+/, ''))}</li>`),
+    '</ul>',
+  ].join('\n');
+}
+
+function parseRichInternalKeyValue(line: string): [string, string] | null {
+  const separator = line.includes('：') ? '：' : ':';
+  const index = line.indexOf(separator);
+  if (index <= 0) {
+    return null;
+  }
+  const key = line.slice(0, index).trim();
+  const value = line.slice(index + separator.length).trim();
+  if (!key || !value || key.length > 80) {
+    return null;
+  }
+  return [key, value];
+}
+
+function formatRichInternalValue(value: string): string {
+  const escaped = escapeTelegramHtml(value);
+  return escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
 }
 
 function clipRichMessageText(value: string, limit: number): string {
