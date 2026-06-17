@@ -10352,7 +10352,7 @@ function formatRichAuthQuotaCell(value: string): string {
   if (!windowLabel || percent === undefined) {
     return trimmed;
   }
-  return `${windowLabel} ${percent}%`;
+  return `${percent}%`;
 }
 
 function parseRichInternalKeyValue(line: string): [string, string] | null {

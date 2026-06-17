@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.37 - 2026-06-17
+
+### 中文
+- 精简 `/auth` RichMessage 表格的 `Quota A` / `Quota B` 单元格：只显示剩余额度百分比，例如 `26%`，窗口含义交给列和后续套餐/状态信息理解。
+- 保持原始文本 fallback 和按钮文本不变，避免影响旧命令、微信复制路径和 auth 切换回调。
+
+### English
+- Simplified the `/auth` RichMessage `Quota A` / `Quota B` cells to show only the remaining percentage, such as `26%`, leaving the window context to the columns and following plan/status fields.
+- Kept the plain-text fallback and button labels unchanged so legacy commands, Weixin copy-paste flows, and auth switching callbacks remain stable.
+
 ## 0.5.36 - 2026-06-17
 
 ### 中文
