@@ -40,10 +40,13 @@ import {
   removeFoxclawExecStartDropIns,
 } from './systemd.js';
 import {
+  clearPendingClusterUpdateBroadcast,
   createSelfUpdateRuntime,
   inferPnpmHomeFromEntryPoint,
   performSelfUpdate,
+  readPendingClusterUpdateBroadcast,
   readSelfUpdateStatus,
+  type SelfUpdateRuntime,
   writeSelfUpdateStatus,
 } from './update.js';
 
@@ -64,8 +67,107 @@ const PROXY_ENV_KEYS = [
 ] as const;
 const STANDARD_NODE_PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const;
 const LOCAL_AUTH_REFRESH_LEASE_TTL_MS = 10 * 60_000;
+const CLUSTER_UPDATE_BROADCAST_PATH = path.join(APP_HOME, 'runtime', 'pending-cluster-update-broadcast.json');
 
 type LocalAuthRefreshLeaseResult = { ok: boolean; leaseId: string | null; reason?: string | null };
+
+type ClusterUpdateSource = {
+  requestId: string;
+  nodeId: string;
+  label?: string | null;
+  targetVersion: string | null;
+  requestedAt: string;
+};
+
+type ClusterUpdateScheduler = {
+  schedule: (source: ClusterUpdateSource) => Promise<{ accepted: boolean; reason?: string | null }>;
+};
+
+function createClusterUpdateScheduler(options: {
+  selfUpdater: SelfUpdateRuntime;
+  canUpdate: () => boolean;
+  currentVersion: () => string;
+  logger: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
+}): ClusterUpdateScheduler {
+  let pending: ClusterUpdateSource | null = null;
+  let timer: NodeJS.Timeout | null = null;
+
+  const scheduleRetry = (): void => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void tryLaunch().catch((error) => {
+        options.logger.warn('cluster.update.launch_failed', { error: serializeError(error) });
+        scheduleRetry();
+      });
+    }, 30_000);
+    timer.unref();
+  };
+
+  const tryLaunch = async (): Promise<void> => {
+    if (!pending) return;
+    const source = pending;
+    if (source.targetVersion && source.targetVersion === options.currentVersion()) {
+      options.logger.info('cluster.update.skipped_current', { targetVersion: source.targetVersion, requestId: source.requestId });
+      pending = null;
+      return;
+    }
+    if (!options.canUpdate()) {
+      scheduleRetry();
+      return;
+    }
+    pending = null;
+    options.logger.info('cluster.update.starting', {
+      requestId: source.requestId,
+      sourceNodeId: source.nodeId,
+      sourceLabel: source.label ?? null,
+      targetVersion: source.targetVersion,
+    });
+    await options.selfUpdater.launch(`cluster:${source.nodeId}:${source.requestId}`, 'zh');
+  };
+
+  return {
+    schedule: async (source): Promise<{ accepted: boolean; reason?: string | null }> => {
+      if (source.targetVersion && source.targetVersion === options.currentVersion()) {
+        return { accepted: false, reason: `already at ${source.targetVersion}` };
+      }
+      if (pending?.requestId === source.requestId) {
+        return { accepted: false, reason: 'update request is already scheduled' };
+      }
+      pending = source;
+      if (options.canUpdate()) {
+        void tryLaunch().catch((error) => {
+          options.logger.warn('cluster.update.launch_failed', { error: serializeError(error) });
+          scheduleRetry();
+        });
+      } else {
+        scheduleRetry();
+      }
+      return { accepted: true, reason: options.canUpdate() ? 'starting when updater accepts the request' : 'queued until runtime is idle' };
+    },
+  };
+}
+
+async function publishPendingClusterUpdateBroadcast(
+  authSync: { publishServiceUpdateRequest: (targetVersion: string | null) => Promise<{ sent: number; peers: string[] }> } | null,
+  logger: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void },
+): Promise<void> {
+  if (!authSync) return;
+  const pending = readPendingClusterUpdateBroadcast(CLUSTER_UPDATE_BROADCAST_PATH);
+  if (!pending) return;
+  try {
+    const result = await authSync.publishServiceUpdateRequest(pending.targetVersion);
+    clearPendingClusterUpdateBroadcast(CLUSTER_UPDATE_BROADCAST_PATH);
+    logger.info('cluster.update.broadcast_sent', {
+      targetVersion: pending.targetVersion,
+      fromVersion: pending.fromVersion,
+      sent: result.sent,
+      peers: result.peers,
+    });
+  } catch (error) {
+    logger.warn('cluster.update.broadcast_failed', { error: serializeError(error) });
+  }
+}
 
 function createLocalAuthRefreshLease(): {
   isIdle: () => boolean;
@@ -145,6 +247,7 @@ async function main(): Promise<void> {
       entryPoint,
       nodePath: process.execPath,
       version: readPackageVersion(),
+      clusterBroadcastFile: CLUSTER_UPDATE_BROADCAST_PATH,
       ...(process.env.CODEX_CLI_BIN || resolveCommand('codex')
         ? { codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex')! }
         : {}),
@@ -181,7 +284,11 @@ async function main(): Promise<void> {
       console.log('No runtime status found.');
       process.exit(1);
     }
-    console.log(JSON.stringify(status, null, 2));
+    if (process.argv.slice(3).includes('--json')) {
+      console.log(JSON.stringify(status, null, 2));
+    } else {
+      console.log(formatRuntimeStatusSummary(status));
+    }
     return;
   }
 
@@ -242,6 +349,74 @@ Usage:
   foxclaw weixin-login [account-id]
   foxclaw --version
   foxclaw --help`);
+}
+
+function formatRuntimeStatusSummary(status: RuntimeStatus): string {
+  const lines: string[] = [];
+  const age = formatAge(status.updatedAt);
+  lines.push(`FoxClaw status: ${status.running ? 'running' : 'stopped'}${status.connected ? ', connected' : ', disconnected'}${age ? ` (${age})` : ''}`);
+  if (status.userAgent) {
+    lines.push(`Codex: ${status.userAgent}`);
+  }
+  if (status.codexAppServer) {
+    lines.push(`App server: ${status.codexAppServer.running ? 'running' : 'stopped'}${status.codexAppServer.pid ? ` pid=${status.codexAppServer.pid}` : ''}${status.codexAppServer.port ? ` port=${status.codexAppServer.port}` : ''}`);
+  }
+  lines.push(`Work: active ${status.activeTurns}, queued ${status.queuedTurns}, approvals ${status.pendingApprovals}, questions ${status.pendingUserInputs}`);
+  if (status.bots?.length) {
+    const activeBots = status.bots
+      .filter(bot => bot.activeTurns > 0 || !bot.connected)
+      .map(bot => `${bot.username ? `@${bot.username}` : bot.id}:${bot.connected ? `${bot.activeTurns} active` : 'offline'}`);
+    lines.push(`Bots: ${status.bots.length}${activeBots.length ? ` (${activeBots.join(', ')})` : ''}`);
+  } else if (status.botUsername) {
+    lines.push(`Bot: @${status.botUsername}`);
+  }
+  if (status.weixinRuntime) {
+    lines.push(`Weixin: ${status.weixinRuntime.connected ? 'connected' : 'disconnected'}, active ${status.weixinRuntime.activeTurns}`);
+  }
+  if (status.authSync?.enabled) {
+    const failures = status.authSync.candidateFailures?.length ?? 0;
+    lines.push(`Auth sync: peers ${status.authSync.peers.length}, pending imports ${status.authSync.pendingImports}, failures ${failures}${status.authSync.lastReceivedAt ? `, last received ${formatAge(status.authSync.lastReceivedAt)}` : ''}`);
+    if (status.authSync.lastError) {
+      lines.push(`Auth sync error: ${status.authSync.lastError}`);
+    }
+    const latestFailure = status.authSync.candidateFailures?.[0];
+    if (latestFailure) {
+      lines.push(`Latest auth failure: ${latestFailure.candidateName}: ${truncateStatusLine(latestFailure.reason, 140)}`);
+    }
+  }
+  if (status.authMirror) {
+    lines.push(`Auth mirror: ${status.authMirror.candidateName} from ${status.authMirror.sourceLabel} ${formatAge(status.authMirror.syncedAt)}`);
+  }
+  if (status.authProactiveRefresh) {
+    lines.push(`Auth refresh: ${status.authProactiveRefresh.state}${status.authProactiveRefresh.finishedAt ? ` ${formatAge(status.authProactiveRefresh.finishedAt)}` : ''}`);
+  }
+  if (status.lastUpdate) {
+    lines.push(`Last update: ${status.lastUpdate.fromVersion} -> ${status.lastUpdate.toVersion ?? 'unknown'} ${formatAge(status.lastUpdate.updatedAt)}`);
+  }
+  if (status.lastError) {
+    lines.push(`Last error: ${truncateStatusLine(status.lastError, 160)}`);
+  }
+  lines.push('Use `foxclaw status --json` for full raw status.');
+  return lines.join('\n');
+}
+
+function formatAge(value: string | null | undefined): string {
+  if (!value) return '';
+  const ms = Date.now() - Date.parse(value);
+  if (!Number.isFinite(ms)) return value;
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function truncateStatusLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 async function runServeCli(): Promise<void> {
@@ -444,6 +619,13 @@ async function runServeCli(): Promise<void> {
       const authSyncLocalIdle = (): boolean => runtimes.every((runtime) => runtime.core.isIdleForServiceUpdate())
           && (!activeWeixinCore || activeWeixinCore.isIdleForServiceUpdate())
           && mirror.isIdle();
+      const clusterUpdateScheduler = createClusterUpdateScheduler({
+        selfUpdater,
+        canUpdate: () => authSyncLocalIdle()
+          && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
+        currentVersion: readPackageVersion,
+        logger,
+      });
       const coordinator = {
         canSelfUpdate: (): boolean => authSyncLocalIdle()
           && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
@@ -596,6 +778,7 @@ async function runServeCli(): Promise<void> {
               }
               return { ok: true, deleted: true, reason: source.reason ?? null };
             },
+            scheduleServiceUpdate: (source) => clusterUpdateScheduler.schedule(source),
             isIdle: authSyncLocalIdle,
             notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot, authNotificationAggregator, {
               quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
@@ -607,6 +790,7 @@ async function runServeCli(): Promise<void> {
         activeAuthSync = authSync;
         attachTelegramAuthSync(authSyncTransportBot.bot, authSync, config, logger);
         authSync.start();
+        void publishPendingClusterUpdateBroadcast(authSync, logger);
       }
       mirror.start();
 
@@ -684,6 +868,13 @@ async function runServeCli(): Promise<void> {
     const singleLocalAuthRefreshLease = createLocalAuthRefreshLease();
     const singleAuthSyncLocalIdle = (): boolean => Boolean(core?.isIdleForServiceUpdate())
       && (!singleMirror || singleMirror.isIdle());
+    const singleClusterUpdateScheduler = createClusterUpdateScheduler({
+      selfUpdater,
+      canUpdate: () => singleAuthSyncLocalIdle()
+        && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
+      currentVersion: readPackageVersion,
+      logger,
+    });
     const singleCoordinator = config.authSyncEnabled ? {
       canSelfUpdate: (): boolean => singleAuthSyncLocalIdle()
         && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
@@ -790,6 +981,7 @@ async function runServeCli(): Promise<void> {
             await core!.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null);
             return { ok: true, deleted: true, reason: source.reason ?? null };
           },
+          scheduleServiceUpdate: (source) => singleClusterUpdateScheduler.schedule(source),
           isIdle: singleAuthSyncLocalIdle,
           notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator, {
             quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
@@ -801,6 +993,7 @@ async function runServeCli(): Promise<void> {
       activeAuthSync = singleAuthSync;
       attachTelegramAuthSync(bot, singleAuthSync, config, logger);
       singleAuthSync.start();
+      void publishPendingClusterUpdateBroadcast(singleAuthSync, logger);
       singleMirror.start();
     }
     const telegram = new TelegramChannelAdapter(core);
@@ -1018,6 +1211,8 @@ function isQuietAuthPoolNotification(event: AuthSyncNotification): boolean {
     case 'recovery_failed':
     case 'pull_request_received':
     case 'pull_response_sent':
+    case 'service_update_sent':
+    case 'service_update_received':
       return true;
     default:
       return false;
@@ -1100,6 +1295,15 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
         return `收到 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}，请求节点：${event.requesterNodeId}`;
       case 'pull_response_sent':
         return `已回应 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}\n结果：${formatPullResponseResult(event.result, event.reason, locale)}`;
+      case 'service_update_sent':
+        return `跨节点升级广播已发出：${event.targetVersion ?? 'latest'}\nRequest：${event.requestId}\nPeer：${peers}`;
+      case 'service_update_received':
+        return [
+          `收到跨节点升级请求：${event.targetVersion ?? 'latest'}`,
+          `来源：${formatSource(event.sourceLabel, event.sourceNodeId)}，peer ${event.peer}`,
+          `处理：${event.accepted ? '已安排本机空闲后升级' : '已跳过'}`,
+          event.reason ? `原因：${event.reason}` : null,
+        ].filter(Boolean).join('\n');
       case 'sync_error':
         return `auth sync 需要注意：\n${event.reason}`;
     }
@@ -1166,6 +1370,15 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
       return `Received peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}, requester node: ${event.requesterNodeId}`;
     case 'pull_response_sent':
       return `Replied to peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}\nResult: ${formatPullResponseResult(event.result, event.reason, locale)}`;
+    case 'service_update_sent':
+      return `Cross-node update broadcast sent: ${event.targetVersion ?? 'latest'}\nRequest: ${event.requestId}\nPeers: ${peers}`;
+    case 'service_update_received':
+      return [
+        `Received cross-node update request: ${event.targetVersion ?? 'latest'}`,
+        `Source: ${formatSource(event.sourceLabel, event.sourceNodeId)}, peer ${event.peer}`,
+        `Action: ${event.accepted ? 'scheduled local update when idle' : 'skipped'}`,
+        event.reason ? `Reason: ${event.reason}` : null,
+      ].filter(Boolean).join('\n');
     case 'sync_error':
       return `Auth sync needs attention:\n${event.reason}`;
   }

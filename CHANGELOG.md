@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.42 - 2026-06-18
+
+### 中文
+- 新增跨节点升级广播：一个节点升级成功后会通过现有 auth sync 加密通道广播目标版本，其他节点收到后会在 runtime/auth sync 空闲时自动执行本机 self-update；终端 `foxclaw update` 成功后也会在服务重启时触发广播。
+- 为避免升级风暴，收到广播的节点如果已经是目标版本会跳过；远端请求会记录到 auth sync recent events，并可在 `/auth sync status/events` 中排查。
+- 精简终端 `foxclaw status` 默认输出，集中展示运行状态、Codex/app-server、工作队列、bot 概况、auth sync backlog、最近升级和错误；完整原始 JSON 可通过 `foxclaw status --json` 查看。
+
+### English
+- Added cross-node update broadcasting: after one node updates successfully, it broadcasts the target version over the existing encrypted auth sync channel, and peers schedule their own self-update when runtime/auth sync work is idle; terminal `foxclaw update` also broadcasts after the restarted service comes back.
+- To avoid update storms, peers skip broadcasts that target their current version; remote update requests are recorded in auth sync recent events for `/auth sync status/events` diagnostics.
+- Condensed terminal `foxclaw status` by default, focusing on runtime health, Codex/app-server, work queues, bot overview, auth sync backlog, recent update, and errors; full raw JSON remains available via `foxclaw status --json`.
+
 ## 0.5.41 - 2026-06-18
 
 ### 中文

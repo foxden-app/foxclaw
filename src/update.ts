@@ -56,6 +56,7 @@ interface PerformSelfUpdateOptions {
   nodePath: string;
   version: string;
   notificationFile?: string;
+  clusterBroadcastFile?: string;
   codexCliBin?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -72,6 +73,12 @@ export interface SelfUpdateOutcome {
   fromVersion: string;
   toVersion: string | null;
   error: string | null;
+}
+
+export interface PendingClusterUpdateBroadcast {
+  targetVersion: string | null;
+  fromVersion: string;
+  updatedAt: string;
 }
 
 interface CodexCliUpdateResult {
@@ -424,6 +431,13 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
     runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
     completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null, releaseNotes);
+    if (options.clusterBroadcastFile && env.FOXCLAW_SUPPRESS_UPDATE_BROADCAST !== '1') {
+      writePendingClusterUpdateBroadcast(options.clusterBroadcastFile, {
+        targetVersion: toVersion,
+        fromVersion: options.version,
+        updatedAt: new Date().toISOString(),
+      });
+    }
     console.log(`[OK] FoxClaw updated and restarted: ${options.version} -> ${toVersion}`);
     return {
       ok: true,
@@ -442,6 +456,38 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
       error: message,
     };
   }
+}
+
+export function readPendingClusterUpdateBroadcast(filePath: string): PendingClusterUpdateBroadcast | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<PendingClusterUpdateBroadcast>;
+    if (
+      (typeof parsed.targetVersion !== 'string' && parsed.targetVersion !== null)
+      || typeof parsed.fromVersion !== 'string'
+      || typeof parsed.updatedAt !== 'string'
+      || !Number.isFinite(Date.parse(parsed.updatedAt))
+    ) {
+      return null;
+    }
+    return {
+      targetVersion: parsed.targetVersion ?? null,
+      fromVersion: parsed.fromVersion,
+      updatedAt: parsed.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writePendingClusterUpdateBroadcast(filePath: string, value: PendingClusterUpdateBroadcast): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporaryFile = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryFile, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temporaryFile, filePath);
+}
+
+export function clearPendingClusterUpdateBroadcast(filePath: string): void {
+  fs.rmSync(filePath, { force: true });
 }
 
 function updateManagedCodexCli(codexCliBin: string, nodePath: string, env: NodeJS.ProcessEnv): CodexCliUpdateResult {

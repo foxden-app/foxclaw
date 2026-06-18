@@ -296,6 +296,70 @@ test('CrossNodeAuthSync testPeers waits for peer pong replies', async () => {
   }
 });
 
+test('CrossNodeAuthSync broadcasts service update requests to peers', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-update-'));
+  try {
+    const notificationsA: AuthSyncNotification[] = [];
+    const notificationsB: AuthSyncNotification[] = [];
+    const scheduled: Array<{ requestId: string; nodeId: string; targetVersion: string | null }> = [];
+    const services: { b?: CrossNodeAuthSync } = {};
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({
+        scheduleServiceUpdate: async (source) => {
+          scheduled.push({
+            requestId: source.requestId,
+            nodeId: source.nodeId,
+            targetVersion: source.targetVersion,
+          });
+          return { accepted: true, reason: 'queued until runtime is idle' };
+        },
+        notify: async (event) => {
+          notificationsB.push(event);
+        },
+      }),
+    );
+    services.b = serviceB;
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({
+        notify: async (event) => {
+          notificationsA.push(event);
+        },
+      }),
+    );
+    await serviceB.initialize();
+    await serviceA.initialize();
+
+    const result = await serviceA.publishServiceUpdateRequest('0.5.42');
+
+    assert.deepEqual(result.peers, ['@botb']);
+    await waitFor(() => scheduled.length > 0);
+    const scheduledUpdate = scheduled[0];
+    assert.ok(scheduledUpdate);
+    assert.equal(scheduledUpdate.nodeId, 'node-a');
+    assert.equal(scheduledUpdate.targetVersion, '0.5.42');
+    assert.equal(notificationsA.some(event => event.kind === 'service_update_sent'), true);
+    const received = notificationsB.find((event): event is Extract<AuthSyncNotification, { kind: 'service_update_received' }> =>
+      event.kind === 'service_update_received');
+    assert.equal(received?.accepted, true);
+    assert.equal(serviceB.getStatus().recentEvents.some(event =>
+      event.kind === 'service.update.request'
+      && event.stage === 'accepted'
+    ), true);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync queues remote imports while the local node is busy', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-busy-'));
   try {
@@ -694,6 +758,7 @@ function callbacks(options: {
   validate?: AuthSyncImportCallbacks['validateCandidate'];
   importCandidate?: AuthSyncImportCallbacks['importCandidate'];
   deleteLocalCandidate?: AuthSyncImportCallbacks['deleteLocalCandidate'];
+  scheduleServiceUpdate?: AuthSyncImportCallbacks['scheduleServiceUpdate'];
   notify?: AuthSyncImportCallbacks['notify'];
 }): AuthSyncImportCallbacks {
   const records = options.records ?? [];
@@ -706,6 +771,9 @@ function callbacks(options: {
   };
   if (options.deleteLocalCandidate) {
     result.deleteLocalCandidate = options.deleteLocalCandidate;
+  }
+  if (options.scheduleServiceUpdate) {
+    result.scheduleServiceUpdate = options.scheduleServiceUpdate;
   }
   if (options.notify) {
     result.notify = options.notify;

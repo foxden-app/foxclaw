@@ -103,6 +103,8 @@ export type AuthSyncNotification =
   | { kind: 'recovery_failed'; candidateName: string; requestId?: string; peers: string[]; reason: string; waitMs?: number; peerReachability?: AuthSyncPeerReachability[] }
   | { kind: 'pull_request_received'; candidateName: string; peer: string; requesterNodeId: string }
   | { kind: 'pull_response_sent'; candidateName: string; peer: string; result: AuthSyncPullResponseResult; reason: string | null }
+  | { kind: 'service_update_sent'; requestId: string; targetVersion: string | null; peers: string[] }
+  | { kind: 'service_update_received'; requestId: string; targetVersion: string | null; sourceNodeId: string; sourceLabel: string; peer: string; accepted: boolean; reason: string | null }
   | { kind: 'sync_error'; reason: string };
 
 export interface AuthSyncImportCallbacks {
@@ -118,6 +120,9 @@ export interface AuthSyncImportCallbacks {
     candidateName: string,
     source: { nodeId: string; label?: string | null; reason?: string | null },
   ) => Promise<{ ok: boolean; deleted: boolean; reason?: string | null }>;
+  scheduleServiceUpdate?: (
+    source: { requestId: string; nodeId: string; label?: string | null; targetVersion: string | null; requestedAt: string },
+  ) => Promise<{ accepted: boolean; reason?: string | null }>;
   isIdle: () => boolean;
   notify?: (event: AuthSyncNotification) => Promise<void>;
 }
@@ -167,7 +172,8 @@ type AuthSyncPlainMessage =
   | { kind: 'lease.request'; leaseId: string; reason: string; expiresAt: number }
   | { kind: 'lease.grant'; leaseId: string; expiresAt: number }
   | { kind: 'lease.deny'; leaseId: string; reason: string }
-  | { kind: 'lease.release'; leaseId: string };
+  | { kind: 'lease.release'; leaseId: string }
+  | { kind: 'service.update.request'; requestId: string; targetVersion: string | null; requestedAt: string };
 
 interface AuthSyncEnvelope {
   magic: 'foxclaw-auth-sync';
@@ -700,6 +706,36 @@ export class CrossNodeAuthSync {
     return resultPromise;
   }
 
+  async publishServiceUpdateRequest(targetVersion: string | null): Promise<{ sent: number; peers: string[] }> {
+    if (!this.isReady()) {
+      return { sent: 0, peers: [] };
+    }
+    const requestId = crypto.randomUUID();
+    const peers = [...this.peers];
+    await this.sendToAll({
+      kind: 'service.update.request',
+      requestId,
+      targetVersion,
+      requestedAt: new Date().toISOString(),
+    });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'service.update.request',
+      stage: 'broadcast',
+      peer: null,
+      requestId,
+      candidateName: null,
+      detail: targetVersion ? `target=${targetVersion}` : null,
+    });
+    this.notify({
+      kind: 'service_update_sent',
+      requestId,
+      targetVersion,
+      peers,
+    });
+    return { sent: peers.length, peers };
+  }
+
   async handleIncomingEnvelope(rawEnvelope: string, peer: AuthSyncPeerIdentity): Promise<boolean> {
     if (!this.isReady() || !this.isAllowedPeer(peer)) {
       return false;
@@ -772,9 +808,52 @@ export class CrossNodeAuthSync {
           this.recordEvent({ direction: 'in', kind: 'lease.release', stage: 'released', peer: normalizePeerIdentity(peer), requestId: message.leaseId, candidateName: null, detail: null });
         }
         return;
+      case 'service.update.request':
+        await this.handleServiceUpdateRequest(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
+        return;
       default:
         return;
     }
+  }
+
+  private async handleServiceUpdateRequest(
+    message: Extract<AuthSyncPlainMessage, { kind: 'service.update.request' }>,
+    senderNodeId: string,
+    sourceLabel: string,
+    peer: string,
+  ): Promise<void> {
+    let result: { accepted: boolean; reason?: string | null } = {
+      accepted: false,
+      reason: 'service update scheduling is not configured',
+    };
+    if (this.callbacks.scheduleServiceUpdate) {
+      result = await this.callbacks.scheduleServiceUpdate({
+        requestId: message.requestId,
+        nodeId: senderNodeId,
+        label: sourceLabel,
+        targetVersion: message.targetVersion,
+        requestedAt: message.requestedAt,
+      });
+    }
+    this.recordEvent({
+      direction: 'local',
+      kind: 'service.update.request',
+      stage: result.accepted ? 'accepted' : 'skipped',
+      peer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: result.reason ?? (message.targetVersion ? `target=${message.targetVersion}` : null),
+    });
+    this.notify({
+      kind: 'service_update_received',
+      requestId: message.requestId,
+      targetVersion: message.targetVersion,
+      sourceNodeId: senderNodeId,
+      sourceLabel,
+      peer,
+      accepted: result.accepted,
+      reason: result.reason ?? null,
+    });
   }
 
   private async handlePullRequest(message: Extract<AuthSyncPlainMessage, { kind: 'pull.request' }>, requesterNodeId: string, peer: string): Promise<void> {
@@ -1713,6 +1792,7 @@ function requestIdFromMessage(message: AuthSyncPlainMessage): string | null {
     case 'delete.candidate':
     case 'test.ping':
     case 'test.pong':
+    case 'service.update.request':
       return message.requestId;
     case 'lease.request':
       return message.leaseId;

@@ -5,12 +5,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildSelfUpdateLaunchCommand,
+  clearPendingClusterUpdateBroadcast,
   createSelfUpdateRuntime,
   extractReleaseNotes,
+  readPendingClusterUpdateBroadcast,
   readSelfUpdateStatus,
   resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
   selfUpdateStatusPath,
+  writePendingClusterUpdateBroadcast,
   writeSelfUpdateStatus,
 } from './update.js';
 
@@ -285,6 +288,29 @@ test('self-update statuses are stored alongside runtime status', () => {
       error: null,
       updatedAt: '2026-05-26T08:00:00.000Z',
     });
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('pending cluster update broadcasts are stored atomically', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-update-broadcast-'));
+  try {
+    const filePath = path.join(tempDir, 'pending.json');
+    writePendingClusterUpdateBroadcast(filePath, {
+      targetVersion: '0.5.42',
+      fromVersion: '0.5.41',
+      updatedAt: '2026-06-18T03:00:00.000Z',
+    });
+
+    assert.deepEqual(readPendingClusterUpdateBroadcast(filePath), {
+      targetVersion: '0.5.42',
+      fromVersion: '0.5.41',
+      updatedAt: '2026-06-18T03:00:00.000Z',
+    });
+
+    clearPendingClusterUpdateBroadcast(filePath);
+    assert.equal(readPendingClusterUpdateBroadcast(filePath), null);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
