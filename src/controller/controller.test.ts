@@ -1553,6 +1553,67 @@ test('completed Codex stream output falls back to RichMessage HTML when native m
   assert.match(rig.editedRichMessages[0]!, /<b>Changed<\/b>/);
 });
 
+test('completed turn collapses all Telegram commentary into the first progress message', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.finalText = 'Done';
+  active.segments = [
+    {
+      itemId: 'commentary-1', phase: 'commentary', outputKind: 'commentary', isPlan: false,
+      text: 'Inspecting **renderer**.', completed: true, startedAtMs: 1_750_000_000_000,
+      completedAtMs: 1_750_000_002_000, messages: [{ messageId: 11, text: 'one' }],
+    },
+    {
+      itemId: 'commentary-2', phase: 'commentary', outputKind: 'commentary', isPlan: false,
+      text: 'Running tests.', completed: true, startedAtMs: 1_750_000_003_000,
+      completedAtMs: 1_750_000_004_000, messages: [{ messageId: 12, text: 'two' }, { messageId: 13, text: 'three' }],
+    },
+    {
+      itemId: 'final', phase: 'final_answer', outputKind: 'final_answer', isPlan: false,
+      text: 'Done', completed: true, startedAtMs: 1_750_000_005_000,
+      completedAtMs: 1_750_000_006_000, messages: [{ messageId: 14, text: 'Done' }],
+    },
+  ];
+
+  await (rig.controller as any).collapseTurnCommentary(active);
+
+  assert.equal(rig.editedRichMessages.length, 1);
+  assert.match(rig.editedRichMessages[0]!, /^<details><summary>Progress · 2 updates ·/);
+  assert.match(rig.editedRichMessages[0]!, /<b>renderer<\/b>/);
+  assert.deepEqual(rig.deletedMessageIds, [12, 13]);
+  assert.equal(active.segments[0].messages.length, 0);
+  assert.equal(active.segments[1].messages.length, 0);
+  assert.equal(active.segments[2].messages.length, 1);
+});
+
+test('commentary collapse keeps original messages when RichMessage editing fails', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.bot.editRichMessage = async () => {
+    throw new Error('unsupported');
+  };
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.finalText = 'Done';
+  active.segments = [{
+    itemId: 'commentary', phase: 'commentary', outputKind: 'commentary', isPlan: false,
+    text: 'Still visible', completed: true, startedAtMs: 1_750_000_000_000,
+    completedAtMs: 1_750_000_001_000, messages: [{ messageId: 11, text: 'Still visible' }],
+  }];
+
+  await (rig.controller as any).collapseTurnCommentary(active);
+
+  assert.deepEqual(rig.deletedMessageIds, []);
+  assert.equal(active.segments[0].messages.length, 1);
+});
+
 test('draft stream uses Telegram RichMessage draft and falls back to plain draft', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

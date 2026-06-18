@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.43 - 2026-06-18
+
+### 中文
+- Codex 最终答复出现后，FoxClaw 会把本轮所有过程汇报合并到第一条过程消息，并编辑为默认收起的 Telegram RichMessage `details`；最终答复继续独立展示，使历史记录保持清晰的一问一答结构。
+- 折叠摘要显示过程条数和整体起止时间，展开后每段过程汇报保留精确到秒的起止时间及原有 Markdown 富文本效果；普通 Telegram 回合和 CLI 观察回合统一生效。
+- 如果 RichMessage 编辑失败，原过程消息全部保留且不执行删除；超出 Telegram 单条富消息上限时会明确标注未收入归档的条数。
+
+### English
+- After a Codex final answer arrives, FoxClaw consolidates all progress updates from the turn into the first progress message and edits it into a collapsed Telegram RichMessage `details` block; the final answer remains separate for a clean question-and-answer history.
+- The collapsed summary shows the update count and overall time range, while each expanded update preserves second-level start/end timestamps and Markdown-rich rendering; this applies to both normal Telegram turns and CLI-observed turns.
+- If RichMessage editing fails, every original progress message is preserved and no deletion is attempted; updates exceeding Telegram's single-rich-message limit are reported explicitly.
+
 ## 0.5.42 - 2026-06-18
 
 ### 中文

@@ -191,6 +191,8 @@ interface ActiveTurnSegment {
   isPlan: boolean;
   text: string;
   completed: boolean;
+  startedAtMs: number;
+  completedAtMs: number | null;
   messages: RenderedTelegramMessage[];
 }
 
@@ -2457,6 +2459,7 @@ export class BridgeSessionCore {
     const segment = ensureTurnSegment(active, `${active.turnId}:codex-error`, 'final_answer', 'final_answer', false);
     segment.text = text;
     segment.completed = true;
+    segment.completedAtMs = Date.now();
     await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
   }
 
@@ -3977,6 +3980,7 @@ export class BridgeSessionCore {
     let shouldMarkPartialOutput = false;
     try {
       await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
+      await this.collapseTurnCommentary(active);
       const renderedMessages = active.segments.reduce((count, segment) => count + segment.messages.length, 0);
       if (renderedMessages === 0) {
         const fallbackKey = active.interruptRequested ? 'interrupted' : 'completed';
@@ -4033,6 +4037,7 @@ export class BridgeSessionCore {
           }
         }
         segment.completed = true;
+        segment.completedAtMs = Date.now();
         await this.queueTurnRender(active, { forceStream: true, forceStatus: true });
         return;
       }
@@ -4327,6 +4332,53 @@ export class BridgeSessionCore {
         ? `${telegramBold(OBSERVED_CLI_USER_LABEL)}\n${telegramPre(chunk)}`
         : telegramPre(chunk);
       await this.sendHtmlMessage(scopeId, body);
+    }
+  }
+
+  private async collapseTurnCommentary(active: ActiveTurn): Promise<void> {
+    if (active.scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX) || !this.hasObservedPersistentReply(active)) {
+      return;
+    }
+    const segments = active.segments.filter(segment => (
+      segment.outputKind === 'commentary' && Boolean(segment.text.trim()) && segment.messages.length > 0
+    ));
+    const messages = segments.flatMap(segment => segment.messages);
+    const firstMessage = messages[0];
+    if (!firstMessage) {
+      return;
+    }
+
+    const locale = this.localeForChat(active.scopeId);
+    const html = renderCollapsedCommentary(locale, segments);
+    const fallback = locale === 'zh'
+      ? `过程汇报（${segments.length} 条，已折叠）`
+      : `Progress updates (${segments.length}, collapsed)`;
+    try {
+      await this.messaging.editRichHtml(active.scopeId, firstMessage.messageId, html, fallback, []);
+    } catch (error) {
+      this.logger.warn('telegram.commentary_collapse_failed', {
+        error: String(error),
+        turnId: active.turnId,
+        messageId: firstMessage.messageId,
+      });
+      return;
+    }
+
+    for (const message of messages.slice(1)) {
+      try {
+        await this.deleteMessage(active.scopeId, message.messageId);
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.commentary_collapse_delete_failed', {
+            error: String(error),
+            turnId: active.turnId,
+            messageId: message.messageId,
+          });
+        }
+      }
+    }
+    for (const segment of segments) {
+      segment.messages = [];
     }
   }
 
@@ -9914,10 +9966,52 @@ function ensureTurnSegment(
     isPlan: Boolean(isPlan),
     text: '',
     completed: false,
+    startedAtMs: Date.now(),
+    completedAtMs: null,
     messages: [],
   };
   active.segments.push(segment);
   return segment;
+}
+
+function renderCollapsedCommentary(locale: AppLocale, segments: ActiveTurnSegment[]): string {
+  const firstAt = segments[0]?.startedAtMs ?? Date.now();
+  const lastSegment = segments[segments.length - 1];
+  const lastAt = lastSegment?.completedAtMs ?? lastSegment?.startedAtMs ?? firstAt;
+  const range = firstAt === lastAt
+    ? formatClockTimestamp(firstAt)
+    : `${formatClockTimestamp(firstAt)} - ${formatClockTimestamp(lastAt)}`;
+  const summary = locale === 'zh'
+    ? `过程汇报 · ${segments.length} 条 · ${range}`
+    : `Progress · ${segments.length} updates · ${range}`;
+  const maxBodyLength = TELEGRAM_RICH_MESSAGE_TEXT_LIMIT - summary.length - 1024;
+  const blocks: string[] = [];
+  let bodyLength = 0;
+  let omitted = 0;
+
+  for (const segment of segments) {
+    const endAt = segment.completedAtMs ?? segment.startedAtMs;
+    const timestamp = endAt === segment.startedAtMs
+      ? formatClockTimestamp(segment.startedAtMs)
+      : `${formatClockTimestamp(segment.startedAtMs)} - ${formatClockTimestamp(endAt)}`;
+    const block = `<h4>${escapeTelegramHtml(timestamp)}</h4>\n${renderTelegramMarkdownRichHtml(segment.text)}`;
+    if (bodyLength + block.length > maxBodyLength) {
+      omitted += 1;
+      continue;
+    }
+    blocks.push(block);
+    bodyLength += block.length;
+  }
+  if (omitted > 0) {
+    blocks.push(`<p>${escapeTelegramHtml(locale === 'zh' ? `另有 ${omitted} 条过长内容未收入归档` : `${omitted} oversized updates omitted`)}</p>`);
+  }
+  return telegramDetails(summary, blocks.join('\n'));
+}
+
+function formatClockTimestamp(timestampMs: number): string {
+  const date = new Date(timestampMs);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function createToolBatchState(): ToolBatchState {
