@@ -251,7 +251,7 @@ export function classifyAgentOutput(phase: string | null, completed: boolean): T
     return completed ? 'final_answer' : 'commentary';
   }
   const normalized = phase.replace(/[^a-z]/gi, '').toLowerCase();
-  if (normalized === 'final' || normalized === 'answer' || normalized === 'response') {
+  if (normalized === 'final' || normalized === 'finalanswer' || normalized === 'answer' || normalized === 'response') {
     return 'final_answer';
   }
   return 'commentary';

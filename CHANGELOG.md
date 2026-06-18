@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.44 - 2026-06-18
+
+### 中文
+- 修复 Codex 真实 `final_answer` phase 在标准化后变成 `finalanswer`、却未被识别为最终答复的问题；该错误会导致 `0.5.43` 的过程汇报折叠逻辑误判“本轮没有最终答复”并直接跳过。
+- 增加真实 phase 分类回归测试，确保最终答复与 commentary 过程汇报正确分离。
+
+### English
+- Fixed classification of Codex's real `final_answer` phase, which normalizes to `finalanswer` but was not recognized as a final response; this caused the `0.5.43` progress-collapse path to incorrectly skip turns as having no final answer.
+- Added a regression test for the real phase value so final responses remain distinct from commentary updates.
+
 ## 0.5.43 - 2026-06-18
 
 ### 中文

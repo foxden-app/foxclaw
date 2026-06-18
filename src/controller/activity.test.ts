@@ -140,6 +140,7 @@ test('normalizes raw tool command events into activity states', () => {
 test('utility classifiers keep renderer-facing categories stable', () => {
   assert.equal(classifyAgentOutput('final', true), 'final_answer');
   assert.equal(classifyAgentOutput('commentary', false), 'commentary');
+  assert.equal(classifyAgentOutput('final_answer', true), 'final_answer');
   assert.equal(inferToolActivityState({
     callId: 'call-1',
     turnId: 'turn-1',
