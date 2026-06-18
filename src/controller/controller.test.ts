@@ -1352,6 +1352,26 @@ test('/update reports terminal fallback when self-update is unavailable', async 
   assert.match(rig.sentMessages[0]!, /foxclaw update/);
 });
 
+test('plain command replies prefer RichMessage markdown and fall back to plain text', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/unknown'), 'en', 'unknown', []);
+
+  assert.equal(rig.sentRichMessages.length, 1);
+  assert.match(rig.sentRichMessages[0]!, /Unknown command/);
+
+  rig.bot.sendRichMessage = async () => {
+    throw new Error('rich markdown unavailable');
+  };
+  await (rig.controller as any).handleCommand(createEvent('/unknown'), 'en', 'unknown', []);
+
+  assert.match(rig.sentMessages.at(-1)!, /Unknown command/);
+});
+
 test('/update explains auth sync import backlog when self-update is blocked', async (t) => {
   const updater: SelfUpdateRuntime = {
     async launch() {},

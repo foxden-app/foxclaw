@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.41 - 2026-06-18
+
+### 中文
+- 将 FoxClaw 的普通 Telegram 回复统一升级为 RichMessage Markdown 优先发送，覆盖短提示、usage、操作结果、升级开始/完成、错误通知和大多数诊断文本。
+- 保持稳定降级：Telegram rich markdown 失败时自动回普通文本；`/status`、`/auth`、`/update` 阻塞诊断等结构化面板继续使用已验证的 RichMessage HTML 表格/列表/details。
+
+### English
+- Upgraded FoxClaw's normal Telegram replies to prefer RichMessage Markdown, covering short notices, usage text, action results, update start/completion messages, error notifications, and most diagnostic text.
+- Stable fallback is preserved: Telegram rich markdown failures automatically return to plain text, while structured panels such as `/status`, `/auth`, and blocked `/update` diagnostics continue using the verified RichMessage HTML tables/lists/details path.
+
 ## 0.5.40 - 2026-06-18
 
 ### 中文

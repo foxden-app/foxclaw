@@ -4218,7 +4218,7 @@ export class BridgeSessionCore {
     text: string,
     inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
   ): Promise<number> {
-    return this.messaging.sendPlain(scopeId, text, inlineKeyboard);
+    return this.sendRichMarkdownMessage(scopeId, text, inlineKeyboard);
   }
 
   private async sendHtmlMessage(
