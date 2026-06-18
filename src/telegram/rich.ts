@@ -23,3 +23,14 @@ export function telegramRichHtml(html: string, options: TelegramRichMessageOptio
   }
   return message;
 }
+
+export function telegramRichMarkdown(markdown: string, options: TelegramRichMessageOptions = {}): TelegramInputRichMessage {
+  const message: TelegramInputRichMessage = { markdown };
+  if (options.isRtl) {
+    message.is_rtl = true;
+  }
+  if (options.skipEntityDetection) {
+    message.skip_entity_detection = true;
+  }
+  return message;
+}

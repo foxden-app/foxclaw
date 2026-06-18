@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.40 - 2026-06-18
+
+### 中文
+- Codex 普通输出完成后优先使用 Telegram 原生 RichMessage Markdown 发送/编辑，保留原始 Markdown 给 Telegram 解析，用于观察编号列表、复制文本和更多 Markdown 语法的真实客户端表现。
+- 如果 Telegram 拒绝原生 Rich Markdown，FoxClaw 会自动退回现有 Markdown -> Rich HTML 转换；若 rich 编辑仍失败，则保留已经发送的普通文本，避免影响输出稳定性。Rich draft 也采用同样的 markdown 优先、HTML/纯文本降级路径。
+
+### English
+- Normal Codex output now prefers Telegram's native RichMessage Markdown when finalizing sent segments, preserving the original Markdown for Telegram to parse so ordered lists, copied text, and broader Markdown syntax can be observed in real clients.
+- If Telegram rejects native Rich Markdown, FoxClaw automatically falls back to the existing Markdown-to-Rich-HTML renderer; if rich editing still fails, the already-sent plain text remains intact. Rich drafts use the same markdown-first path with HTML/plain fallback.
+
 ## 0.5.39 - 2026-06-17
 
 ### 中文

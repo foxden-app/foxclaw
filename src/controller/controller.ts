@@ -4248,12 +4248,17 @@ export class BridgeSessionCore {
     text: string,
     inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
   ): Promise<number> {
-    return this.sendRichHtmlMessage(
-      scopeId,
-      renderTelegramMarkdownRichHtml(text),
-      escapeTelegramHtml(text),
-      inlineKeyboard,
-    );
+    try {
+      return await this.messaging.sendRichMarkdown(scopeId, text, text, inlineKeyboard);
+    } catch (markdownError) {
+      this.logger.warn('telegram.rich_markdown_send_failed', { scopeId, error: toErrorMeta(markdownError) });
+      return this.sendRichHtmlMessage(
+        scopeId,
+        renderTelegramMarkdownRichHtml(text),
+        escapeTelegramHtml(text),
+        inlineKeyboard,
+      );
+    }
   }
 
   private async sendRichInternalMessage(
@@ -9417,6 +9422,15 @@ export class BridgeSessionCore {
     await this.messaging.sendRichDraft(scopeId, draftId, html, fallbackText);
   }
 
+  private async sendRichMarkdownDraft(scopeId: string, draftId: number, markdown: string, fallbackText: string): Promise<void> {
+    try {
+      await this.messaging.sendRichMarkdownDraft(scopeId, draftId, markdown, fallbackText);
+    } catch (markdownError) {
+      this.logger.warn('telegram.rich_markdown_draft_failed', { scopeId, error: toErrorMeta(markdownError) });
+      await this.sendRichDraft(scopeId, draftId, renderTelegramMarkdownRichHtml(markdown), fallbackText);
+    }
+  }
+
   private renderActiveStatus(active: ActiveTurn): string {
     const locale = this.localeForChat(active.scopeId);
     return renderActiveTurnStatus(locale, {
@@ -9683,10 +9697,10 @@ export class BridgeSessionCore {
       if (active.richDraftDisabled) {
         await this.sendDraft(active.scopeId, active.draftId, draftText);
       } else {
-        await this.sendRichDraft(
+        await this.sendRichMarkdownDraft(
           active.scopeId,
           active.draftId,
-          renderTelegramMarkdownRichHtml(draftText),
+          draftText,
           draftText,
         );
       }
@@ -9833,15 +9847,28 @@ export class BridgeSessionCore {
       if (!existing || !chunk.trim()) {
         continue;
       }
-      const richHtml = renderTelegramMarkdownRichHtml(chunk);
-      if (existing.richHtml === richHtml || existing.richFailedForText === chunk) {
+      if (existing.richHtml === chunk || existing.richFailedForText === chunk) {
         continue;
       }
       try {
-        await this.messaging.editRichHtml(active.scopeId, existing.messageId, richHtml, escapeTelegramHtml(chunk));
-        existing.richHtml = richHtml;
+        await this.messaging.editRichMarkdown(active.scopeId, existing.messageId, chunk, chunk);
+        existing.richHtml = chunk;
         existing.richFailedForText = null;
-      } catch (error) {
+      } catch (markdownError) {
+        this.logger.warn('telegram.stream_rich_markdown_edit_failed', {
+          error: String(markdownError),
+          turnId: active.turnId,
+          itemId: segment.itemId,
+          messageId: existing.messageId,
+          chunkIndex: index,
+        });
+        const richHtml = renderTelegramMarkdownRichHtml(chunk);
+        try {
+          await this.messaging.editRichHtml(active.scopeId, existing.messageId, richHtml, escapeTelegramHtml(chunk));
+          existing.richHtml = richHtml;
+          existing.richFailedForText = null;
+          continue;
+        } catch (error) {
         if (isTelegramMessageGone(error)) {
           segment.messages.splice(index);
           return;
@@ -9854,6 +9881,7 @@ export class BridgeSessionCore {
           messageId: existing.messageId,
           chunkIndex: index,
         });
+        }
       }
     }
   }

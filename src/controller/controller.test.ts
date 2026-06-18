@@ -309,7 +309,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       return 1000 + sentHtmlMessages.length;
     },
     sendRichMessage: async (_chatId: string, richMessage: any, keyboard?: any) => {
-      const text = richMessage.html ?? JSON.stringify(richMessage);
+      const text = richMessage.html ?? richMessage.markdown ?? JSON.stringify(richMessage);
       sentRichMessages.push(text);
       sentMessages.push(text.replaceAll('&gt;', '>').replaceAll('&lt;', '<').replaceAll('&amp;', '&'));
       sentRichKeyboards.push(keyboard ?? []);
@@ -325,14 +325,14 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       editedHtmlKeyboards.push(keyboard ?? []);
     },
     editRichMessage: async (_chatId: string, _messageId: number, richMessage: any, keyboard?: any) => {
-      editedRichMessages.push(richMessage.html ?? JSON.stringify(richMessage));
+      editedRichMessages.push(richMessage.html ?? richMessage.markdown ?? JSON.stringify(richMessage));
       editedRichKeyboards.push(keyboard ?? []);
     },
     sendMessageDraft: async (_chatId: string, _draftId: number, text: string) => {
       sentDraftMessages.push(text);
     },
     sendRichMessageDraft: async (_chatId: string, _draftId: number, richMessage: any) => {
-      sentRichDraftMessages.push(richMessage.html ?? JSON.stringify(richMessage));
+      sentRichDraftMessages.push(richMessage.html ?? richMessage.markdown ?? JSON.stringify(richMessage));
     },
     deleteMessage: async (_chatId: string, messageId: number) => {
       deletedMessageIds.push(messageId);
@@ -1492,10 +1492,45 @@ test('completed Codex stream output is promoted to Telegram RichMessage', async 
 
   assert.equal(rig.editedMessages.length, 0);
   assert.equal(rig.editedRichMessages.length, 1);
+  assert.equal(rig.editedRichMessages[0], segment.text);
+});
+
+test('completed Codex stream output falls back to RichMessage HTML when native markdown is rejected', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  let editRichCalls = 0;
+  rig.bot.editRichMessage = async (_chatId: string, _messageId: number, richMessage: any) => {
+    editRichCalls += 1;
+    if (richMessage.markdown) {
+      throw new Error('Bad Request: unsupported rich markdown');
+    }
+    rig.editedRichMessages.push(richMessage.html ?? JSON.stringify(richMessage));
+  };
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  const segment = {
+    itemId: 'item-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: '# Done\n\n- **Changed** `src/app.ts`',
+    completed: false,
+    messages: [],
+  };
+  active.segments = [segment];
+
+  await (rig.controller as any).syncSegmentTimeline(active, segment);
+  segment.completed = true;
+  await (rig.controller as any).syncSegmentTimeline(active, segment);
+
+  assert.equal(editRichCalls, 2);
+  assert.equal(rig.editedRichMessages.length, 1);
   assert.match(rig.editedRichMessages[0]!, /<h2>Done<\/h2>/);
   assert.match(rig.editedRichMessages[0]!, /<b>Changed<\/b>/);
-  assert.match(rig.editedRichMessages[0]!, /<code>src\/app\.ts<\/code>/);
-  assert.match(rig.editedRichMessages[0]!, /<a href="https:\/\/example\.com\/docs">docs<\/a>/);
 });
 
 test('draft stream uses Telegram RichMessage draft and falls back to plain draft', async (t) => {
@@ -1521,8 +1556,7 @@ test('draft stream uses Telegram RichMessage draft and falls back to plain draft
 
   assert.equal(rig.sentDraftMessages.length, 0);
   assert.equal(rig.sentRichDraftMessages.length, 1);
-  assert.match(rig.sentRichDraftMessages[0]!, /<b>Streaming<\/b>/);
-  assert.match(rig.sentRichDraftMessages[0]!, /<code>draft<\/code>/);
+  assert.equal(rig.sentRichDraftMessages[0], '**Streaming** `draft`');
 
   rig.bot.sendRichMessageDraft = async () => {
     throw new Error('rich draft unavailable');

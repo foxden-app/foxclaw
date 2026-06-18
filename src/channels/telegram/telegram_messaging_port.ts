@@ -2,7 +2,7 @@ import { parseTelegramTargetFromBridgeScope } from '../../core/bridge_scope.js';
 import type { ChannelPort } from '../../core/channel_port.js';
 import type { TelegramGateway } from '../../telegram/gateway.js';
 import type { TelegramRemoteFile } from '../../telegram/api.js';
-import { telegramRichHtml } from '../../telegram/rich.js';
+import { telegramRichHtml, telegramRichMarkdown } from '../../telegram/rich.js';
 
 export type InlineKeyboard = Array<Array<{ text: string; callback_data: string }>>;
 
@@ -44,6 +44,20 @@ export class TelegramMessagingPort implements ChannelPort {
     );
   }
 
+  async sendRichMarkdown(
+    bridgeScopeId: string,
+    markdown: string,
+    inlineKeyboard?: InlineKeyboard,
+  ): Promise<number> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    return this.gateway.sendRichMessage(
+      target.chatId,
+      telegramRichMarkdown(markdown, { skipEntityDetection: true }),
+      inlineKeyboard,
+      target.topicId,
+    );
+  }
+
   async editPlain(
     bridgeScopeId: string,
     messageId: number,
@@ -79,6 +93,21 @@ export class TelegramMessagingPort implements ChannelPort {
     );
   }
 
+  async editRichMarkdown(
+    bridgeScopeId: string,
+    messageId: number,
+    markdown: string,
+    inlineKeyboard?: InlineKeyboard,
+  ): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    await this.gateway.editRichMessage(
+      target.chatId,
+      messageId,
+      telegramRichMarkdown(markdown, { skipEntityDetection: true }),
+      inlineKeyboard,
+    );
+  }
+
   async deleteMessage(bridgeScopeId: string, messageId: number): Promise<void> {
     const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
     await this.gateway.deleteMessage(target.chatId, messageId);
@@ -105,6 +134,16 @@ export class TelegramMessagingPort implements ChannelPort {
       target.chatId,
       draftId,
       telegramRichHtml(html, { skipEntityDetection: true }),
+      target.topicId,
+    );
+  }
+
+  async sendRichMarkdownDraft(bridgeScopeId: string, draftId: number, markdown: string): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    await this.gateway.sendRichMessageDraft(
+      target.chatId,
+      draftId,
+      telegramRichMarkdown(markdown, { skipEntityDetection: true }),
       target.topicId,
     );
   }
