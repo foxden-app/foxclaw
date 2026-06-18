@@ -216,6 +216,12 @@ interface ArchivedStatusContent {
   html: string | null;
 }
 
+interface SelfUpdateBroadcastSummary {
+  state: 'sent' | 'pending' | 'disabled';
+  sent: number;
+  peers: string[];
+}
+
 interface ToolDescriptor {
   kind: keyof ToolBatchCounts;
   key: string;
@@ -5640,22 +5646,99 @@ export class BridgeSessionCore {
       return;
     }
     this.coordinator?.selfUpdateCompleted?.(status);
-    await this.sendMessage(status.scopeId, this.formatSelfUpdateResult(status));
+    const broadcast = await this.resolveSelfUpdateBroadcastSummary(status);
+    const result = this.formatSelfUpdateResult(status, broadcast);
+    await this.sendRichHtmlMessage(status.scopeId, result.html, result.fallbackHtml);
     await this.selfUpdater?.clearStatus();
   }
 
-  private formatSelfUpdateResult(status: SelfUpdateStatus): string {
+  private formatSelfUpdateResult(
+    status: SelfUpdateStatus,
+    broadcast: SelfUpdateBroadcastSummary,
+  ): { html: string; fallbackHtml: string } {
     const codexUpdateLine = this.formatCodexUpdateResult(status);
     const releaseNotes = this.formatSelfUpdateReleaseNotes(status);
     if (status.state === 'succeeded') {
-      const result = t(status.locale, 'update_succeeded', {
+      const foxclawResult = t(status.locale, 'update_succeeded', {
         from: status.fromVersion,
         to: status.toVersion ?? t(status.locale, 'unknown'),
       });
-      return [result, releaseNotes, codexUpdateLine].filter(Boolean).join('\n');
+      const broadcastLine = formatSelfUpdateBroadcastLine(status.locale, status.toVersion, broadcast);
+      const rows = [
+        ['FoxClaw', `${status.fromVersion} -> ${status.toVersion ?? t(status.locale, 'unknown')}`, status.locale === 'zh' ? '升级完成，服务已重启' : 'Updated; service restarted'],
+        ['Codex CLI', formatSelfUpdateVersionTransition(status.codexFromVersion, status.codexToVersion, status.locale), formatCodexUpdateState(status)],
+        [status.locale === 'zh' ? '集群广播' : 'Cluster broadcast', status.toVersion ?? t(status.locale, 'unknown'), broadcastLine],
+      ];
+      const notes = status.releaseNotes?.filter(note => note.trim()) ?? [];
+      const notesHtml = notes.length > 0
+        ? telegramDetails(
+          status.locale === 'zh' ? `查看更新内容 · ${notes.length} 项` : `Release notes · ${notes.length} items`,
+          `<ul>${notes.map(note => `<li>${escapeTelegramHtml(note)}</li>`).join('')}</ul>`,
+        )
+        : '';
+      const title = status.locale === 'zh' ? 'FoxClaw 升级完成' : 'FoxClaw update completed';
+      const html = [
+        `<h3>${escapeTelegramHtml(title)}</h3>`,
+        renderTelegramTable(
+          status.locale === 'zh' ? ['组件', '版本', '结果'] : ['Component', 'Version', 'Result'],
+          rows,
+        ),
+        notesHtml,
+        '<footer>FoxClaw · update</footer>',
+      ].filter(Boolean).join('\n');
+      const fallbackHtml = [
+        telegramBold(title),
+        escapeTelegramHtml(foxclawResult),
+        escapeTelegramHtml(codexUpdateLine ?? (status.locale === 'zh' ? 'Codex CLI：未执行升级。' : 'Codex CLI: not updated.')),
+        escapeTelegramHtml(broadcastLine),
+        releaseNotes ? escapeTelegramHtml(releaseNotes) : '',
+      ].filter(Boolean).join('\n');
+      return { html, fallbackHtml };
     }
     const result = t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
-    return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+    const fallback = codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+    return {
+      html: `<h3>${escapeTelegramHtml(status.locale === 'zh' ? 'FoxClaw 升级失败' : 'FoxClaw update failed')}</h3><p>${escapeTelegramHtml(fallback)}</p>`,
+      fallbackHtml: escapeTelegramHtml(fallback),
+    };
+  }
+
+  private async resolveSelfUpdateBroadcastSummary(status: SelfUpdateStatus): Promise<SelfUpdateBroadcastSummary> {
+    if (status.state !== 'succeeded' || !status.toVersion || !this.coordinator?.getServiceStatus) {
+      return { state: 'pending', sent: 0, peers: [] };
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const serviceStatus = await this.coordinator.getServiceStatus().catch(() => null);
+      const authSync = serviceStatus?.authSync;
+      if (!authSync?.enabled) {
+        return { state: 'disabled', sent: 0, peers: [] };
+      }
+      const recentEvents = authSync.recentEvents ?? [];
+      const updateCompletedAt = Date.parse(status.updatedAt);
+      const broadcast = [...recentEvents].reverse().find(event => (
+        event.kind === 'service.update.request'
+        && event.stage === 'broadcast'
+        && event.detail === `target=${status.toVersion}`
+        && (!Number.isFinite(updateCompletedAt) || Date.parse(event.createdAt) >= updateCompletedAt)
+      ));
+      if (broadcast) {
+        const peers = recentEvents
+          .filter(event => (
+            event.kind === 'service.update.request'
+            && event.stage === 'sent'
+            && event.direction === 'out'
+            && event.requestId === broadcast.requestId
+            && Boolean(event.peer)
+          ))
+          .map(event => event.peer!)
+          .filter((peer, index, all) => all.indexOf(peer) === index);
+        return { state: 'sent', sent: peers.length, peers };
+      }
+      if (attempt < 4) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    return { state: 'pending', sent: 0, peers: [] };
   }
 
   private formatSelfUpdateReleaseNotes(status: SelfUpdateStatus): string | null {
@@ -10641,6 +10724,57 @@ function parseRichInternalKeyValue(line: string): [string, string] | null {
 function formatRichInternalValue(value: string): string {
   const escaped = escapeTelegramHtml(value);
   return escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function renderTelegramTable(headers: string[], rows: string[][]): string {
+  return [
+    '<table bordered striped>',
+    `<thead><tr>${headers.map(header => `<th>${escapeTelegramHtml(header)}</th>`).join('')}</tr></thead>`,
+    `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${escapeTelegramHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`,
+    '</table>',
+  ].join('');
+}
+
+function formatSelfUpdateVersionTransition(
+  fromVersion: string | null | undefined,
+  toVersion: string | null | undefined,
+  locale: AppLocale,
+): string {
+  if (!fromVersion && !toVersion) {
+    return locale === 'zh' ? '未检测' : 'Not detected';
+  }
+  return `${fromVersion ?? '?'} -> ${toVersion ?? '?'}`;
+}
+
+function formatCodexUpdateState(status: SelfUpdateStatus): string {
+  if (status.codexFromVersion && status.codexToVersion) {
+    if (status.codexFromVersion === status.codexToVersion) {
+      return status.locale === 'zh' ? '已是最新版本' : 'Already current';
+    }
+    return status.locale === 'zh' ? '升级完成' : 'Updated';
+  }
+  return status.codexUpdate ?? (status.locale === 'zh' ? '未执行升级' : 'Not updated');
+}
+
+function formatSelfUpdateBroadcastLine(
+  locale: AppLocale,
+  targetVersion: string | null,
+  broadcast: SelfUpdateBroadcastSummary,
+): string {
+  if (broadcast.state === 'disabled') {
+    return locale === 'zh' ? '未启用跨节点同步' : 'Cross-node sync is disabled';
+  }
+  if (broadcast.state === 'pending') {
+    return locale === 'zh'
+      ? `目标 ${targetVersion ?? '?'}，等待广播结果`
+      : `Target ${targetVersion ?? '?'}; waiting for broadcast result`;
+  }
+  if (broadcast.peers.length === 0) {
+    return locale === 'zh' ? '广播完成，无已配置 peer' : 'Broadcast completed; no configured peers';
+  }
+  return locale === 'zh'
+    ? `已发送 ${broadcast.sent} 个 peer：${broadcast.peers.join('、')}`
+    : `Sent to ${broadcast.sent} peers: ${broadcast.peers.join(', ')}`;
 }
 
 function clipRichMessageText(value: string, limit: number): string {

@@ -1304,6 +1304,33 @@ test('/update launches a background self-update and reports the completed result
     selfUpdateCompleted: (terminalStatus: SelfUpdateStatus) => {
       completed.status = terminalStatus;
     },
+    getServiceStatus: async () => ({
+      authSync: {
+        enabled: true,
+        recentEvents: [
+          {
+            createdAt: '2099-01-01T00:00:01.000Z',
+            direction: 'out',
+            kind: 'service.update.request',
+            stage: 'sent',
+            peer: '@peer_a',
+            requestId: 'update-1',
+            candidateName: null,
+            detail: null,
+          },
+          {
+            createdAt: '2099-01-01T00:00:02.000Z',
+            direction: 'local',
+            kind: 'service.update.request',
+            stage: 'broadcast',
+            peer: null,
+            requestId: 'update-1',
+            candidateName: null,
+            detail: 'target=0.3.14',
+          },
+        ],
+      },
+    }),
   };
   t.after(() => {
     (rig.controller as any).clearSelfUpdateStatusPoll();
@@ -1331,11 +1358,14 @@ test('/update launches a background self-update and reports the completed result
   };
   await (rig.controller as any).pollSelfUpdateStatus();
 
-  assert.match(rig.sentMessages[1]!, /FoxClaw 已升级并重启：0\.3\.13 -> 0\.3\.14/);
-  assert.match(rig.sentMessages[1]!, /更新内容：/);
-  assert.match(rig.sentMessages[1]!, /- 修复升级回报/);
-  assert.match(rig.sentMessages[1]!, /- 显示更新内容/);
-  assert.match(rig.sentMessages[1]!, /Codex CLI：0\.135\.0 -> 0\.136\.0/);
+  assert.match(rig.sentMessages[1]!, /<td>0\.3\.13 -> 0\.3\.14<\/td>/);
+  assert.match(rig.sentMessages[1]!, /<li>修复升级回报<\/li>/);
+  assert.match(rig.sentMessages[1]!, /<li>显示更新内容<\/li>/);
+  assert.match(rig.sentMessages[1]!, /<td>Codex CLI<\/td><td>0\.135\.0 -> 0\.136\.0<\/td><td>升级完成<\/td>/);
+  assert.match(rig.sentRichMessages[1]!, /<h3>FoxClaw 升级完成<\/h3>/);
+  assert.match(rig.sentRichMessages[1]!, /<table bordered striped>/);
+  assert.match(rig.sentRichMessages[1]!, /已发送 1 个 peer：@peer_a/);
+  assert.match(rig.sentRichMessages[1]!, /<details><summary>查看更新内容 · 2 项<\/summary>/);
   assert.equal(status, null);
   assert.equal(completed.status?.toVersion, '0.3.14');
 });

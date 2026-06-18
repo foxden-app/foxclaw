@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.45 - 2026-06-18
+
+### 中文
+- 将 `/update` 完成通知升级为 RichMessage 表格，分别展示 FoxClaw 版本与重启结果、Codex CLI 版本与升级状态、集群广播目标及真实发送 peer。
+- 发布说明改为默认收起的 details，避免较长更新内容挤占聊天页面；RichMessage 不可用时仍保留清晰的 HTML 降级文本。
+- 升级完成后会短暂等待 auth sync 广播事件，只展示本次升级对应的广播结果；未启用跨节点同步、无 peer 或广播仍在等待时会给出明确状态。
+
+### English
+- Upgraded `/update` completion notifications to a RichMessage table with separate FoxClaw version/restart, Codex CLI version/state, and cluster broadcast target/peer results.
+- Release notes now live in a collapsed details block to keep update notifications compact, with a clear HTML fallback when RichMessage is unavailable.
+- The completion report briefly waits for the matching auth sync broadcast event and only shows results from the current update; disabled sync, no peers, and pending broadcasts are reported explicitly.
+
 ## 0.5.44 - 2026-06-18
 
 ### 中文
