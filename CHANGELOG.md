@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.47 - 2026-06-20
+
+### 中文
+- 修复远端 auth 候选已成功导入后，`/auth` 面板仍保留旧的 `needs_repair`/禁用状态，导致候选显示问号且无法切换的问题。
+- 远端导入成功现在会恢复该候选的全局状态和各 Telegram runtime 覆盖状态为 active/enabled，确保“确认可用后文件和 UI 状态一致”。
+- 增加 mirror 远端导入 hook 回归测试，避免后续同步链路再次只更新 auth 文件、不恢复健康标记。
+
+### English
+- Fixed `/auth` keeping stale `needs_repair`/disabled state after a remote auth candidate was successfully imported, which left the candidate shown with a question mark and blocked switching.
+- Successful remote imports now restore the candidate's global state and each Telegram runtime override to active/enabled, keeping the UI state aligned with validated auth files.
+- Added a regression test for the mirror remote-import hook so future sync changes do not update auth files without clearing health markers.
+
 ## 0.5.46 - 2026-06-20
 
 ### 中文

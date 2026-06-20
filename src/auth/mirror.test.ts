@@ -96,6 +96,48 @@ test('AuthCandidateMirror propagates a newer validated refresh between runtimes'
   }
 });
 
+test('AuthCandidateMirror calls hook after a successful remote import', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-mirror-remote-hook-'));
+  const canonical = path.join(root, 'canonical');
+  const runtime = path.join(root, 'bot1');
+  const statusPath = path.join(root, 'runtime', 'auth-mirror.json');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const remoteAuth = auth('acct-1', '2026-06-01T00:00:00.000Z');
+    const imported: Array<{ candidateName: string; sourceRuntimeId: string; sourceLabel: string }> = [];
+    const mirror = new AuthCandidateMirror(
+      canonical,
+      [{ id: 'bot1', authDir: runtime }],
+      loggerStub as any,
+      statusPath,
+      {
+        onRemoteImported: (event) => {
+          imported.push({
+            candidateName: event.record.candidateName,
+            sourceRuntimeId: event.status.sourceRuntimeId,
+            sourceLabel: event.status.sourceLabel,
+          });
+        },
+      },
+    );
+    await mirror.initialize();
+
+    const result = await mirror.importExternalCandidate('auth.json_work', remoteAuth, {
+      nodeId: 'node-rt',
+      label: '@rt',
+    });
+
+    assert.equal(result.imported, true);
+    assert.deepEqual(imported, [{
+      candidateName: 'auth.json_work',
+      sourceRuntimeId: 'remote:node-rt',
+      sourceLabel: '@rt',
+    }]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror rejects a same-name candidate belonging to a different account', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-conflict-'));
   const canonical = path.join(root, 'canonical');

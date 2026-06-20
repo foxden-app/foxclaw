@@ -77,6 +77,7 @@ export interface AuthMirrorSyncAllResult {
 
 export interface AuthMirrorHooks {
   onSynced?: (event: AuthMirrorSyncedEvent) => Promise<void> | void;
+  onRemoteImported?: (event: AuthMirrorSyncedEvent) => Promise<void> | void;
 }
 
 export type AuthMirrorNotification =
@@ -398,6 +399,16 @@ export class AuthCandidateMirror {
           sourceLabel,
         };
         await Promise.allSettled(this.runtimes.map((target) => target.notify?.(notification)));
+        await this.hooks.onRemoteImported?.({
+          status: this.lastStatus,
+          record: {
+            raw,
+            ...metadata,
+            candidateName,
+            sourceRuntimeId: `remote:${source.nodeId}`,
+            sourceLabel,
+          },
+        });
         return {
           ok: true,
           imported: true,

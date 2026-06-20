@@ -535,6 +535,7 @@ async function runServeCli(): Promise<void> {
       }
 
       let authSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
+      const authRuntimeIds = seeds.map((runtime) => runtime.id);
       const mirror = new AuthCandidateMirror(
         canonicalAuthDir,
         seeds.map((runtime) => ({
@@ -552,6 +553,9 @@ async function runServeCli(): Promise<void> {
         {
           onSynced: async (event): Promise<void> => {
             await authSync?.publishCandidate(event.record.candidateName);
+          },
+          onRemoteImported: (event): void => {
+            restoreImportedAuthCandidateState(store!, event.record.candidateName, authRuntimeIds);
           },
         },
       );
@@ -941,6 +945,9 @@ async function runServeCli(): Promise<void> {
           onSynced: async (event): Promise<void> => {
             await singleAuthSync?.publishCandidate(event.record.candidateName);
           },
+          onRemoteImported: (event): void => {
+            restoreImportedAuthCandidateState(store!, event.record.candidateName, ['default']);
+          },
         },
       );
       await singleMirror.initialize();
@@ -1072,6 +1079,8 @@ interface AuthSyncNotifyStore {
   getTelegramPrivateScope(botId: string): { scopeId: string; chatId: string } | null;
   getChatSettings(scopeId: string): { locale: AppLocale | null } | null;
   getCodexAuthPoolStats(): CodexAuthPoolStats;
+  setCodexAuthCandidateState(name: string, state: 'active' | 'needs_repair', runtimeId?: string): void;
+  setCodexAuthCandidateDisabled(name: string, disabled: boolean, runtimeId?: string): void;
 }
 
 interface AuthSyncNotifierOptions {
@@ -1086,6 +1095,19 @@ interface AuthMirrorNotifierOptions {
 
 interface AuthMirrorNotifyBot {
   sendMessage(chatId: string, text: string): Promise<number>;
+}
+
+function restoreImportedAuthCandidateState(
+  store: AuthSyncNotifyStore,
+  candidateName: string,
+  runtimeIds: string[],
+): void {
+  store.setCodexAuthCandidateState(candidateName, 'active');
+  store.setCodexAuthCandidateDisabled(candidateName, false);
+  for (const runtimeId of runtimeIds) {
+    store.setCodexAuthCandidateState(candidateName, 'active', runtimeId);
+    store.setCodexAuthCandidateDisabled(candidateName, false, runtimeId);
+  }
 }
 
 function createAuthMirrorNotifier(
