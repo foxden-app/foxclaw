@@ -55,6 +55,7 @@ import {
   TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
   telegramVoiceContentType,
 } from './voice/files.js';
+import { inferTelegramBotId, resolveTelegramVoiceTarget } from './voice/target.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -386,8 +387,8 @@ async function runSendVoiceCli(): Promise<void> {
     throw new Error('Telegram voice files must be 50MB or smaller.');
   }
 
-  const botId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
-  const botToken = resolveTelegramBotToken(config.tgBotTokens, botId);
+  const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
+  const { botId, botToken } = resolveTelegramVoiceTarget(config.tgBotTokens, inferredBotId);
   const { BridgeStore } = await import('./store/database.js');
   const store = new BridgeStore(config.storePath);
   let chatId = parsed.chatId;
@@ -452,23 +453,6 @@ function parseSendVoiceCliArgs(args: string[]): {
     botId,
     chatId,
   };
-}
-
-function inferTelegramBotId(codexHome: string | null | undefined): string | null {
-  if (!codexHome) return null;
-  const match = codexHome.match(/(?:^|[\\/])(bot\d+)(?:[\\/]|$)/i);
-  return match?.[1]?.toLowerCase() ?? null;
-}
-
-function resolveTelegramBotToken(tokens: string[], botId: string | null): string {
-  if (botId) {
-    const numericId = botId.replace(/^bot/i, '');
-    const matched = tokens.find(token => token.startsWith(`${numericId}:`));
-    if (matched) return matched;
-    throw new Error(`No configured Telegram token matches ${botId}. Pass --bot-id for a configured bot.`);
-  }
-  if (tokens.length === 1) return tokens[0]!;
-  throw new Error('Cannot infer the Telegram bot from this Codex session. Pass --bot-id <bot-id>.');
 }
 
 function formatRuntimeStatusSummary(status: RuntimeStatus): string {

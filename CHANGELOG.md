@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.53 - 2026-06-20
+
+### 中文
+- 修复单 bot 默认 runtime 的 `telegram-voice-delivery` 无法找到私聊的问题：当 `CODEX_HOME` 不含 bot ID 时，`send-voice` 现在会从唯一配置的 Telegram token 安全补全 bot ID，再读取已经记录的私聊目标。
+- 将内置 `telegram-voice-delivery` Skill 的触发说明、工作流和 UI 元数据改为中文，并明确只有确实没有私聊记录时才要求用户发送 `/status`。
+
+### English
+- Fixed `telegram-voice-delivery` failing to find the private chat in a single-bot default runtime. When `CODEX_HOME` has no bot ID, `send-voice` now safely derives it from the only configured Telegram token before reading the remembered chat target.
+- Localized the bundled `telegram-voice-delivery` skill instructions and UI metadata into Chinese, and clarified that users should only be asked to send `/status` when no private chat is actually remembered.
+
 ## 0.5.52 - 2026-06-20
 
 ### 中文
