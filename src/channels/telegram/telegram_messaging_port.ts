@@ -58,6 +58,16 @@ export class TelegramMessagingPort implements ChannelPort {
     );
   }
 
+  async sendVoice(
+    bridgeScopeId: string,
+    filename: string,
+    contents: Buffer,
+    caption?: string,
+  ): Promise<number> {
+    const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
+    return this.gateway.sendVoice(target.chatId, filename, contents, caption, target.topicId);
+  }
+
   async editPlain(
     bridgeScopeId: string,
     messageId: number,

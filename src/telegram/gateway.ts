@@ -207,6 +207,34 @@ export class TelegramGateway extends EventEmitter {
     return result.result.message_id;
   }
 
+  async sendVoice(
+    chatId: string,
+    filename: string,
+    contents: Buffer,
+    caption?: string,
+    messageThreadId?: number | null,
+  ): Promise<number> {
+    const result = await callTelegramMultipartApi<SendMessageResult>(
+      this.botToken,
+      'sendVoice',
+      {
+        chat_id: chatId,
+        ...(caption ? { caption } : {}),
+        ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: String(messageThreadId) } : {}),
+      },
+      [{
+        fieldName: 'voice',
+        filename,
+        contents,
+        contentType: 'audio/ogg',
+      }],
+    );
+    if (!result.ok || !result.result) {
+      throw new Error(result.description || 'Failed to send Telegram voice message');
+    }
+    return result.result.message_id;
+  }
+
   async sendMessageDraft(
     chatId: string,
     draftId: number,

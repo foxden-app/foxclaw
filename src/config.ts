@@ -94,6 +94,16 @@ export interface AppConfig {
   authSyncStatePath: string;
   authSyncTempDir: string;
   authAutoDeleteNeedsRepair: boolean;
+  voiceTtsEnabled: boolean;
+  voiceTtsMode: 'http' | 'ssh';
+  voiceTtsUrl: string | null;
+  voiceTtsToken: string | null;
+  voiceTtsSshHost: string;
+  voiceTtsSshDir: string;
+  voiceTtsDesignInstruct: string;
+  voiceFfmpegBin: string;
+  voiceSummaryButtonEnabled: boolean;
+  voiceTextLimit: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -155,6 +165,16 @@ export function loadConfig(): AppConfig {
     authSyncStatePath: process.env.AUTH_SYNC_STATE_PATH || DEFAULT_AUTH_SYNC_STATE_PATH,
     authSyncTempDir: process.env.AUTH_SYNC_TEMP_DIR || DEFAULT_AUTH_SYNC_TEMP_DIR,
     authAutoDeleteNeedsRepair: boolEnv('AUTH_AUTO_DELETE_NEEDS_REPAIR', false),
+    voiceTtsEnabled: boolEnv('VOICE_TTS_ENABLED', false),
+    voiceTtsMode: parseVoiceTtsMode(process.env.VOICE_TTS_MODE || (process.env.VOICE_TTS_URL?.trim() ? 'http' : 'ssh')),
+    voiceTtsUrl: optional('VOICE_TTS_URL') ?? 'https://tts.foxden.app',
+    voiceTtsToken: optional('VOICE_TTS_TOKEN'),
+    voiceTtsSshHost: process.env.VOICE_TTS_SSH_HOST?.trim() || 'thinkbook16p',
+    voiceTtsSshDir: process.env.VOICE_TTS_SSH_DIR?.trim() || '/home/wuya/dev/qwen-speech-server',
+    voiceTtsDesignInstruct: process.env.VOICE_TTS_DESIGN_INSTRUCT?.trim() || '用自然清晰的中文女声朗读，语速适中。',
+    voiceFfmpegBin: process.env.VOICE_FFMPEG_BIN?.trim() || 'ffmpeg',
+    voiceSummaryButtonEnabled: boolEnv('VOICE_SUMMARY_BUTTON_ENABLED', true),
+    voiceTextLimit: intEnv('VOICE_TEXT_LIMIT', 2800),
   };
   ensureAppDirs(config);
   return config;
@@ -241,6 +261,10 @@ function parseApprovalPolicy(value: string): AppConfig['defaultApprovalPolicy'] 
 function parseSandboxMode(value: string): AppConfig['defaultSandboxMode'] {
   if (value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access') return value;
   return 'workspace-write';
+}
+
+function parseVoiceTtsMode(value: string): AppConfig['voiceTtsMode'] {
+  return value.trim().toLowerCase() === 'http' ? 'http' : 'ssh';
 }
 
 function resolveCommand(commandName: string): string | null {

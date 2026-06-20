@@ -12,6 +12,7 @@ import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gatew
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 import type { CoreCoordinator } from './controller.js';
 import type { GuidedPlanSessionRecord } from '../types.js';
+import { normalizeVoiceText } from '../voice/tts.js';
 
 const loggerStub = {
   debug(): void {},
@@ -67,6 +68,16 @@ function createConfig(tempDir: string): AppConfig {
     authSyncStatePath: path.join(tempDir, 'auth-sync.json'),
     authSyncTempDir: path.join(tempDir, 'auth-sync'),
     authAutoDeleteNeedsRepair: false,
+    voiceTtsEnabled: false,
+    voiceTtsMode: 'ssh',
+    voiceTtsUrl: 'https://tts.foxden.app',
+    voiceTtsToken: null,
+    voiceTtsSshHost: 'thinkbook16p',
+    voiceTtsSshDir: '/home/wuya/dev/qwen-speech-server',
+    voiceTtsDesignInstruct: '用自然清晰的中文女声朗读，语速适中。',
+    voiceFfmpegBin: 'ffmpeg',
+    voiceSummaryButtonEnabled: true,
+    voiceTextLimit: 2800,
   };
 }
 
@@ -289,6 +300,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
   const editedRichMessages: string[] = [];
   const sentDraftMessages: string[] = [];
   const sentRichDraftMessages: string[] = [];
+  const sentVoices: Array<{ filename: string; contents: Buffer; caption?: string }> = [];
   const sentHtmlKeyboards: any[] = [];
   const sentRichKeyboards: any[] = [];
   const editedHtmlKeyboards: any[] = [];
@@ -315,6 +327,10 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       sentRichKeyboards.push(keyboard ?? []);
       sentKeyboards.push(keyboard ?? []);
       return sentMessages.length;
+    },
+    sendVoice: async (_chatId: string, filename: string, contents: Buffer, caption?: string) => {
+      sentVoices.push(caption === undefined ? { filename, contents } : { filename, contents, caption });
+      return 2000 + sentVoices.length;
     },
     editMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
       editedMessages.push(text);
@@ -512,10 +528,12 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     interruptTurn: async () => {},
   };
   const outbound = new BridgeMessagingRouter(new TelegramMessagingPort(bot as any), weixinPort as any);
-  const controller = new BridgeController(createConfig(tempDir), store, loggerStub as any, bot as any, app as any, outbound, selfUpdater, coordinator);
+  const config = createConfig(tempDir);
+  const controller = new BridgeController(config, store, loggerStub as any, bot as any, app as any, outbound, selfUpdater, coordinator);
   (controller as any).updateStatus = () => {};
   return {
     controller,
+    config,
     store,
     sentMessages,
     sentKeyboards,
@@ -527,6 +545,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     editedRichMessages,
     sentDraftMessages,
     sentRichDraftMessages,
+    sentVoices,
     sentHtmlKeyboards,
     sentRichKeyboards,
     editedHtmlKeyboards,
@@ -1543,6 +1562,54 @@ test('completed Codex stream output is promoted to Telegram RichMessage', async 
   assert.equal(rig.editedMessages.length, 0);
   assert.equal(rig.editedRichMessages.length, 1);
   assert.equal(rig.editedRichMessages[0], segment.text);
+});
+
+test('completed final answer adds a voice summary button when voice is enabled', async (t) => {
+  const rig = createControllerRig();
+  rig.config.voiceTtsEnabled = true;
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  const segment = {
+    itemId: 'item-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: '# Done\n\n- **Changed** `src/app.ts`',
+    completed: false,
+    messages: [],
+  };
+  active.segments = [segment];
+
+  await (rig.controller as any).syncSegmentTimeline(active, segment);
+  segment.completed = true;
+  await (rig.controller as any).syncSegmentTimeline(active, segment);
+
+  assert.equal(rig.editedRichKeyboards.length, 1);
+  assert.match(rig.editedRichKeyboards[0]?.[0]?.[0]?.text, /^🔊 (听总结|Listen)$/);
+  assert.match(rig.editedRichKeyboards[0]?.[0]?.[0]?.callback_data, /^voice:[a-f0-9]{12}$/);
+});
+
+test('voice text normalization removes Markdown noise and truncates long output', () => {
+  const normalized = normalizeVoiceText([
+    '# Summary',
+    '',
+    '- **Changed** `src/app.ts`',
+    '- See [docs](https://example.com/docs)',
+    '',
+    '```ts',
+    'console.log("hidden");',
+    '```',
+  ].join('\n'), 80);
+
+  assert.match(normalized, /Summary/);
+  assert.match(normalized, /Changed src\/app\.ts/);
+  assert.match(normalized, /See docs/);
+  assert.match(normalized, /代码块已省略/);
+  assert.ok(normalized.length <= 86);
 });
 
 test('completed Codex stream output falls back to RichMessage HTML when native markdown is rejected', async (t) => {

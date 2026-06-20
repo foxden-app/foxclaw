@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.48 - 2026-06-20
+
+### 中文
+- 新增 Telegram 总结语音能力：最终答复完成后可附带“听总结”按钮，点击后由 FoxClaw 调用语音服务生成 OGG/OPUS 并通过 Telegram `sendVoice` 发回聊天。
+- 新增 `/voice <文本>` 和 `/voice last`，便于直接测试任意文本或最近一次最终总结的朗读效果；微信通道会明确提示当前不支持语音消息。
+- 支持 SSH 语音后端和 HTTP 语音后端两种模式；SSH 模式可直接使用 16p 上的 Qwen TTS 服务和远端 `ffmpeg` 转码，并在 custom speaker 不可用时自动降级到 VoiceDesign endpoint。
+
+### English
+- Added Telegram voice summaries: completed final answers can include a "Listen" button that asks FoxClaw to synthesize OGG/OPUS audio and return it through Telegram `sendVoice`.
+- Added `/voice <text>` and `/voice last` for quick manual checks against arbitrary text or the latest final answer; Weixin scopes now get an explicit unsupported-channel message.
+- Supports both SSH and HTTP speech backends. SSH mode can use the Qwen TTS service and remote `ffmpeg` on the 16p host, and automatically falls back to the VoiceDesign endpoint when custom speakers are unavailable.
+
 ## 0.5.47 - 2026-06-20
 
 ### 中文

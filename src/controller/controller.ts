@@ -121,6 +121,7 @@ import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/a
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
+import { normalizeVoiceText, synthesizeTelegramVoice } from '../voice/tts.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
 import {
   readCodexLocalUsageSnapshot,
@@ -194,6 +195,7 @@ interface ActiveTurnSegment {
   startedAtMs: number;
   completedAtMs: number | null;
   messages: RenderedTelegramMessage[];
+  voiceSnippetId: string | null;
 }
 
 interface ToolBatchCounts {
@@ -604,6 +606,8 @@ export class BridgeSessionCore {
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
   private restartPreviewRecoveryTimers = new Map<string, NodeJS.Timeout>();
+  private voiceSnippets = new Map<string, { scopeId: string; text: string; createdAt: number }>();
+  private latestVoiceSnippetByScope = new Map<string, string>();
   private selfUpdatePollTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshInProgress = false;
@@ -1003,6 +1007,10 @@ export class BridgeSessionCore {
       }
       case 'quota_nudge': {
         await this.handleQuotaNudgeCommand(scopeId, locale, args);
+        return;
+      }
+      case 'voice': {
+        await this.handleVoiceCommand(scopeId, locale, args);
         return;
       }
       case 'login':
@@ -1578,6 +1586,11 @@ export class BridgeSessionCore {
     const configMatch = /^config:auth_auto_delete:(on|off)$/.exec(event.data);
     if (configMatch) {
       await this.handleConfigToggleCallback(event, configMatch[1] === 'on', locale);
+      return;
+    }
+    const voiceMatch = /^voice:([a-f0-9]+)$/.exec(event.data);
+    if (voiceMatch) {
+      await this.handleVoiceCallback(event, voiceMatch[1]!, locale);
       return;
     }
     const settingsMatch = /^settings:(model|effort|access):(.+)$/.exec(event.data);
@@ -6296,6 +6309,47 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, t(locale, 'quota_nudge_sent'));
   }
 
+  private async handleVoiceCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const raw = args.join(' ').trim();
+    const snippetId = raw.toLowerCase() === 'last' ? this.latestVoiceSnippetByScope.get(scopeId) ?? null : null;
+    const text = snippetId ? this.voiceSnippets.get(snippetId)?.text ?? '' : raw;
+    if (!text) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '用法：/voice 要朗读的文本，或 /voice last' : 'Usage: /voice text to read, or /voice last');
+      return;
+    }
+    await this.sendVoiceForText(scopeId, locale, text);
+  }
+
+  private async handleVoiceCallback(event: TelegramCallbackEvent, localId: string, locale: AppLocale): Promise<void> {
+    const snippet = this.voiceSnippets.get(localId);
+    if (!snippet || snippet.scopeId !== event.scopeId) {
+      await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '这条总结语音已过期' : 'This voice summary has expired');
+      return;
+    }
+    await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '正在生成语音...' : 'Generating voice...');
+    await this.sendVoiceForText(event.scopeId, locale, snippet.text);
+  }
+
+  private async sendVoiceForText(scopeId: string, locale: AppLocale, text: string): Promise<void> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '当前只有 Telegram 支持语音消息。' : 'Voice messages are currently supported only on Telegram.');
+      return;
+    }
+    if (!this.config.voiceTtsEnabled) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '语音服务未启用。' : 'Voice TTS is not enabled.');
+      return;
+    }
+    try {
+      const voice = await synthesizeTelegramVoice(text, this.config);
+      await this.messaging.sendVoice(scopeId, voice.filename, voice.contents, locale === 'zh' ? 'FoxClaw 总结语音' : 'FoxClaw voice summary');
+    } catch (error) {
+      this.logger.warn('voice.summary_failed', { scopeId, error: toErrorMeta(error) });
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? `语音生成失败：${formatUserError(error)}`
+        : `Voice generation failed: ${formatUserError(error)}`);
+    }
+  }
+
   private async handleLoginDeviceCommand(scopeId: string, locale: AppLocale): Promise<void> {
     const login = await this.app.startDeviceLogin();
     const oldLoginId = this.pendingLoginsByScope.get(scopeId);
@@ -9985,8 +10039,9 @@ export class BridgeSessionCore {
       if (existing.richHtml === chunk || existing.richFailedForText === chunk) {
         continue;
       }
+      const keyboard = this.voiceKeyboardForSegment(active, segment, index, chunks.length);
       try {
-        await this.messaging.editRichMarkdown(active.scopeId, existing.messageId, chunk, chunk);
+        await this.messaging.editRichMarkdown(active.scopeId, existing.messageId, chunk, chunk, keyboard);
         existing.richHtml = chunk;
         existing.richFailedForText = null;
       } catch (markdownError) {
@@ -9999,7 +10054,7 @@ export class BridgeSessionCore {
         });
         const richHtml = renderTelegramMarkdownRichHtml(chunk);
         try {
-          await this.messaging.editRichHtml(active.scopeId, existing.messageId, richHtml, escapeTelegramHtml(chunk));
+          await this.messaging.editRichHtml(active.scopeId, existing.messageId, richHtml, escapeTelegramHtml(chunk), keyboard);
           existing.richHtml = richHtml;
           existing.richFailedForText = null;
           continue;
@@ -10017,6 +10072,61 @@ export class BridgeSessionCore {
           chunkIndex: index,
         });
         }
+      }
+    }
+  }
+
+  private voiceKeyboardForSegment(
+    active: ActiveTurn,
+    segment: ActiveTurnSegment,
+    chunkIndex: number,
+    chunkCount: number,
+  ): Array<Array<{ text: string; callback_data: string }>> | undefined {
+    if (
+      !this.config.voiceTtsEnabled
+      || !this.config.voiceSummaryButtonEnabled
+      || active.scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)
+      || active.isObserved
+      || segment.outputKind !== 'final_answer'
+      || chunkIndex !== chunkCount - 1
+    ) {
+      return undefined;
+    }
+    const snippetId = segment.voiceSnippetId ?? this.registerVoiceSnippet(active.scopeId, segment.text);
+    segment.voiceSnippetId = snippetId;
+    const locale = this.localeForChat(active.scopeId);
+    return [[{
+      text: locale === 'zh' ? '🔊 听总结' : '🔊 Listen',
+      callback_data: `voice:${snippetId}`,
+    }]];
+  }
+
+  private registerVoiceSnippet(scopeId: string, text: string): string {
+    this.pruneVoiceSnippets();
+    const normalized = normalizeVoiceText(text, this.config.voiceTextLimit);
+    const id = crypto.randomBytes(6).toString('hex');
+    this.voiceSnippets.set(id, { scopeId, text: normalized, createdAt: Date.now() });
+    this.latestVoiceSnippetByScope.set(scopeId, id);
+    return id;
+  }
+
+  private pruneVoiceSnippets(): void {
+    const expiresBefore = Date.now() - 24 * 60 * 60_000;
+    for (const [id, snippet] of this.voiceSnippets.entries()) {
+      if (snippet.createdAt < expiresBefore) {
+        this.voiceSnippets.delete(id);
+        if (this.latestVoiceSnippetByScope.get(snippet.scopeId) === id) {
+          this.latestVoiceSnippetByScope.delete(snippet.scopeId);
+        }
+      }
+    }
+    while (this.voiceSnippets.size > 100) {
+      const oldest = [...this.voiceSnippets.entries()]
+        .sort((left, right) => left[1].createdAt - right[1].createdAt)[0];
+      if (!oldest) break;
+      this.voiceSnippets.delete(oldest[0]);
+      if (this.latestVoiceSnippetByScope.get(oldest[1].scopeId) === oldest[0]) {
+        this.latestVoiceSnippetByScope.delete(oldest[1].scopeId);
       }
     }
   }
@@ -10052,6 +10162,7 @@ function ensureTurnSegment(
     startedAtMs: Date.now(),
     completedAtMs: null,
     messages: [],
+    voiceSnippetId: null,
   };
   active.segments.push(segment);
   return segment;
