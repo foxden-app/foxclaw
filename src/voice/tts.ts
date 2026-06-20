@@ -119,6 +119,12 @@ async function convertToOggOpus(input: Buffer, ffmpegBin: string): Promise<Buffe
 }
 
 async function synthesizeViaSsh(text: string, config: AppConfig): Promise<Buffer> {
+  if (!config.voiceTtsSshHost) {
+    throw new Error('VOICE_TTS_SSH_HOST is not configured');
+  }
+  if (!config.voiceTtsSshDir) {
+    throw new Error('VOICE_TTS_SSH_DIR is not configured');
+  }
   const encodedText = Buffer.from(text, 'utf8').toString('base64');
   const script = String.raw`set -euo pipefail
 TEXT="$(printf '%s' "$1" | base64 -d)"

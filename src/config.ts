@@ -98,8 +98,8 @@ export interface AppConfig {
   voiceTtsMode: 'http' | 'ssh';
   voiceTtsUrl: string | null;
   voiceTtsToken: string | null;
-  voiceTtsSshHost: string;
-  voiceTtsSshDir: string;
+  voiceTtsSshHost: string | null;
+  voiceTtsSshDir: string | null;
   voiceTtsDesignInstruct: string;
   voiceFfmpegBin: string;
   voiceSummaryButtonEnabled: boolean;
@@ -166,11 +166,11 @@ export function loadConfig(): AppConfig {
     authSyncTempDir: process.env.AUTH_SYNC_TEMP_DIR || DEFAULT_AUTH_SYNC_TEMP_DIR,
     authAutoDeleteNeedsRepair: boolEnv('AUTH_AUTO_DELETE_NEEDS_REPAIR', false),
     voiceTtsEnabled: boolEnv('VOICE_TTS_ENABLED', false),
-    voiceTtsMode: parseVoiceTtsMode(process.env.VOICE_TTS_MODE || (process.env.VOICE_TTS_URL?.trim() ? 'http' : 'ssh')),
-    voiceTtsUrl: optional('VOICE_TTS_URL') ?? 'https://tts.foxden.app',
+    voiceTtsMode: parseVoiceTtsMode(process.env.VOICE_TTS_MODE || (process.env.VOICE_TTS_SSH_HOST?.trim() ? 'ssh' : 'http')),
+    voiceTtsUrl: optional('VOICE_TTS_URL'),
     voiceTtsToken: optional('VOICE_TTS_TOKEN'),
-    voiceTtsSshHost: process.env.VOICE_TTS_SSH_HOST?.trim() || 'thinkbook16p',
-    voiceTtsSshDir: process.env.VOICE_TTS_SSH_DIR?.trim() || '/home/wuya/dev/qwen-speech-server',
+    voiceTtsSshHost: optional('VOICE_TTS_SSH_HOST'),
+    voiceTtsSshDir: optional('VOICE_TTS_SSH_DIR'),
     voiceTtsDesignInstruct: process.env.VOICE_TTS_DESIGN_INSTRUCT?.trim() || '用自然清晰的中文女声朗读，语速适中。',
     voiceFfmpegBin: process.env.VOICE_FFMPEG_BIN?.trim() || 'ffmpeg',
     voiceSummaryButtonEnabled: boolEnv('VOICE_SUMMARY_BUTTON_ENABLED', true),

@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.49 - 2026-06-20
+
+### 中文
+- 将 Telegram 总结语音后端彻底改为用户自配：默认不再内置 `thinkbook16p`、`tts.foxden.app` 或任何私有 TTS 服务地址。
+- 启用语音后如果缺少 `VOICE_TTS_URL` 或 `VOICE_TTS_SSH_HOST`/`VOICE_TTS_SSH_DIR`，会明确提示配置缺失，而不是尝试连接开发者私有服务。
+- 更新 `.env.example`，把 HTTP/SSH 语音后端写成通用占位示例，明确 FoxClaw 不随包提供公共 TTS 后端。
+
+### English
+- Made the Telegram voice-summary backend fully user-configured: FoxClaw no longer embeds `thinkbook16p`, `tts.foxden.app`, or any private TTS service endpoint as a product default.
+- When voice is enabled without `VOICE_TTS_URL` or `VOICE_TTS_SSH_HOST`/`VOICE_TTS_SSH_DIR`, FoxClaw now reports the missing configuration instead of trying a developer-private service.
+- Updated `.env.example` to show generic HTTP/SSH backend placeholders and state that FoxClaw does not ship with a public TTS backend.
+
 ## 0.5.48 - 2026-06-20
 
 ### 中文
