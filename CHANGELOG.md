@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.51 - 2026-06-20
+
+### 中文
+- 新增 `/voice file <path> [caption]`，可以把 Codex 已经生成好的本地音频文件直接作为 Telegram voice 发出去，不再重复 TTS。
+- 支持 `.ogg`、`.opus`、`.oga`、`.mp3`、`.m4a`，相对路径按 `DEFAULT_CWD` 解析，并限制 50MB 以内。
+- Telegram voice multipart 现在会按文件类型设置 content type，避免所有语音文件都被当成 `audio/ogg`。
+
+### English
+- Added `/voice file <path> [caption]` for sending an already-generated local audio file as a Telegram voice message without re-running TTS.
+- Supports `.ogg`, `.opus`, `.oga`, `.mp3`, and `.m4a`; relative paths resolve from `DEFAULT_CWD` and files are capped at 50MB.
+- Telegram voice multipart uploads now set content type by file type instead of treating every voice file as `audio/ogg`.
+
 ## 0.5.50 - 2026-06-20
 
 ### 中文

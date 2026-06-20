@@ -302,7 +302,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
   const editedRichMessages: string[] = [];
   const sentDraftMessages: string[] = [];
   const sentRichDraftMessages: string[] = [];
-  const sentVoices: Array<{ filename: string; contents: Buffer; caption?: string }> = [];
+  const sentVoices: Array<{ filename: string; contents: Buffer; caption?: string; contentType?: string }> = [];
   const sentHtmlKeyboards: any[] = [];
   const sentRichKeyboards: any[] = [];
   const editedHtmlKeyboards: any[] = [];
@@ -330,8 +330,13 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       sentKeyboards.push(keyboard ?? []);
       return sentMessages.length;
     },
-    sendVoice: async (_chatId: string, filename: string, contents: Buffer, caption?: string) => {
-      sentVoices.push(caption === undefined ? { filename, contents } : { filename, contents, caption });
+    sendVoice: async (_chatId: string, filename: string, contents: Buffer, caption?: string, _messageThreadId?: number | null, contentType?: string) => {
+      sentVoices.push({
+        filename,
+        contents,
+        ...(caption === undefined ? {} : { caption }),
+        ...(contentType === undefined ? {} : { contentType }),
+      });
       return 2000 + sentVoices.length;
     },
     editMessage: async (_chatId: string, _messageId: number, text: string, keyboard?: any) => {
@@ -1616,6 +1621,25 @@ test('voice text normalization removes Markdown noise and truncates long output'
   assert.match(normalized, /See docs/);
   assert.match(normalized, /代码块已省略/);
   assert.ok(normalized.length <= 86);
+});
+
+test('/voice file sends an existing local audio file as Telegram voice', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const audioPath = path.join(rig.tempDir, 'summary.ogg');
+  fs.writeFileSync(audioPath, Buffer.from('OggS-test-audio'));
+
+  await (rig.controller as any).handleCommand(createEvent('/voice file summary.ogg Ready'), 'en', 'voice', ['file', 'summary.ogg', 'Ready']);
+
+  assert.equal(rig.sentVoices.length, 1);
+  assert.equal(rig.sentVoices[0]?.filename, 'summary.ogg');
+  assert.equal(rig.sentVoices[0]?.caption, 'Ready');
+  assert.equal(rig.sentVoices[0]?.contentType, 'audio/ogg');
+  assert.equal(rig.sentVoices[0]?.contents.toString('utf8'), 'OggS-test-audio');
 });
 
 test('completed Codex stream output falls back to RichMessage HTML when native markdown is rejected', async (t) => {

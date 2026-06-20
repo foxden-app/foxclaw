@@ -6310,6 +6310,10 @@ export class BridgeSessionCore {
   }
 
   private async handleVoiceCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (args[0]?.toLowerCase() === 'file' || args[0]?.toLowerCase() === 'send') {
+      await this.handleVoiceFileCommand(scopeId, locale, args.slice(1));
+      return;
+    }
     const raw = args.join(' ').trim();
     const snippetId = raw.toLowerCase() === 'last' ? this.latestVoiceSnippetByScope.get(scopeId) ?? null : null;
     const text = snippetId ? this.voiceSnippets.get(snippetId)?.text ?? '' : raw;
@@ -6318,6 +6322,47 @@ export class BridgeSessionCore {
       return;
     }
     await this.sendVoiceForText(scopeId, locale, text);
+  }
+
+  private async handleVoiceFileCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '当前只有 Telegram 支持语音消息。' : 'Voice messages are currently supported only on Telegram.');
+      return;
+    }
+    const fileArg = args[0]?.trim();
+    if (!fileArg) {
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? '用法：/voice file /path/to/audio.ogg [说明]'
+        : 'Usage: /voice file /path/to/audio.ogg [caption]');
+      return;
+    }
+    const filePath = path.resolve(this.config.defaultCwd, fileArg);
+    const contentType = telegramVoiceContentType(filePath);
+    if (!contentType) {
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? '只支持作为 Telegram voice 发送的音频格式：.ogg、.opus、.oga、.mp3、.m4a。'
+        : 'Supported Telegram voice file formats: .ogg, .opus, .oga, .mp3, .m4a.');
+      return;
+    }
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat?.isFile()) {
+      await this.sendMessage(scopeId, locale === 'zh' ? `找不到音频文件：${filePath}` : `Audio file not found: ${filePath}`);
+      return;
+    }
+    if (stat.size > 50 * 1024 * 1024) {
+      await this.sendMessage(scopeId, locale === 'zh' ? 'Telegram voice 文件不能超过 50MB。' : 'Telegram voice files must be 50MB or smaller.');
+      return;
+    }
+    try {
+      const contents = await fs.readFile(filePath);
+      const caption = args.slice(1).join(' ').trim() || (locale === 'zh' ? 'FoxClaw 语音文件' : 'FoxClaw voice file');
+      await this.messaging.sendVoice(scopeId, path.basename(filePath), contents, caption, contentType);
+    } catch (error) {
+      this.logger.warn('voice.file_send_failed', { scopeId, filePath, error: toErrorMeta(error) });
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? `语音文件发送失败：${formatUserError(error)}`
+        : `Voice file send failed: ${formatUserError(error)}`);
+    }
   }
 
   private async handleVoiceCallback(event: TelegramCallbackEvent, localId: string, locale: AppLocale): Promise<void> {
@@ -10166,6 +10211,22 @@ function ensureTurnSegment(
   };
   active.segments.push(segment);
   return segment;
+}
+
+function telegramVoiceContentType(filePath: string): string | null {
+  const extension = path.extname(filePath).toLowerCase();
+  switch (extension) {
+    case '.ogg':
+    case '.oga':
+    case '.opus':
+      return 'audio/ogg';
+    case '.mp3':
+      return 'audio/mpeg';
+    case '.m4a':
+      return 'audio/mp4';
+    default:
+      return null;
+  }
 }
 
 function renderCollapsedCommentary(locale: AppLocale, segments: ActiveTurnSegment[]): string {

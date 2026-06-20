@@ -213,6 +213,7 @@ export class TelegramGateway extends EventEmitter {
     contents: Buffer,
     caption?: string,
     messageThreadId?: number | null,
+    contentType = 'audio/ogg',
   ): Promise<number> {
     const result = await callTelegramMultipartApi<SendMessageResult>(
       this.botToken,
@@ -226,7 +227,7 @@ export class TelegramGateway extends EventEmitter {
         fieldName: 'voice',
         filename,
         contents,
-        contentType: 'audio/ogg',
+        contentType,
       }],
     );
     if (!result.ok || !result.result) {

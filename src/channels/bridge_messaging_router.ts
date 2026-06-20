@@ -60,11 +60,11 @@ export class BridgeMessagingRouter {
     return this.telegram.sendRichMarkdown(scopeId, markdown, keyboard);
   }
 
-  sendVoice(scopeId: string, filename: string, contents: Buffer, caption?: string): Promise<number> {
+  sendVoice(scopeId: string, filename: string, contents: Buffer, caption?: string, contentType?: string): Promise<number> {
     if (this.isWeixinScope(scopeId)) {
       throw new Error(`Voice messages are not supported for Weixin scope ${scopeId}`);
     }
-    return this.telegram.sendVoice(scopeId, filename, contents, caption);
+    return this.telegram.sendVoice(scopeId, filename, contents, caption, contentType);
   }
 
   editPlain(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
