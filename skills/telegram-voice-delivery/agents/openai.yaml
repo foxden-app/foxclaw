@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram Voice Delivery"
+  short_description: "Send generated audio back through FoxClaw"
+  default_prompt: "Use $telegram-voice-delivery to send a completed audio file to the current Telegram conversation through FoxClaw."

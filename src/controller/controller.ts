@@ -3,6 +3,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config.js';
+import {
+  TELEGRAM_VOICE_MAX_BYTES,
+  TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
+  telegramVoiceContentType,
+} from '../voice/files.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type {
@@ -6341,7 +6346,7 @@ export class BridgeSessionCore {
     if (!contentType) {
       await this.sendMessage(scopeId, locale === 'zh'
         ? '只支持作为 Telegram voice 发送的音频格式：.ogg、.opus、.oga、.mp3、.m4a。'
-        : 'Supported Telegram voice file formats: .ogg, .opus, .oga, .mp3, .m4a.');
+        : `Supported Telegram voice file formats: ${TELEGRAM_VOICE_SUPPORTED_EXTENSIONS}.`);
       return;
     }
     const stat = await fs.stat(filePath).catch(() => null);
@@ -6349,7 +6354,7 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, locale === 'zh' ? `找不到音频文件：${filePath}` : `Audio file not found: ${filePath}`);
       return;
     }
-    if (stat.size > 50 * 1024 * 1024) {
+    if (stat.size > TELEGRAM_VOICE_MAX_BYTES) {
       await this.sendMessage(scopeId, locale === 'zh' ? 'Telegram voice 文件不能超过 50MB。' : 'Telegram voice files must be 50MB or smaller.');
       return;
     }
@@ -10211,22 +10216,6 @@ function ensureTurnSegment(
   };
   active.segments.push(segment);
   return segment;
-}
-
-function telegramVoiceContentType(filePath: string): string | null {
-  const extension = path.extname(filePath).toLowerCase();
-  switch (extension) {
-    case '.ogg':
-    case '.oga':
-    case '.opus':
-      return 'audio/ogg';
-    case '.mp3':
-      return 'audio/mpeg';
-    case '.m4a':
-      return 'audio/mp4';
-    default:
-      return null;
-  }
 }
 
 function renderCollapsedCommentary(locale: AppLocale, segments: ActiveTurnSegment[]): string {

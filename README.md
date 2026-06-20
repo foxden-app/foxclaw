@@ -310,7 +310,7 @@ foxclaw weixin-login
 
 ## Codex Skill
 
-仓库自带一个 Codex skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。它可以让 Codex 通过 SSH 在本机或远程 Mac 上 bootstrap FoxClaw——写 `.env`、构建、跑 doctor、装 launchd、引导首次消息验证，一条龙。
+仓库自带 FoxClaw 安装维护 Skill 和 `telegram-voice-delivery` 语音投递 Skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。FoxClaw 启动时会把语音投递 Skill 自动同步到每个 Telegram runtime 的 `CODEX_HOME`；Codex 生成音频后可直接执行 `foxclaw send-voice`，自动把文件送回当前 Telegram 私聊，无需用户再输入 `/voice file`。
 
 ## 故障排查
 

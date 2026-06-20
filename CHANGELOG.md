@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.52 - 2026-06-20
+
+### 中文
+- 新增 `telegram-voice-delivery` Codex Skill；FoxClaw 启动时会把它同步到每个 Telegram runtime 的 `CODEX_HOME`，Codex 生成音频后可自动投递到当前 Telegram 私聊，不再要求用户输入 `/voice file`。
+- 新增 `foxclaw send-voice <path> [caption]` CLI；它会从当前 `CODEX_HOME` 识别 bot，并从 FoxClaw 本地数据库读取该 bot 最近记录的私聊目标。
+- CLI 支持 `--bot-id`、`--chat-id` 显式覆盖，复用 Telegram voice 的格式和 50MB 限制，并且不会输出或暴露 bot token。
+
+### English
+- Added the `telegram-voice-delivery` Codex skill. FoxClaw syncs it into every Telegram runtime's `CODEX_HOME` at startup, allowing Codex to automatically deliver generated audio to the current Telegram private chat without asking the user to enter `/voice file`.
+- Added `foxclaw send-voice <path> [caption]`; it infers the bot from the current `CODEX_HOME` and reads that bot's most recently remembered private chat from the FoxClaw store.
+- The CLI supports explicit `--bot-id` and `--chat-id` overrides, reuses Telegram voice format and 50MB limits, and never prints bot tokens.
+
 ## 0.5.51 - 2026-06-20
 
 ### 中文

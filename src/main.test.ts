@@ -57,12 +57,19 @@ test('CLI version and help commands do not enter serve mode', () => {
   assert.match(help.stdout, /Usage:/);
   assert.match(help.stdout, /foxclaw status/);
   assert.match(help.stdout, /foxclaw update/);
+  assert.match(help.stdout, /foxclaw send-voice/);
   assert.equal(help.stderr, '');
 
   const subcommandHelp = runFoxclawCli('install-systemd', '--help');
   assert.equal(subcommandHelp.status, 0);
   assert.match(subcommandHelp.stdout, /Usage:/);
   assert.doesNotMatch(subcommandHelp.stdout + subcommandHelp.stderr, /Installed /);
+});
+
+test('CLI send-voice requires an audio path before loading configuration', () => {
+  const result = runFoxclawCli('send-voice');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Usage: foxclaw send-voice/);
 });
 
 test('CLI unknown commands show usage instead of starting the bridge', () => {

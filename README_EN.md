@@ -310,7 +310,7 @@ Weixin runtime files default to `~/.foxclaw/weixin`. When `TG_BOT_TOKENS` is ena
 
 ## Codex Skill
 
-This repo ships a Codex skill at [`skills/foxclaw`](./skills/foxclaw). Use it when you want Codex to bootstrap FoxClaw locally or on another Mac over SSH — write `.env`, build, run doctor, install launchd, and guide first-message validation.
+This repo ships the FoxClaw deployment skill and a [`telegram-voice-delivery`](./skills/telegram-voice-delivery) skill. FoxClaw automatically syncs the delivery skill into every Telegram runtime's `CODEX_HOME` at startup. Codex can then run `foxclaw send-voice` after generating audio and deliver the file to the current Telegram private chat without asking the user to enter `/voice file`.
 
 ## Troubleshooting
 

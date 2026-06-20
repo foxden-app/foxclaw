@@ -26,6 +26,7 @@ import {
 } from './auth/notifications.js';
 import type { CodexAuthPoolStats } from './store/database.js';
 import type { AppLocale, RuntimeStatus } from './types.js';
+import { installBundledCodexSkills } from './codex_skills.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 import {
@@ -49,6 +50,11 @@ import {
   type SelfUpdateRuntime,
   writeSelfUpdateStatus,
 } from './update.js';
+import {
+  TELEGRAM_VOICE_MAX_BYTES,
+  TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
+  telegramVoiceContentType,
+} from './voice/files.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -303,6 +309,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'send-voice' || command === 'voice-file') {
+    requireNode24(command);
+    await runSendVoiceCli();
+    return;
+  }
+
   if (command !== 'serve') {
     console.error(`Unknown command: ${command}`);
     printUsage();
@@ -344,11 +356,119 @@ Usage:
   foxclaw status
   foxclaw start|restart|stop
   foxclaw update
+  foxclaw send-voice <path> [caption]
   foxclaw install-systemd|uninstall-systemd
   foxclaw install-launchd|uninstall-launchd
   foxclaw weixin-login [account-id]
   foxclaw --version
   foxclaw --help`);
+}
+
+async function runSendVoiceCli(): Promise<void> {
+  const parsed = parseSendVoiceCliArgs(process.argv.slice(3));
+  if (!parsed.fileArg) {
+    console.error('Usage: foxclaw send-voice <path> [caption] [--bot-id <bot-id>] [--chat-id <chat-id>]');
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = loadConfig();
+  const filePath = path.resolve(config.defaultCwd, parsed.fileArg);
+  const contentType = telegramVoiceContentType(filePath);
+  if (!contentType) {
+    throw new Error(`Unsupported Telegram voice file format. Supported formats: ${TELEGRAM_VOICE_SUPPORTED_EXTENSIONS}.`);
+  }
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile()) {
+    throw new Error(`Audio file not found: ${filePath}`);
+  }
+  if (stat.size > TELEGRAM_VOICE_MAX_BYTES) {
+    throw new Error('Telegram voice files must be 50MB or smaller.');
+  }
+
+  const botId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
+  const botToken = resolveTelegramBotToken(config.tgBotTokens, botId);
+  const { BridgeStore } = await import('./store/database.js');
+  const store = new BridgeStore(config.storePath);
+  let chatId = parsed.chatId;
+  try {
+    chatId ??= botId ? store.getTelegramPrivateScope(botId)?.chatId ?? null : null;
+  } finally {
+    store.close();
+  }
+  if (!chatId) {
+    const target = botId ? ` for ${botId}` : '';
+    throw new Error(`No remembered Telegram private chat${target}. Send /status to the bot once, or pass --chat-id <chat-id>.`);
+  }
+
+  const contents = await fs.promises.readFile(filePath);
+  const { callTelegramMultipartApi } = await import('./telegram/api.js');
+  const result = await callTelegramMultipartApi<{ message_id: number }>(
+    botToken,
+    'sendVoice',
+    {
+      chat_id: chatId,
+      caption: parsed.caption || 'FoxClaw voice',
+    },
+    [{
+      fieldName: 'voice',
+      filename: path.basename(filePath),
+      contents,
+      contentType,
+    }],
+  );
+  if (!result.ok || !result.result) {
+    throw new Error(result.description || 'Telegram sendVoice failed.');
+  }
+  console.log(`Sent Telegram voice message ${result.result.message_id}: ${filePath}`);
+}
+
+function parseSendVoiceCliArgs(args: string[]): {
+  fileArg: string | null;
+  caption: string;
+  botId: string | null;
+  chatId: string | null;
+} {
+  const positional: string[] = [];
+  let botId: string | null = null;
+  let chatId: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--bot-id' || arg === '--chat-id') {
+      const value = args[index + 1]?.trim();
+      if (!value) {
+        throw new Error(`${arg} requires a value.`);
+      }
+      if (arg === '--bot-id') botId = value;
+      else chatId = value;
+      index += 1;
+      continue;
+    }
+    positional.push(arg);
+  }
+  return {
+    fileArg: positional[0]?.trim() || null,
+    caption: positional.slice(1).join(' ').trim(),
+    botId,
+    chatId,
+  };
+}
+
+function inferTelegramBotId(codexHome: string | null | undefined): string | null {
+  if (!codexHome) return null;
+  const match = codexHome.match(/(?:^|[\\/])(bot\d+)(?:[\\/]|$)/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function resolveTelegramBotToken(tokens: string[], botId: string | null): string {
+  if (botId) {
+    const numericId = botId.replace(/^bot/i, '');
+    const matched = tokens.find(token => token.startsWith(`${numericId}:`));
+    if (matched) return matched;
+    throw new Error(`No configured Telegram token matches ${botId}. Pass --bot-id for a configured bot.`);
+  }
+  if (tokens.length === 1) return tokens[0]!;
+  throw new Error('Cannot infer the Telegram bot from this Codex session. Pass --bot-id <bot-id>.');
 }
 
 function formatRuntimeStatusSummary(status: RuntimeStatus): string {
@@ -503,6 +623,7 @@ async function runServeCli(): Promise<void> {
         if (!sharedDefaultRuntime) {
           fs.mkdirSync(home, { recursive: true, mode: 0o700 });
         }
+        installBundledCodexSkills(packageRoot, home);
         const runtimeConfig = {
           ...config,
           tgBotToken: token,
@@ -836,6 +957,8 @@ async function runServeCli(): Promise<void> {
       process.on('SIGTERM', () => void shutdown('SIGTERM'));
       return;
     }
+    const singleCodexHome = config.codexHome ?? path.join(os.homedir(), '.codex');
+    installBundledCodexSkills(packageRoot, singleCodexHome);
     const bot = new TelegramGateway(
       config.tgBotToken,
       config.tgAllowedUserId,
