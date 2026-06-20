@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.54 - 2026-06-20
+
+### 中文
+- 修复升级到 Codex CLI `0.141.0` 后 Telegram 看不到工具执行明细的问题；FoxClaw 现在支持现代 app-server 的 `item/started` / `item/completed` 工具生命周期。
+- 命令执行、文件修改、网页搜索、MCP/动态工具、图片查看和生成、协作 Agent 操作会重新实时显示；阶段结束后仍压缩为可展开明细，最终过程汇报继续独立折叠。
+- 保留旧版 `codex/event/exec_command_begin/end` 兼容，避免旧节点或旧 Codex CLI 失去过程状态。
+
+### English
+- Fixed Telegram tool activity details disappearing after upgrading to Codex CLI `0.141.0`; FoxClaw now supports the modern app-server `item/started` and `item/completed` tool lifecycle.
+- Command execution, file changes, web search, MCP/dynamic tools, image activity, and collaborative agent operations are visible in real time again, then archived into expandable stage details.
+- Kept compatibility with legacy `codex/event/exec_command_begin/end` notifications for older Codex CLI installations.
+
 ## 0.5.53 - 2026-06-20
 
 ### 中文

@@ -1680,6 +1680,44 @@ test('completed Codex stream output falls back to RichMessage HTML when native m
   assert.match(rig.editedRichMessages[0]!, /<b>Changed<\/b>/);
 });
 
+test('modern Codex tool items render live Telegram activity details', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState(
+    'telegram:99::root',
+    '99',
+    'private',
+    null,
+    'thread-1',
+    'turn-1',
+    0,
+  );
+  setActiveTurnForTest(rig, active);
+
+  await (rig.controller as any).handleNotification({
+    method: 'item/started',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: {
+        type: 'commandExecution',
+        id: 'command-1',
+        command: 'rg hello src',
+        cwd: rig.tempDir,
+        commandActions: [{ type: 'search', command: 'rg hello src', query: 'hello', path: 'src' }],
+        status: 'inProgress',
+      },
+    },
+  });
+
+  assert.ok(rig.sentMessages.some(message => /Searching|search/i.test(message)));
+  assert.ok(rig.sentMessages.some(message => /hello/.test(message)));
+});
+
 test('completed turn collapses all Telegram commentary into the first progress message', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
