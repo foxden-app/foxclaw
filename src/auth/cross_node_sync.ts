@@ -192,6 +192,7 @@ interface PendingRemoteImport {
   sourceLabel: string | null;
   receivedAt: number;
   fromPeer: string;
+  mode: AuthSyncRemoteImportMode;
 }
 
 interface PendingRemoteDelete {
@@ -619,7 +620,22 @@ export class CrossNodeAuthSync {
     const expiresAt = Date.now() + LEASE_TTL_MS;
     const result = await new Promise<AuthSyncLeaseResult>((resolve) => {
       const timer = setTimeout(() => {
+        const pending = this.pendingLeases.get(leaseId);
         this.pendingLeases.delete(leaseId);
+        if (pending && pending.denies.length === 0) {
+          const detail = `partial grants=${pending.grants.size}/${this.peers.length}; reason=${reason}`;
+          this.recordEvent({
+            direction: 'local',
+            kind: 'lease.request',
+            stage: 'partial_granted',
+            peer: null,
+            requestId: leaseId,
+            candidateName: null,
+            detail,
+          });
+          resolve({ ok: true, leaseId, reason: detail });
+          return;
+        }
         this.recordEvent({
           direction: 'local',
           kind: 'lease.request',
@@ -652,7 +668,7 @@ export class CrossNodeAuthSync {
     });
     if (result.ok) {
       this.activeLocalLease = { leaseId, expiresAt };
-      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'granted', peer: null, requestId: leaseId, candidateName: null, detail: reason });
+      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: result.reason?.startsWith('partial grants=') ? 'granted_partial' : 'granted', peer: null, requestId: leaseId, candidateName: null, detail: result.reason ?? reason });
     } else {
       this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'denied', peer: null, requestId: leaseId, candidateName: null, detail: result.reason ?? reason });
       await this.releaseRefreshLease(leaseId);
@@ -955,6 +971,11 @@ export class CrossNodeAuthSync {
       peer,
       sourceNodeId: senderNodeId,
     });
+    if (this.shouldQueueRemoteImport()) {
+      this.finishPendingPullAsAccepted(pending, peer, 'queued until local runtime is idle');
+      this.enqueueImport(message.bundle, senderNodeId, sourceLabel, peer, 'pull');
+      return;
+    }
     const outcome = await this.validateAndImport(message.bundle, senderNodeId, sourceLabel, peer, 'pull');
     if (!outcome.imported) {
       this.markPullPeerUnavailable(message.requestId, matchedPeer, outcome.reason ?? 'peer candidate was not imported');
@@ -966,6 +987,22 @@ export class CrossNodeAuthSync {
     this.pendingPulls.delete(message.requestId);
     pending.resolve(true);
     this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'imported', peer, requestId: message.requestId, candidateName: pending.candidateName, detail: null });
+  }
+
+  private finishPendingPullAsAccepted(pending: PendingPull, peer: string, detail: string): void {
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingPulls.delete(pending.requestId);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'pull.response',
+      stage: 'queued',
+      peer,
+      requestId: pending.requestId,
+      candidateName: pending.candidateName,
+      detail,
+    });
+    pending.resolve(true);
   }
 
   private markPullPeerUnavailable(requestId: string, peer: string, reason: string): void {
@@ -1061,18 +1098,33 @@ export class CrossNodeAuthSync {
     }
   }
 
-  private enqueueImport(bundle: AuthSyncBundlePayload, sourceNodeId: string, sourceLabel: string | null, fromPeer: string): void {
-    const queued = this.importProcessorActive || !this.callbacks.isIdle() || this.pendingImports.length > 0;
+  private shouldQueueRemoteImport(): boolean {
+    return this.importProcessorActive
+      || this.deleteProcessorActive
+      || !this.callbacks.isIdle()
+      || this.pendingImports.length > 0
+      || this.pendingDeletes.length > 0;
+  }
+
+  private enqueueImport(
+    bundle: AuthSyncBundlePayload,
+    sourceNodeId: string,
+    sourceLabel: string | null,
+    fromPeer: string,
+    mode: AuthSyncRemoteImportMode = 'push',
+  ): void {
+    const queued = this.shouldQueueRemoteImport();
     this.pendingImports.push({
       bundle,
       sourceNodeId,
       sourceLabel,
       receivedAt: Date.now(),
       fromPeer,
+      mode,
     });
     this.recordEvent({
       direction: 'local',
-      kind: 'push.bundle',
+      kind: mode === 'pull' ? 'pull.response' : 'push.bundle',
       stage: queued ? 'queued' : 'processing',
       peer: fromPeer,
       requestId: bundle.requestId ?? null,
@@ -1102,7 +1154,7 @@ export class CrossNodeAuthSync {
       while (this.pendingImports.length > 0) {
         if (!this.callbacks.isIdle()) return;
         const pending = this.pendingImports.shift()!;
-        await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, 'push');
+        await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, pending.mode);
       }
     } finally {
       this.importProcessorActive = false;

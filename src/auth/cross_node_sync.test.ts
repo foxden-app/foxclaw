@@ -596,6 +596,65 @@ test('CrossNodeAuthSync pull recovery imports the first newer peer bundle', asyn
   }
 });
 
+test('CrossNodeAuthSync queues pull recovery bundles while the local node is busy', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-busy-'));
+  try {
+    const newer = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    let idle = false;
+    let imported = false;
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({ records: [newer] }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' });
+        },
+      },
+      callbacks({
+        isIdle: () => idle,
+        validate: async () => ({ ok: true }),
+        importCandidate: async () => {
+          imported = true;
+          return { ok: true, imported: true };
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    assert.equal(await serviceB.requestRecovery('auth.json_work', {
+      accountId: 'acct-1',
+      lastRefreshMs: Date.parse('2026-05-01T00:00:00.000Z'),
+    }), true);
+    assert.equal(imported, false);
+    assert.equal(serviceB.getStatus().pendingImports, 1);
+    assert.equal(serviceB.getStatus().recentEvents.some(event =>
+      event.kind === 'pull.response'
+      && event.stage === 'queued'
+      && event.candidateName === 'auth.json_work'
+    ), true);
+
+    idle = true;
+    await (serviceB as any).processPendingImports();
+    assert.equal(imported, true);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync pull recovery ignores a different ChatGPT user on the same account', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-pull-user-conflict-'));
   try {
@@ -747,6 +806,30 @@ test('CrossNodeAuthSync refresh lease requires peer grant', async () => {
     const denied = await serviceA.acquireRefreshLease('test');
     assert.equal(denied.ok, false);
     assert.match(denied.reason ?? '', /not idle/);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
+test('CrossNodeAuthSync refresh lease proceeds on peer timeout without explicit deny', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-lease-timeout-'));
+  try {
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      { send: async () => undefined },
+      callbacks({ records: [] }),
+    );
+    await serviceA.initialize();
+
+    const granted = await serviceA.acquireRefreshLease('test-timeout');
+    assert.equal(granted.ok, true);
+    assert.match(granted.reason ?? '', /partial grants=0\/1/);
+    assert.equal(serviceA.getStatus().recentEvents.some(event =>
+      event.kind === 'lease.request'
+      && event.stage === 'granted_partial'
+    ), true);
+    await serviceA.releaseRefreshLease(granted.leaseId);
   } finally {
     await removeTempTree(root);
   }

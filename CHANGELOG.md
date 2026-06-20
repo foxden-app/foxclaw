@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.46 - 2026-06-20
+
+### 中文
+- 修复跨节点 pull 回来的较新 auth 候选在本机 runtime 忙碌时被立即判定失败的问题；现在会先接受并进入远端导入队列，等 runtime 空闲后再验证和导入，避免 RT/WSL 节点已有更新却同步不到本机。
+- 调整主动刷新租约策略：如果 peer 明确拒绝仍会停止，但 peer 慢回包或暂时无响应时不再让刷新一直失败；FoxClaw 会记录 `granted_partial` 事件并优先保持授权可用性和连续性。
+- 增加回归测试覆盖忙碌期间的 pull recovery 排队导入，以及 peer 超时但无明确拒绝时的刷新租约继续执行。
+
+### English
+- Fixed cross-node pull recovery dropping newer auth candidates when the local runtime is busy; pulled bundles are now accepted into the remote import queue and validated/imported once the runtime becomes idle, so updates from RT/WSL peers are not lost.
+- Relaxed proactive refresh leases for availability: explicit peer denials still stop the refresh, but slow or temporarily silent peers no longer make the refresh fail indefinitely. FoxClaw records `granted_partial` events and prioritizes auth continuity.
+- Added regression tests for queued pull recovery while busy and refresh lease continuation when peers time out without an explicit denial.
+
 ## 0.5.45 - 2026-06-18
 
 ### 中文
