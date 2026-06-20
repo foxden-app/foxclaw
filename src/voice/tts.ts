@@ -73,14 +73,17 @@ async function requestTtsWav(config: AppConfig, pathname: string, body: Record<s
     throw new Error('VOICE_TTS_URL is not configured');
   }
   const endpoint = new URL(pathname, config.voiceTtsUrl.endsWith('/') ? config.voiceTtsUrl : `${config.voiceTtsUrl}/`);
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), config.voiceTtsTimeoutMs);
   const response = await fetch(endpoint, {
     method: 'POST',
+    signal: abortController.signal,
     headers: {
       'content-type': 'application/json',
       ...(config.voiceTtsToken ? { authorization: `Bearer ${config.voiceTtsToken}` } : {}),
     },
     body: JSON.stringify(body),
-  });
+  }).finally(() => clearTimeout(timer));
   if (!response.ok) {
     throw new Error(`TTS request failed: ${response.status} ${response.statusText}: ${await response.text().catch(() => '')}`);
   }
@@ -186,10 +189,10 @@ PY
     encodedText,
     config.voiceTtsSshDir,
     config.voiceTtsDesignInstruct,
-  ], script);
+  ], script, config.voiceTtsTimeoutMs);
 }
 
-async function runSshBinary(args: string[], stdin: string): Promise<Buffer> {
+async function runSshBinary(args: string[], stdin: string, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn('ssh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
@@ -197,7 +200,7 @@ async function runSshBinary(args: string[], stdin: string): Promise<Buffer> {
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
       reject(new Error('remote TTS timed out'));
-    }, 120_000);
+    }, timeoutMs);
     child.stdout.on('data', (chunk: Buffer | string) => {
       stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     });

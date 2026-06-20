@@ -10103,7 +10103,7 @@ export class BridgeSessionCore {
 
   private registerVoiceSnippet(scopeId: string, text: string): string {
     this.pruneVoiceSnippets();
-    const normalized = normalizeVoiceText(text, this.config.voiceTextLimit);
+    const normalized = normalizeVoiceText(text, this.config.voiceSummaryTextLimit);
     const id = crypto.randomBytes(6).toString('hex');
     this.voiceSnippets.set(id, { scopeId, text: normalized, createdAt: Date.now() });
     this.latestVoiceSnippetByScope.set(scopeId, id);

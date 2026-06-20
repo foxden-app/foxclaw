@@ -103,7 +103,9 @@ export interface AppConfig {
   voiceTtsDesignInstruct: string;
   voiceFfmpegBin: string;
   voiceSummaryButtonEnabled: boolean;
+  voiceSummaryTextLimit: number;
   voiceTextLimit: number;
+  voiceTtsTimeoutMs: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -174,7 +176,9 @@ export function loadConfig(): AppConfig {
     voiceTtsDesignInstruct: process.env.VOICE_TTS_DESIGN_INSTRUCT?.trim() || '用自然清晰的中文女声朗读，语速适中。',
     voiceFfmpegBin: process.env.VOICE_FFMPEG_BIN?.trim() || 'ffmpeg',
     voiceSummaryButtonEnabled: boolEnv('VOICE_SUMMARY_BUTTON_ENABLED', true),
+    voiceSummaryTextLimit: intEnv('VOICE_SUMMARY_TEXT_LIMIT', 180),
     voiceTextLimit: intEnv('VOICE_TEXT_LIMIT', 2800),
+    voiceTtsTimeoutMs: intEnv('VOICE_TTS_TIMEOUT_MS', 120_000),
   };
   ensureAppDirs(config);
   return config;

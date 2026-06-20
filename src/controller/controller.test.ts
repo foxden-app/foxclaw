@@ -77,7 +77,9 @@ function createConfig(tempDir: string): AppConfig {
     voiceTtsDesignInstruct: '用自然清晰的中文女声朗读，语速适中。',
     voiceFfmpegBin: 'ffmpeg',
     voiceSummaryButtonEnabled: true,
+    voiceSummaryTextLimit: 180,
     voiceTextLimit: 2800,
+    voiceTtsTimeoutMs: 120_000,
   };
 }
 
@@ -1567,6 +1569,7 @@ test('completed Codex stream output is promoted to Telegram RichMessage', async 
 test('completed final answer adds a voice summary button when voice is enabled', async (t) => {
   const rig = createControllerRig();
   rig.config.voiceTtsEnabled = true;
+  rig.config.voiceSummaryTextLimit = 40;
   t.after(() => {
     rig.store.close();
     fs.rmSync(rig.tempDir, { recursive: true, force: true });
@@ -1578,7 +1581,7 @@ test('completed final answer adds a voice summary button when voice is enabled',
     phase: 'final_answer',
     outputKind: 'final_answer',
     isPlan: false,
-    text: '# Done\n\n- **Changed** `src/app.ts`',
+    text: '# Done\n\n- **Changed** `src/app.ts`\n- ' + 'Long summary. '.repeat(20),
     completed: false,
     messages: [],
   };
@@ -1590,7 +1593,10 @@ test('completed final answer adds a voice summary button when voice is enabled',
 
   assert.equal(rig.editedRichKeyboards.length, 1);
   assert.match(rig.editedRichKeyboards[0]?.[0]?.[0]?.text, /^🔊 (听总结|Listen)$/);
-  assert.match(rig.editedRichKeyboards[0]?.[0]?.[0]?.callback_data, /^voice:[a-f0-9]{12}$/);
+  const callbackData = rig.editedRichKeyboards[0]?.[0]?.[0]?.callback_data;
+  assert.match(callbackData, /^voice:[a-f0-9]{12}$/);
+  const snippet = (rig.controller as any).voiceSnippets.get(callbackData.replace('voice:', ''));
+  assert.ok(snippet.text.length <= 46);
 });
 
 test('voice text normalization removes Markdown noise and truncates long output', () => {

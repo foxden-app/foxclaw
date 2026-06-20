@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.50 - 2026-06-20
+
+### 中文
+- 给 Telegram “听总结”按钮增加独立的 `VOICE_SUMMARY_TEXT_LIMIT`，默认只朗读短摘要，避免把完整最终回复交给慢速 TTS 后端导致长时间排队或超时。
+- 新增 `VOICE_TTS_TIMEOUT_MS`，HTTP/SSH 语音后端共用该超时配置；SSH 超时会终止远端调用，HTTP 超时会中止请求。
+- `/voice <文本>` 仍使用 `VOICE_TEXT_LIMIT`，方便手动朗读较长文本；最终总结按钮走更短的摘要上限，优先保证可听、及时返回。
+
+### English
+- Added a separate `VOICE_SUMMARY_TEXT_LIMIT` for Telegram "Listen" buttons, so final-answer voice summaries read a short digest instead of sending the entire final response to slow TTS backends.
+- Added `VOICE_TTS_TIMEOUT_MS` for both HTTP and SSH voice backends; SSH calls are terminated on timeout and HTTP requests are aborted.
+- `/voice <text>` still uses `VOICE_TEXT_LIMIT` for manual longer reads, while final-answer buttons use the shorter summary limit for timely playback.
+
 ## 0.5.49 - 2026-06-20
 
 ### 中文
