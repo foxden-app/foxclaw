@@ -2083,6 +2083,9 @@ export class BridgeSessionCore {
     if (status === 'idle') {
       return;
     }
+    if (status === 'active' || status === 'running') {
+      return;
+    }
     const locale = this.localeForChat(scopeId);
     await this.sendMessage(scopeId, t(locale, 'thread_status_changed', { threadId, status }));
   }
@@ -2124,7 +2127,6 @@ export class BridgeSessionCore {
     }
     const locale = this.localeForChat(scopeId);
     if (method === 'thread/goal/cleared') {
-      await this.sendMessage(scopeId, t(locale, 'goal_cleared_notification', { threadId }));
       return;
     }
     const goal = mapGoalNotification(params?.goal);
@@ -2441,6 +2443,10 @@ export class BridgeSessionCore {
     const message = params?.error
       ? `MCP ${name}: ${status} (${String(params.error)})`
       : `MCP ${name}: ${status}`;
+    const normalized = status.toLowerCase();
+    if (!params?.error && ['ready', 'running', 'starting', 'connected'].includes(normalized)) {
+      return;
+    }
     await this.notifyBoundScopes(message);
   }
 
@@ -2493,7 +2499,7 @@ export class BridgeSessionCore {
     }
     try {
       await this.completeTurn(active);
-      await this.cleanupObservedTransientMessages(active);
+      await this.cleanupTransientProgressMessages(active);
       await this.finalizeUserInputsForTurn(active, 'resolved');
       this.markQueuedTurnCompleted(active);
     } finally {
@@ -4094,7 +4100,7 @@ export class BridgeSessionCore {
         try {
           this.promoteReadyToolBatch(active);
           await this.completeTurn(active);
-          await this.cleanupObservedTransientMessages(active);
+          await this.cleanupTransientProgressMessages(active);
           await this.finalizeUserInputsForTurn(active, active.interruptRequested ? 'interrupted' : 'resolved');
           await this.maybeSendPlanImplementationPrompt(active);
           this.markQueuedTurnCompleted(active);
@@ -4406,22 +4412,26 @@ export class BridgeSessionCore {
     }
   }
 
-  private async cleanupObservedTransientMessages(active: ActiveTurn): Promise<void> {
-    if (!active.isObserved || !this.hasObservedPersistentReply(active)) {
+  private async cleanupTransientProgressMessages(active: ActiveTurn): Promise<void> {
+    if (!this.hasObservedPersistentReply(active)) {
       return;
     }
 
     const messageIds = new Set<number>();
-    for (const segment of active.segments) {
-      if (segment.outputKind === 'final_answer') {
-        continue;
-      }
-      for (const message of segment.messages) {
-        messageIds.add(message.messageId);
+    if (active.isObserved) {
+      for (const segment of active.segments) {
+        if (segment.outputKind === 'final_answer') {
+          continue;
+        }
+        for (const message of segment.messages) {
+          messageIds.add(message.messageId);
+        }
       }
     }
-    for (const messageId of active.archivedMessageIds) {
-      messageIds.add(messageId);
+    if (this.config.telegramDeleteToolDetailsAfterFinal) {
+      for (const messageId of active.archivedMessageIds) {
+        messageIds.add(messageId);
+      }
     }
 
     for (const messageId of messageIds) {
@@ -4429,7 +4439,7 @@ export class BridgeSessionCore {
         await this.deleteMessage(active.scopeId, messageId);
       } catch (error) {
         if (!isTelegramMessageGone(error)) {
-          this.logger.warn('telegram.observed_cleanup_delete_failed', {
+          this.logger.warn('telegram.transient_progress_cleanup_delete_failed', {
             error: String(error),
             turnId: active.turnId,
             messageId,
@@ -9766,7 +9776,7 @@ export class BridgeSessionCore {
         } else {
           messageId = await this.sendMessage(active.scopeId, content.text);
         }
-        if (active.isObserved && messageId !== null) {
+        if (messageId !== null) {
           active.archivedMessageIds.push(messageId);
         }
       } catch (error) {
@@ -9782,9 +9792,7 @@ export class BridgeSessionCore {
       } else {
         await this.editMessage(active.scopeId, active.previewMessageId, content.text, []);
       }
-      if (active.isObserved) {
-        active.archivedMessageIds.push(active.previewMessageId);
-      }
+      active.archivedMessageIds.push(active.previewMessageId);
     } catch (error) {
       if (isTelegramMessageGone(error)) {
         active.previewActive = false;

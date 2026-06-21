@@ -48,6 +48,7 @@ function createConfig(tempDir: string): AppConfig {
     defaultSandboxMode: 'danger-full-access',
     telegramPollIntervalMs: 1000,
     telegramPreviewThrottleMs: 0,
+    telegramDeleteToolDetailsAfterFinal: true,
     threadListLimit: 10,
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
@@ -69,6 +70,7 @@ function createConfig(tempDir: string): AppConfig {
     authSyncTempDir: path.join(tempDir, 'auth-sync'),
     authAutoDeleteNeedsRepair: false,
     voiceTtsEnabled: false,
+    voiceTtsEngine: 'qwen',
     voiceTtsMode: 'ssh',
     voiceTtsUrl: 'https://tts.foxden.app',
     voiceTtsToken: null,
@@ -79,7 +81,7 @@ function createConfig(tempDir: string): AppConfig {
     voiceSummaryButtonEnabled: true,
     voiceSummaryTextLimit: 180,
     voiceTextLimit: 2800,
-    voiceTtsTimeoutMs: 120_000,
+    voiceTtsTimeoutMs: 60_000,
   };
 }
 
@@ -884,6 +886,21 @@ test('diagnostic notifications route goal, model, remote, and MCP progress updat
     params: { threadId: 'thread-1', turnId: 'turn-1', itemId: 'item-1', message: 'Indexing workspace' },
   });
   assert.match(active.pendingArchivedStatus?.text ?? '', /MCP progress: Indexing workspace/);
+
+  const beforeQuiet = rig.sentMessages.length;
+  await (rig.controller as any).handleNotification({
+    method: 'thread/goal/cleared',
+    params: { threadId: 'thread-1' },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'thread/status/changed',
+    params: { threadId: 'thread-1', status: 'active' },
+  });
+  await (rig.controller as any).handleNotification({
+    method: 'mcpServer/startupStatus/updated',
+    params: { name: 'codex_apps', status: 'ready' },
+  });
+  assert.equal(rig.sentMessages.length, beforeQuiet);
 });
 
 test('/mode opens setup panel, while /mode <value>, /plan, and /agent update collaboration mode settings', async (t) => {
@@ -5781,6 +5798,69 @@ test('observed turns delete commentary and archived status messages after a fina
   });
 
   assert.deepEqual(rig.deletedMessageIds, [11, 33]);
+});
+
+test('completed turns delete archived tool detail messages after a final reply arrives', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.finalText = 'done';
+  active.segments = [{
+    itemId: 'final-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: 'done',
+    completed: true,
+    messages: [{ messageId: 22, text: 'done' }],
+  }];
+  active.archivedMessageIds = [33, 34];
+  setActiveTurnForTest(rig, active);
+  (rig.controller as any).completeTurn = async () => {};
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.deepEqual(rig.deletedMessageIds, [33, 34]);
+});
+
+test('completed turns keep archived tool details when cleanup config is disabled', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  (rig.controller as any).config.telegramDeleteToolDetailsAfterFinal = false;
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.finalText = 'done';
+  active.segments = [{
+    itemId: 'final-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: 'done',
+    completed: true,
+    messages: [{ messageId: 22, text: 'done' }],
+  }];
+  active.archivedMessageIds = [33, 34];
+  setActiveTurnForTest(rig, active);
+  (rig.controller as any).completeTurn = async () => {};
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.deepEqual(rig.deletedMessageIds, []);
 });
 
 test('unwatch stops the current watcher and reports when nothing is being watched', async (t) => {

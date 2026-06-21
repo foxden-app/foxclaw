@@ -71,6 +71,7 @@ export interface AppConfig {
   defaultSandboxMode: SandboxModeValue;
   telegramPollIntervalMs: number;
   telegramPreviewThrottleMs: number;
+  telegramDeleteToolDetailsAfterFinal: boolean;
   threadListLimit: number;
   statusPath: string;
   logPath: string;
@@ -95,6 +96,7 @@ export interface AppConfig {
   authSyncTempDir: string;
   authAutoDeleteNeedsRepair: boolean;
   voiceTtsEnabled: boolean;
+  voiceTtsEngine: 'qwen' | 'soulx';
   voiceTtsMode: 'http' | 'ssh';
   voiceTtsUrl: string | null;
   voiceTtsToken: string | null;
@@ -147,6 +149,7 @@ export function loadConfig(): AppConfig {
     defaultSandboxMode: parseSandboxMode(process.env.DEFAULT_SANDBOX_MODE || 'workspace-write'),
     telegramPollIntervalMs: intEnv('TELEGRAM_POLL_INTERVAL_MS', 1200),
     telegramPreviewThrottleMs: intEnv('TELEGRAM_PREVIEW_THROTTLE_MS', 800),
+    telegramDeleteToolDetailsAfterFinal: boolEnv('TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL', true),
     threadListLimit: intEnv('THREAD_LIST_LIMIT', 10),
     statusPath: DEFAULT_STATUS_PATH,
     logPath: DEFAULT_LOG_PATH,
@@ -168,6 +171,7 @@ export function loadConfig(): AppConfig {
     authSyncTempDir: process.env.AUTH_SYNC_TEMP_DIR || DEFAULT_AUTH_SYNC_TEMP_DIR,
     authAutoDeleteNeedsRepair: boolEnv('AUTH_AUTO_DELETE_NEEDS_REPAIR', false),
     voiceTtsEnabled: boolEnv('VOICE_TTS_ENABLED', false),
+    voiceTtsEngine: parseVoiceTtsEngine(process.env.VOICE_TTS_ENGINE || 'qwen'),
     voiceTtsMode: parseVoiceTtsMode(process.env.VOICE_TTS_MODE || (process.env.VOICE_TTS_SSH_HOST?.trim() ? 'ssh' : 'http')),
     voiceTtsUrl: optional('VOICE_TTS_URL'),
     voiceTtsToken: optional('VOICE_TTS_TOKEN'),
@@ -178,7 +182,7 @@ export function loadConfig(): AppConfig {
     voiceSummaryButtonEnabled: boolEnv('VOICE_SUMMARY_BUTTON_ENABLED', true),
     voiceSummaryTextLimit: intEnv('VOICE_SUMMARY_TEXT_LIMIT', 180),
     voiceTextLimit: intEnv('VOICE_TEXT_LIMIT', 2800),
-    voiceTtsTimeoutMs: intEnv('VOICE_TTS_TIMEOUT_MS', 120_000),
+    voiceTtsTimeoutMs: intEnv('VOICE_TTS_TIMEOUT_MS', 60_000),
   };
   ensureAppDirs(config);
   return config;
@@ -269,6 +273,10 @@ function parseSandboxMode(value: string): AppConfig['defaultSandboxMode'] {
 
 function parseVoiceTtsMode(value: string): AppConfig['voiceTtsMode'] {
   return value.trim().toLowerCase() === 'http' ? 'http' : 'ssh';
+}
+
+function parseVoiceTtsEngine(value: string): AppConfig['voiceTtsEngine'] {
+  return value.trim().toLowerCase() === 'soulx' ? 'soulx' : 'qwen';
 }
 
 function resolveCommand(commandName: string): string | null {

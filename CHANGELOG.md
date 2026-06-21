@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.55 - 2026-06-21
+
+### 中文
+- 最终答复发出后，默认删除已折叠的工具操作明细消息，让 Telegram 回顾时更接近“一问一答”；新增 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=false` 可保留这些明细。
+- “听总结”新增 `VOICE_TTS_ENGINE=soulx`，SSH 模式会先检查 SoulX `/health`，再调用 `/v1/tts` 并转成 Telegram voice；语音 TTS 默认超时缩短到 60 秒。
+- 降噪内部状态通知：不再向 Telegram 展示“目标已清除”“线程 active/running”“MCP ready/starting”等低价值生命周期消息，错误和需要处理的状态仍会提示。
+
+### English
+- After a final answer is sent, FoxClaw now deletes archived tool-detail messages by default so Telegram history reads closer to one user turn and one final reply. Set `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=false` to keep them.
+- Added `VOICE_TTS_ENGINE=soulx` for voice summaries. SSH mode checks the SoulX `/health` endpoint, calls `/v1/tts`, and converts the result to Telegram voice; the default TTS timeout is now 60 seconds.
+- Reduced noisy internal lifecycle notifications: Telegram no longer shows low-value "goal cleared", active/running thread status, or MCP ready/starting messages, while errors and actionable states are still reported.
+
 ## 0.5.54 - 2026-06-20
 
 ### 中文

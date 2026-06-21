@@ -53,6 +53,9 @@ async function synthesizeViaHttp(text: string, config: AppConfig): Promise<Buffe
   if (!config.voiceTtsUrl) {
     throw new Error('VOICE_TTS_URL is not configured');
   }
+  if (config.voiceTtsEngine === 'soulx') {
+    return convertToOggOpus(await requestTtsWav(config, '/v1/tts', { text, seed: '7' }), config.voiceFfmpegBin);
+  }
   try {
     return convertToOggOpus(await requestTtsWav(config, '/v1/tts/custom', { text, language: 'zh' }), config.voiceFfmpegBin);
   } catch (error) {
@@ -128,6 +131,9 @@ async function synthesizeViaSsh(text: string, config: AppConfig): Promise<Buffer
   if (!config.voiceTtsSshDir) {
     throw new Error('VOICE_TTS_SSH_DIR is not configured');
   }
+  if (config.voiceTtsEngine === 'soulx') {
+    return synthesizeSoulxViaSsh(text, config);
+  }
   const encodedText = Buffer.from(text, 'utf8').toString('base64');
   const script = String.raw`set -euo pipefail
 TEXT="$(printf '%s' "$1" | base64 -d)"
@@ -189,6 +195,64 @@ PY
     encodedText,
     config.voiceTtsSshDir,
     config.voiceTtsDesignInstruct,
+  ], script, config.voiceTtsTimeoutMs);
+}
+
+async function synthesizeSoulxViaSsh(text: string, config: AppConfig): Promise<Buffer> {
+  const sshHost = config.voiceTtsSshHost;
+  const envDir = config.voiceTtsSshDir;
+  if (!sshHost) {
+    throw new Error('VOICE_TTS_SSH_HOST is not configured');
+  }
+  if (!envDir) {
+    throw new Error('VOICE_TTS_SSH_DIR is not configured');
+  }
+  const encodedText = Buffer.from(text, 'utf8').toString('base64');
+  const baseUrl = config.voiceTtsUrl || 'http://127.0.0.1:18082';
+  const script = String.raw`set -euo pipefail
+TEXT="$(printf '%s' "$1" | base64 -d)"
+ENV_DIR="$2"
+BASE_URL="$3"
+cd "$ENV_DIR"
+set -a
+. ./.env
+set +a
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -sS "\${BASE_URL}/health" >/dev/null
+TEXT="$TEXT" python3 - <<'PY' > "$tmp/body.json"
+import json
+import os
+print(json.dumps({"text": os.environ["TEXT"], "seed": 7, "dialect_prompt": ""}, ensure_ascii=False))
+PY
+status="$(curl -sS -w '%{http_code}' -X POST "\${BASE_URL}/v1/tts" \
+  -H "Authorization: Bearer $QWEN_SPEECH_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary "@$tmp/body.json" \
+  --output "$tmp/tts.wav")"
+if [[ "$status" != "200" ]]; then
+  python3 - "$tmp/tts.wav" <<'PY' >&2
+import pathlib
+import sys
+sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())
+PY
+  exit 22
+fi
+ffmpeg -nostdin -hide_banner -loglevel error -y -i "$tmp/tts.wav" -ac 1 -c:a libopus -b:a 32k "$tmp/voice.ogg"
+python3 - "$tmp/voice.ogg" <<'PY'
+import pathlib
+import sys
+sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())
+PY
+`;
+  return runSshBinary([
+    sshHost,
+    'bash',
+    '-s',
+    '--',
+    encodedText,
+    envDir,
+    baseUrl,
   ], script, config.voiceTtsTimeoutMs);
 }
 
