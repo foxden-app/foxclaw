@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.60 - 2026-06-21
+
+### 中文
+- 修复 `/auth` 刷新时间测试对 Asia/Shanghai 时区的硬编码，使 Linux、macOS 和 UTC CI runner 都按各自本地时区验证；功能内容与 0.5.59 一并发布。
+
+### English
+- Fixed the `/auth` reset-time test to respect the runner's local timezone across Linux, macOS, and UTC CI environments. This release publishes the feature set introduced in 0.5.59.
+
 ## 0.5.59 - 2026-06-21
 
 ### 中文

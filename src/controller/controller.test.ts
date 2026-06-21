@@ -283,6 +283,12 @@ function codexRateLimits(
   };
 }
 
+function localTimestamp(seconds: number): string {
+  const date = new Date(seconds * 1000);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function installTempCodexHome(t: TestContext, tempDir: string): string {
   const codexHome = path.join(tempDir, '.codex-home');
   fs.mkdirSync(path.join(codexHome, 'sessions'), { recursive: true });
@@ -2035,6 +2041,8 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   });
   const authDir = installTempAuthFiles(t, rig.tempDir);
   const expiresAtMs = Date.parse('2026-06-18T10:20:00.000Z');
+  const primaryResetsAt = 1_782_036_000;
+  const secondaryResetsAt = 1_782_640_800;
   writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString(), { expiresAtMs });
   writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString(), { expiresAtMs });
 
@@ -2046,7 +2054,7 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   (rig.controller as any).app.readAccountRateLimits = async () => {
     const currentName = path.basename(fs.realpathSync(path.join(authDir, 'auth.json')));
     return currentName === 'auth.json_a'
-      ? codexRateLimits(80, 75, 'plus', 1_782_036_000, 1_782_640_800)
+      ? codexRateLimits(80, 75, 'plus', primaryResetsAt, secondaryResetsAt)
       : codexRateLimits(10, 5);
   };
 
@@ -2056,11 +2064,11 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.match(rig.sentRichMessages[0]!, /<h3>\/auth<\/h3>/);
   assert.match(rig.sentRichMessages[0]!, /<th>Quota A<\/th><th>A reset<\/th><th>Quota B<\/th><th>B reset<\/th><th>Auth<\/th>/);
   assert.match(rig.sentRichMessages[0]!, /<th>Last refresh<\/th><th>Expiry<\/th><th>Risk<\/th><th>Command<\/th>/);
-  assert.match(rig.sentRichMessages[0]!, /<td>20%<\/td><td>2026-06-21 18:00<\/td><td>25%<\/td><td>2026-06-28 18:00<\/td><td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">a<\/a><\/td><td>yes<\/td>/);
+  assert.ok(rig.sentRichMessages[0]!.includes(`<td>20%</td><td>${localTimestamp(primaryResetsAt)}</td><td>25%</td><td>${localTimestamp(secondaryResetsAt)}</td><td><a href="tg://msg?text=%2Fauth%20use%201">a</a></td><td>yes</td>`));
   assert.match(rig.sentRichMessages[0]!, /<td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">use<\/a> <a href="tg:\/\/msg\?text=%2Fauth%20disable%201">disable<\/a><\/td>/);
   assert.match(rig.sentRichMessages[0]!, /<td>expires 2026-06-18 10:20Z<\/td>/);
   assert.match(rig.sentMessages[0]!, /Codex auth files:/);
-  assert.match(rig.sentMessages[0]!, /5h:20@2026-06-21 18:00\|7d:25@2026-06-28 18:00\|a \*/);
+  assert.ok(rig.sentMessages[0]!.includes(`5h:20@${localTimestamp(primaryResetsAt)}|7d:25@${localTimestamp(secondaryResetsAt)}|a *`));
   assert.match(rig.sentMessages[0]!, /\|b/);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
