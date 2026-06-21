@@ -81,7 +81,7 @@ function createConfig(tempDir: string): AppConfig {
     voiceSummaryButtonEnabled: true,
     voiceSummaryTextLimit: 180,
     voiceTextLimit: 2800,
-    voiceTtsTimeoutMs: 60_000,
+    voiceTtsTimeoutMs: 300_000,
   };
 }
 
@@ -5154,6 +5154,7 @@ test('startup preview cleanup recovers still-live app-server turns', async (t) =
     scopeId: 'telegram:99::root',
     threadId: 'thread-1',
     messageId: 123,
+    archivedMessageIds: [77, 78],
   });
   (rig.controller as any).app.readThreadSnapshot = async () => ({
     threadId: 'thread-1',
@@ -5196,6 +5197,7 @@ test('startup preview cleanup recovers still-live app-server turns', async (t) =
   const active = getActiveTurnForTest(rig, 'telegram:99::root', 'turn-live');
   assert.ok(active);
   assert.equal(active.isObserved, false);
+  assert.deepEqual(active.archivedMessageIds, [77, 78]);
   assert.equal((rig.controller as any).observedThreadWatchers.get('telegram:99::root')?.activeTurnId, 'turn-live');
   assert.equal(rig.store.listActiveTurnPreviews().length, 1);
   assert.equal(rig.editedMessages.length, 0);

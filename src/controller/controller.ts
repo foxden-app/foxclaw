@@ -3733,6 +3733,7 @@ export class BridgeSessionCore {
     authRetry: AuthRetryContext | null = null,
     collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
     queuedInputId: string | null = null,
+    archivedMessageIds: number[] = [],
   ): Promise<void> {
     const active = this.createActiveTurnState(
       scopeId,
@@ -3746,6 +3747,7 @@ export class BridgeSessionCore {
       collaborationMode,
       queuedInputId,
     );
+    active.archivedMessageIds = [...archivedMessageIds];
     active.authRetry = authRetry;
     this.setActiveTurn(scopeId, turnId, active);
     const pendingError = this.pendingTurnErrors.get(turnId);
@@ -3760,6 +3762,7 @@ export class BridgeSessionCore {
         threadId,
         messageId: previewMessageId,
         isObserved: active.isObserved,
+        archivedMessageIds: active.archivedMessageIds,
       });
     }
     this.updateStatus();
@@ -9318,6 +9321,7 @@ export class BridgeSessionCore {
     turnId: string;
     messageId: number;
     isObserved: boolean;
+    archivedMessageIds: number[];
   }): Promise<boolean> {
     if (this.getActiveTurn(preview.scopeId, preview.turnId)) {
       return true;
@@ -9370,6 +9374,7 @@ export class BridgeSessionCore {
       turnId: string;
       messageId: number;
       isObserved: boolean;
+      archivedMessageIds: number[];
     },
     target: { chatId: string; chatType: string; topicId: number | null },
     snapshot: AppThreadSnapshot,
@@ -9386,6 +9391,7 @@ export class BridgeSessionCore {
       preview.messageId,
       preview.isObserved,
     );
+    active.archivedMessageIds = [...preview.archivedMessageIds];
     this.setActiveTurn(preview.scopeId, liveTurn.turnId, active);
     this.store.saveActiveTurnPreview({
       turnId: liveTurn.turnId,
@@ -9393,6 +9399,7 @@ export class BridgeSessionCore {
       threadId: preview.threadId,
       messageId: preview.messageId,
       isObserved: preview.isObserved,
+      archivedMessageIds: active.archivedMessageIds,
     });
     const watcher: ObservedThreadWatcher = {
       scopeId: preview.scopeId,
@@ -9431,6 +9438,7 @@ export class BridgeSessionCore {
       threadId: string;
       turnId: string;
       messageId: number;
+      archivedMessageIds: number[];
     },
     target: { chatId: string; chatType: string; topicId: number | null },
   ): Promise<boolean> {
@@ -9480,6 +9488,8 @@ export class BridgeSessionCore {
           failedAuthTargets: new Set(),
         },
         turnState.collaborationMode,
+        null,
+        preview.archivedMessageIds,
       );
       this.logger.info('telegram.preview_auto_resumed_after_restart', {
         scopeId: preview.scopeId,
@@ -9725,6 +9735,7 @@ export class BridgeSessionCore {
           threadId: active.threadId,
           messageId,
           isObserved: active.isObserved,
+          archivedMessageIds: active.archivedMessageIds,
         });
       } catch (error) {
         this.logger.warn('telegram.preview_send_failed', { error: String(error), turnId: active.turnId });

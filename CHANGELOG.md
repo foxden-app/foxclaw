@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.58 - 2026-06-21
+
+### 中文
+- 修复重启恢复中的操作明细清理：FoxClaw 现在会把已折叠工具明细的 Telegram message id 持久化到 active turn preview，重启后最终答复完成时仍能按配置删除这些明细消息。
+- 将 `VOICE_TTS_TIMEOUT_MS` 默认值和示例配置改为 300000ms，适配 SoulX 等较慢语音后端；本机配置也已同步为 5 分钟。
+
+### English
+- Fixed operation-detail cleanup after restart recovery. FoxClaw now persists archived tool-detail Telegram message ids with active turn previews, so final-answer cleanup can still delete them after a service restart.
+- Changed the default and example `VOICE_TTS_TIMEOUT_MS` to 300000ms for slower voice backends such as SoulX; the local deployment config has been updated to five minutes as well.
+
 ## 0.5.57 - 2026-06-21
 
 ### 中文
