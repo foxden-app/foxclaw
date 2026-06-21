@@ -151,7 +151,7 @@ export function loadConfig(): AppConfig {
     telegramPollIntervalMs: intEnv('TELEGRAM_POLL_INTERVAL_MS', 1200),
     telegramPreviewThrottleMs: intEnv('TELEGRAM_PREVIEW_THROTTLE_MS', 800),
     telegramDeleteToolDetailsAfterFinal: boolEnv('TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL', true),
-    telegramPanelTtlMs: intEnv('TELEGRAM_PANEL_TTL_MS', 30 * 60_000),
+    telegramPanelTtlMs: intEnv('TELEGRAM_PANEL_TTL_MS', 5 * 60_000),
     threadListLimit: intEnv('THREAD_LIST_LIMIT', 10),
     statusPath: DEFAULT_STATUS_PATH,
     logPath: DEFAULT_LOG_PATH,

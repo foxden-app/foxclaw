@@ -1598,9 +1598,14 @@ export class BridgeSessionCore {
       );
       return;
     }
-    const configMatch = /^config:auth_auto_delete:(on|off)$/.exec(event.data);
+    const configMatch = /^config:(auth_auto_delete|delete_tool_details):(on|off)$/.exec(event.data);
     if (configMatch) {
-      await this.handleConfigToggleCallback(event, configMatch[1] === 'on', locale);
+      await this.handleConfigToggleCallback(
+        event,
+        configMatch[1]! as 'auth_auto_delete' | 'delete_tool_details',
+        configMatch[2] === 'on',
+        locale,
+      );
       return;
     }
     const voiceMatch = /^voice:([a-f0-9]+)$/.exec(event.data);
@@ -6782,54 +6787,92 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'config_auth_auto_delete_usage'));
         return;
       }
-      const update = await this.setAuthAutoDeleteNeedsRepair(enabled);
+      const update = await this.setFoxClawBooleanConfig('auth_auto_delete', enabled);
       const binding = this.store.getBinding(scopeId);
       const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-      await this.sendMessage(
+      const sentMessageId = await this.sendMessage(
         scopeId,
         `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
         configKeyboard(locale, this.config),
       );
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
+      return;
+    }
+    if (['delete_tool_details', 'delete-tool-details', 'tool_details', 'tool-details'].includes(action)) {
+      const enabled = parseConfigBooleanArg(args[1]);
+      if (enabled === null) {
+        await this.sendMessage(scopeId, t(locale, 'config_delete_tool_details_usage'));
+        return;
+      }
+      const update = await this.setFoxClawBooleanConfig('delete_tool_details', enabled);
+      const binding = this.store.getBinding(scopeId);
+      const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+      const sentMessageId = await this.sendMessage(
+        scopeId,
+        `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
+        configKeyboard(locale, this.config),
+      );
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
       return;
     }
     const binding = this.store.getBinding(scopeId);
     const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-    await this.sendMessage(scopeId, formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats()), configKeyboard(locale, this.config));
+    const sentMessageId = await this.sendMessage(scopeId, formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats()), configKeyboard(locale, this.config));
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
-  private async handleConfigToggleCallback(event: TelegramCallbackEvent, enabled: boolean, locale: AppLocale): Promise<void> {
-    const update = await this.setAuthAutoDeleteNeedsRepair(enabled);
+  private async handleConfigToggleCallback(
+    event: TelegramCallbackEvent,
+    key: 'auth_auto_delete' | 'delete_tool_details',
+    enabled: boolean,
+    locale: AppLocale,
+  ): Promise<void> {
+    const update = await this.setFoxClawBooleanConfig(key, enabled);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     const binding = this.store.getBinding(event.scopeId);
     const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
     const message = `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`;
     if (event.messageId !== null) {
       await this.editMessage(event.scopeId, event.messageId, message, configKeyboard(locale, this.config));
+      this.scheduleStalePanelDeletion(event.scopeId, event.messageId);
     } else {
-      await this.sendMessage(event.scopeId, message, configKeyboard(locale, this.config));
+      const sentMessageId = await this.sendMessage(event.scopeId, message, configKeyboard(locale, this.config));
+      this.scheduleStalePanelDeletion(event.scopeId, sentMessageId);
     }
   }
 
-  private async setAuthAutoDeleteNeedsRepair(enabled: boolean): Promise<{ enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null }> {
-    this.config.authAutoDeleteNeedsRepair = enabled;
+  private async setFoxClawBooleanConfig(
+    key: 'auth_auto_delete' | 'delete_tool_details',
+    enabled: boolean,
+  ): Promise<{ key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envKey: string; envPath: string | null; envUpdated: boolean; envError: string | null }> {
+    const envKey = key === 'auth_auto_delete'
+      ? 'AUTH_AUTO_DELETE_NEEDS_REPAIR'
+      : 'TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL';
+    if (key === 'auth_auto_delete') {
+      this.config.authAutoDeleteNeedsRepair = enabled;
+    } else {
+      this.config.telegramDeleteToolDetailsAfterFinal = enabled;
+    }
     const envPath = this.config.envPath;
     if (!envPath) {
-      return { enabled, envPath: null, envUpdated: false, envError: null };
+      return { key, enabled, envKey, envPath: null, envUpdated: false, envError: null };
     }
     try {
-      await writeEnvBoolean(envPath, 'AUTH_AUTO_DELETE_NEEDS_REPAIR', enabled);
-      return { enabled, envPath, envUpdated: true, envError: null };
+      await writeEnvBoolean(envPath, envKey, enabled);
+      return { key, enabled, envKey, envPath, envUpdated: true, envError: null };
     } catch (error) {
-      this.logger.warn('config.env_update_failed', { key: 'AUTH_AUTO_DELETE_NEEDS_REPAIR', envPath, error: toErrorMeta(error) });
-      return { enabled, envPath, envUpdated: false, envError: formatUserError(error) };
+      this.logger.warn('config.env_update_failed', { key: envKey, envPath, error: toErrorMeta(error) });
+      return { key, enabled, envKey, envPath, envUpdated: false, envError: formatUserError(error) };
     }
   }
 
   private formatConfigToggleUpdate(
     locale: AppLocale,
-    update: { enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null },
+    update: { key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null },
   ): string {
-    const lines = [t(locale, 'config_auth_auto_delete_updated', { value: t(locale, update.enabled ? 'yes' : 'no') })];
+    const lines = [t(locale, update.key === 'auth_auto_delete' ? 'config_auth_auto_delete_updated' : 'config_delete_tool_details_updated', {
+      value: t(locale, update.enabled ? 'yes' : 'no'),
+    })];
     if (update.envError) {
       lines.push(t(locale, 'config_env_update_failed', { value: update.envPath ?? t(locale, 'unknown'), error: update.envError }));
     }
@@ -8708,9 +8751,11 @@ export class BridgeSessionCore {
       }
       if (messageId !== undefined) {
         await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
+        this.scheduleStalePanelDeletion(scopeId, messageId);
         return;
       }
-      await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      const sentMessageId = await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
       return;
     }
 
@@ -8723,9 +8768,11 @@ export class BridgeSessionCore {
       }
       if (messageId !== undefined) {
         await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
+        this.scheduleStalePanelDeletion(scopeId, messageId);
         return;
       }
-      await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      const sentMessageId = await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
       return;
     }
 
@@ -8735,9 +8782,11 @@ export class BridgeSessionCore {
     }
     if (messageId !== undefined) {
       await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, true));
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendMessage(scopeId, text, whereKeyboard(locale, true));
+    const sentMessageId = await this.sendMessage(scopeId, text, whereKeyboard(locale, true));
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async handleThreadListNavigationCallback(
@@ -8863,9 +8912,11 @@ export class BridgeSessionCore {
     const keyboard = buildModelSettingsKeyboard(locale, models, settings);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async showSetupPanel(
@@ -8903,9 +8954,11 @@ export class BridgeSessionCore {
     const keyboard = buildAccessSettingsKeyboard(locale, access);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async handleSettingsCallback(
@@ -11187,11 +11240,17 @@ function formatConfigMessage(
   lines.push(t(locale, 'config_layers', { count: layers.length }));
   lines.push('');
   lines.push(t(locale, 'config_foxclaw_title'));
-  lines.push(t(locale, 'config_auth_auto_delete_needs_repair', {
-    value: t(locale, appConfig.authAutoDeleteNeedsRepair ? 'yes' : 'no'),
-  }));
-  lines.push(`AUTH_AUTO_DELETE_NEEDS_REPAIR=${appConfig.authAutoDeleteNeedsRepair ? 'true' : 'false'}`);
-  lines.push(formatCodexAuthPoolSummary(locale, authPoolStats));
+    lines.push(t(locale, 'config_auth_auto_delete_needs_repair', {
+      value: t(locale, appConfig.authAutoDeleteNeedsRepair ? 'yes' : 'no'),
+    }));
+    lines.push(`AUTH_AUTO_DELETE_NEEDS_REPAIR=${appConfig.authAutoDeleteNeedsRepair ? 'true' : 'false'}`);
+    lines.push(t(locale, 'config_delete_tool_details_after_final', {
+      value: t(locale, appConfig.telegramDeleteToolDetailsAfterFinal ? 'yes' : 'no'),
+    }));
+    lines.push(`TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=${appConfig.telegramDeleteToolDetailsAfterFinal ? 'true' : 'false'}`);
+    lines.push(t(locale, 'config_panel_ttl', { value: formatDurationMs(locale, appConfig.telegramPanelTtlMs) }));
+    lines.push(`TELEGRAM_PANEL_TTL_MS=${appConfig.telegramPanelTtlMs}`);
+    lines.push(formatCodexAuthPoolSummary(locale, authPoolStats));
   return lines.join('\n');
 }
 
@@ -11208,11 +11267,33 @@ function isInvalidCodexAuthDeleteReason(reason: string | null | undefined): bool
 }
 
 function configKeyboard(locale: AppLocale, appConfig: AppConfig): Array<Array<{ text: string; callback_data: string }>> {
-  const enabled = appConfig.authAutoDeleteNeedsRepair;
-  return [[{
-    text: t(locale, enabled ? 'button_config_auth_auto_delete_off' : 'button_config_auth_auto_delete_on'),
-    callback_data: `config:auth_auto_delete:${enabled ? 'off' : 'on'}`,
-  }]];
+  const authAutoDeleteEnabled = appConfig.authAutoDeleteNeedsRepair;
+  const deleteToolDetailsEnabled = appConfig.telegramDeleteToolDetailsAfterFinal;
+  return [
+    [{
+      text: t(locale, authAutoDeleteEnabled ? 'button_config_auth_auto_delete_off' : 'button_config_auth_auto_delete_on'),
+      callback_data: `config:auth_auto_delete:${authAutoDeleteEnabled ? 'off' : 'on'}`,
+    }],
+    [{
+      text: t(locale, deleteToolDetailsEnabled ? 'button_config_delete_tool_details_off' : 'button_config_delete_tool_details_on'),
+      callback_data: `config:delete_tool_details:${deleteToolDetailsEnabled ? 'off' : 'on'}`,
+    }],
+  ];
+}
+
+function formatDurationMs(locale: AppLocale, value: number): string {
+  if (value <= 0) {
+    return locale === 'zh' ? '关闭' : 'disabled';
+  }
+  if (value % 60_000 === 0) {
+    const minutes = value / 60_000;
+    return locale === 'zh' ? `${minutes} 分钟` : `${minutes} min`;
+  }
+  if (value % 1000 === 0) {
+    const seconds = value / 1000;
+    return locale === 'zh' ? `${seconds} 秒` : `${seconds} sec`;
+  }
+  return `${value}ms`;
 }
 
 function parseConfigBooleanArg(value: string | undefined): boolean | null {

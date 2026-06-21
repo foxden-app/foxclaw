@@ -49,7 +49,7 @@ function createConfig(tempDir: string): AppConfig {
     telegramPollIntervalMs: 1000,
     telegramPreviewThrottleMs: 0,
     telegramDeleteToolDetailsAfterFinal: true,
-    telegramPanelTtlMs: 30 * 60_000,
+    telegramPanelTtlMs: 5 * 60_000,
     threadListLimit: 10,
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
@@ -4615,9 +4615,12 @@ test('/config toggles auth auto-delete and writes the env file', async (t) => {
 
   assert.equal((rig.controller as any).config.authAutoDeleteNeedsRepair, true);
   assert.match(rig.sentMessages.at(-1)!, /Auto-delete unrecoverable auth candidates set to: yes/);
+  assert.match(rig.sentMessages.at(-1)!, /Delete operation details after final reply: yes/);
+  assert.match(rig.sentMessages.at(-1)!, /Interactive panel cleanup: 5 min/);
   assert.match(rig.sentMessages.at(-1)!, /Auth pool: total seen 0, alive 0, invalid-deleted 0\./);
   assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /AUTH_AUTO_DELETE_NEEDS_REPAIR=true/);
   assert.equal(rig.sentKeyboards.at(-1)?.[0]?.[0]?.callback_data, 'config:auth_auto_delete:off');
+  assert.equal(rig.sentKeyboards.at(-1)?.[1]?.[0]?.callback_data, 'config:delete_tool_details:off');
 
   await (rig.controller as any).handleCallback(createCallback('config:auth_auto_delete:off', 1));
 
@@ -4626,6 +4629,40 @@ test('/config toggles auth auto-delete and writes the env file', async (t) => {
   assert.match(rig.editedMessages.at(-1)!, /Auto-delete unrecoverable auth candidates set to: no/);
   assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /AUTH_AUTO_DELETE_NEEDS_REPAIR=false/);
   assert.equal(rig.editedKeyboards.at(-1)?.[0]?.[0]?.callback_data, 'config:auth_auto_delete:on');
+});
+
+test('/config toggles operation-detail cleanup and writes the env file', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).app.readConfig = async () => ({
+    config: { model: 'gpt-5', approval_policy: 'never', sandbox_mode: 'read-only' },
+    layers: [],
+    origins: {},
+  });
+
+  await (rig.controller as any).handleCommand(
+    createEvent('/config delete_tool_details off'),
+    'en',
+    'config',
+    ['delete_tool_details', 'off'],
+  );
+
+  assert.equal((rig.controller as any).config.telegramDeleteToolDetailsAfterFinal, false);
+  assert.match(rig.sentMessages.at(-1)!, /Delete operation details after final reply set to: no/);
+  assert.match(rig.sentMessages.at(-1)!, /TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=false/);
+  assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=false/);
+  assert.equal(rig.sentKeyboards.at(-1)?.[1]?.[0]?.callback_data, 'config:delete_tool_details:on');
+
+  await (rig.controller as any).handleCallback(createCallback('config:delete_tool_details:on', 1));
+
+  assert.equal((rig.controller as any).config.telegramDeleteToolDetailsAfterFinal, true);
+  assert.equal(rig.callbackAnswers.at(-1), 'Decision recorded');
+  assert.match(rig.editedMessages.at(-1)!, /Delete operation details after final reply set to: yes/);
+  assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=true/);
+  assert.equal(rig.editedKeyboards.at(-1)?.[1]?.[0]?.callback_data, 'config:delete_tool_details:off');
 });
 
 test('diagnostic notifications are routed to bound Telegram scope', async (t) => {

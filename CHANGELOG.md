@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.61 - 2026-06-21
+
+### 中文
+- 将 `/auth`、`/setup`、`/threads` 等交互面板的默认自动清理时间从 30 分钟改为 5 分钟，并把 `/where`、旧 model/access 设置面板和 `/config` 面板纳入同一类时效清理。
+- `/config` 现在明确定位为 FoxClaw 自身设置面板，新增“最终回复后删除操作明细”开关；可通过按钮或 `/config delete_tool_details <on|off>` 修改，并写回 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL`。
+- `/config` 展示当前 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL` 和 `TELEGRAM_PANEL_TTL_MS`，方便确认聊天清理策略是否生效。
+
+### English
+- Changed the default cleanup timeout for interactive panels such as `/auth`, `/setup`, and `/threads` from 30 minutes to 5 minutes, and applied the same stale-panel cleanup to `/where`, legacy model/access settings panels, and `/config`.
+- `/config` is now the FoxClaw runtime settings panel and includes a "delete operation details after final reply" toggle. It can be changed via the button or `/config delete_tool_details <on|off>`, writing `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL`.
+- `/config` shows the current `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL` and `TELEGRAM_PANEL_TTL_MS` values so cleanup behavior is visible.
+
 ## 0.5.60 - 2026-06-21
 
 ### 中文
