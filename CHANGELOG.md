@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.57 - 2026-06-21
+
+### 中文
+- 修复 SoulX SSH 语音后端 URL 构造错误：远端脚本现在正确展开 `$BASE_URL`，不再把 `${BASE_URL}` 字面量传给 curl 导致 `URL rejected: Bad hostname`。
+- SoulX SSH 语音请求现在也会把 `VOICE_TTS_TIMEOUT_MS` 下发给远端 curl，远端 `/health` 和 `/v1/tts` 请求会自行按超时退出，避免 SSH 被中断后留下长时间运行的 curl。
+
+### English
+- Fixed SoulX SSH voice backend URL construction. The remote script now expands `$BASE_URL` correctly instead of passing a literal `${BASE_URL}` to curl and failing with `URL rejected: Bad hostname`.
+- SoulX SSH voice requests now pass `VOICE_TTS_TIMEOUT_MS` down to remote curl for both `/health` and `/v1/tts`, preventing long-running remote curl processes after a timed-out SSH call.
+
 ## 0.5.56 - 2026-06-21
 
 ### 中文

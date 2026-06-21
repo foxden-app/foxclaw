@@ -54,7 +54,7 @@ async function synthesizeViaHttp(text: string, config: AppConfig): Promise<Buffe
     throw new Error('VOICE_TTS_URL is not configured');
   }
   if (config.voiceTtsEngine === 'soulx') {
-    return convertToOggOpus(await requestTtsWav(config, '/v1/tts', { text, seed: '7' }), config.voiceFfmpegBin);
+    return convertToOggOpus(await requestTtsWav(config, '/v1/tts', { text, seed: 7 }), config.voiceFfmpegBin);
   }
   try {
     return convertToOggOpus(await requestTtsWav(config, '/v1/tts/custom', { text, language: 'zh' }), config.voiceFfmpegBin);
@@ -71,7 +71,7 @@ async function synthesizeViaHttp(text: string, config: AppConfig): Promise<Buffe
   return convertToOggOpus(wav, config.voiceFfmpegBin);
 }
 
-async function requestTtsWav(config: AppConfig, pathname: string, body: Record<string, string>): Promise<Buffer> {
+async function requestTtsWav(config: AppConfig, pathname: string, body: Record<string, unknown>): Promise<Buffer> {
   if (!config.voiceTtsUrl) {
     throw new Error('VOICE_TTS_URL is not configured');
   }
@@ -209,23 +209,25 @@ async function synthesizeSoulxViaSsh(text: string, config: AppConfig): Promise<B
   }
   const encodedText = Buffer.from(text, 'utf8').toString('base64');
   const baseUrl = config.voiceTtsUrl || 'http://127.0.0.1:18082';
+  const curlMaxTimeSeconds = Math.max(1, Math.ceil(config.voiceTtsTimeoutMs / 1000));
   const script = String.raw`set -euo pipefail
 TEXT="$(printf '%s' "$1" | base64 -d)"
 ENV_DIR="$2"
 BASE_URL="$3"
+CURL_MAX_TIME="$4"
 cd "$ENV_DIR"
 set -a
 . ./.env
 set +a
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-curl -sS "\${BASE_URL}/health" >/dev/null
+curl -sS --connect-timeout 5 --max-time "$CURL_MAX_TIME" "$BASE_URL/health" >/dev/null
 TEXT="$TEXT" python3 - <<'PY' > "$tmp/body.json"
 import json
 import os
 print(json.dumps({"text": os.environ["TEXT"], "seed": 7, "dialect_prompt": ""}, ensure_ascii=False))
 PY
-status="$(curl -sS -w '%{http_code}' -X POST "\${BASE_URL}/v1/tts" \
+status="$(curl -sS --connect-timeout 5 --max-time "$CURL_MAX_TIME" -w '%{http_code}' -X POST "$BASE_URL/v1/tts" \
   -H "Authorization: Bearer $QWEN_SPEECH_API_TOKEN" \
   -H "Content-Type: application/json" \
   --data-binary "@$tmp/body.json" \
@@ -253,6 +255,7 @@ PY
     encodedText,
     envDir,
     baseUrl,
+    String(curlMaxTimeSeconds),
   ], script, config.voiceTtsTimeoutMs);
 }
 
