@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.56 - 2026-06-21
+
+### 中文
+- 修正 `foxclaw status` 和 Telegram `/status` 的升级状态摘要：旧的成功 self-update 记录如果不是当前 FoxClaw 版本，不再显示为 “Last update/Last service update”，避免误导当前运行版本判断。
+- 多 runtime 状态聚合现在携带当前 FoxClaw 版本，用于判断升级记录是否仍然相关；失败、运行中等需要处理的升级状态仍会展示。
+
+### English
+- Fixed `foxclaw status` and Telegram `/status` update summaries so stale successful self-update records are no longer shown as the current "Last update/Last service update" when they do not match the running FoxClaw version.
+- Multi-runtime status aggregation now carries the current FoxClaw version for this relevance check; failed or in-progress update states are still shown.
+
 ## 0.5.55 - 2026-06-21
 
 ### 中文

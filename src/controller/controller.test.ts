@@ -1254,6 +1254,7 @@ test('/status in multi-bot mode reports auth runtime types and recent coordinati
   (rig.controller as any).config.tgMultiBotMode = true;
   (rig.controller as any).coordinator = {
     getServiceStatus: async () => ({
+      currentVersion: '0.4.0',
       bots: [
         { id: 'bot1', username: 'bot_one', connected: true, activeTurns: 1, currentAuth: 'auth.json_a' },
         { id: 'bot2', username: 'bot_two', connected: true, activeTurns: 0, runtimeKind: 'default' as const, currentAuth: 'auth.json_b' },

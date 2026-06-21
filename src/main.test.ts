@@ -122,7 +122,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
         scopeId: 'telegram:1::root',
         locale: 'zh',
         fromVersion: '0.5.40',
-        toVersion: '0.5.41',
+        toVersion: '0.5.56',
         error: null,
         updatedAt: new Date().toISOString(),
       },
@@ -133,12 +133,37 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
     assert.match(summary.stdout, /FoxClaw status: running, connected/);
     assert.match(summary.stdout, /Work: active 1, queued 3, approvals 1, questions 0/);
     assert.match(summary.stdout, /Auth sync: peers 1, pending imports 4/);
-    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.41/);
+    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.56/);
     assert.doesNotMatch(summary.stdout.trim(), /^\{/);
 
     const raw = runFoxclawCliWithEnv({ STATUS_PATH: statusPath }, 'status', '--json');
     assert.equal(raw.status, 0);
     assert.equal(JSON.parse(raw.stdout).authSync.pendingImports, 4);
+
+    const staleStatusPath = path.join(tempDir, 'stale-status.json');
+    fs.writeFileSync(staleStatusPath, `${JSON.stringify({
+      running: true,
+      connected: true,
+      userAgent: 'foxclaw/0.141.0 (Linux; x86_64) unknown (foxclaw; 0.5.55)',
+      botUsername: 'foxclaw_bot',
+      currentBindings: 0,
+      pendingApprovals: 0,
+      pendingUserInputs: 0,
+      queuedTurns: 0,
+      activeTurns: 0,
+      lastError: null,
+      updatedAt: new Date().toISOString(),
+      lastUpdate: {
+        state: 'succeeded',
+        fromVersion: '0.5.53',
+        toVersion: '0.5.53',
+        error: null,
+        updatedAt: new Date().toISOString(),
+      },
+    })}\n`);
+    const staleSummary = runFoxclawCliWithEnv({ STATUS_PATH: staleStatusPath }, 'status');
+    assert.equal(staleSummary.status, 0);
+    assert.doesNotMatch(staleSummary.stdout, /Last update:/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

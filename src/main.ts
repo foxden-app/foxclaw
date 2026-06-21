@@ -56,6 +56,7 @@ import {
   telegramVoiceContentType,
 } from './voice/files.js';
 import { inferTelegramBotId, resolveTelegramVoiceTarget } from './voice/target.js';
+import { shouldShowRuntimeLastUpdate } from './update_status.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -494,8 +495,9 @@ function formatRuntimeStatusSummary(status: RuntimeStatus): string {
   if (status.authProactiveRefresh) {
     lines.push(`Auth refresh: ${status.authProactiveRefresh.state}${status.authProactiveRefresh.finishedAt ? ` ${formatAge(status.authProactiveRefresh.finishedAt)}` : ''}`);
   }
-  if (status.lastUpdate) {
-    lines.push(`Last update: ${status.lastUpdate.fromVersion} -> ${status.lastUpdate.toVersion ?? 'unknown'} ${formatAge(status.lastUpdate.updatedAt)}`);
+  if (shouldShowRuntimeLastUpdate(status, readPackageVersion())) {
+    const lastUpdate = status.lastUpdate!;
+    lines.push(`Last update: ${lastUpdate.fromVersion} -> ${lastUpdate.toVersion ?? 'unknown'} ${formatAge(lastUpdate.updatedAt)}`);
   }
   if (status.lastError) {
     lines.push(`Last error: ${truncateStatusLine(status.lastError, 160)}`);
@@ -775,6 +777,7 @@ async function runServeCli(): Promise<void> {
         authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
+          currentVersion: readPackageVersion(),
           bots: await Promise.all(runtimes.map(async (runtime) => {
             const status = runtime.core.getRuntimeStatus();
             return {

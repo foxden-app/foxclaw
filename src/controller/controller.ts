@@ -65,6 +65,7 @@ import type {
   ThreadSessionState,
 } from '../types.js';
 import { parseCommand } from './commands.js';
+import { shouldShowRuntimeLastUpdate } from '../update_status.js';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
@@ -171,6 +172,7 @@ export interface CoreCoordinator {
   authSyncTest?: () => Promise<{ sent: number; replied: number; missing: string[] }>;
   statusUpdated?: (status: RuntimeStatus) => void;
   getServiceStatus?: () => Promise<{
+    currentVersion?: string;
     bots: NonNullable<RuntimeStatus['bots']>;
     weixinRuntime?: RuntimeStatus['weixinRuntime'];
     authMirror?: RuntimeStatus['authMirror'];
@@ -979,13 +981,14 @@ export class BridgeSessionCore {
               value: formatAuthProactiveRefreshStatus(locale, serviceStatus.authProactiveRefresh),
             }));
           }
-          if (serviceStatus.lastUpdate) {
+          if (shouldShowRuntimeLastUpdate(serviceStatus)) {
+            const lastUpdate = serviceStatus.lastUpdate!;
             lines.push(t(locale, 'status_last_update', {
-              from: serviceStatus.lastUpdate.fromVersion,
-              to: serviceStatus.lastUpdate.toVersion ?? t(locale, 'unknown'),
-              time: serviceStatus.lastUpdate.updatedAt,
+              from: lastUpdate.fromVersion,
+              to: lastUpdate.toVersion ?? t(locale, 'unknown'),
+              time: lastUpdate.updatedAt,
             }));
-            const codexUpdateLine = this.formatCodexUpdateResult(serviceStatus.lastUpdate);
+            const codexUpdateLine = this.formatCodexUpdateResult(lastUpdate);
             if (codexUpdateLine) {
               lines.push(t(locale, 'status_last_codex_update', { value: codexUpdateLine }));
             }
