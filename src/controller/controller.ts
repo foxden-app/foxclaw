@@ -375,8 +375,10 @@ interface CodexAuthQuotaSnapshot {
   planType: string | null;
   primaryWindowDurationMins: number | null;
   primaryRemainingPercent: number | null;
+  primaryResetsAt: number | null;
   secondaryWindowDurationMins: number | null;
   secondaryRemainingPercent: number | null;
+  secondaryResetsAt: number | null;
 }
 
 interface CodexAuthQuotaIdentity {
@@ -619,6 +621,7 @@ export class BridgeSessionCore {
   private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshInProgress = false;
   private proactiveAuthRefreshStatus: AuthProactiveRefreshStatus | null = null;
+  private stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -753,6 +756,10 @@ export class BridgeSessionCore {
     this.clearRestartPreviewRecoveryTimers();
     this.clearSelfUpdateStatusPoll();
     this.clearProactiveAuthRefreshTimer();
+    for (const timer of this.stalePanelDeleteTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.stalePanelDeleteTimers.clear();
     await this.app.stop({ terminateServer: false });
     this.updateStatus();
   }
@@ -4352,6 +4359,55 @@ export class BridgeSessionCore {
     }
   }
 
+  private async editRichInternalMessage(
+    scopeId: string,
+    messageId: number,
+    title: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      await this.editMessage(scopeId, messageId, text, inlineKeyboard);
+      return;
+    }
+    await this.editRichHtmlMessage(
+      scopeId,
+      messageId,
+      formatRichInternalMessage(title, text),
+      escapeTelegramHtml(text),
+      inlineKeyboard,
+    );
+  }
+
+  private async editAuthPanelMessage(
+    scopeId: string,
+    messageId: number,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    await this.editRichInternalMessage(scopeId, messageId, '/auth', text, inlineKeyboard);
+    this.scheduleStalePanelDeletion(scopeId, messageId);
+  }
+
+  private scheduleStalePanelDeletion(scopeId: string, messageId: number): void {
+    if (this.config.telegramPanelTtlMs <= 0 || parseWeixinBridgeScope(scopeId)) {
+      return;
+    }
+    const key = `${scopeId}:${messageId}`;
+    const existing = this.stalePanelDeleteTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.stalePanelDeleteTimers.delete(key);
+      void this.deleteMessage(scopeId, messageId).catch(error => {
+        this.logger.warn('telegram.stale_panel_delete_failed', { scopeId, messageId, error: toErrorMeta(error) });
+      });
+    }, this.config.telegramPanelTtlMs);
+    timer.unref();
+    this.stalePanelDeleteTimers.set(key, timer);
+  }
+
   private async deleteMessage(scopeId: string, messageId: number): Promise<void> {
     await this.messaging.deleteMessage(scopeId, messageId);
   }
@@ -5956,6 +6012,7 @@ export class BridgeSessionCore {
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
+    this.scheduleStalePanelDeletion(scopeId, messageId);
   }
 
   private async handleAuthSyncCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -6863,12 +6920,12 @@ export class BridgeSessionCore {
       }
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_sync_safe_starting'));
       if (record.messageId !== null) {
-        await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_safe_starting'), []);
+        await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_safe_starting'), []);
       }
       const result = await this.runAuthSafeSyncAll();
       if (!result) {
         if (record.messageId !== null) {
-          await this.editMessage(
+          await this.editAuthPanelMessage(
             event.scopeId,
             record.messageId,
             t(locale, 'auth_sync_disabled'),
@@ -6883,7 +6940,7 @@ export class BridgeSessionCore {
       record.createdAt = Date.now();
       clampCodexAuthListOffset(record);
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           `${t(locale, 'auth_sync_safe_done', {
@@ -6904,7 +6961,7 @@ export class BridgeSessionCore {
       }
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_confirm_short'));
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           t(locale, 'auth_refresh_all_confirm_message'),
@@ -6920,7 +6977,7 @@ export class BridgeSessionCore {
       record.candidates = state.candidates;
       record.createdAt = Date.now();
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
@@ -6936,12 +6993,12 @@ export class BridgeSessionCore {
       }
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_starting'));
       if (record.messageId !== null) {
-        await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_refresh_all_starting'), []);
+        await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_refresh_all_starting'), []);
       }
       const lease = await this.coordinator?.acquireAuthRefreshLease?.('auth refresh all');
       if (lease && !lease.ok) {
         if (record.messageId !== null) {
-          await this.editMessage(
+          await this.editAuthPanelMessage(
             event.scopeId,
             record.messageId,
             t(locale, 'auth_refresh_all_lease_failed', { error: lease.reason ?? t(locale, 'unknown') }),
@@ -6961,7 +7018,7 @@ export class BridgeSessionCore {
       record.candidates = state.candidates;
       record.createdAt = Date.now();
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
@@ -7006,7 +7063,7 @@ export class BridgeSessionCore {
     clampCodexAuthListOffset(record);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
@@ -7037,7 +7094,7 @@ export class BridgeSessionCore {
     }
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_repair_actions_short'));
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         t(locale, 'auth_repair_actions_message', { value: formatCodexAuthCandidateDisplayName(candidate.name) }),
@@ -7074,7 +7131,7 @@ export class BridgeSessionCore {
       record.createdAt = Date.now();
       clampCodexAuthListOffset(record);
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
@@ -7090,7 +7147,7 @@ export class BridgeSessionCore {
     if (action === 'login') {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'login_device_started'));
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           t(locale, 'auth_repair_login_preparing', { value: candidate.name }),
@@ -7108,7 +7165,7 @@ export class BridgeSessionCore {
     record.createdAt = Date.now();
     clampCodexAuthListOffset(record);
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         `${t(locale, 'auth_candidate_deleted', { value: candidate.name })}${restarted ? `\n${t(locale, 'auth_delete_current_restarted')}` : ''}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
@@ -7144,7 +7201,7 @@ export class BridgeSessionCore {
     clampCodexAuthListOffset(record);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, disabled ? 'auth_candidate_disabled_short' : 'auth_candidate_enabled_short'));
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
@@ -7186,7 +7243,7 @@ export class BridgeSessionCore {
     const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
     const switchingMessage = t(locale, 'auth_switching', this.codexAuthSwitchParams(locale, switchLabels.fromLabel, switchLabels.toLabel));
     if (record.messageId !== null) {
-      await this.editMessage(event.scopeId, record.messageId, switchingMessage, []);
+      await this.editAuthPanelMessage(event.scopeId, record.messageId, switchingMessage, []);
     }
     const outcome = await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false, false);
     const state = await this.listCodexAuthState();
@@ -7194,7 +7251,7 @@ export class BridgeSessionCore {
     record.createdAt = Date.now();
     clampCodexAuthListOffset(record);
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         [
@@ -8243,6 +8300,7 @@ export class BridgeSessionCore {
         ? buildThreadsKeyboard(locale, threadLikes, binding.threadId)
         : buildThreadListKeyboard(locale, threadLikes, listState, binding.threadId);
       await this.editHtmlMessage(scopeId, event.messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, event.messageId);
     }
 
     let callbackText = t(locale, 'thread_opened');
@@ -8787,9 +8845,11 @@ export class BridgeSessionCore {
       : buildThreadListKeyboard(locale, forDisplay, presentationState, binding?.threadId ?? null);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async showModelSettingsPanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
@@ -8826,9 +8886,11 @@ export class BridgeSessionCore {
     const keyboard = buildSetupPanelKeyboard(locale, { focus, models, settings, access });
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async showAccessSettingsPanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
@@ -10754,7 +10816,9 @@ function formatRichInternalSectionWithoutCandidates(lines: string[]): string {
 interface RichAuthCandidateRow {
   index: string;
   quotaA: string;
+  quotaAReset: string;
   quotaB: string;
+  quotaBReset: string;
   name: string;
   current: boolean;
   plan: string;
@@ -10786,12 +10850,14 @@ function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
   if (!name) {
     return null;
   }
-  const quotas = parts.map(formatRichAuthQuotaCell);
+  const quotas = parts.map(parseRichAuthQuotaCell);
   const statusParts = splitRichAuthStatus(status);
   return {
     index: match[1]!,
-    quotaA: quotas[0] ?? '-',
-    quotaB: quotas[1] ?? '-',
+    quotaA: quotas[0]?.value ?? '-',
+    quotaAReset: quotas[0]?.reset ?? '-',
+    quotaB: quotas[1]?.value ?? '-',
+    quotaBReset: quotas[1]?.reset ?? '-',
     name,
     current,
     enabled: statusParts.health === 'disabled' || statusParts.health === '已禁用'
@@ -10804,12 +10870,14 @@ function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
 function formatRichAuthCandidateTable(rows: RichAuthCandidateRow[]): string {
   return [
     '<table bordered striped>',
-    '<tr><th>#</th><th>Quota A</th><th>Quota B</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th><th>Command</th></tr>',
+    '<tr><th>#</th><th>Quota A</th><th>A reset</th><th>Quota B</th><th>B reset</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th><th>Command</th></tr>',
     ...rows.map(row => [
       '<tr>',
       `<td>${escapeTelegramHtml(row.index)}</td>`,
       `<td>${escapeTelegramHtml(row.quotaA)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaAReset)}</td>`,
       `<td>${escapeTelegramHtml(row.quotaB)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaBReset)}</td>`,
       `<td>${formatRichAuthCommandLink(`/auth use ${row.index}`, row.name)}</td>`,
       `<td>${row.current ? 'yes' : '-'}</td>`,
       `<td>${escapeTelegramHtml(row.plan)}</td>`,
@@ -10863,16 +10931,17 @@ function formatRichAuthRisk(health: string): string {
   return '-';
 }
 
-function formatRichAuthQuotaCell(value: string): string {
+function parseRichAuthQuotaCell(value: string): { value: string; reset: string } {
   const trimmed = value.trim();
   if (!trimmed || trimmed === '--' || trimmed === '—') {
-    return '-';
+    return { value: '-', reset: '-' };
   }
-  const [windowLabel, percent] = trimmed.split(':');
+  const [quotaPart, reset = '-'] = trimmed.split('@', 2);
+  const [windowLabel, percent] = quotaPart!.split(':');
   if (!windowLabel || percent === undefined) {
-    return trimmed;
+    return { value: quotaPart!, reset };
   }
-  return `${percent}%`;
+  return { value: `${percent}%`, reset };
 }
 
 function formatRichAuthCommandCell(row: RichAuthCandidateRow): string {
@@ -13213,8 +13282,10 @@ function authQuotaSnapshotFromRateLimit(
     planType: snapshot.planType,
     primaryWindowDurationMins: snapshot.primary?.windowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
+    primaryResetsAt: snapshot.primary?.resetsAt ?? null,
     secondaryWindowDurationMins: snapshot.secondary?.windowDurationMins ?? null,
     secondaryRemainingPercent: snapshot.secondary ? remainingUsagePercent(snapshot.secondary.usedPercent) : null,
+    secondaryResetsAt: snapshot.secondary?.resetsAt ?? null,
   };
 }
 
@@ -13226,8 +13297,10 @@ function codexAuthQuotaSnapshotFromRecord(record: CodexAuthQuotaSnapshotRecord):
     planType: record.planType,
     primaryWindowDurationMins: record.primaryWindowDurationMins,
     primaryRemainingPercent: record.primaryRemainingPercent,
+    primaryResetsAt: record.primaryResetsAt,
     secondaryWindowDurationMins: record.secondaryWindowDurationMins,
     secondaryRemainingPercent: record.secondaryRemainingPercent,
+    secondaryResetsAt: record.secondaryResetsAt,
   };
 }
 
@@ -13255,8 +13328,10 @@ function isFiniteCodexAuthQuotaSnapshotRecord(record: CodexAuthQuotaSnapshotReco
     && isNullableString(record.planType)
     && isNullableFiniteNumber(record.primaryWindowDurationMins)
     && isNullableFiniteNumber(record.primaryRemainingPercent)
+    && isNullableFiniteNumber(record.primaryResetsAt)
     && isNullableFiniteNumber(record.secondaryWindowDurationMins)
-    && isNullableFiniteNumber(record.secondaryRemainingPercent);
+    && isNullableFiniteNumber(record.secondaryRemainingPercent)
+    && isNullableFiniteNumber(record.secondaryResetsAt);
 }
 
 function remainingUsagePercent(usedPercent: number): number | null {
@@ -13271,13 +13346,13 @@ function formatAuthQuotaPrefix(locale: AppLocale, snapshot: CodexAuthQuotaSnapsh
     return '--';
   }
   const windows = [
-    [snapshot.primaryWindowDurationMins, snapshot.primaryRemainingPercent, 'primary'],
-    [snapshot.secondaryWindowDurationMins, snapshot.secondaryRemainingPercent, 'secondary'],
+    [snapshot.primaryWindowDurationMins, snapshot.primaryRemainingPercent, snapshot.primaryResetsAt, 'primary'],
+    [snapshot.secondaryWindowDurationMins, snapshot.secondaryRemainingPercent, snapshot.secondaryResetsAt, 'secondary'],
   ] as const;
   const values = windows
-    .filter(([duration, remaining]) => duration !== null || remaining !== null)
-    .map(([duration, remaining, fallback]) => (
-      `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}`
+    .filter(([duration, remaining, resetsAt]) => duration !== null || remaining !== null || resetsAt !== null)
+    .map(([duration, remaining, resetsAt, fallback]) => (
+      `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}${resetsAt === null ? '' : `@${formatLocalTimestamp(resetsAt)}`}`
     ));
   return values.length > 0 ? values.join('|') : '--';
 }
@@ -13307,8 +13382,10 @@ function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapsh
     && (snapshot.planType === undefined || isNullableString(snapshot.planType))
     && (snapshot.primaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.primaryWindowDurationMins))
     && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
+    && (snapshot.primaryResetsAt === undefined || isNullableFiniteNumber(snapshot.primaryResetsAt))
     && (snapshot.secondaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.secondaryWindowDurationMins))
-    && isNullableFiniteNumber(snapshot.secondaryRemainingPercent);
+    && isNullableFiniteNumber(snapshot.secondaryRemainingPercent)
+    && (snapshot.secondaryResetsAt === undefined || isNullableFiniteNumber(snapshot.secondaryResetsAt));
 }
 
 function normalizeCodexAuthQuotaSnapshot(snapshot: CodexAuthQuotaSnapshot): CodexAuthQuotaSnapshot {
@@ -13319,8 +13396,10 @@ function normalizeCodexAuthQuotaSnapshot(snapshot: CodexAuthQuotaSnapshot): Code
     planType: snapshot.planType ?? null,
     primaryWindowDurationMins: snapshot.primaryWindowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primaryRemainingPercent,
+    primaryResetsAt: snapshot.primaryResetsAt ?? null,
     secondaryWindowDurationMins: snapshot.secondaryWindowDurationMins ?? null,
     secondaryRemainingPercent: snapshot.secondaryRemainingPercent,
+    secondaryResetsAt: snapshot.secondaryResetsAt ?? null,
   };
 }
 

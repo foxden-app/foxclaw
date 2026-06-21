@@ -49,6 +49,7 @@ function createConfig(tempDir: string): AppConfig {
     telegramPollIntervalMs: 1000,
     telegramPreviewThrottleMs: 0,
     telegramDeleteToolDetailsAfterFinal: true,
+    telegramPanelTtlMs: 30 * 60_000,
     threadListLimit: 10,
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
@@ -261,13 +262,19 @@ function chatGptAccount(planType = 'plus'): any {
   };
 }
 
-function codexRateLimits(primaryUsedPercent = 80, secondaryUsedPercent = 75, planType = 'plus'): any {
+function codexRateLimits(
+  primaryUsedPercent = 80,
+  secondaryUsedPercent = 75,
+  planType = 'plus',
+  primaryResetsAt: number | null = null,
+  secondaryResetsAt: number | null = null,
+): any {
   return {
     rateLimits: {
       limitId: 'codex',
       limitName: null,
-      primary: { usedPercent: primaryUsedPercent, windowDurationMins: 300, resetsAt: null },
-      secondary: { usedPercent: secondaryUsedPercent, windowDurationMins: 10080, resetsAt: null },
+      primary: { usedPercent: primaryUsedPercent, windowDurationMins: 300, resetsAt: primaryResetsAt },
+      secondary: { usedPercent: secondaryUsedPercent, windowDurationMins: 10080, resetsAt: secondaryResetsAt },
       credits: null,
       planType,
       rateLimitReachedType: null,
@@ -2039,7 +2046,7 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   (rig.controller as any).app.readAccountRateLimits = async () => {
     const currentName = path.basename(fs.realpathSync(path.join(authDir, 'auth.json')));
     return currentName === 'auth.json_a'
-      ? codexRateLimits(80, 75)
+      ? codexRateLimits(80, 75, 'plus', 1_782_036_000, 1_782_640_800)
       : codexRateLimits(10, 5);
   };
 
@@ -2047,13 +2054,13 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
 
   assert.equal(rig.sentRichMessages.length, 1);
   assert.match(rig.sentRichMessages[0]!, /<h3>\/auth<\/h3>/);
-  assert.match(rig.sentRichMessages[0]!, /<th>Quota A<\/th><th>Quota B<\/th><th>Auth<\/th>/);
+  assert.match(rig.sentRichMessages[0]!, /<th>Quota A<\/th><th>A reset<\/th><th>Quota B<\/th><th>B reset<\/th><th>Auth<\/th>/);
   assert.match(rig.sentRichMessages[0]!, /<th>Last refresh<\/th><th>Expiry<\/th><th>Risk<\/th><th>Command<\/th>/);
-  assert.match(rig.sentRichMessages[0]!, /<td>20%<\/td><td>25%<\/td><td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">a<\/a><\/td><td>yes<\/td>/);
+  assert.match(rig.sentRichMessages[0]!, /<td>20%<\/td><td>2026-06-21 18:00<\/td><td>25%<\/td><td>2026-06-28 18:00<\/td><td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">a<\/a><\/td><td>yes<\/td>/);
   assert.match(rig.sentRichMessages[0]!, /<td><a href="tg:\/\/msg\?text=%2Fauth%20use%201">use<\/a> <a href="tg:\/\/msg\?text=%2Fauth%20disable%201">disable<\/a><\/td>/);
   assert.match(rig.sentRichMessages[0]!, /<td>expires 2026-06-18 10:20Z<\/td>/);
   assert.match(rig.sentMessages[0]!, /Codex auth files:/);
-  assert.match(rig.sentMessages[0]!, /5h:20\|7d:25\|a \*/);
+  assert.match(rig.sentMessages[0]!, /5h:20@2026-06-21 18:00\|7d:25@2026-06-28 18:00\|a \*/);
   assert.match(rig.sentMessages[0]!, /\|b/);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
@@ -2063,19 +2070,36 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
   assert.equal(rig.callbackAnswers[0], 'Auth selected');
-  assert.match(rig.editedMessages[0]!, /Switching Codex auth: auth\.json_a -> auth\.json_b/);
-  assert.match(rig.editedMessages.at(-1)!, /Current auth: b/);
-  assert.match(rig.editedMessages.at(-1)!, /5h:90\|7d:95\|b \* \[Plus · ready · refreshed 0m ago · expires 2026-06-18 10:20Z\]/);
+  assert.match(rig.editedRichMessages[0]!, /Switching Codex auth: auth\.json_a -&gt; auth\.json_b/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Current auth<\/td><td>b/);
+  assert.match(rig.editedRichMessages.at(-1)!, /5h:90\|7d:95\|b \* \[Plus · ready · refreshed 0m ago · expires 2026-06-18 10:20Z\]/);
   assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'active');
   assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
-  assert.match(rig.editedKeyboards.at(-1)?.[1]?.[0]?.text, /✅ 90\|95\|b/);
+  assert.match(rig.editedRichKeyboards.at(-1)?.[1]?.[0]?.text, /✅ 90\|95\|b/);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:0`, 1));
 
   assert.equal(restarts, 2);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
-  assert.match(rig.editedMessages.at(-1)!, /Current auth: a/);
-  assert.match(rig.editedKeyboards.at(-1)?.[0]?.[0]?.text, /✅ 20\|25\|a/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Current auth<\/td><td>a/);
+  assert.match(rig.editedRichKeyboards.at(-1)?.[0]?.[0]?.text, /✅ 20\|25\|a/);
+});
+
+test('time-sensitive auth and threads panels expire after the configured idle period', async (t) => {
+  const rig = createControllerRig();
+  t.after(async () => {
+    await rig.controller.stop();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.config.telegramPanelTtlMs = 10;
+  (rig.controller as any).app.listThreads = async () => [];
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  await (rig.controller as any).handleCommand(createEvent('/threads'), 'en', 'threads', []);
+  await new Promise(resolve => setTimeout(resolve, 30));
+
+  assert.deepEqual(rig.deletedMessageIds.sort((left, right) => left - right), [1, 1001]);
 });
 
 test('/auth switch validates selected candidate and marks unusable auth for repair', async (t) => {
@@ -2103,10 +2127,10 @@ test('/auth switch validates selected candidate and marks unusable auth for repa
   assert.equal(restarts, 2);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
   assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
-  assert.match(rig.editedMessages.at(-1)!, /Selected auth failed validation: candidate is not a readable ChatGPT auth file/);
-  assert.match(rig.editedMessages.at(-1)!, /Restored the previous auth after the failed switch/);
-  assert.match(rig.editedMessages.at(-1)!, /\|b \[needs login repair\]/);
-  assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
+  assert.match(rig.editedRichMessages.at(-1)!, /Selected auth failed validation: candidate is not a readable ChatGPT auth file/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Restored the previous auth after the failed switch/);
+  assert.match(rig.editedRichMessages.at(-1)!, /\|b \[needs login repair\]/);
+  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.[1], [
     { text: '? —|—|b', callback_data: `auth:${list.localId}:repair:1` },
     { text: '?', callback_data: `auth:${list.localId}:repair:1` },
   ]);
@@ -2142,9 +2166,9 @@ test('/auth switch does not mark quota-limited candidates for repair or auto-del
   assert.equal(fs.existsSync(path.join(authDir, 'auth.json_b')), true);
   assert.notEqual(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
   assert.equal(rig.store.getCodexAuthPoolStats().deletedInvalid, 0);
-  assert.match(rig.editedMessages.at(-1)!, /Selected auth hit a Codex usage limit/);
-  assert.match(rig.editedMessages.at(-1)!, /It was not marked invalid/);
-  assert.match(rig.editedMessages.at(-1)!, /Restored the previous auth after the failed switch/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Selected auth hit a Codex usage limit/);
+  assert.match(rig.editedRichMessages.at(-1)!, /It was not marked invalid/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Restored the previous auth after the failed switch/);
 });
 
 test('/auth sync commands report status, test peers, and push all', async (t) => {
@@ -2250,9 +2274,9 @@ test('/auth panel can trigger safe auth sync', async (t) => {
 
   assert.equal(pushed, true);
   assert.equal(rig.callbackAnswers.at(-1), 'Safely syncing auth across local bot runtimes and cross-node peers...');
-  assert.equal(rig.editedMessages[0], 'Safely syncing auth across local bot runtimes and cross-node peers...');
-  assert.match(rig.editedMessages.at(-1)!, /Safe auth sync complete: local synced 1, local skipped 2; cross-node sent 3, skipped 4\./);
-  assert.match(rig.editedMessages.at(-1)!, /Codex auth files:/);
+  assert.match(rig.editedRichMessages[0]!, /Safely syncing auth across local bot runtimes and cross-node peers/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Safe auth sync complete: local synced 1, local skipped 2; cross-node sent 3, skipped 4\./);
+  assert.match(rig.editedRichMessages.at(-1)!, /Codex auth files:/);
 });
 
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
@@ -2291,7 +2315,7 @@ test('/auth switch recovers a newer same-account credential before restart and s
     'restart',
     'sync:default:auth.json_b',
   ]);
-  assert.match(rig.editedMessages.at(-1)!, /Current auth: b/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Current auth<\/td><td>b/);
   assert.equal((rig.controller as any).pendingAuthChoiceLists.get(list.localId), list);
 });
 
@@ -2347,8 +2371,8 @@ test('/auth switch labels resolve symlink-backed auth files', async (t) => {
 
   assert.equal(restarts, 1);
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
-  assert.match(rig.editedMessages[0]!, /Switching Codex auth: personal-real\.json -> work-real\.json/);
-  assert.match(rig.editedMessages.at(-1)!, /Current auth: work-real\.json/);
+  assert.match(rig.editedRichMessages[0]!, /Switching Codex auth: personal-real\.json -&gt; work-real\.json/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Current auth<\/td><td>work-real\.json/);
 });
 
 test('/auth panel can disable and enable candidates for auto rotation', async (t) => {
@@ -2379,8 +2403,8 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
 
   assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], ['auth.json_b']);
   assert.equal(rig.callbackAnswers.at(-1), 'Auth disabled');
-  assert.match(rig.editedMessages.at(-1)!, /\|b \[disabled\]/);
-  assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
+  assert.match(rig.editedRichMessages.at(-1)!, /\|b \[disabled\]/);
+  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.[1], [
     { text: '🔐 —|—|b · off', callback_data: `auth:${list.localId}:1` },
     { text: '⏸️', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
@@ -2389,8 +2413,8 @@ test('/auth panel can disable and enable candidates for auto rotation', async (t
 
   assert.deepEqual([...rig.store.listDisabledCodexAuthCandidateNames()], []);
   assert.equal(rig.callbackAnswers.at(-1), 'Auth enabled');
-  assert.match(rig.editedMessages.at(-1)!, /\|b \[invalid auth file\]/);
-  assert.deepEqual(rig.editedKeyboards.at(-1)?.[1], [
+  assert.match(rig.editedRichMessages.at(-1)!, /\|b \[invalid auth file\]/);
+  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.[1], [
     { text: '🔐 —|—|b', callback_data: `auth:${list.localId}:1` },
     { text: '✅', callback_data: `auth:${list.localId}:toggle:1` },
   ]);
@@ -2637,16 +2661,16 @@ test('/auth panel paginates large inventories, filters attention candidates, and
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:page:next`, 1));
 
-  assert.match(rig.editedMessages.at(-1)!, /Showing 9-16 of 100 matched candidates \(100 total\), page 2\/13/);
-  assert.match(rig.editedMessages.at(-1)!, /\|free008/);
-  assert.doesNotMatch(rig.editedMessages.at(-1)!, /\|free007/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Showing 9-16 of 100 matched candidates \(100 total\), page 2\/13/);
+  assert.match(rig.editedRichMessages.at(-1)!, /\|free008/);
+  assert.doesNotMatch(rig.editedRichMessages.at(-1)!, /\|free007/);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:filter:attention`, 1));
 
-  assert.match(rig.editedMessages.at(-1)!, /Filter: attention/);
-  assert.match(rig.editedMessages.at(-1)!, /Showing 1-8 of 99 matched candidates \(100 total\), page 1\/13/);
-  assert.doesNotMatch(rig.editedMessages.at(-1)!, /\d+\. .*\|free000/);
-  assert.match(rig.editedMessages.at(-1)!, /\|free001 \[quota unknown · refreshed 0m ago\]/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Filter<\/td><td>attention/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Showing 1-8 of 99 matched candidates \(100 total\), page 1\/13/);
+  assert.doesNotMatch(rig.editedRichMessages.at(-1)!, /\d+\. .*\|free000/);
+  assert.match(rig.editedRichMessages.at(-1)!, /\|free001 \[quota unknown · refreshed 0m ago\]/);
 
   await (rig.controller as any).handleCommand(createEvent('/auth list free099'), 'en', 'auth', ['list', 'free099']);
 
@@ -2737,8 +2761,8 @@ test('/auth marks repair candidates with a question action and can repair login'
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:repair:1`, 1));
 
   assert.equal(rig.callbackAnswers.at(-1), 'Repair actions');
-  assert.match(rig.editedMessages.at(-1)!, /b has been verified unusable/);
-  assert.deepEqual(rig.editedKeyboards.at(-1), [
+  assert.match(rig.editedRichMessages.at(-1)!, /b has been verified unusable/);
+  assert.deepEqual(rig.editedRichKeyboards.at(-1), [
     [{ text: '🔑 Login repair', callback_data: `auth:${list.localId}:repair_login:1` }],
     [{ text: '🗑️ Delete', callback_data: `auth:${list.localId}:repair_delete:1` }],
     [{ text: '✖️ Cancel', callback_data: `auth:${list.localId}:repair_cancel:1` }],
@@ -2782,8 +2806,8 @@ test('/auth repair menu can delete an unrecoverable candidate', async (t) => {
   assert.equal(rig.callbackAnswers.at(-1), 'Auth deleted');
   assert.equal(fs.existsSync(path.join(authDir, 'auth.json_b')), false);
   assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), undefined);
-  assert.match(rig.editedMessages.at(-1)!, /Deleted auth candidate: auth\.json_b/);
-  assert.doesNotMatch(rig.editedMessages.at(-1)!, /\|b \[/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Deleted auth candidate: auth\.json_b/);
+  assert.doesNotMatch(rig.editedRichMessages.at(-1)!, /\|b \[/);
 });
 
 test('/auth refresh all command can refresh all ChatGPT candidates and keep an auth panel', async (t) => {
@@ -2869,10 +2893,10 @@ test('/auth refresh all command can refresh all ChatGPT candidates and keep an a
     'refresh:auth.json_b',
     'sync:default:auth.json_b',
   ]);
-  assert.match(rig.editedMessages[0]!, /Refreshing all ChatGPT auth candidates/);
-  assert.match(rig.editedMessages.at(-1)!, /Auth refresh all complete: 2 refreshed, 1 skipped, 0 failed/);
-  assert.match(rig.editedMessages.at(-1)!, /Current auth: a/);
-  assert.deepEqual(rig.editedKeyboards.at(-1)?.at(-1), [
+  assert.match(rig.editedRichMessages[0]!, /Refreshing all ChatGPT auth candidates/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Auth refresh all complete: 2 refreshed, 1 skipped, 0 failed/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Current auth<\/td><td>a/);
+  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.at(-1), [
     { text: '🧷 Safe sync', callback_data: `auth:${confirmationList.localId}:safe_sync` },
     { text: '🔄 Reload auth', callback_data: `auth:${confirmationList.localId}:reload` },
   ]);

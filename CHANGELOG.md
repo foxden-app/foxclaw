@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.59 - 2026-06-21
+
+### 中文
+- `/auth` 富文本表格新增 Quota A、Quota B 的下次刷新时间；精确时间随额度快照持久化并可在节点间共享，旧快照安全显示 `-`。
+- 修复 `/auth` 按钮回调后退化为普通消息的问题：切换、启停、筛选、翻页、修复、刷新和安全同步现在始终使用 RichMessage 编辑。
+- 新增时效面板自动清理：`/auth`、`/threads` 和统一 `/setup` 面板默认空闲 30 分钟后删除，每次交互重新计时；可用 `TELEGRAM_PANEL_TTL_MS` 调整，设为 `0` 可关闭。
+
+### English
+- Added next-reset columns for Quota A and Quota B in the `/auth` RichMessage table. Exact reset timestamps now persist with quota snapshots and can be shared across nodes; legacy snapshots safely show `-`.
+- Fixed `/auth` callback refreshes degrading to plain messages. Switch, toggle, filter, pagination, repair, refresh, and safe-sync actions now consistently edit the panel as a RichMessage.
+- Added automatic cleanup for time-sensitive panels. `/auth`, `/threads`, and unified `/setup` panels are deleted after 30 minutes of inactivity by default, with interaction resetting the timer. Configure `TELEGRAM_PANEL_TTL_MS`, or set it to `0` to disable cleanup.
+
 ## 0.5.58 - 2026-06-21
 
 ### 中文

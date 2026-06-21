@@ -58,8 +58,10 @@ export interface CodexAuthQuotaSnapshotRecord {
   planType: string | null;
   primaryWindowDurationMins: number | null;
   primaryRemainingPercent: number | null;
+  primaryResetsAt: number | null;
   secondaryWindowDurationMins: number | null;
   secondaryRemainingPercent: number | null;
+  secondaryResetsAt: number | null;
   updatedAt: number;
 }
 
@@ -261,8 +263,10 @@ export class BridgeStore {
         plan_type TEXT,
         primary_window_duration_mins REAL,
         primary_remaining_percent REAL,
+        primary_resets_at INTEGER,
         secondary_window_duration_mins REAL,
         secondary_remaining_percent REAL,
+        secondary_resets_at INTEGER,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, candidate_name)
       );
@@ -295,7 +299,9 @@ export class BridgeStore {
     this.ensureColumn('codex_auth_candidate_runtime', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
+    this.ensureColumn('codex_auth_quota_snapshots', 'primary_resets_at', 'INTEGER');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
+    this.ensureColumn('codex_auth_quota_snapshots', 'secondary_resets_at', 'INTEGER');
     this.ensureColumn('codex_auth_quota_snapshots', 'quota_identity_id', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('codex_auth_pool_history', 'invalid_delete_count', 'INTEGER NOT NULL DEFAULT 0');
     this.db.prepare(`
@@ -1311,7 +1317,11 @@ export class BridgeStore {
       | 'primaryRemainingPercent'
       | 'secondaryWindowDurationMins'
       | 'secondaryRemainingPercent'
-    >,
+    > & Partial<Pick<
+      CodexAuthQuotaSnapshotRecord,
+      | 'primaryResetsAt'
+      | 'secondaryResetsAt'
+    >>,
   ): void {
     this.db.prepare(`
       INSERT INTO codex_auth_quota_snapshots (
@@ -1323,11 +1333,13 @@ export class BridgeStore {
         plan_type,
         primary_window_duration_mins,
         primary_remaining_percent,
+        primary_resets_at,
         secondary_window_duration_mins,
         secondary_remaining_percent,
+        secondary_resets_at,
         updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(runtime_id, candidate_name) DO UPDATE SET
         account_id = excluded.account_id,
         quota_identity_id = excluded.quota_identity_id,
@@ -1335,8 +1347,10 @@ export class BridgeStore {
         plan_type = excluded.plan_type,
         primary_window_duration_mins = excluded.primary_window_duration_mins,
         primary_remaining_percent = excluded.primary_remaining_percent,
+        primary_resets_at = excluded.primary_resets_at,
         secondary_window_duration_mins = excluded.secondary_window_duration_mins,
         secondary_remaining_percent = excluded.secondary_remaining_percent,
+        secondary_resets_at = excluded.secondary_resets_at,
         updated_at = excluded.updated_at
     `).run(
       runtimeId,
@@ -1347,8 +1361,10 @@ export class BridgeStore {
       snapshot.planType,
       snapshot.primaryWindowDurationMins,
       snapshot.primaryRemainingPercent,
+      snapshot.primaryResetsAt ?? null,
       snapshot.secondaryWindowDurationMins,
       snapshot.secondaryRemainingPercent,
+      snapshot.secondaryResetsAt ?? null,
       Date.now(),
     );
   }
@@ -1369,8 +1385,10 @@ export class BridgeStore {
         plan_type,
         primary_window_duration_mins,
         primary_remaining_percent,
+        primary_resets_at,
         secondary_window_duration_mins,
         secondary_remaining_percent,
+        secondary_resets_at,
         updated_at
       FROM codex_auth_quota_snapshots
       WHERE quota_identity_id IN (${placeholders})
@@ -1384,8 +1402,10 @@ export class BridgeStore {
       planType: nullableString(row.plan_type),
       primaryWindowDurationMins: nullableNumber(row.primary_window_duration_mins),
       primaryRemainingPercent: nullableNumber(row.primary_remaining_percent),
+      primaryResetsAt: nullableNumber(row.primary_resets_at),
       secondaryWindowDurationMins: nullableNumber(row.secondary_window_duration_mins),
       secondaryRemainingPercent: nullableNumber(row.secondary_remaining_percent),
+      secondaryResetsAt: nullableNumber(row.secondary_resets_at),
       updatedAt: Number(row.updated_at),
     }));
   }
