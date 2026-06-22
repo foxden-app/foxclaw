@@ -156,6 +156,8 @@ import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
 const AUTH_DELETE_REASON_NEEDS_REPAIR = 'needs_repair';
 const RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS = [3000, 7000, 15_000, 30_000, 45_000, 60_000, 60_000, 60_000];
+const TOOL_ARCHIVE_MAX_LINES = 12;
+const TOOL_ARCHIVE_LINE_LIMIT = 240;
 
 type AuthProactiveRefreshStatus = NonNullable<RuntimeStatus['authProactiveRefresh']>;
 
@@ -9906,10 +9908,20 @@ export class BridgeSessionCore {
           messageId = await this.sendMessage(active.scopeId, content.text);
         }
         if (messageId !== null) {
-          active.archivedMessageIds.push(messageId);
+          this.recordArchivedMessageId(active, messageId);
         }
       } catch (error) {
-        this.logger.warn('telegram.preview_archive_send_failed', { error: String(error), turnId: active.turnId });
+        if (isTelegramMessageTooLong(error)) {
+          try {
+            const messageId = await this.sendMessage(active.scopeId, firstLine(content.text));
+            this.recordArchivedMessageId(active, messageId);
+            return true;
+          } catch (fallbackError) {
+            this.logger.warn('telegram.preview_archive_fallback_send_failed', { error: String(fallbackError), turnId: active.turnId });
+          }
+        } else {
+          this.logger.warn('telegram.preview_archive_send_failed', { error: String(error), turnId: active.turnId });
+        }
         this.scheduleRenderRetry(active);
         return false;
       }
@@ -9921,7 +9933,7 @@ export class BridgeSessionCore {
       } else {
         await this.editMessage(active.scopeId, active.previewMessageId, content.text, []);
       }
-      active.archivedMessageIds.push(active.previewMessageId);
+      this.recordArchivedMessageId(active, active.previewMessageId);
     } catch (error) {
       if (isTelegramMessageGone(error)) {
         active.previewActive = false;
@@ -9929,6 +9941,36 @@ export class BridgeSessionCore {
         active.statusNeedsRebase = false;
         this.store.removeActiveTurnPreview(active.turnId);
         return this.archiveStatusMessage(active, content);
+      }
+      if (isTelegramMessageTooLong(error)) {
+        try {
+          await this.editMessage(active.scopeId, active.previewMessageId, firstLine(content.text), []);
+          this.recordArchivedMessageId(active, active.previewMessageId);
+          active.previewActive = false;
+          active.statusMessageText = null;
+          active.statusNeedsRebase = false;
+          this.store.removeActiveTurnPreview(active.turnId);
+          return true;
+        } catch (fallbackError) {
+          if (isTelegramMessageGone(fallbackError)) {
+            active.previewActive = false;
+            active.statusMessageText = null;
+            active.statusNeedsRebase = false;
+            this.store.removeActiveTurnPreview(active.turnId);
+            return this.archiveStatusMessage(active, { text: firstLine(content.text), html: null });
+          }
+          this.logger.warn('telegram.preview_archive_fallback_failed', {
+            error: String(fallbackError),
+            turnId: active.turnId,
+            messageId: active.previewMessageId,
+          });
+          this.recordArchivedMessageId(active, active.previewMessageId);
+          active.previewActive = false;
+          active.statusMessageText = null;
+          active.statusNeedsRebase = false;
+          this.store.removeActiveTurnPreview(active.turnId);
+          return true;
+        }
       }
       this.logger.warn('telegram.preview_archive_failed', {
         error: String(error),
@@ -9943,6 +9985,22 @@ export class BridgeSessionCore {
     active.statusNeedsRebase = false;
     this.store.removeActiveTurnPreview(active.turnId);
     return true;
+  }
+
+  private recordArchivedMessageId(active: ActiveTurn, messageId: number): void {
+    if (!active.archivedMessageIds.includes(messageId)) {
+      active.archivedMessageIds.push(messageId);
+    }
+    if (active.previewActive && active.previewMessageId > 0) {
+      this.store.saveActiveTurnPreview({
+        turnId: active.turnId,
+        scopeId: active.scopeId,
+        threadId: active.threadId,
+        messageId: active.previewMessageId,
+        isObserved: active.isObserved,
+        archivedMessageIds: active.archivedMessageIds,
+      });
+    }
   }
 
   private noteToolCommandStart(active: ActiveTurn, event: RawExecCommandEvent): void {
@@ -10433,9 +10491,12 @@ function renderArchivedToolBatchStatus(
     return { text, html: null };
   }
   const heading = formatToolBatchHeading(locale, counts, false);
+  const detailLines = actionLines
+    .slice(0, TOOL_ARCHIVE_MAX_LINES)
+    .map(line => truncateInline(line, TOOL_ARCHIVE_LINE_LIMIT));
   const html = [
     telegramBold(heading),
-    telegramExpandableBlockquote(actionLines.slice(0, 12).join('\n')),
+    telegramExpandableBlockquote(detailLines.join('\n')),
   ].join('\n');
   return { text, html };
 }
@@ -10588,6 +10649,10 @@ function truncateInline(value: string, limit: number): string {
     return value;
   }
   return `${value.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function firstLine(value: string): string {
+  return value.split(/\r?\n/, 1)[0]?.trim() || value.trim();
 }
 
 function parseReviewTarget(args: string[]): ReviewTarget | null {
@@ -13553,6 +13618,13 @@ function isTelegramMessageGone(error: unknown): boolean {
   return message.includes('message to delete not found')
     || message.includes('message to edit not found')
     || message.includes('message not found');
+}
+
+function isTelegramMessageTooLong(error: unknown): boolean {
+  const message = formatUserError(error).toLowerCase();
+  return message.includes('message_too_long')
+    || message.includes('message is too long')
+    || message.includes('message too long');
 }
 
 function isFileMissingError(error: unknown): boolean {

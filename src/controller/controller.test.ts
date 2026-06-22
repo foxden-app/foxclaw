@@ -1810,6 +1810,47 @@ test('commentary collapse keeps original messages when RichMessage editing fails
   assert.equal(active.segments[0].messages.length, 1);
 });
 
+test('oversized tool archive falls back to a short archived message and remains deletable', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.bot.editHtmlMessage = async () => {
+    throw new Error('Bad Request: MESSAGE_TOO_LONG');
+  };
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 42);
+  const content = { text: `Ran commands\n${'x'.repeat(10_000)}`, html: `<b>Ran commands</b>\n<blockquote>${'x'.repeat(10_000)}</blockquote>` };
+
+  const archived = await (rig.controller as any).archiveStatusMessage(active, content);
+
+  assert.equal(archived, true);
+  assert.deepEqual(active.archivedMessageIds, [42]);
+  assert.equal(active.previewActive, false);
+  assert.equal(rig.editedMessages.at(-1), 'Ran commands');
+
+  active.finalText = 'done';
+  active.segments = [{
+    itemId: 'final-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: 'done',
+    completed: true,
+    messages: [{ messageId: 22, text: 'done' }],
+  }];
+  setActiveTurnForTest(rig, active);
+  (rig.controller as any).completeTurn = async () => {};
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.deepEqual(rig.deletedMessageIds, [42]);
+});
+
 test('draft stream uses Telegram RichMessage draft and falls back to plain draft', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

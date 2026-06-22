@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.62 - 2026-06-22
+
+### 中文
+- 修复超长工具操作明细无法折叠或最终删除的问题：当 Telegram 拒绝编辑超长归档消息时，FoxClaw 会降级为短摘要，并仍登记原消息用于最终回复后的清理。
+- 工具归档 details 现在会截短单条命令行，避免长 shell 命令触发 `MESSAGE_TOO_LONG` 后反复重试。
+- 归档操作明细的 message id 会在登记时同步持久化，降低网络切换或重启窗口中丢失最终清理目标的概率。
+
+### English
+- Fixed oversized tool activity details failing to collapse or delete after the final reply. If Telegram rejects an oversized archive edit, FoxClaw now falls back to a short summary while still tracking the message for final cleanup.
+- Tool archive details now truncate individual command lines to avoid repeated `MESSAGE_TOO_LONG` retries for long shell commands.
+- Archived tool-detail message ids are persisted as soon as they are registered, reducing cleanup loss during network changes or restarts.
+
 ## 0.5.61 - 2026-06-21
 
 ### 中文
