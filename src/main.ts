@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   APP_HOME,
+  buildCodexApiProviderOverrides,
   DEFAULT_CODEX_TELEGRAM_HOME,
   DEFAULT_ENV_PATH,
   DEFAULT_LOG_PATH,
@@ -559,6 +560,10 @@ async function runServeCli(): Promise<void> {
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
+  const codexApiProviderOverrides = buildCodexApiProviderOverrides(
+    config.codexApiProviders,
+    config.codexApiDefaultProvider,
+  );
   const authNotificationAggregator = createAuthRefreshNotificationAggregator(logger);
   attachIlinkRuntimeFromBridgeLogger(logger, config.wxIlinkRouteTag);
   const processLock = acquireProcessLock(config.lockPath);
@@ -636,7 +641,10 @@ async function runServeCli(): Promise<void> {
           runtimeConfig.codexAppServerLogPath,
           logger,
           childEnv,
-          sharedDefaultRuntime ? [] : ['cli_auth_credentials_store="file"'],
+          [
+            ...codexApiProviderOverrides,
+            ...(sharedDefaultRuntime ? [] : ['cli_auth_credentials_store="file"']),
+          ],
         );
         seeds.push({ id, home, authDir, sharedDefaultRuntime, config: runtimeConfig, bot, app });
       }
@@ -825,6 +833,8 @@ async function runServeCli(): Promise<void> {
           config.codexAppServerStatePath,
           config.codexAppServerLogPath,
           logger,
+          null,
+          codexApiProviderOverrides,
         );
         const outbound = new BridgeMessagingRouter(
           new TelegramMessagingPort(seeds[0]!.bot),
@@ -961,6 +971,8 @@ async function runServeCli(): Promise<void> {
       config.codexAppServerStatePath,
       config.codexAppServerLogPath,
       logger,
+      config.codexHome ? { CODEX_HOME: config.codexHome } : null,
+      codexApiProviderOverrides,
     );
     const telegramMessaging = new TelegramMessagingPort(bot);
     const weixinMessaging = config.wxEnabled

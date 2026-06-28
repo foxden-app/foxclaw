@@ -11318,7 +11318,29 @@ function formatConfigMessage(
     lines.push(t(locale, 'config_panel_ttl', { value: formatDurationMs(locale, appConfig.telegramPanelTtlMs) }));
     lines.push(`TELEGRAM_PANEL_TTL_MS=${appConfig.telegramPanelTtlMs}`);
     lines.push(formatCodexAuthPoolSummary(locale, authPoolStats));
+    lines.push(...formatCodexApiProviderConfigLines(locale, appConfig));
   return lines.join('\n');
+}
+
+function formatCodexApiProviderConfigLines(locale: AppLocale, appConfig: AppConfig): string[] {
+  if (appConfig.codexApiProviders.length === 0) {
+    return [t(locale, 'config_api_providers_none')];
+  }
+  const lines = [t(locale, 'config_api_providers_title')];
+  lines.push(t(locale, 'config_api_default_provider', { value: appConfig.codexApiDefaultProvider ?? '-' }));
+  for (const provider of appConfig.codexApiProviders) {
+    lines.push(t(locale, 'config_api_provider_line', {
+      id: provider.id,
+      model: provider.model ?? '-',
+      base: provider.baseUrl,
+      env: provider.apiKeyEnv,
+      key: process.env[provider.apiKeyEnv]?.trim() ? t(locale, 'yes') : t(locale, 'no'),
+    }));
+    if (provider.chatCompletionsOnly) {
+      lines.push(t(locale, 'config_api_provider_chat_warning', { id: provider.id }));
+    }
+  }
+  return lines;
 }
 
 function formatCodexAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): string {

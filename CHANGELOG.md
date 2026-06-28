@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.64 - 2026-06-29
+
+### 中文
+- 新增 OpenAI-compatible API provider 配置支持：`CODEX_API_PROVIDERS` 可声明 provider id、base URL、key 环境变量、默认模型，并在启动 Codex app-server 时注入原生 `model_providers.*` 配置。
+- 新增 `CODEX_API_DEFAULT_PROVIDER`，用于显式把 Codex 默认 `model_provider` 切到已配置的 API provider；未设置时只登记 provider，不会悄悄替换现有 ChatGPT/Codex 登录态。
+- `/config` 现在展示 API provider 摘要、默认 provider、key 环境变量是否存在，并对 `/v1/chat/completions` 来源提示 Codex 当前需要 Responses-compatible 端点；API key 不会出现在面板或 Codex 配置 override 中。
+
+### English
+- Added OpenAI-compatible API provider configuration. `CODEX_API_PROVIDERS` can declare provider id, base URL, API-key environment variable, and default model, then FoxClaw injects native Codex `model_providers.*` app-server config.
+- Added `CODEX_API_DEFAULT_PROVIDER` to explicitly switch Codex's default `model_provider` to a configured API provider. Without it, providers are registered but the existing ChatGPT/Codex auth flow is not silently replaced.
+- `/config` now shows API provider summaries, the default provider, whether each key env var is present, and warns when the source URL was `/v1/chat/completions` because current Codex requires a Responses-compatible endpoint. API keys are not printed in panels or Codex config overrides.
+
 ## 0.5.63 - 2026-06-28
 
 ### 中文

@@ -39,6 +39,8 @@ function createConfig(tempDir: string): AppConfig {
     codexAppServerLogPath: path.join(tempDir, 'codex-app-server.log'),
     codexAuthDir: null,
     codexHome: null,
+    codexApiProviders: [],
+    codexApiDefaultProvider: null,
     codexAppSyncOnOpen: false,
     codexAppSyncOnTurnComplete: false,
     storePath: path.join(tempDir, 'bridge.sqlite'),
@@ -4744,6 +4746,46 @@ test('/config toggles operation-detail cleanup and writes the env file', async (
   assert.match(rig.editedMessages.at(-1)!, /Delete operation details after final reply set to: yes/);
   assert.match(fs.readFileSync(path.join(rig.tempDir, '.env'), 'utf8'), /TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=true/);
   assert.equal(rig.editedKeyboards.at(-1)?.[1]?.[0]?.callback_data, 'config:delete_tool_details:off');
+});
+
+test('/config displays API provider status without leaking keys', async (t) => {
+  const rig = createControllerRig();
+  const previous = process.env.FOXCLAW_TEST_PROVIDER_KEY;
+  process.env.FOXCLAW_TEST_PROVIDER_KEY = 'sk-test-secret';
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.FOXCLAW_TEST_PROVIDER_KEY;
+    } else {
+      process.env.FOXCLAW_TEST_PROVIDER_KEY = previous;
+    }
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  rig.config.codexApiProviders = [{
+    id: 'shop',
+    name: 'Shop Proxy',
+    baseUrl: 'https://example.test/v1',
+    apiKeyEnv: 'FOXCLAW_TEST_PROVIDER_KEY',
+    model: 'gpt-5.5',
+    wireApi: 'responses',
+    sourceEndpoint: 'https://example.test/v1/chat/completions',
+    chatCompletionsOnly: true,
+  }];
+  rig.config.codexApiDefaultProvider = 'shop';
+  (rig.controller as any).app.readConfig = async () => ({
+    config: { model: 'gpt-5', approval_policy: 'never', sandbox_mode: 'read-only' },
+    layers: [],
+    origins: {},
+  });
+
+  await (rig.controller as any).handleCommand(createEvent('/config'), 'en', 'config', []);
+
+  const message = rig.sentMessages.at(-1)!;
+  assert.match(message, /API providers:/);
+  assert.match(message, /Default API provider: shop/);
+  assert.match(message, /shop: model gpt-5\.5, base https:\/\/example\.test\/v1, key env FOXCLAW_TEST_PROVIDER_KEY present yes/);
+  assert.match(message, /Codex requires a Responses-compatible endpoint/);
+  assert.doesNotMatch(message, /sk-test-secret/);
 });
 
 test('diagnostic notifications are routed to bound Telegram scope', async (t) => {

@@ -62,6 +62,8 @@ export interface AppConfig {
   codexAppServerLogPath: string;
   codexAuthDir: string | null;
   codexHome: string | null;
+  codexApiProviders: CodexApiProviderConfig[];
+  codexApiDefaultProvider: string | null;
   codexAppSyncOnOpen: boolean;
   codexAppSyncOnTurnComplete: boolean;
   storePath: string;
@@ -111,6 +113,17 @@ export interface AppConfig {
   voiceTtsTimeoutMs: number;
 }
 
+export interface CodexApiProviderConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+  model: string | null;
+  wireApi: 'responses';
+  sourceEndpoint: string | null;
+  chatCompletionsOnly: boolean;
+}
+
 export function loadConfig(): AppConfig {
   loadEnv();
   const configuredTokens = parseCommaSeparatedIds(process.env.TG_BOT_TOKENS);
@@ -141,6 +154,8 @@ export function loadConfig(): AppConfig {
     codexAppServerLogPath: process.env.CODEX_APP_SERVER_LOG_PATH || DEFAULT_CODEX_APP_SERVER_LOG_PATH,
     codexAuthDir: process.env.CODEX_AUTH_DIR?.trim() || null,
     codexHome: process.env.CODEX_HOME?.trim() || null,
+    codexApiProviders: parseCodexApiProviders(process.env.CODEX_API_PROVIDERS),
+    codexApiDefaultProvider: optionalSanitizedProviderId(process.env.CODEX_API_DEFAULT_PROVIDER),
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
     codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
@@ -188,6 +203,135 @@ export function loadConfig(): AppConfig {
   };
   ensureAppDirs(config);
   return config;
+}
+
+export function buildCodexApiProviderOverrides(
+  providers: readonly CodexApiProviderConfig[],
+  defaultProviderId: string | null = null,
+): string[] {
+  const overrides: string[] = [];
+  for (const provider of providers) {
+    overrides.push(`model_providers.${provider.id}=${tomlInlineTable({
+      name: provider.name,
+      base_url: provider.baseUrl,
+      env_key: provider.apiKeyEnv,
+      wire_api: provider.wireApi,
+    })}`);
+  }
+  if (defaultProviderId) {
+    const selected = providers.find(provider => provider.id === defaultProviderId);
+    if (!selected) {
+      throw new Error(`CODEX_API_DEFAULT_PROVIDER does not match any configured provider: ${defaultProviderId}`);
+    }
+    overrides.push(`model_provider=${tomlString(selected.id)}`);
+    if (selected.model) {
+      overrides.push(`model=${tomlString(selected.model)}`);
+    }
+  }
+  return overrides;
+}
+
+export function parseCodexApiProviders(raw: string | undefined): CodexApiProviderConfig[] {
+  if (!raw?.trim()) return [];
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('[')) {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!Array.isArray(parsed)) {
+      throw new Error('CODEX_API_PROVIDERS JSON must be an array');
+    }
+    return parsed.map((entry, index) => normalizeCodexApiProvider(entry, index));
+  }
+  return trimmed
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry, index) => {
+      const parts = entry.split('|').map((part) => part.trim());
+      if (parts.length < 3 || parts.length > 5) {
+        throw new Error('CODEX_API_PROVIDERS entries must use id|url|env_key[|model][|name]');
+      }
+      const [id, url, apiKeyEnv, model, name] = parts as [string, string, string, string | undefined, string | undefined];
+      return normalizeCodexApiProvider({ id, url, apiKeyEnv, model, displayName: name }, index);
+    });
+}
+
+function normalizeCodexApiProvider(entry: unknown, index: number): CodexApiProviderConfig {
+  if (!entry || typeof entry !== 'object') {
+    throw new Error(`CODEX_API_PROVIDERS[${index}] must be an object`);
+  }
+  const record = entry as Record<string, unknown>;
+  const id = sanitizeCodexProviderId(stringField(record, ['id'], index));
+  const sourceEndpoint = optionalStringField(record, ['endpoint', 'api', 'url', 'baseUrl', 'base_url']);
+  if (!sourceEndpoint) {
+    throw new Error(`CODEX_API_PROVIDERS[${index}] is missing url/baseUrl`);
+  }
+  const normalized = normalizeOpenAiCompatibleBaseUrl(sourceEndpoint);
+  const apiKeyEnv = stringField(record, ['apiKeyEnv', 'api_key_env', 'envKey', 'env_key'], index);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
+    throw new Error(`CODEX_API_PROVIDERS[${index}] env key is not a valid environment variable name`);
+  }
+  const displayName = optionalStringField(record, ['displayName', 'display_name', 'label']) ?? id;
+  return {
+    id,
+    name: displayName,
+    baseUrl: normalized.baseUrl,
+    apiKeyEnv,
+    model: optionalStringField(record, ['model']),
+    wireApi: 'responses',
+    sourceEndpoint,
+    chatCompletionsOnly: normalized.chatCompletionsEndpoint,
+  };
+}
+
+function normalizeOpenAiCompatibleBaseUrl(input: string): { baseUrl: string; chatCompletionsEndpoint: boolean } {
+  const trimmed = input.trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    throw new Error('CODEX_API_PROVIDERS contains an empty URL');
+  }
+  const chatSuffix = '/chat/completions';
+  if (trimmed.endsWith(chatSuffix)) {
+    return { baseUrl: trimmed.slice(0, -chatSuffix.length), chatCompletionsEndpoint: true };
+  }
+  return { baseUrl: trimmed, chatCompletionsEndpoint: false };
+}
+
+function stringField(record: Record<string, unknown>, keys: string[], index: number): string {
+  const value = optionalStringField(record, keys);
+  if (!value) {
+    throw new Error(`CODEX_API_PROVIDERS[${index}] is missing ${keys[0]}`);
+  }
+  return value;
+}
+
+function optionalStringField(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function sanitizeCodexProviderId(value: string): string {
+  const sanitized = value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!sanitized) {
+    throw new Error('CODEX_API_PROVIDERS contains an invalid provider id');
+  }
+  return sanitized;
+}
+
+function optionalSanitizedProviderId(value: string | undefined): string | null {
+  if (!value?.trim()) return null;
+  return sanitizeCodexProviderId(value);
+}
+
+function tomlInlineTable(values: Record<string, string>): string {
+  return `{ ${Object.entries(values).map(([key, value]) => `${key} = ${tomlString(value)}`).join(', ')} }`;
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
 }
 
 export function selectDefaultRuntimeBotToken(configuredTokens: string[], legacyToken: string | null): string | null {
