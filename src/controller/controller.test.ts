@@ -2220,6 +2220,45 @@ test('/auth switch does not mark quota-limited candidates for repair or auto-del
   assert.match(rig.editedRichMessages.at(-1)!, /Restored the previous auth after the failed switch/);
 });
 
+test('/auth switch treats token-invalidated rate-limit fetch failures as repair-needed auth', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', new Date().toISOString());
+  writeChatGptAuthCandidate(authDir, 'auth.json_GamsGo1', 'acct-gams', new Date().toISOString(), {
+    userId: 'user-gams',
+    email: 'philip.fhz2@zynhop.com',
+  });
+
+  let restarts = 0;
+  (rig.controller as any).app.restart = async () => {
+    restarts += 1;
+  };
+  (rig.controller as any).app.readAccount = async () => chatGptAccount();
+  (rig.controller as any).app.readAccountRateLimits = async () => {
+    throw new Error('failed to fetch codex rate limits: GET https://chatgpt.com/backend-api/wham/usage failed: 401 Unauthorized; body={"error":{"message":"Your authentication token has been invalidated. Please try signing in again.","code":"token_invalidated"}}');
+  };
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  const index = list.candidates.findIndex((candidate: any) => candidate.name === 'auth.json_GamsGo1');
+  assert.notEqual(index, -1);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:${index}`, 1));
+
+  assert.equal(restarts, 2);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_a'));
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_GamsGo1'), 'needs_repair');
+  assert.match(rig.editedRichMessages.at(-1)!, /Selected auth failed validation:/);
+  assert.doesNotMatch(rig.editedRichMessages.at(-1)!, /usage limit/);
+  assert.match(rig.editedRichMessages.at(-1)!, /GamsGo1/);
+  assert.match(rig.editedRichMessages.at(-1)!, /needs login repair/);
+});
+
 test('/auth sync commands report status, test peers, and push all', async (t) => {
   let pushed = false;
   let tested = false;
@@ -3576,7 +3615,8 @@ test('auth auto-rotation keeps polling candidates after switch validation fails'
   assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_c'));
   assert.equal(retryStarts.length, 1);
   assert.ok(hasActiveTurnForTest(rig, 'turn-2'));
-  assert.ok(rig.sentMessages.some(message => /Selected auth hit a Codex usage limit: failed to fetch codex rate limits/.test(message)));
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'needs_repair');
+  assert.ok(rig.sentMessages.some(message => /Selected auth failed validation: failed to fetch codex rate limits/.test(message)));
   assert.ok(rig.sentMessages.some(message => /Switched Codex auth after usage limit: auth\.json_a -> auth\.json_c/.test(message)));
 });
 

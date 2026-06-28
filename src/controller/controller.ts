@@ -7545,9 +7545,11 @@ export class BridgeSessionCore {
           error: toErrorMeta(error),
         });
       }
-      const validationFailureKind: CodexAuthRotationReason = isCodexQuotaLimitError(validation.error)
-        ? 'quota_limited'
-        : 'auth_invalid';
+      const validationFailureKind: CodexAuthRotationReason = isCodexAuthInvalidError(validation.error)
+        ? 'auth_invalid'
+        : isCodexQuotaLimitError(validation.error)
+          ? 'quota_limited'
+          : 'auth_invalid';
       const repairDisposition = validationFailureKind === 'auth_invalid'
         ? await this.markCodexAuthCandidateNeedsRepair(candidate.name)
         : { deleted: false, restarted: false };
@@ -12753,6 +12755,9 @@ function classifyCodexAuthRotationError(params: any): CodexAuthRotationReason | 
   const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
   const message = stringOrNull(params?.error?.message) ?? '';
   const text = `${code ?? ''}\n${message}\n${collected}`;
+  if (isCodexAuthInvalidError(text)) {
+    return 'auth_invalid';
+  }
   if (isCodexQuotaLimitError(text)) {
     return 'quota_limited';
   }
@@ -12762,6 +12767,16 @@ function classifyCodexAuthRotationError(params: any): CodexAuthRotationReason | 
   return /(not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message)
     ? 'auth_invalid'
     : null;
+}
+
+function isCodexAuthInvalidError(text: string): boolean {
+  return /token[_\s-]?invalidated/i.test(text)
+    || /authentication token has been invalidated/i.test(text)
+    || /\b401\s+unauthorized\b/i.test(text)
+    || /\bunauthorized\b/i.test(text)
+    || /\bnot authenticated\b/i.test(text)
+    || /\bsign in again\b/i.test(text)
+    || /\blog in again\b/i.test(text);
 }
 
 function isCodexQuotaLimitError(text: string): boolean {

@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.63 - 2026-06-28
+
+### 中文
+- 修复 auth 切换失败分类：`failed to fetch codex rate limits` 中如果同时包含 `401 Unauthorized` / `token_invalidated`，现在按登录失效处理并标记候选为 `needs_repair`，不再误判为额度耗尽。
+- 自动轮转遇到这类失效候选时会把它标为需登录修复，然后继续尝试下一个可用候选。
+
+### English
+- Fixed auth switch failure classification. `failed to fetch codex rate limits` errors that also contain `401 Unauthorized` / `token_invalidated` are now treated as invalid auth and mark the candidate `needs_repair`, instead of being mistaken for quota exhaustion.
+- Auto-rotation now marks these invalid candidates for login repair and continues trying the next usable candidate.
+
 ## 0.5.62 - 2026-06-22
 
 ### 中文
