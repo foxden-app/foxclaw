@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.66 - 2026-06-29
+
+### 中文
+- 优化 Codex 需要用户确认时的 Telegram 富文本展示：问题保持顶层编号，候选项改为缩进的二级编号列表，避免多问题确认卡片看起来像一整串扁平 `1/2/3`。
+- RichMessage Markdown 渲染器现在支持嵌套有序/无序列表，类似安装选项、配置选择这类两层列表会渲染成真正的 Telegram 嵌套列表。
+
+### English
+- Improved Telegram RichMessage rendering for Codex user-input prompts. Questions stay as top-level numbered items, while choices are indented as second-level numbered lists, avoiding a flat sequence of confusing `1/2/3` items.
+- The RichMessage Markdown renderer now supports nested ordered and unordered lists, so setup and configuration prompts render as real Telegram nested lists.
+
 ## 0.5.65 - 2026-06-29
 
 ### 中文

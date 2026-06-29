@@ -25,3 +25,18 @@ test('renderTelegramMarkdownRichHtml escapes plain HTML and unsafe links', () =>
 
   assert.equal(html, '<p>&lt;b&gt;literal&lt;/b&gt; bad</p>');
 });
+
+test('renderTelegramMarkdownRichHtml preserves nested numbered choices', () => {
+  const html = renderTelegramMarkdownRichHtml([
+    '1. **Default model** Which route?',
+    '   1. Private model - Internal first.',
+    '   2. DeepSeek first - External fallback.',
+    '2. **Offline package** Which strategy?',
+    '   1. Image tar - docker save/load.',
+  ].join('\n'));
+
+  assert.equal(
+    html,
+    '<ol><li><b>Default model</b> Which route?<ol><li>Private model - Internal first.</li><li>DeepSeek first - External fallback.</li></ol></li><li><b>Offline package</b> Which strategy?<ol><li>Image tar - docker save/load.</li></ol></li></ol>',
+  );
+});

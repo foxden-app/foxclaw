@@ -13105,23 +13105,24 @@ function renderUserInputMessage(
   record.questions.forEach((question, index) => {
     lines.push('');
     const title = question.header || question.question || question.id;
-    lines.push(`${index + 1}. ${title}`);
     if (question.header && question.question) {
-      lines.push(question.question);
+      lines.push(`${index + 1}. **${title}** ${question.question}`);
+    } else {
+      lines.push(`${index + 1}. **${title}**`);
     }
     if (question.isOther) {
-      lines.push(t(locale, 'user_input_other_hint'));
+      lines.push(`   - ${t(locale, 'user_input_other_hint')}`);
     }
     if (question.isSecret) {
-      lines.push(t(locale, 'user_input_secret_warning'));
+      lines.push(`   - ${t(locale, 'user_input_secret_warning')}`);
     }
     question.options.forEach((option, optionIndex) => {
       const description = option.description ? ` - ${option.description}` : '';
-      lines.push(`${optionIndex + 1}) ${option.label}${description}`);
+      lines.push(`   ${optionIndex + 1}. ${option.label}${description}`);
     });
     const answer = record.answers.get(question.id);
     if (answer) {
-      lines.push(t(locale, 'user_input_selected', { value: answer }));
+      lines.push(`   - ${t(locale, 'user_input_selected', { value: answer })}`);
     }
   });
 

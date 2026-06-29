@@ -37,23 +37,11 @@ export function renderTelegramMarkdownRichHtml(markdown: string): string {
       continue;
     }
 
-    if (/^\s*[-*+]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index]!)) {
-        items.push(stripListMarker(lines[index]!, false));
-        index += 1;
-      }
-      blocks.push(`<ul>${items.map(item => `<li>${renderInlineRichHtml(item)}</li>`).join('')}</ul>`);
-      continue;
-    }
-
-    if (/^\s*\d+[.)]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index]!)) {
-        items.push(stripListMarker(lines[index]!, true));
-        index += 1;
-      }
-      blocks.push(`<ol>${items.map(item => `<li>${renderInlineRichHtml(item)}</li>`).join('')}</ol>`);
+    const list = parseListMarker(line);
+    if (list) {
+      const rendered = consumeList(lines, index, list.indent, list.ordered);
+      blocks.push(rendered.html);
+      index = rendered.nextIndex;
       continue;
     }
 
@@ -74,8 +62,7 @@ export function renderTelegramMarkdownRichHtml(markdown: string): string {
       && lines[index]!.trim()
       && !/^```/.test(lines[index]!)
       && !/^(#{1,4})\s+/.test(lines[index]!)
-      && !/^\s*[-*+]\s+/.test(lines[index]!)
-      && !/^\s*\d+[.)]\s+/.test(lines[index]!)
+      && !parseListMarker(lines[index]!)
       && !/^\s*>\s?/.test(lines[index]!)
     ) {
       paragraphLines.push(lines[index]!.trimEnd());
@@ -109,10 +96,65 @@ export function renderInlineRichHtml(markdown: string): string {
   return html.replaceAll('\n', '<br>');
 }
 
-function stripListMarker(line: string, ordered: boolean): string {
-  return ordered
-    ? line.replace(/^\s*\d+[.)]\s+/, '')
-    : line.replace(/^\s*[-*+]\s+/, '');
+function consumeList(
+  lines: string[],
+  startIndex: number,
+  indent: number,
+  ordered: boolean,
+): { html: string; nextIndex: number } {
+  const items: string[] = [];
+  let index = startIndex;
+
+  while (index < lines.length) {
+    const marker = parseListMarker(lines[index]!);
+    if (!marker || marker.indent < indent) {
+      break;
+    }
+    if (marker.indent > indent) {
+      break;
+    }
+    if (marker.ordered !== ordered) {
+      break;
+    }
+
+    let itemHtml = renderInlineRichHtml(marker.text);
+    index += 1;
+
+    while (index < lines.length) {
+      const nested = parseListMarker(lines[index]!);
+      if (!nested || nested.indent <= indent) {
+        break;
+      }
+      const rendered = consumeList(lines, index, nested.indent, nested.ordered);
+      itemHtml += rendered.html;
+      index = rendered.nextIndex;
+    }
+
+    items.push(`<li>${itemHtml}</li>`);
+  }
+
+  const tag = ordered ? 'ol' : 'ul';
+  return { html: `<${tag}>${items.join('')}</${tag}>`, nextIndex: index };
+}
+
+function parseListMarker(line: string): { indent: number; ordered: boolean; text: string } | null {
+  const ordered = line.match(/^(\s*)\d+[.)]\s+(.+)$/);
+  if (ordered) {
+    return {
+      indent: ordered[1]!.replaceAll('\t', '    ').length,
+      ordered: true,
+      text: ordered[2]!,
+    };
+  }
+  const unordered = line.match(/^(\s*)[-*+]\s+(.+)$/);
+  if (unordered) {
+    return {
+      indent: unordered[1]!.replaceAll('\t', '    ').length,
+      ordered: false,
+      text: unordered[2]!,
+    };
+  }
+  return null;
 }
 
 function sanitizeCodeLanguage(language: string): string | undefined {
