@@ -6026,6 +6026,50 @@ test('completed turns delete archived tool detail messages after a final reply a
   assert.deepEqual(rig.deletedMessageIds, [33, 34]);
 });
 
+test('completed turns delete stale status messages left behind after preview edit failures', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  let failNextEdit = true;
+  rig.bot.editMessage = async () => {
+    if (failNextEdit) {
+      failNextEdit = false;
+      throw new Error('Client network socket disconnected before secure TLS connection was established');
+    }
+  };
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 41);
+  active.previewActive = true;
+  active.statusMessageText = 'Running old command';
+
+  await (rig.controller as any).ensureStatusMessage(active, 'Running replacement command');
+
+  assert.deepEqual(active.archivedMessageIds, [41]);
+  assert.equal(active.previewMessageId, 1);
+  active.finalText = 'done';
+  active.segments = [{
+    itemId: 'final-1',
+    phase: 'final_answer',
+    outputKind: 'final_answer',
+    isPlan: false,
+    text: 'done',
+    completed: true,
+    messages: [{ messageId: 22, text: 'done' }],
+  }];
+  setActiveTurnForTest(rig, active);
+  (rig.controller as any).completeTurn = async () => {};
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'completed',
+  });
+
+  assert.deepEqual(rig.deletedMessageIds, [41]);
+});
+
 test('completed turns keep archived tool details when cleanup config is disabled', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

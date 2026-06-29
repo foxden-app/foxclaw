@@ -9882,6 +9882,7 @@ export class BridgeSessionCore {
       active.previewActive = false;
       active.statusMessageText = null;
       active.statusNeedsRebase = false;
+      this.recordArchivedMessageId(active, active.previewMessageId);
       this.store.removeActiveTurnPreview(active.turnId);
       await this.ensureStatusMessage(active, text);
       return;

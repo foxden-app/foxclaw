@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.65 - 2026-06-29
+
+### 中文
+- 修复 Telegram 运行状态消息在网络/TLS 抖动下可能残留的问题：当 FoxClaw 编辑“正在运行命令”等 preview 消息失败并改发新状态消息时，旧 message id 现在会登记到最终清理列表。
+- 保持“过程汇报”折叠消息的完整内容，不做自动裁剪；用户仍可通过 Telegram 展开、查看更多或弹窗查看全部过程。
+
+### English
+- Fixed stale Telegram runtime status messages after transient network/TLS edit failures. When FoxClaw fails to edit a "running command" preview and sends a replacement status message, the old message id is now tracked for final cleanup.
+- Kept collapsed progress summaries complete rather than trimming them, preserving Telegram's expand, "show more", and full-view behavior.
+
 ## 0.5.64 - 2026-06-29
 
 ### 中文
