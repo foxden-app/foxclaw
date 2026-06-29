@@ -3845,8 +3845,8 @@ test('requestUserInput is bridged through Telegram callbacks', async (t) => {
   assert.ok(pending);
   assert.match(rig.sentMessages[0]!, /Codex needs input:/);
   assert.match(rig.sentMessages[0]!, /1\. \*\*Continue\?\*\* Apply the plan\?/);
-  assert.match(rig.sentMessages[0]!, /\n   1\. Yes - Implement now/);
-  assert.match(rig.sentMessages[0]!, /\n   2\. No - Stop here/);
+  assert.match(rig.sentMessages[0]!, /\n {3}1\. Yes - Implement now/);
+  assert.match(rig.sentMessages[0]!, /\n {3}2\. No - Stop here/);
   assert.equal(rig.store.listPendingUserInputs().length, 1);
   assert.equal(rig.store.listPendingUserInputs()[0]!.messageId, 1);
 
