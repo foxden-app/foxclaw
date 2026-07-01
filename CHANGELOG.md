@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.68 - 2026-07-01
+
+### 中文
+- 新增 `foxclaw send-media <path> [caption]`，Codex 生成图片、封面、截图、GIF、视频或其他文件后，可以直接投递到当前 Telegram 私聊；FoxClaw 会按文件类型选择 `sendPhoto`、`sendVideo`、`sendAnimation` 或 `sendDocument`。
+- 新增内置 `telegram-media-delivery` skill，并随 Telegram runtime 自动同步到 `CODEX_HOME`，让 Codex 像发送语音一样发送视觉产物；`sendVideo` 默认启用 `supports_streaming=true`，提升 MP4 在 Telegram 客户端中的在线播放体验。
+- Telegram Bot API endpoint 现在可通过 `TELEGRAM_BOT_API_BASE_URL` 配置为 Local Bot API Server，并可用 `TELEGRAM_BOT_API_TIMEOUT_MS` 调大上传超时，适合交付 25 分钟这类大视频。
+
+### English
+- Added `foxclaw send-media <path> [caption]`, allowing Codex-generated images, covers, screenshots, GIFs, videos, and other files to be delivered directly to the current Telegram private chat. FoxClaw selects `sendPhoto`, `sendVideo`, `sendAnimation`, or `sendDocument` by file type.
+- Added the bundled `telegram-media-delivery` skill and sync it into each Telegram runtime's `CODEX_HOME`, so Codex can deliver visual artifacts like it already delivers voice files. `sendVideo` enables `supports_streaming=true` for better inline MP4 playback in Telegram clients.
+- Telegram Bot API endpoint calls can now use `TELEGRAM_BOT_API_BASE_URL` for a Local Bot API Server, with `TELEGRAM_BOT_API_TIMEOUT_MS` for longer uploads, making 25-minute video delivery practical when the file size exceeds public Bot API limits.
+
 ## 0.5.67 - 2026-07-01
 
 ### 中文

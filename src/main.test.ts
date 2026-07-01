@@ -58,6 +58,7 @@ test('CLI version and help commands do not enter serve mode', () => {
   assert.match(help.stdout, /foxclaw status/);
   assert.match(help.stdout, /foxclaw update/);
   assert.match(help.stdout, /foxclaw send-voice/);
+  assert.match(help.stdout, /foxclaw send-media/);
   assert.equal(help.stderr, '');
 
   const subcommandHelp = runFoxclawCli('install-systemd', '--help');
@@ -70,6 +71,12 @@ test('CLI send-voice requires an audio path before loading configuration', () =>
   const result = runFoxclawCli('send-voice');
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Usage: foxclaw send-voice/);
+});
+
+test('CLI send-media requires a file path before loading configuration', () => {
+  const result = runFoxclawCli('send-media');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Usage: foxclaw send-media/);
 });
 
 test('CLI unknown commands show usage instead of starting the bridge', () => {
@@ -122,7 +129,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
         scopeId: 'telegram:1::root',
         locale: 'zh',
         fromVersion: '0.5.40',
-        toVersion: '0.5.67',
+        toVersion: '0.5.68',
         error: null,
         updatedAt: new Date().toISOString(),
       },
@@ -133,7 +140,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
     assert.match(summary.stdout, /FoxClaw status: running, connected/);
     assert.match(summary.stdout, /Work: active 1, queued 3, approvals 1, questions 0/);
     assert.match(summary.stdout, /Auth sync: peers 1, pending imports 4/);
-    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.67/);
+    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.68/);
     assert.doesNotMatch(summary.stdout.trim(), /^\{/);
 
     const raw = runFoxclawCliWithEnv({ STATUS_PATH: statusPath }, 'status', '--json');

@@ -77,6 +77,16 @@ const PROXY_ENV_KEYS = [
 const STANDARD_NODE_PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const;
 const LOCAL_AUTH_REFRESH_LEASE_TTL_MS = 10 * 60_000;
 const CLUSTER_UPDATE_BROADCAST_PATH = path.join(APP_HOME, 'runtime', 'pending-cluster-update-broadcast.json');
+const TELEGRAM_PUBLIC_BOT_API_UPLOAD_HINT_BYTES = 50 * 1024 * 1024;
+
+type TelegramOutboundMediaKind = 'photo' | 'video' | 'animation' | 'document';
+
+type TelegramOutboundMediaPlan = {
+  kind: TelegramOutboundMediaKind;
+  method: 'sendPhoto' | 'sendVideo' | 'sendAnimation' | 'sendDocument';
+  fieldName: 'photo' | 'video' | 'animation' | 'document';
+  contentType: string;
+};
 
 type LocalAuthRefreshLeaseResult = { ok: boolean; leaseId: string | null; reason?: string | null };
 
@@ -318,6 +328,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'send-media' || command === 'media-file') {
+    requireNode24(command);
+    await runSendMediaCli();
+    return;
+  }
+
   if (command !== 'serve') {
     console.error(`Unknown command: ${command}`);
     printUsage();
@@ -360,6 +376,7 @@ Usage:
   foxclaw start|restart|stop
   foxclaw update
   foxclaw send-voice <path> [caption]
+  foxclaw send-media <path> [caption]
   foxclaw install-systemd|uninstall-systemd
   foxclaw install-launchd|uninstall-launchd
   foxclaw weixin-login [account-id]
@@ -426,6 +443,68 @@ async function runSendVoiceCli(): Promise<void> {
   console.log(`Sent Telegram voice message ${result.result.message_id}: ${filePath}`);
 }
 
+async function runSendMediaCli(): Promise<void> {
+  const parsed = parseSendVoiceCliArgs(process.argv.slice(3));
+  if (!parsed.fileArg) {
+    console.error('Usage: foxclaw send-media <path> [caption] [--bot-id <bot-id>] [--chat-id <chat-id>]');
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = loadConfig();
+  const filePath = path.resolve(config.defaultCwd, parsed.fileArg);
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile()) {
+    throw new Error(`Media file not found: ${filePath}`);
+  }
+  const plan = planTelegramOutboundMedia(filePath);
+
+  const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
+  const { botId, botToken } = resolveTelegramVoiceTarget(config.tgBotTokens, inferredBotId);
+  const { BridgeStore } = await import('./store/database.js');
+  const store = new BridgeStore(config.storePath);
+  let chatId = parsed.chatId;
+  try {
+    chatId ??= botId ? store.getTelegramPrivateScope(botId)?.chatId ?? null : null;
+  } finally {
+    store.close();
+  }
+  if (!chatId) {
+    const target = botId ? ` for ${botId}` : '';
+    throw new Error(`No remembered Telegram private chat${target}. Send /status to the bot once, or pass --chat-id <chat-id>.`);
+  }
+
+  if (stat.size > TELEGRAM_PUBLIC_BOT_API_UPLOAD_HINT_BYTES && !isLocalTelegramBotApiConfigured()) {
+    console.warn([
+      `Media is ${formatBytes(stat.size)}. Public Telegram Bot API uploads may reject large files.`,
+      'For long videos, configure TELEGRAM_BOT_API_BASE_URL to a Local Bot API Server.',
+    ].join(' '));
+  }
+
+  const contents = await fs.promises.readFile(filePath);
+  const { callTelegramMultipartApi } = await import('./telegram/api.js');
+  const fields: Record<string, string> = {
+    chat_id: chatId,
+    ...(parsed.caption ? { caption: parsed.caption } : {}),
+    ...(plan.kind === 'video' ? { supports_streaming: 'true' } : {}),
+  };
+  const result = await callTelegramMultipartApi<{ message_id: number }>(
+    botToken,
+    plan.method,
+    fields,
+    [{
+      fieldName: plan.fieldName,
+      filename: path.basename(filePath),
+      contents,
+      contentType: plan.contentType,
+    }],
+  );
+  if (!result.ok || !result.result) {
+    throw new Error(result.description || `Telegram ${plan.method} failed.`);
+  }
+  console.log(`Sent Telegram ${plan.kind} message ${result.result.message_id}: ${filePath}`);
+}
+
 function parseSendVoiceCliArgs(args: string[]): {
   fileArg: string | null;
   caption: string;
@@ -455,6 +534,52 @@ function parseSendVoiceCliArgs(args: string[]): {
     botId,
     chatId,
   };
+}
+
+function planTelegramOutboundMedia(filePath: string): TelegramOutboundMediaPlan {
+  const extension = path.extname(filePath).toLowerCase();
+  switch (extension) {
+    case '.jpg':
+    case '.jpeg':
+      return { kind: 'photo', method: 'sendPhoto', fieldName: 'photo', contentType: 'image/jpeg' };
+    case '.png':
+      return { kind: 'photo', method: 'sendPhoto', fieldName: 'photo', contentType: 'image/png' };
+    case '.webp':
+      return { kind: 'photo', method: 'sendPhoto', fieldName: 'photo', contentType: 'image/webp' };
+    case '.gif':
+      return { kind: 'animation', method: 'sendAnimation', fieldName: 'animation', contentType: 'image/gif' };
+    case '.mp4':
+    case '.m4v':
+      return { kind: 'video', method: 'sendVideo', fieldName: 'video', contentType: 'video/mp4' };
+    case '.mov':
+      return { kind: 'video', method: 'sendVideo', fieldName: 'video', contentType: 'video/quicktime' };
+    case '.pdf':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/pdf' };
+    case '.json':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/json' };
+    case '.md':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'text/markdown' };
+    case '.txt':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'text/plain' };
+    case '.zip':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/zip' };
+    default:
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/octet-stream' };
+  }
+}
+
+function isLocalTelegramBotApiConfigured(): boolean {
+  const value = process.env.TELEGRAM_BOT_API_BASE_URL?.trim();
+  return Boolean(value && !/^https:\/\/api\.telegram\.org\/?$/i.test(value));
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib.toFixed(1)}KiB`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib.toFixed(1)}MiB`;
+  return `${(mib / 1024).toFixed(2)}GiB`;
 }
 
 function formatRuntimeStatusSummary(status: RuntimeStatus): string {

@@ -250,6 +250,17 @@ Later commands are sorted by recent usage. Plain text, photos, and files continu
 
 These are useful when the phone-side model, permission, or provider behavior does not match what you expected.
 
+### 3.4 Media delivery CLI
+
+Codex can deliver generated files back to the current Telegram private chat without asking you to run a Telegram command manually:
+
+```bash
+foxclaw send-voice /absolute/path/audio.ogg "caption"
+foxclaw send-media /absolute/path/output.mp4 "caption"
+```
+
+`send-media` auto-selects Telegram `sendPhoto`, `sendVideo`, `sendAnimation`, or `sendDocument` based on the file extension. MP4 videos are sent with `supports_streaming=true`, so Telegram clients can play them inline when the file is encoded compatibly. For long videos, prefer H.264/AAC MP4. Public Bot API uploads can reject large files; configure a Local Bot API Server with `TELEGRAM_BOT_API_BASE_URL` and a longer `TELEGRAM_BOT_API_TIMEOUT_MS` when delivering large media.
+
 ## 4. The `/setup` Panel
 
 `/setup` is one of the main mobile panels. Settings are scoped to the chat, so private chat, group, and topic can use different settings.

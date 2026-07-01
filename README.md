@@ -310,7 +310,7 @@ foxclaw weixin-login
 
 ## Codex Skill
 
-仓库自带 FoxClaw 安装维护 Skill 和 `telegram-voice-delivery` 语音投递 Skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。FoxClaw 启动时会把语音投递 Skill 自动同步到每个 Telegram runtime 的 `CODEX_HOME`；Codex 生成音频后可直接执行 `foxclaw send-voice`，自动把文件送回当前 Telegram 私聊，无需用户再输入 `/voice file`。
+仓库自带 FoxClaw 安装维护 Skill、`telegram-voice-delivery` 语音投递 Skill 和 `telegram-media-delivery` 媒体投递 Skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。FoxClaw 启动时会把投递 Skill 自动同步到每个 Telegram runtime 的 `CODEX_HOME`；Codex 生成音频、图片、封面、截图或视频后可直接执行 `foxclaw send-voice` / `foxclaw send-media`，自动把文件送回当前 Telegram 私聊。
 
 ## 故障排查
 

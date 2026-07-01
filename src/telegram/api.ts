@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -17,17 +18,14 @@ export interface TelegramRemoteFile {
   file_path?: string;
 }
 
-const API_HOST = 'api.telegram.org';
+const DEFAULT_API_BASE_URL = 'https://api.telegram.org';
 
 export async function callTelegramApi<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
   const payload = JSON.stringify(body);
+  const endpoint = telegramApiUrl(botToken, method);
   return new Promise<TelegramApiResult<T>>((resolve, reject) => {
-    const request = https.request({
-      host: API_HOST,
-      port: 443,
-      path: `/bot${botToken}/${method}`,
+    const request = requestForUrl(endpoint, {
       method: 'POST',
-      family: 4,
       headers: {
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(payload),
@@ -47,7 +45,7 @@ export async function callTelegramApi<T>(botToken: string, method: string, body:
       });
     });
     request.on('error', reject);
-    request.setTimeout(20_000, () => {
+    request.setTimeout(telegramApiTimeoutMs(false), () => {
       request.destroy(new Error(`Telegram API request timed out for ${method}`));
     });
     request.write(payload);
@@ -79,13 +77,10 @@ export async function callTelegramMultipartApi<T>(
   }
   parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
   const payload = Buffer.concat(parts);
+  const endpoint = telegramApiUrl(botToken, method);
   return new Promise<TelegramApiResult<T>>((resolve, reject) => {
-    const request = https.request({
-      host: API_HOST,
-      port: 443,
-      path: `/bot${botToken}/${method}`,
+    const request = requestForUrl(endpoint, {
       method: 'POST',
-      family: 4,
       headers: {
         'content-type': `multipart/form-data; boundary=${boundary}`,
         'content-length': payload.length,
@@ -105,7 +100,7 @@ export async function callTelegramMultipartApi<T>(
       });
     });
     request.on('error', reject);
-    request.setTimeout(20_000, () => {
+    request.setTimeout(telegramApiTimeoutMs(true), () => {
       request.destroy(new Error(`Telegram API request timed out for ${method}`));
     });
     request.write(payload);
@@ -126,13 +121,9 @@ export async function downloadTelegramFile(botToken: string, remoteFilePath: str
   const tempPath = `${destinationPath}.tmp-${process.pid}-${Date.now()}`;
   let response: IncomingMessage | null = null;
   try {
+    const endpoint = telegramFileUrl(botToken, remoteFilePath);
     response = await new Promise<IncomingMessage>((resolve, reject) => {
-      const request = https.get({
-        host: API_HOST,
-        port: 443,
-        path: `/file/bot${botToken}/${remoteFilePath}`,
-        family: 4,
-      }, (incoming) => {
+      const request = getForUrl(endpoint, (incoming) => {
         const statusCode = incoming.statusCode ?? 500;
         if (statusCode >= 400) {
           incoming.resume();
@@ -142,7 +133,7 @@ export async function downloadTelegramFile(botToken: string, remoteFilePath: str
         resolve(incoming);
       });
       request.on('error', reject);
-      request.setTimeout(20_000, () => {
+      request.setTimeout(telegramApiTimeoutMs(true), () => {
         request.destroy(new Error(`Telegram file download timed out for ${remoteFilePath}`));
       });
     });
@@ -164,4 +155,52 @@ export async function downloadTelegramFile(botToken: string, remoteFilePath: str
 
 function escapeMultipartName(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\r', '').replaceAll('\n', '');
+}
+
+function telegramApiBaseUrl(): string {
+  const raw = process.env.TELEGRAM_BOT_API_BASE_URL?.trim() || DEFAULT_API_BASE_URL;
+  return raw.replace(/\/+$/g, '');
+}
+
+function telegramApiUrl(botToken: string, method: string): URL {
+  return new URL(`${telegramApiBaseUrl()}/bot${botToken}/${method}`);
+}
+
+function telegramFileUrl(botToken: string, remoteFilePath: string): URL {
+  return new URL(`${telegramApiBaseUrl()}/file/bot${botToken}/${remoteFilePath}`);
+}
+
+function telegramApiTimeoutMs(multipart: boolean): number {
+  const raw = Number.parseInt(process.env.TELEGRAM_BOT_API_TIMEOUT_MS ?? '', 10);
+  if (Number.isFinite(raw) && raw > 0) {
+    return raw;
+  }
+  return multipart ? 300_000 : 20_000;
+}
+
+function requestForUrl(
+  url: URL,
+  options: http.RequestOptions,
+  callback: (response: IncomingMessage) => void,
+): http.ClientRequest {
+  const client = url.protocol === 'http:' ? http : https;
+  return client.request({
+    ...options,
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port || undefined,
+    path: `${url.pathname}${url.search}`,
+    family: url.hostname === 'localhost' ? undefined : 4,
+  }, callback);
+}
+
+function getForUrl(url: URL, callback: (response: IncomingMessage) => void): http.ClientRequest {
+  const client = url.protocol === 'http:' ? http : https;
+  return client.get({
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port || undefined,
+    path: `${url.pathname}${url.search}`,
+    family: url.hostname === 'localhost' ? undefined : 4,
+  }, callback);
 }

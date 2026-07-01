@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const BUNDLED_CODEX_SKILLS = ['telegram-voice-delivery'] as const;
+const BUNDLED_CODEX_SKILLS = ['telegram-voice-delivery', 'telegram-media-delivery'] as const;
 
 export function installBundledCodexSkills(packageRoot: string, codexHome: string): string[] {
   const installed: string[] = [];

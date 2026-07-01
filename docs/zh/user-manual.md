@@ -250,6 +250,17 @@ TG_ALLOWED_TOPIC_ID=42
 
 这些命令适合排查“为什么手机上跑出来的权限、模型或 provider 和预期不同”。
 
+### 3.4 媒体投递 CLI
+
+Codex 可以把已经生成的文件直接送回当前 Telegram 私聊，不需要你手动输入 Telegram 命令：
+
+```bash
+foxclaw send-voice /absolute/path/audio.ogg "说明"
+foxclaw send-media /absolute/path/output.mp4 "说明"
+```
+
+`send-media` 会按文件扩展名自动选择 Telegram `sendPhoto`、`sendVideo`、`sendAnimation` 或 `sendDocument`。MP4 视频会带 `supports_streaming=true`，只要编码兼容，Telegram 客户端就可以内联播放。长视频建议使用 H.264/AAC MP4。公网 Bot API 上传大文件可能被拒绝；需要交付大视频时，建议配置 Local Bot API Server，并设置 `TELEGRAM_BOT_API_BASE_URL` 和更长的 `TELEGRAM_BOT_API_TIMEOUT_MS`。
+
 ## 4. `/setup` 会话设置面板
 
 `/setup` 是手机端最重要的面板之一。它按聊天范围保存设置，私聊、群组、topic 可以有不同设置。
