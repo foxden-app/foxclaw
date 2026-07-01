@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.67 - 2026-07-01
+
+### 中文
+- 修复手动中断 Codex thread 后 Telegram 过程消息残留的问题：中断收尾现在也会折叠已有过程汇报，并按 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL` 删除已归档的工具/运行状态明细。
+- 中断时即使没有 final answer，也会被视为已有持久化收尾消息，从而复用正常完成路径的聊天清理逻辑，减少未折叠、未删除的旧消息。
+
+### English
+- Fixed stale Telegram progress messages after manually interrupting a Codex thread. Interrupted turn cleanup now also collapses existing progress updates and deletes archived tool/runtime detail messages according to `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL`.
+- Interrupted turns are now treated as having a persistent terminal message even when there is no final answer, allowing them to reuse the normal completion cleanup path.
+
 ## 0.5.66 - 2026-06-29
 
 ### 中文

@@ -4519,6 +4519,9 @@ export class BridgeSessionCore {
   }
 
   private hasObservedPersistentReply(active: ActiveTurn): boolean {
+    if (active.interruptRequested) {
+      return true;
+    }
     if ((active.finalText || '').trim()) {
       return true;
     }

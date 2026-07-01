@@ -1812,6 +1812,35 @@ test('commentary collapse keeps original messages when RichMessage editing fails
   assert.equal(active.segments[0].messages.length, 1);
 });
 
+test('interrupted turns collapse Telegram commentary without a final answer', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.interruptRequested = true;
+  active.segments = [
+    {
+      itemId: 'commentary-1', phase: 'commentary', outputKind: 'commentary', isPlan: false,
+      text: 'Step one.', completed: true, startedAtMs: 1_750_000_000_000,
+      completedAtMs: 1_750_000_001_000, messages: [{ messageId: 11, text: 'one' }],
+    },
+    {
+      itemId: 'commentary-2', phase: 'commentary', outputKind: 'commentary', isPlan: false,
+      text: 'Step two.', completed: true, startedAtMs: 1_750_000_002_000,
+      completedAtMs: 1_750_000_003_000, messages: [{ messageId: 12, text: 'two' }],
+    },
+  ];
+
+  await (rig.controller as any).collapseTurnCommentary(active);
+
+  assert.equal(rig.editedRichMessages.length, 1);
+  assert.match(rig.editedRichMessages[0]!, /^<details><summary>Progress · 2 updates ·/);
+  assert.deepEqual(rig.deletedMessageIds, [12]);
+});
+
 test('oversized tool archive falls back to a short archived message and remains deletable', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -6024,6 +6053,27 @@ test('completed turns delete archived tool detail messages after a final reply a
     kind: 'turn_completed',
     turnId: 'turn-1',
     state: 'completed',
+  });
+
+  assert.deepEqual(rig.deletedMessageIds, [33, 34]);
+});
+
+test('interrupted turns delete archived tool detail messages without a final answer', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const active = (rig.controller as any).createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  active.archivedMessageIds = [33, 34];
+  setActiveTurnForTest(rig, active);
+  (rig.controller as any).completeTurn = async () => {};
+
+  await (rig.controller as any).handleTurnActivityEvent({
+    kind: 'turn_completed',
+    turnId: 'turn-1',
+    state: 'interrupted',
   });
 
   assert.deepEqual(rig.deletedMessageIds, [33, 34]);
