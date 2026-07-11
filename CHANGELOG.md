@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.70 - 2026-07-11
+
+### 中文
+- `foxclaw status` 现在显示实际生效的 Codex home。单 bot 显示一条 `Codex home` 路径；多 bot 模式会按 bot 列出共享默认 runtime 和各隔离 runtime 的 home，`foxclaw status --json` 也会保留这些路径。
+
+### English
+- `foxclaw status` now shows the effective Codex home. Single-bot mode prints one `Codex home` path, while multi-bot mode lists the shared default runtime and every isolated runtime by bot. The same paths are retained in `foxclaw status --json`.
+
 ## 0.5.69 - 2026-07-11
 
 ### 中文

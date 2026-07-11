@@ -401,6 +401,8 @@ export interface RuntimeStatus {
   running: boolean;
   connected: boolean;
   userAgent: string | null;
+  /** Effective Codex home used by this runtime, including the implicit ~/.codex default. */
+  codexHome?: string | null;
   codexAppServer?: {
     pid: number | null;
     port: number | null;
@@ -424,6 +426,7 @@ export interface RuntimeStatus {
     activeTurns: number;
     runtimeKind?: 'default' | 'isolated';
     currentAuth?: string | null;
+    codexHome?: string | null;
     codexAppServer?: RuntimeStatus['codexAppServer'];
   }>;
   weixinRuntime?: {

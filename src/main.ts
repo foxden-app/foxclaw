@@ -589,6 +589,18 @@ function formatRuntimeStatusSummary(status: RuntimeStatus): string {
   if (status.userAgent) {
     lines.push(`Codex: ${status.userAgent}`);
   }
+  const botHomes = (status.bots ?? [])
+    .flatMap(bot => bot.codexHome ? [{ label: bot.username ? `@${bot.username}` : bot.id, home: bot.codexHome }] : []);
+  if (botHomes.length > 1) {
+    lines.push('Codex homes:');
+    for (const { label, home } of botHomes) {
+      lines.push(`  ${label}: ${home}`);
+    }
+  } else if (botHomes.length === 1) {
+    lines.push(`Codex home: ${botHomes[0]!.home}`);
+  } else if (status.codexHome) {
+    lines.push(`Codex home: ${status.codexHome}`);
+  }
   if (status.codexAppServer) {
     lines.push(`App server: ${status.codexAppServer.running ? 'running' : 'stopped'}${status.codexAppServer.pid ? ` pid=${status.codexAppServer.pid}` : ''}${status.codexAppServer.port ? ` port=${status.codexAppServer.port}` : ''}`);
   }
@@ -826,6 +838,7 @@ async function runServeCli(): Promise<void> {
             && statuses.every((status) => status.connected)
             && (!weixinStatus || weixinStatus.connected),
           userAgent: first?.userAgent ?? null,
+          codexHome: first?.codexHome ?? null,
           ...(first?.codexAppServer ? { codexAppServer: first.codexAppServer } : {}),
           botUsername: first?.botUsername ?? null,
           currentBindings: store!.countBindings(),
@@ -845,6 +858,7 @@ async function runServeCli(): Promise<void> {
             connected: running && Boolean(statuses[index]?.connected),
             activeTurns: running ? (statuses[index]?.activeTurns ?? 0) : 0,
             runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
+            codexHome: statuses[index]?.codexHome ?? runtime.home,
             ...(statuses[index]?.codexAppServer ? { codexAppServer: statuses[index].codexAppServer } : {}),
           })),
           ...(weixinStatus ? {
@@ -920,6 +934,7 @@ async function runServeCli(): Promise<void> {
               activeTurns: status.activeTurns,
               runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
               currentAuth: await runtime.core.getCurrentAuthLabel().catch(() => null),
+              codexHome: status.codexHome ?? runtime.home,
               ...(status.codexAppServer ? { codexAppServer: status.codexAppServer } : {}),
             };
           })),
@@ -1282,6 +1297,7 @@ async function runServeCli(): Promise<void> {
         running: false,
         connected: false,
         userAgent: app.getUserAgent(),
+        codexHome: singleCodexHome,
         codexAppServer: app.getServerStatus(),
         botUsername: bot.username,
         currentBindings: 0,

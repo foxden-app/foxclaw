@@ -771,6 +771,7 @@ export class BridgeSessionCore {
       running: true,
       connected: this.app.isConnected(),
       userAgent: this.app.getUserAgent(),
+      codexHome: this.config.codexHome ?? path.join(os.homedir(), '.codex'),
       codexAppServer: this.app.getServerStatus(),
       botUsername: this.botUsername,
       currentBindings: this.store.countBindings(),
