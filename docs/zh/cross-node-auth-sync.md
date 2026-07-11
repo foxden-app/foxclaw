@@ -10,7 +10,7 @@
 
 - 这些 ChatGPT 账号和 auth 文件都由你合法拥有和维护。
 - 多台机器都运行 FoxClaw，并且每台机器至少有一个 Telegram bot。
-- 你希望 auth 文件在节点间自动保持较新，并允许 FoxClaw 在已启用 ChatGPT 候选 `last_refresh` 超过 9 天时，持有跨节点刷新锁后主动刷新。
+- 你希望 auth 文件在节点间自动保持较新，并允许 FoxClaw 在已启用 ChatGPT 候选 `last_refresh` 已满 8 天时，持有跨节点刷新锁后主动刷新。
 - 默认推荐每台机器只选择一个“联系人 bot”参与跨节点同步；同一节点内其他 bot 继续使用原本的本机 auth 镜像。
 
 不适合：
@@ -25,7 +25,7 @@
 
 - **Push**：本节点登录、Codex 自动刷新或 `/auth refresh all confirm` 成功并通过本机 usage 验证后，把较新的候选加密发送给 peer。
 - **Pull**：本节点切换或重载 auth 前，如果本机其他 runtime 没有更新副本，会向 peer 请求同名、同账号的较新候选。
-- **Lease**：执行会旋转 refresh token 的 `/auth refresh all confirm` 或后台 9 天主动刷新前，先向 peer 申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止刷新。
+- **Lease**：执行会旋转 refresh token 的 `/auth refresh all confirm`、后台 8 天主动刷新或 `/auth` 集群自检前，先向 peer 申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止刷新。
 
 安全边界：
 
@@ -153,6 +153,16 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 如果显示 `未回应：@peer_bot`，说明 Telegram 发送可能成功，但对方没有成功接收、解密、通过 allowlist，或没有运行同一组 auth sync 配置。
 
+`/auth` 面板还提供 **全节点自检并同步**（命令等价入口是 `/auth sync audit`）。它会让所有已配置 peer 用 usage 接口逐个验证本机候选，然后：
+
+- 对同名、同 account、同 ChatGPT 用户身份的候选，选择最新且验证有效的副本并分发给所有 peer；
+- 只有显式审计已经证明时间戳更晚的副本无效时，才允许经过验证的较旧有效副本替换它；
+- 仅当所有 peer 都回应、没有任何有效副本，且至少两个节点独立判定无效时，才把候选标为 `?`；
+- 任一 peer 未回应、忙碌或账号/用户身份冲突时，不做无效裁决；
+- 由发起节点刷新 `last_refresh` 已满 8 天的已启用 ChatGPT 候选，再把刷新结果分发给所有 peer。
+
+一次审计覆盖发起节点 `AUTH_SYNC_PEERS` 中的全部联系人。要让每个节点都参与同一次操作，请使用相互 allowlist 的全互联 peer 配置。
+
 3. 用低风险候选做第一次广播。先确认所有 bot runtime 空闲，然后在节点 A 执行：
 
 ```text
@@ -209,4 +219,4 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 **要不要定期 `/auth refresh all confirm` 保活**
 
-不要手动定期强刷。Codex 会按 access token 到期自动刷新；FoxClaw 也会在已启用 ChatGPT 候选 `last_refresh` 超过 9 天时，等全局空闲并拿到跨节点刷新锁后主动刷新。`/auth refresh all confirm` 仍然是人工维护命令，用于你明确接受 refresh token 轮换风险的场景。
+不要手动定期强刷。Codex 会按 access token 到期自动刷新；FoxClaw 也会在已启用 ChatGPT 候选 `last_refresh` 已满 8 天时，等全局空闲并拿到跨节点刷新锁后主动刷新。`/auth refresh all confirm` 仍然是人工维护命令，用于你明确接受 refresh token 轮换风险的场景。

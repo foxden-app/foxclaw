@@ -76,6 +76,20 @@ export interface AuthSyncValidationResult {
   reason?: string | null;
 }
 
+export interface AuthSyncClusterAuditResult {
+  requestId: string;
+  nodesExpected: number;
+  nodesResponded: number;
+  missingPeers: string[];
+  busyNodes: string[];
+  checkedCandidates: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  synchronizedCandidates: string[];
+  consensusInvalidCandidates: string[];
+  identityConflicts: string[];
+}
+
 export type AuthSyncRemoteImportMode = 'push' | 'pull';
 
 export type AuthSyncPullResponseResult = 'sent' | 'candidate_not_found' | 'account_mismatch' | 'not_newer';
@@ -110,12 +124,18 @@ export type AuthSyncNotification =
 export interface AuthSyncImportCallbacks {
   readLocalCandidate: (candidateName: string) => Promise<AuthMirrorCandidateRecord | null>;
   listLocalCandidates: () => Promise<AuthMirrorCandidateRecord[]>;
+  listLocalCandidateCopies?: () => Promise<AuthMirrorCandidateRecord[]>;
   validateCandidate: (candidateName: string, raw: string, expectedAccountId: string) => Promise<AuthSyncValidationResult>;
   importCandidate: (
     candidateName: string,
     raw: string,
-    source: { nodeId: string; label?: string | null },
+    source: { nodeId: string; label?: string | null; replaceExisting?: boolean },
   ) => Promise<AuthMirrorImportResult>;
+  markCandidateState?: (
+    candidateName: string,
+    state: 'active' | 'needs_repair',
+    expected: { accountId: string; quotaIdentityId: string | null; maxLastRefreshMs: number },
+  ) => Promise<boolean>;
   deleteLocalCandidate?: (
     candidateName: string,
     source: { nodeId: string; label?: string | null; reason?: string | null },
@@ -161,6 +181,23 @@ interface AuthSyncBundlePayload {
   authSha256: string;
 }
 
+interface AuthSyncAuditRecord {
+  candidateName: string;
+  accountId: string;
+  quotaIdentityId: string | null;
+  lastRefreshMs: number;
+  status: 'valid' | 'invalid';
+  reason: string | null;
+  bundle: AuthSyncBundlePayload | null;
+}
+
+interface AuthSyncAuditNodeReport {
+  nodeId: string;
+  status: 'completed' | 'busy';
+  records: AuthSyncAuditRecord[];
+  reason: string | null;
+}
+
 type AuthSyncPlainMessage =
   | ({ kind: 'push.bundle'; requestId?: string | null } & AuthSyncBundlePayload)
   | { kind: 'pull.request'; requestId: string; candidateName: string; accountId: string | null; quotaIdentityId?: string | null; lastRefreshMs: number | null }
@@ -173,6 +210,10 @@ type AuthSyncPlainMessage =
   | { kind: 'lease.grant'; leaseId: string; expiresAt: number }
   | { kind: 'lease.deny'; leaseId: string; reason: string }
   | { kind: 'lease.release'; leaseId: string }
+  | { kind: 'audit.request'; requestId: string; requestedAt: string }
+  | { kind: 'audit.response'; requestId: string; report: AuthSyncAuditNodeReport }
+  | { kind: 'audit.apply'; requestId: string; bundle: AuthSyncBundlePayload; replaceExisting: boolean }
+  | { kind: 'audit.state'; requestId: string; candidateName: string; state: 'active' | 'needs_repair'; accountId: string; quotaIdentityId: string | null; maxLastRefreshMs: number }
   | { kind: 'service.update.request'; requestId: string; targetVersion: string | null; requestedAt: string };
 
 interface AuthSyncEnvelope {
@@ -238,6 +279,14 @@ interface PendingTest {
   finished: boolean;
 }
 
+interface PendingAudit {
+  peers: string[];
+  reports: Map<string, AuthSyncAuditNodeReport>;
+  resolve: (value: { reports: Map<string, AuthSyncAuditNodeReport>; missing: string[] }) => void;
+  timer: NodeJS.Timeout;
+  finished: boolean;
+}
+
 export interface AuthSyncLeaseResult {
   ok: boolean;
   leaseId: string | null;
@@ -254,6 +303,7 @@ const ENVELOPE_MAGIC = 'foxclaw-auth-sync';
 const NONCE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const PULL_TIMEOUT_MS = 12_000;
 const TEST_TIMEOUT_MS = 8_000;
+const AUDIT_TIMEOUT_MS = 5 * 60_000;
 const LEASE_TIMEOUT_MS = 8_000;
 const LEASE_TTL_MS = 10 * 60_000;
 const REMOTE_ACCESS_TOKEN_MIN_TTL_MS = 60_000;
@@ -269,6 +319,7 @@ export class CrossNodeAuthSync {
   private readonly pendingPulls = new Map<string, PendingPull>();
   private readonly pendingLeases = new Map<string, PendingLease>();
   private readonly pendingTests = new Map<string, PendingTest>();
+  private readonly pendingAudits = new Map<string, PendingAudit>();
   private seenNonces = new Map<string, number>();
   private lastPeerActivityAt = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
@@ -380,6 +431,7 @@ export class CrossNodeAuthSync {
       && this.pendingPulls.size === 0
       && this.pendingLeases.size === 0
       && this.pendingTests.size === 0
+      && this.pendingAudits.size === 0
       && this.activeLocalLease === null
       && this.activeRemoteLease === null;
   }
@@ -722,6 +774,65 @@ export class CrossNodeAuthSync {
     return resultPromise;
   }
 
+  async auditCluster(): Promise<AuthSyncClusterAuditResult> {
+    const requestId = crypto.randomUUID();
+    const peers = [...this.peers];
+    const localReportPromise = this.buildAuditReport();
+    const remoteReportsPromise = new Promise<{ reports: Map<string, AuthSyncAuditNodeReport>; missing: string[] }>((resolve) => {
+      if (!this.isReady() || peers.length === 0) {
+        resolve({ reports: new Map(), missing: [] });
+        return;
+      }
+      const timer = setTimeout(() => this.finishPendingAudit(requestId), AUDIT_TIMEOUT_MS);
+      timer.unref();
+      this.pendingAudits.set(requestId, {
+        peers,
+        reports: new Map(),
+        resolve,
+        timer,
+        finished: false,
+      });
+    });
+
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.request',
+      stage: 'started',
+      peer: null,
+      requestId,
+      candidateName: null,
+      detail: `peers=${peers.join(', ') || 'none'}`,
+    });
+    if (this.isReady() && peers.length > 0) {
+      try {
+        await this.sendToAll({ kind: 'audit.request', requestId, requestedAt: new Date().toISOString() });
+      } catch (error) {
+        const pending = this.pendingAudits.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingAudits.delete(requestId);
+          pending.finished = true;
+          pending.resolve({ reports: pending.reports, missing: pending.peers.filter(peer => !pending.reports.has(peer)) });
+        }
+        throw error;
+      }
+    }
+
+    const [localReport, remote] = await Promise.all([localReportPromise, remoteReportsPromise]);
+    const reports = [localReport, ...remote.reports.values()];
+    const result = await this.reconcileAuditReports(requestId, reports, remote.missing);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.request',
+      stage: 'completed',
+      peer: null,
+      requestId,
+      candidateName: null,
+      detail: `responded=${result.nodesResponded}/${result.nodesExpected}; synchronized=${result.synchronizedCandidates.length}; repair=${result.consensusInvalidCandidates.length}`,
+    });
+    return result;
+  }
+
   async publishServiceUpdateRequest(targetVersion: string | null): Promise<{ sent: number; peers: string[] }> {
     if (!this.isReady()) {
       return { sent: 0, peers: [] };
@@ -824,12 +935,276 @@ export class CrossNodeAuthSync {
           this.recordEvent({ direction: 'in', kind: 'lease.release', stage: 'released', peer: normalizePeerIdentity(peer), requestId: message.leaseId, candidateName: null, detail: null });
         }
         return;
+      case 'audit.request':
+        await this.handleAuditRequest(message, normalizePeerIdentity(peer));
+        return;
+      case 'audit.response':
+        this.handleAuditResponse(message, normalizePeerIdentity(peer));
+        return;
+      case 'audit.apply':
+        await this.handleAuditApply(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
+        return;
+      case 'audit.state':
+        await this.applyAuditState(message);
+        return;
       case 'service.update.request':
         await this.handleServiceUpdateRequest(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
         return;
       default:
         return;
     }
+  }
+
+  private async handleAuditRequest(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.request' }>,
+    peer: string,
+  ): Promise<void> {
+    const report = await this.buildAuditReport();
+    await this.sendToPeer(peer, { kind: 'audit.response', requestId: message.requestId, report });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.response',
+      stage: 'sent',
+      peer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: `${report.status}; records=${report.records.length}`,
+    });
+  }
+
+  private handleAuditResponse(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.response' }>,
+    peer: string,
+  ): void {
+    const pending = this.pendingAudits.get(message.requestId);
+    if (!pending || pending.finished || !isValidAuditReport(message.report)) return;
+    const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
+    pending.reports.set(matchedPeer, message.report);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.response',
+      stage: 'received',
+      peer: matchedPeer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: `${message.report.status}; records=${message.report.records.length}; node=${message.report.nodeId}`,
+    });
+    if (pending.peers.every(peerName => pending.reports.has(peerName))) {
+      this.finishPendingAudit(message.requestId);
+    }
+  }
+
+  private async handleAuditApply(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.apply' }>,
+    senderNodeId: string,
+    sourceLabel: string,
+    peer: string,
+  ): Promise<void> {
+    const outcome = await this.validateAndImport(
+      { ...message.bundle, requestId: message.requestId },
+      senderNodeId,
+      sourceLabel,
+      peer,
+      'push',
+      message.replaceExisting,
+    );
+    if (!outcome.ok) return;
+    const bundle = message.bundle;
+    const stateRestored = await this.callbacks.markCandidateState?.(bundle.candidateName, 'active', {
+      accountId: bundle.accountId,
+      quotaIdentityId: bundle.quotaIdentityId ?? null,
+      maxLastRefreshMs: bundle.lastRefreshMs,
+    });
+    if (stateRestored && this.clearCandidateFailure(bundle.candidateName)) {
+      await this.writeState();
+    }
+  }
+
+  private async applyAuditState(message: Extract<AuthSyncPlainMessage, { kind: 'audit.state' }>): Promise<void> {
+    const applied = await this.callbacks.markCandidateState?.(message.candidateName, message.state, {
+      accountId: message.accountId,
+      quotaIdentityId: message.quotaIdentityId,
+      maxLastRefreshMs: message.maxLastRefreshMs,
+    });
+    if (applied && message.state === 'active' && this.clearCandidateFailure(message.candidateName)) {
+      await this.writeState();
+    }
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.state',
+      stage: message.state,
+      peer: null,
+      requestId: message.requestId,
+      candidateName: message.candidateName,
+      detail: null,
+    });
+  }
+
+  private async buildAuditReport(): Promise<AuthSyncAuditNodeReport> {
+    if (!this.callbacks.isIdle()) {
+      return {
+        nodeId: this.nodeId ?? 'local',
+        status: 'busy',
+        records: [],
+        reason: 'runtime is not idle',
+      };
+    }
+    const records: AuthSyncAuditRecord[] = [];
+    const candidates = await (this.callbacks.listLocalCandidateCopies?.() ?? this.callbacks.listLocalCandidates());
+    for (const candidate of candidates) {
+      const bundle = bundleFromRecord(candidate);
+      const expiresAt = readAccessTokenExpiresAtMs(candidate.raw);
+      let validation: AuthSyncValidationResult;
+      if (expiresAt === null || expiresAt <= Date.now() + REMOTE_ACCESS_TOKEN_MIN_TTL_MS) {
+        validation = { ok: false, reason: 'access token is expired or missing exp' };
+      } else {
+        validation = await this.callbacks.validateCandidate(candidate.candidateName, candidate.raw, candidate.accountId);
+      }
+      records.push({
+        candidateName: candidate.candidateName,
+        accountId: candidate.accountId,
+        quotaIdentityId: candidate.quotaIdentityId ?? null,
+        lastRefreshMs: candidate.lastRefreshMs,
+        status: validation.ok ? 'valid' : 'invalid',
+        reason: validation.ok ? null : validation.reason ?? 'usage validation failed',
+        bundle: validation.ok ? bundle : null,
+      });
+    }
+    return {
+      nodeId: this.nodeId ?? 'local',
+      status: 'completed',
+      records,
+      reason: null,
+    };
+  }
+
+  private async reconcileAuditReports(
+    requestId: string,
+    reports: AuthSyncAuditNodeReport[],
+    missingPeers: string[],
+  ): Promise<AuthSyncClusterAuditResult> {
+    const completedReports = reports.filter(report => report.status === 'completed');
+    const busyNodes = reports.filter(report => report.status === 'busy').map(report => report.nodeId);
+    const byCandidate = new Map<string, Array<{ report: AuthSyncAuditNodeReport; record: AuthSyncAuditRecord }>>();
+    for (const report of completedReports) {
+      for (const record of report.records) {
+        const entries = byCandidate.get(record.candidateName) ?? [];
+        entries.push({ report, record });
+        byCandidate.set(record.candidateName, entries);
+      }
+    }
+
+    const synchronizedCandidates: string[] = [];
+    const consensusInvalidCandidates: string[] = [];
+    const identityConflicts: string[] = [];
+    const completeAudit = missingPeers.length === 0 && busyNodes.length === 0;
+    let validCandidates = 0;
+    let invalidCandidates = 0;
+    for (const [candidateName, entries] of byCandidate) {
+      const identities = new Set(entries.map(({ record }) => auditIdentityKey(record.accountId, record.quotaIdentityId)));
+      if (identities.size !== 1) {
+        identityConflicts.push(candidateName);
+        continue;
+      }
+      const valid = entries
+        .filter(({ record }) => record.status === 'valid' && record.bundle !== null)
+        .sort((left, right) => right.record.lastRefreshMs - left.record.lastRefreshMs);
+      if (valid.length > 0) {
+        validCandidates += 1;
+        const selected = valid[0]!;
+        const bundle = selected.record.bundle!;
+        const currentLocal = await this.callbacks.readLocalCandidate(candidateName);
+        let locallyValidated = selected.report.nodeId === this.nodeId
+          && currentLocal?.lastRefreshMs === bundle.lastRefreshMs
+          && sha256(currentLocal.raw) === bundle.authSha256;
+        if (!locallyValidated) {
+          const outcome = await this.validateAndImport(
+            { ...bundle, requestId },
+            selected.report.nodeId,
+            selected.report.nodeId,
+            selected.report.nodeId,
+            'push',
+            completeAudit,
+          );
+          locallyValidated = outcome.ok;
+        }
+        if (!locallyValidated) continue;
+        const stateRestored = await this.callbacks.markCandidateState?.(candidateName, 'active', {
+          accountId: bundle.accountId,
+          quotaIdentityId: bundle.quotaIdentityId ?? null,
+          maxLastRefreshMs: bundle.lastRefreshMs,
+        });
+        if (stateRestored && this.clearCandidateFailure(candidateName)) {
+          await this.writeState();
+        }
+        if (this.isReady()) {
+          await this.sendToAll({ kind: 'audit.apply', requestId, bundle, replaceExisting: completeAudit });
+          await this.sendToAll({
+            kind: 'audit.state',
+            requestId,
+            candidateName,
+            state: 'active',
+            accountId: bundle.accountId,
+            quotaIdentityId: bundle.quotaIdentityId ?? null,
+            maxLastRefreshMs: bundle.lastRefreshMs,
+          });
+        }
+        synchronizedCandidates.push(candidateName);
+        continue;
+      }
+
+      invalidCandidates += 1;
+      const invalidEntries = entries.filter(({ record }) => record.status === 'invalid');
+      const invalidNodes = new Set(invalidEntries.map(({ report }) => report.nodeId));
+      const consensusReached = completeAudit
+        && invalidNodes.size >= 2
+        && invalidEntries.length === entries.length;
+      if (!consensusReached) continue;
+      const latest = invalidEntries.reduce((current, entry) => (
+        !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
+      ), null as (typeof invalidEntries)[number] | null);
+      if (!latest) continue;
+      const expected = {
+        accountId: latest.record.accountId,
+        quotaIdentityId: latest.record.quotaIdentityId,
+        maxLastRefreshMs: latest.record.lastRefreshMs,
+      };
+      await this.callbacks.markCandidateState?.(candidateName, 'needs_repair', expected);
+      if (this.isReady()) {
+        await this.sendToAll({
+          kind: 'audit.state',
+          requestId,
+          candidateName,
+          state: 'needs_repair',
+          ...expected,
+        });
+      }
+      consensusInvalidCandidates.push(candidateName);
+    }
+
+    return {
+      requestId,
+      nodesExpected: this.peers.length + 1,
+      nodesResponded: reports.length,
+      missingPeers,
+      busyNodes,
+      checkedCandidates: byCandidate.size,
+      validCandidates,
+      invalidCandidates,
+      synchronizedCandidates,
+      consensusInvalidCandidates,
+      identityConflicts,
+    };
+  }
+
+  private finishPendingAudit(requestId: string): void {
+    const pending = this.pendingAudits.get(requestId);
+    if (!pending || pending.finished) return;
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingAudits.delete(requestId);
+    const missing = pending.peers.filter(peer => !pending.reports.has(peer));
+    pending.resolve({ reports: pending.reports, missing });
   }
 
   private async handleServiceUpdateRequest(
@@ -1314,6 +1689,7 @@ export class CrossNodeAuthSync {
     sourceLabel: string | null,
     fromPeer: string,
     mode: AuthSyncRemoteImportMode,
+    replaceExisting = false,
   ): Promise<AuthSyncImportOutcome> {
     const source = sourceLabel ?? fromPeer;
     if (!isValidBundle(bundle)) {
@@ -1340,6 +1716,7 @@ export class CrossNodeAuthSync {
     const result = await this.callbacks.importCandidate(bundle.candidateName, bundle.rawAuth, {
       nodeId: sourceNodeId,
       label: source,
+      replaceExisting,
     });
     if (!result.ok) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote candidate import failed for ${bundle.candidateName}: ${result.reason ?? 'unknown'}`);
@@ -1726,6 +2103,30 @@ function isValidBundle(value: AuthSyncBundlePayload): boolean {
     && typeof value.authSha256 === 'string';
 }
 
+function isValidAuditReport(value: AuthSyncAuditNodeReport): boolean {
+  return Boolean(value)
+    && typeof value.nodeId === 'string'
+    && (value.status === 'completed' || value.status === 'busy')
+    && Array.isArray(value.records)
+    && (typeof value.reason === 'string' || value.reason === null)
+    && value.records.every(record => (
+      typeof record.candidateName === 'string'
+      && isAuthCandidateName(record.candidateName)
+      && typeof record.accountId === 'string'
+      && (typeof record.quotaIdentityId === 'string' || record.quotaIdentityId === null)
+      && typeof record.lastRefreshMs === 'number'
+      && Number.isFinite(record.lastRefreshMs)
+      && (record.status === 'valid' || record.status === 'invalid')
+      && (typeof record.reason === 'string' || record.reason === null)
+      && (record.bundle === null || isValidBundle(record.bundle))
+      && (record.status !== 'valid' || record.bundle !== null)
+    ));
+}
+
+function auditIdentityKey(accountId: string, quotaIdentityId: string | null): string {
+  return `${accountId}\u0000${quotaIdentityId || accountId}`;
+}
+
 function quotaIdentitiesCompatible(accountId: string, left: string | null | undefined, right: string | null | undefined): boolean {
   if (!left || !right || left === accountId || right === accountId) {
     return true;
@@ -1844,6 +2245,10 @@ function requestIdFromMessage(message: AuthSyncPlainMessage): string | null {
     case 'delete.candidate':
     case 'test.ping':
     case 'test.pong':
+    case 'audit.request':
+    case 'audit.response':
+    case 'audit.apply':
+    case 'audit.state':
     case 'service.update.request':
       return message.requestId;
     case 'lease.request':
@@ -1865,6 +2270,10 @@ function candidateNameFromMessage(message: AuthSyncPlainMessage): string | null 
       return message.candidateName;
     case 'pull.response':
       return message.bundle?.candidateName ?? null;
+    case 'audit.apply':
+      return message.bundle.candidateName;
+    case 'audit.state':
+      return message.candidateName;
     default:
       return null;
   }

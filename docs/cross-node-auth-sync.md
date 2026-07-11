@@ -10,7 +10,7 @@ Use it when:
 
 - You legally own and maintain the ChatGPT accounts and auth files.
 - Multiple machines run FoxClaw, and each machine has at least one Telegram bot.
-- You want auth files to stay fresh across nodes, and you allow FoxClaw to proactively refresh enabled ChatGPT candidates whose `last_refresh` is older than 9 days after it obtains the cross-node refresh lease.
+- You want auth files to stay fresh across nodes, and you allow FoxClaw to proactively refresh enabled ChatGPT candidates whose `last_refresh` is at least 8 days old after it obtains the cross-node refresh lease.
 - The recommended default is one contact bot per node for cross-node sync. Other bots on the same node continue to use local auth mirroring.
 
 Do not use it when:
@@ -25,7 +25,7 @@ Cross-node sync combines three active paths:
 
 - **Push**: after local login, Codex automatic refresh, or `/auth refresh all confirm` succeeds and passes usage validation, FoxClaw sends the newer candidate to peers.
 - **Pull**: before auth switch or reload, FoxClaw first searches local runtimes for a newer candidate. If none exists, it asks peers for a newer same-name, same-account candidate.
-- **Lease**: before `/auth refresh all confirm` or the background 9-day proactive refresh rotates refresh tokens, FoxClaw requests a cross-node refresh lease. Any busy, denying, or non-responsive peer blocks the refresh.
+- **Lease**: before `/auth refresh all confirm`, the background 8-day proactive refresh, or the `/auth` cluster check rotates refresh tokens, FoxClaw requests a cross-node refresh lease. Any busy, denying, or non-responsive peer blocks the refresh.
 
 Safety boundaries:
 
@@ -153,6 +153,16 @@ Auth sync test complete: sent 1, replies 1.
 
 If it shows `Missing replies: @peer_bot`, Telegram delivery may have succeeded, but the peer did not receive, decrypt, pass allowlist validation, or run the same auth sync configuration.
 
+The `/auth` panel also provides **Check all nodes and reconcile auth** (`/auth sync audit`). It asks every configured peer to validate every local candidate against the usage endpoint, then:
+
+- selects the newest usage-validated copy for each same-name, same-account and same-user identity and distributes it to every peer;
+- allows a validated older copy to replace a newer timestamped copy only when the newer copy failed this explicit audit;
+- marks a candidate `?` only when every peer responded, no node has a valid copy, and at least two nodes independently reported it invalid;
+- leaves candidates unchanged when any peer is missing or busy, or when account/user identities conflict;
+- refreshes enabled ChatGPT candidates whose `last_refresh` is at least 8 days old on the initiating node, then distributes the refreshed copies.
+
+The audit reaches all entries in the initiating node's `AUTH_SYNC_PEERS`. Use reciprocal full-mesh peer lists when every node must participate in one operation.
+
 3. Use a low-risk candidate for the first broadcast. Make sure every runtime is idle, then run on node A:
 
 ```text
@@ -209,4 +219,4 @@ With cross-node sync enabled, this command first requests a cross-node refresh l
 
 **Should I periodically run `/auth refresh all confirm` as keepalive?**
 
-Do not force it manually on a schedule. Codex refreshes automatically when access tokens expire, and FoxClaw now proactively refreshes enabled ChatGPT candidates whose `last_refresh` is older than 9 days after the node is globally idle and obtains the cross-node refresh lease. `/auth refresh all confirm` remains a manual maintenance command for cases where you explicitly accept refresh-token rotation risk.
+Do not force it manually on a schedule. Codex refreshes automatically when access tokens expire, and FoxClaw proactively refreshes enabled ChatGPT candidates whose `last_refresh` is at least 8 days old after the node is globally idle and obtains the cross-node refresh lease. `/auth refresh all confirm` remains a manual maintenance command for cases where you explicitly accept refresh-token rotation risk.

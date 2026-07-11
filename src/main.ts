@@ -924,6 +924,7 @@ async function runServeCli(): Promise<void> {
         },
         authSyncPushAll: () => authSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
         authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
+        authSyncAudit: () => authSync?.auditCluster() ?? Promise.resolve(null),
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
           currentVersion: readPackageVersion(),
@@ -1019,6 +1020,7 @@ async function runServeCli(): Promise<void> {
           {
             readLocalCandidate: (candidateName: string) => mirror.readNewestCandidate(candidateName),
             listLocalCandidates: () => mirror.listNewestCandidates(),
+            listLocalCandidateCopies: () => mirror.listCandidateCopies(),
             validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
               if (!authSyncLocalIdle()) {
                 return { ok: false, reason: 'runtime is not idle' };
@@ -1030,6 +1032,14 @@ async function runServeCli(): Promise<void> {
               return runtime.core.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
             },
             importCandidate: (candidateName, raw, source) => mirror.importExternalCandidate(candidateName, raw, source),
+            markCandidateState: (candidateName, state, expected) => markAuditedAuthCandidateState(
+              store!,
+              mirror,
+              candidateName,
+              state,
+              expected,
+              authRuntimeIds,
+            ),
             deleteLocalCandidate: async (candidateName, source) => {
               if (!authSyncLocalIdle()) {
                 return { ok: false, deleted: false, reason: 'runtime is not idle' };
@@ -1182,6 +1192,7 @@ async function runServeCli(): Promise<void> {
       },
       authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
       authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
+      authSyncAudit: () => singleAuthSync?.auditCluster() ?? Promise.resolve(null),
       statusUpdated: (status: import('./types.js').RuntimeStatus): void => {
         writeRuntimeStatus(config.statusPath, {
           ...status,
@@ -1236,6 +1247,7 @@ async function runServeCli(): Promise<void> {
         {
           readLocalCandidate: (candidateName: string) => singleMirror!.readNewestCandidate(candidateName),
           listLocalCandidates: () => singleMirror!.listNewestCandidates(),
+          listLocalCandidateCopies: () => singleMirror!.listCandidateCopies(),
           validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
             if (!singleAuthSyncLocalIdle()) {
               return { ok: false, reason: 'runtime is not idle' };
@@ -1243,6 +1255,14 @@ async function runServeCli(): Promise<void> {
             return core!.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
           },
           importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
+          markCandidateState: (candidateName, state, expected) => markAuditedAuthCandidateState(
+            store!,
+            singleMirror!,
+            candidateName,
+            state,
+            expected,
+            ['default'],
+          ),
           deleteLocalCandidate: async (candidateName, source) => {
             if (!singleAuthSyncLocalIdle()) {
               return { ok: false, deleted: false, reason: 'runtime is not idle' };
@@ -1373,6 +1393,39 @@ function restoreImportedAuthCandidateState(
     store.setCodexAuthCandidateState(candidateName, 'active', runtimeId);
     store.setCodexAuthCandidateDisabled(candidateName, false, runtimeId);
   }
+}
+
+async function markAuditedAuthCandidateState(
+  store: AuthSyncNotifyStore,
+  mirror: { readNewestCandidate(candidateName: string): Promise<import('./auth/mirror.js').AuthMirrorCandidateRecord | null> },
+  candidateName: string,
+  state: 'active' | 'needs_repair',
+  expected: { accountId: string; quotaIdentityId: string | null; maxLastRefreshMs: number },
+  runtimeIds: string[],
+): Promise<boolean> {
+  const record = await mirror.readNewestCandidate(candidateName);
+  if (!record || record.accountId !== expected.accountId || record.lastRefreshMs > expected.maxLastRefreshMs) {
+    return false;
+  }
+  if (
+    expected.quotaIdentityId
+    && expected.quotaIdentityId !== expected.accountId
+    && record.quotaIdentityId !== record.accountId
+    && record.quotaIdentityId !== expected.quotaIdentityId
+  ) {
+    return false;
+  }
+  store.setCodexAuthCandidateState(candidateName, state);
+  if (state === 'active') {
+    store.setCodexAuthCandidateDisabled(candidateName, false);
+  }
+  for (const runtimeId of runtimeIds) {
+    store.setCodexAuthCandidateState(candidateName, state, runtimeId);
+    if (state === 'active') {
+      store.setCodexAuthCandidateDisabled(candidateName, false, runtimeId);
+    }
+  }
+  return true;
 }
 
 function createAuthMirrorNotifier(

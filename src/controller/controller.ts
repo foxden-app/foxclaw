@@ -25,7 +25,7 @@ import {
   readChatGptAuthMetadata,
   type ChatGptAuthMetadata,
 } from '../auth/mirror.js';
-import { readAccessTokenExpiresAtMs } from '../auth/cross_node_sync.js';
+import { readAccessTokenExpiresAtMs, type AuthSyncClusterAuditResult } from '../auth/cross_node_sync.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -172,6 +172,7 @@ export interface CoreCoordinator {
   authSyncSafeAll?: () => Promise<{ localSynced: number; localSkipped: number; sent: number; skipped: number }>;
   authSyncPushAll?: () => Promise<{ sent: number; skipped: number }>;
   authSyncTest?: () => Promise<{ sent: number; replied: number; missing: string[] }>;
+  authSyncAudit?: () => Promise<AuthSyncClusterAuditResult | null>;
   statusUpdated?: (status: RuntimeStatus) => void;
   getServiceStatus?: () => Promise<{
     currentVersion?: string;
@@ -423,6 +424,13 @@ interface CodexAuthRefreshAllResult {
   failed: Array<{ name: string; error: string }>;
 }
 
+interface CodexAuthClusterAuditOutcome {
+  audit: AuthSyncClusterAuditResult;
+  refresh: CodexAuthRefreshAllResult;
+  push: { sent: number; skipped: number };
+  refreshSkippedReason: string | null;
+}
+
 interface CodexAuthSelection {
   candidate: CodexAuthCandidate;
   fromLabel: string | null;
@@ -510,7 +518,7 @@ const CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME = 'codex-auth-quota.json';
 const CODEX_AUTH_LIST_PAGE_SIZE = 8;
 const CODEX_AUTH_LOW_QUOTA_PERCENT = 10;
 const CODEX_AUTH_STALE_CREDENTIAL_DAYS = 8;
-const CODEX_AUTH_PROACTIVE_REFRESH_DAYS = 9;
+const CODEX_AUTH_PROACTIVE_REFRESH_DAYS = 8;
 const CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS = 60 * 60_000;
 const CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS = 5 * 60_000;
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
@@ -1677,12 +1685,12 @@ export class BridgeSessionCore {
       await this.handleAuthListViewCallback(event, authClearSearchMatch[1]!, 'clear_search', locale);
       return;
     }
-    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|safe_sync|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
+    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|safe_sync|cluster_audit|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
     if (authActionMatch) {
       await this.handleAuthPanelActionCallback(
         event,
         authActionMatch[1]!,
-        authActionMatch[2]! as 'login_device' | 'reload' | 'safe_sync' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
+        authActionMatch[2]! as 'login_device' | 'reload' | 'safe_sync' | 'cluster_audit' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
         locale,
       );
       return;
@@ -4416,6 +4424,14 @@ export class BridgeSessionCore {
     this.stalePanelDeleteTimers.set(key, timer);
   }
 
+  private pauseStalePanelDeletion(scopeId: string, messageId: number): void {
+    const key = `${scopeId}:${messageId}`;
+    const timer = this.stalePanelDeleteTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.stalePanelDeleteTimers.delete(key);
+  }
+
   private async deleteMessage(scopeId: string, messageId: number): Promise<void> {
     await this.messaging.deleteMessage(scopeId, messageId);
   }
@@ -6072,6 +6088,20 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, message);
       return;
     }
+    if (action === 'audit' || action === 'check') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.sendMessage(scopeId, t(locale, 'auth_cluster_audit_blocked_active'));
+        return;
+      }
+      await this.sendMessage(scopeId, t(locale, 'auth_cluster_audit_starting'));
+      const outcome = await this.runAuthClusterAudit();
+      if (!outcome) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
+        return;
+      }
+      await this.sendRichInternalMessage(scopeId, '/auth sync audit', formatAuthClusterAuditResult(locale, outcome));
+      return;
+    }
     if (action === 'safe' || (action === 'push' && args[1]?.toLowerCase() === 'all')) {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_push_blocked_active'));
@@ -6102,6 +6132,47 @@ export class BridgeSessionCore {
     return pushResult
       ? { localSynced: 0, localSkipped: 0, sent: pushResult.sent, skipped: pushResult.skipped }
       : null;
+  }
+
+  private async runAuthClusterAudit(): Promise<CodexAuthClusterAuditOutcome | null> {
+    if (!this.coordinator?.authSyncAudit) return null;
+    const lease = await this.coordinator.acquireAuthRefreshLease?.('cluster auth audit and stale refresh');
+    if (lease && !lease.ok) {
+      throw new UserFacingError(lease.reason ?? 'cluster auth audit lease was not granted');
+    }
+    try {
+      const audit = await this.coordinator.authSyncAudit();
+      if (!audit) return null;
+      const refresh: CodexAuthRefreshAllResult = { refreshed: [], skipped: [], failed: [] };
+      let refreshSkippedReason: string | null = null;
+      const complete = audit.nodesResponded === audit.nodesExpected
+        && audit.missingPeers.length === 0
+        && audit.busyNodes.length === 0;
+      if (complete) {
+        const state = await this.listCodexAuthState();
+        const staleNames = new Set(state.candidates
+          .filter(candidate => (
+            !candidate.disabled
+            && candidate.state !== 'needs_repair'
+            && candidate.credentialKind === 'chatgpt'
+            && candidate.credentialLastRefreshMs !== null
+            && candidate.credentialLastRefreshMs <= Date.now() - CODEX_AUTH_PROACTIVE_REFRESH_DAYS * 24 * 60 * 60_000
+          ))
+          .map(candidate => candidate.name));
+        if (staleNames.size > 0) {
+          const refreshed = await this.refreshCodexAuthCandidates(staleNames);
+          refresh.refreshed.push(...refreshed.refreshed);
+          refresh.skipped.push(...refreshed.skipped);
+          refresh.failed.push(...refreshed.failed);
+        }
+      } else {
+        refreshSkippedReason = 'cluster audit was incomplete';
+      }
+      const push = await this.coordinator.authSyncPushAll?.() ?? { sent: 0, skipped: 0 };
+      return { audit, refresh, push, refreshSkippedReason };
+    } finally {
+      await this.coordinator.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
+    }
   }
 
   private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale, confirmed = false): Promise<void> {
@@ -6945,7 +7016,7 @@ export class BridgeSessionCore {
   private async handleAuthPanelActionCallback(
     event: TelegramCallbackEvent,
     localId: string,
-    action: 'login_device' | 'reload' | 'safe_sync' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
+    action: 'login_device' | 'reload' | 'safe_sync' | 'cluster_audit' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
     locale: AppLocale,
   ): Promise<void> {
     const record = this.pendingAuthChoiceLists.get(localId);
@@ -6998,6 +7069,51 @@ export class BridgeSessionCore {
             sent: result.sent,
             skipped: result.skipped,
           })}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
+          authChoiceKeyboard(locale, record),
+        );
+      }
+      return;
+    }
+    if (action === 'cluster_audit') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_cluster_audit_blocked_active'));
+        return;
+      }
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_cluster_audit_starting'));
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_cluster_audit_starting'), []);
+        this.pauseStalePanelDeletion(event.scopeId, record.messageId);
+      }
+      let outcome: CodexAuthClusterAuditOutcome | null;
+      try {
+        outcome = await this.runAuthClusterAudit();
+      } catch (error) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_cluster_audit_failed', { error: formatUserError(error) }),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      if (!outcome) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_disabled'), authChoiceKeyboard(locale, record));
+        }
+        return;
+      }
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      clampCodexAuthListOffset(record);
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(
+          event.scopeId,
+          record.messageId,
+          `${formatAuthClusterAuditResult(locale, outcome)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
           authChoiceKeyboard(locale, record),
         );
       }
@@ -12388,6 +12504,9 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
     { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
   ]);
   rows.push([
+    { text: t(locale, 'button_auth_cluster_audit'), callback_data: `auth:${record.localId}:cluster_audit` },
+  ]);
+  rows.push([
     { text: t(locale, 'button_auth_safe_sync'), callback_data: `auth:${record.localId}:safe_sync` },
     { text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` },
   ]);
@@ -12524,6 +12643,39 @@ function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshA
       .join('; ');
     lines.push(t(locale, 'auth_refresh_all_failed', { value: details }));
   }
+  return lines.join('\n');
+}
+
+function formatAuthClusterAuditResult(locale: AppLocale, outcome: CodexAuthClusterAuditOutcome): string {
+  const { audit, refresh, push } = outcome;
+  const lines = [t(locale, 'auth_cluster_audit_summary', {
+    responded: audit.nodesResponded,
+    expected: audit.nodesExpected,
+    checked: audit.checkedCandidates,
+    valid: audit.validCandidates,
+    invalid: audit.invalidCandidates,
+  })];
+  if (audit.synchronizedCandidates.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_synced', { value: audit.synchronizedCandidates.join(', ') }));
+  }
+  if (audit.consensusInvalidCandidates.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_repair', { value: audit.consensusInvalidCandidates.join(', ') }));
+  }
+  if (audit.missingPeers.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_missing', { value: audit.missingPeers.join(', ') }));
+  }
+  if (audit.busyNodes.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_busy', { value: audit.busyNodes.join(', ') }));
+  }
+  if (audit.identityConflicts.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_conflicts', { value: audit.identityConflicts.join(', ') }));
+  }
+  if (outcome.refreshSkippedReason) {
+    lines.push(t(locale, 'auth_cluster_audit_refresh_skipped'));
+  } else {
+    lines.push(formatAuthRefreshAllResult(locale, refresh, 'proactive'));
+  }
+  lines.push(t(locale, 'auth_cluster_audit_push', { sent: push.sent, skipped: push.skipped }));
   return lines.join('\n');
 }
 

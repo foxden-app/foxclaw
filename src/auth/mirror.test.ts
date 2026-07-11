@@ -138,6 +138,34 @@ test('AuthCandidateMirror calls hook after a successful remote import', async ()
   }
 });
 
+test('AuthCandidateMirror cluster reconciliation can replace a newer invalid copy with a validated older copy', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-mirror-reconcile-'));
+  const canonical = path.join(root, 'canonical');
+  const runtime = path.join(root, 'bot1');
+  try {
+    await fs.mkdir(canonical, { recursive: true });
+    const newerInvalid = auth('acct-1', '2026-06-09T00:00:00.000Z');
+    const olderValid = auth('acct-1', '2026-06-01T00:00:00.000Z');
+    await fs.writeFile(path.join(canonical, 'auth.json_work'), newerInvalid);
+    const mirror = new AuthCandidateMirror(canonical, [{ id: 'bot1', authDir: runtime }], loggerStub as any);
+    await mirror.initialize();
+
+    const ordinary = await mirror.importExternalCandidate('auth.json_work', olderValid, { nodeId: 'node-b' });
+    assert.equal(ordinary.imported, false);
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), newerInvalid);
+
+    const reconciled = await mirror.importExternalCandidate('auth.json_work', olderValid, {
+      nodeId: 'node-b',
+      replaceExisting: true,
+    });
+    assert.equal(reconciled.imported, true);
+    assert.equal(await fs.readFile(path.join(canonical, 'auth.json_work'), 'utf8'), olderValid);
+    assert.equal(await fs.readFile(path.join(runtime, 'auth.json_work'), 'utf8'), olderValid);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('AuthCandidateMirror rejects a same-name candidate belonging to a different account', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-conflict-'));
   const canonical = path.join(root, 'canonical');

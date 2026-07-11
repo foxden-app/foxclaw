@@ -203,6 +203,29 @@ export class AuthCandidateMirror {
     });
   }
 
+  async listCandidateCopies(): Promise<AuthMirrorCandidateRecord[]> {
+    return this.withActivity(async () => {
+      const copies: AuthMirrorCandidateRecord[] = [];
+      const seen = new Set<string>();
+      for (const entry of await this.collectAuthRecords()) {
+        if (!isAuthCandidateName(entry.candidateName)) continue;
+        const key = `${entry.candidateName}\u0000${entry.record.accountId}\u0000${entry.record.quotaIdentityId}\u0000${entry.record.lastRefreshMs}\u0000${entry.record.raw}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        copies.push({
+          ...entry.record,
+          candidateName: entry.candidateName,
+          sourceRuntimeId: entry.runtimeId,
+          sourceLabel: this.runtimeLabel(entry.runtimeId),
+        });
+      }
+      return copies.sort((left, right) => (
+        left.candidateName.localeCompare(right.candidateName)
+        || right.lastRefreshMs - left.lastRefreshMs
+      ));
+    });
+  }
+
   async syncRuntimeCandidate(runtimeId: string, candidateName: string): Promise<boolean> {
     if (!isAuthCandidateName(candidateName)) return false;
     const runtime = this.runtimes.find((entry) => entry.id === runtimeId);
@@ -346,7 +369,7 @@ export class AuthCandidateMirror {
   async importExternalCandidate(
     candidateName: string,
     raw: string,
-    source: { nodeId: string; label?: string | null },
+    source: { nodeId: string; label?: string | null; replaceExisting?: boolean },
   ): Promise<AuthMirrorImportResult> {
     if (!isAuthCandidateName(candidateName)) {
       return { ok: false, imported: false, reason: 'invalid candidate name' };
@@ -374,7 +397,7 @@ export class AuthCandidateMirror {
           !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
         ), null);
         const previousRefresh = Math.max(newest?.record.lastRefreshMs ?? 0, this.lastSyncedRefresh.get(candidateName) ?? 0);
-        if (metadata.lastRefreshMs <= previousRefresh) {
+        if (metadata.lastRefreshMs <= previousRefresh && !source.replaceExisting) {
           return { ok: true, imported: false, reason: 'local candidate is already newer or equal' };
         }
 

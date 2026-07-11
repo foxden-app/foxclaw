@@ -439,11 +439,13 @@ Candidates: 2
 
 右侧 `✅` / `⏸️` 表示当前是否参与自动轮转。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--` 表示该候选还没有额度历史快照。健康摘要会区分正常、额度偏低、额度耗尽、额度未知、长期未刷新、API key、无效 auth 文件和需要登录修复。
 
+**全节点自检并同步** 按钮会通知所有已配置 auth-sync peer 验证本机候选。FoxClaw 会采用并分发最新有效副本；只有完整的多节点无效共识才会标记 `?`；`last_refresh` 已满 8 天的已启用 ChatGPT auth 由发起节点刷新后再分发。存在未回应、忙碌或身份冲突节点时，本轮不会做无效裁决和临期刷新。
+
 当某个候选在实际使用中已经失败，并且 FoxClaw 无法从本机 mirror 或跨节点同步恢复同账号较新凭据时，会标为“需要登录修复”。这类候选不会参与自动轮转和后台主动刷新，也不会出现在“已启用”筛选里。它的按钮会显示 `?`。点击后有两个选择：`登录修复` 会在选中该候选的状态下启动设备码登录；`删除` 会从 canonical 和所有本机 bot runtime 中删除这个候选，并清理它的额度缓存。
 
 `/auth refresh all` 是仅命令入口的维护操作，因为 ChatGPT refresh token 会被轮换。只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。命令会先显示风险确认：如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并显示摘要。
 
-OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 超过 9 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。私聊里会显示一条主动刷新状态消息，并在结束时编辑成最终结果；较新的候选会继续镜像和跨节点同步，成批出现的镜像/跨节点刷新通知会合并成简短汇总。
+OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 已满 8 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。私聊里会显示一条主动刷新状态消息，并在结束时编辑成最终结果；较新的候选会继续镜像和跨节点同步，成批出现的镜像/跨节点刷新通知会合并成简短汇总。
 
 ### 6.4 跨节点 auth 同步
 
@@ -480,14 +482,14 @@ AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 - 只接收 `AUTH_SYNC_PEERS` 中 peer bot 发来的同步文件；密钥、cluster、nonce 或 payload 校验失败时不会写盘。
 - 远端导入必须等本机全局空闲，再临时切换到待验证 auth、重启 app-server、读取 usage 验证成功后才写入候选。
 - 同名候选如果已知属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱，永远拒绝覆盖。
-- 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 9 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
+- 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 8 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
 - 如果开启 `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 或在 `/config` 中打开自动剔除，无法恢复的候选会直接删除并向 peer 传播删除 tombstone；私聊通知会压缩为 auth 池摘要：历史总数、存活数、因失效剔除数。
 
 双主动流程：
 
 - push：本节点登录、Codex 自动刷新或 `/auth refresh all` 成功并通过本机镜像验证后，会主动把较新的候选加密推送给 peer。
 - pull：本节点切换或重载 auth 前如果发现本地候选不是最新，会先查本机其他 runtime；仍找不到时，再向 peer 拉取同名同账号的较新副本。
-- lease：执行会旋转 refresh token 的 `/auth refresh all confirm` 或后台 9 天主动刷新前，会向 peer 申请跨节点刷新锁。任一 peer 忙碌、拒绝或无响应都会阻止刷新。
+- lease：执行会旋转 refresh token 的 `/auth refresh all confirm`、后台 8 天主动刷新或集群自检前，会向 peer 申请跨节点刷新锁。任一 peer 忙碌、拒绝或无响应都会阻止刷新。
 
 命令：
 
@@ -495,6 +497,7 @@ AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 - `/auth sync events [过滤]`：查看最近同步事件，可按候选名、peer、request id、事件类型、阶段或详情过滤。
 - `/auth sync trace <requestId>`：查看某个 request id 或事件 id 的最近流水。
 - `/auth sync test`：发送加密 ping 并等待 peer 返回 pong，确认 peer、共享密钥和 Bot-to-Bot 私聊可用。
+- `/auth sync audit`：执行与 `/auth` 面板“全节点自检并同步”按钮相同的验证、协商、无效共识、临期刷新和分发流程。
 - `/auth sync push all`：手动广播当前节点已验证的全部候选，不刷新 token；“已发送”不等于对端已经导入，需要在 peer 上看 `/auth sync status` 和 `/auth`。
 
 命令等价用法：

@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.75 - 2026-07-11
+
+### 中文
+- `/auth` 面板新增“全节点自检并同步”按钮，命令等价入口为 `/auth sync audit`。发起节点会申请跨节点刷新锁，通知所有已配置 peer 逐个通过 Codex usage 接口验证 auth，并在同一轮中汇总节点、有效候选、无效候选、未回应、忙碌和身份冲突状态。
+- 集群审计会在同名、同 account、同 ChatGPT 用户身份范围内采用最新且验证有效的副本，并分发给所有 peer。完整审计确认较新的副本无效时，允许经过验证的较旧有效副本替换它；任一节点未回应或忙碌时仍坚持普通的只接受更新副本规则。
+- 只有所有 peer 都回应、没有任何有效副本，并且至少两个节点独立确认无效时，才会把候选统一标记为 `?` 等待人工处理；有效副本导入后会恢复 active 状态并清除旧失败记录。
+- 临期主动刷新阈值由 9 天统一为 `last_refresh` 已满 8 天。集群自检完整结束后，由主动发起的 bot 刷新符合条件的已启用 ChatGPT auth，再向所有 peer 分发；同一节点的 canonical 和各 Codex home 副本都会参与检查，避免漏掉本机仍有效的旧副本。
+
+### English
+- Added **Check all nodes and reconcile auth** to the `/auth` panel, with `/auth sync audit` as the command equivalent. The initiating node acquires the cross-node refresh lease, asks every configured peer to validate each auth through the Codex usage endpoint, and summarizes responding, missing, busy, valid, invalid, and identity-conflicting states in one run.
+- Cluster audit selects the newest validated copy among same-name candidates with matching account and ChatGPT user identity, then distributes it to every peer. A validated older copy may replace a newer invalid copy only after a complete audit; missing or busy peers keep normal newer-only import semantics.
+- A candidate is marked `?` only when every peer responds, no valid copy exists, and at least two nodes independently confirm it invalid. Importing a valid copy restores the active state and clears stale failure records.
+- Unified proactive maintenance at `last_refresh` age 8 days instead of 9. After a complete audit, the initiating bot refreshes eligible enabled ChatGPT auth and distributes the result. Audits inspect canonical and per-Codex-home copies on each node so an older but still valid local copy is not overlooked.
+
 ## 0.5.74 - 2026-07-11
 
 ### 中文

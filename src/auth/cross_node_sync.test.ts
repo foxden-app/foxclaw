@@ -296,6 +296,202 @@ test('CrossNodeAuthSync testPeers waits for peer pong replies', async () => {
   }
 });
 
+test('CrossNodeAuthSync cluster audit adopts and distributes the newest valid candidate', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-valid-'));
+  try {
+    const older = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    const newer = record('auth.json_work', 'acct-1', '2026-06-09T00:00:00.000Z');
+    let importedOnA: string | null = null;
+    const activeOnA: string[] = [];
+    const activeOnB: string[] = [];
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' });
+        },
+      },
+      callbacks({
+        records: [older],
+        importCandidate: async (_candidateName, raw, source) => {
+          importedOnA = raw;
+          assert.equal(source.replaceExisting, true);
+          return { ok: true, imported: true };
+        },
+        markCandidateState: async (candidateName, state) => {
+          if (state === 'active') activeOnA.push(candidateName);
+          return true;
+        },
+      }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      {
+        send: async (_peer, envelope) => {
+          await services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' });
+        },
+      },
+      callbacks({
+        records: [newer],
+        markCandidateState: async (candidateName, state) => {
+          if (state === 'active') activeOnB.push(candidateName);
+          return true;
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    const result = await serviceA.auditCluster();
+
+    assert.equal(importedOnA, newer.raw);
+    assert.deepEqual(result.missingPeers, []);
+    assert.equal(result.nodesResponded, 2);
+    assert.deepEqual(result.synchronizedCandidates, ['auth.json_work']);
+    assert.deepEqual(result.consensusInvalidCandidates, []);
+    assert.equal(activeOnA.includes('auth.json_work'), true);
+    assert.equal(activeOnB.includes('auth.json_work'), true);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
+test('CrossNodeAuthSync cluster audit recovers an older valid local copy hidden by a newer invalid copy', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-local-copy-'));
+  try {
+    const newerInvalid = record('auth.json_work', 'acct-1', '2026-06-09T00:00:00.000Z');
+    newerInvalid.raw = rawAuth('acct-1', '2026-06-09T00:00:00.000Z', Math.floor(Date.now() / 1000) - 60);
+    const olderValid = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    let restoredRaw: string | null = null;
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' }).then(() => undefined) },
+      callbacks({
+        records: [newerInvalid, olderValid],
+        importCandidate: async (_candidateName, raw, source) => {
+          assert.equal(source.replaceExisting, true);
+          restoredRaw = raw;
+          return { ok: true, imported: true };
+        },
+      }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' }).then(() => undefined) },
+      callbacks({ records: [newerInvalid] }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    const result = await serviceA.auditCluster();
+
+    assert.equal(restoredRaw, olderValid.raw);
+    assert.deepEqual(result.synchronizedCandidates, ['auth.json_work']);
+    assert.deepEqual(result.consensusInvalidCandidates, []);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
+test('CrossNodeAuthSync cluster audit marks an auth for repair only after multi-node invalid consensus', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-invalid-'));
+  try {
+    const expiredA = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    expiredA.raw = rawAuth('acct-1', '2026-06-01T00:00:00.000Z', Math.floor(Date.now() / 1000) - 60);
+    const expiredB = record('auth.json_work', 'acct-1', '2026-06-02T00:00:00.000Z');
+    expiredB.raw = rawAuth('acct-1', '2026-06-02T00:00:00.000Z', Math.floor(Date.now() / 1000) - 60);
+    const repairOnA: string[] = [];
+    const repairOnB: string[] = [];
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' }).then(() => undefined) },
+      callbacks({
+        records: [expiredA],
+        markCandidateState: async (candidateName, state) => {
+          if (state === 'needs_repair') repairOnA.push(candidateName);
+          return true;
+        },
+      }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' }).then(() => undefined) },
+      callbacks({
+        records: [expiredB],
+        markCandidateState: async (candidateName, state) => {
+          if (state === 'needs_repair') repairOnB.push(candidateName);
+          return true;
+        },
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    const result = await serviceA.auditCluster();
+
+    assert.deepEqual(result.consensusInvalidCandidates, ['auth.json_work']);
+    assert.deepEqual(repairOnA, ['auth.json_work']);
+    assert.deepEqual(repairOnB, ['auth.json_work']);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
+test('CrossNodeAuthSync cluster audit does not mark repair when a peer is busy', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-busy-'));
+  try {
+    const expired = record('auth.json_work', 'acct-1', '2026-06-01T00:00:00.000Z');
+    expired.raw = rawAuth('acct-1', '2026-06-01T00:00:00.000Z', Math.floor(Date.now() / 1000) - 60);
+    let marked = false;
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' }).then(() => undefined) },
+      callbacks({
+        records: [expired],
+        markCandidateState: async () => {
+          marked = true;
+          return true;
+        },
+      }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' }).then(() => undefined) },
+      callbacks({ isIdle: () => false }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    const result = await serviceA.auditCluster();
+
+    assert.deepEqual(result.busyNodes, ['node-b']);
+    assert.deepEqual(result.consensusInvalidCandidates, []);
+    assert.equal(marked, false);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync broadcasts service update requests to peers', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-update-'));
   try {
@@ -842,6 +1038,7 @@ function callbacks(options: {
   importCandidate?: AuthSyncImportCallbacks['importCandidate'];
   deleteLocalCandidate?: AuthSyncImportCallbacks['deleteLocalCandidate'];
   scheduleServiceUpdate?: AuthSyncImportCallbacks['scheduleServiceUpdate'];
+  markCandidateState?: AuthSyncImportCallbacks['markCandidateState'];
   notify?: AuthSyncImportCallbacks['notify'];
 }): AuthSyncImportCallbacks {
   const records = options.records ?? [];
@@ -857,6 +1054,9 @@ function callbacks(options: {
   }
   if (options.scheduleServiceUpdate) {
     result.scheduleServiceUpdate = options.scheduleServiceUpdate;
+  }
+  if (options.markCandidateState) {
+    result.markCandidateState = options.markCandidateState;
   }
   if (options.notify) {
     result.notify = options.notify;

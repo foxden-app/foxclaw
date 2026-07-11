@@ -2398,6 +2398,68 @@ test('/auth panel can trigger safe auth sync', async (t) => {
   assert.match(rig.editedRichMessages.at(-1)!, /Codex auth files:/);
 });
 
+test('/auth panel can run a cluster audit and keep the rich panel interactive', async (t) => {
+  const events: string[] = [];
+  const rig = createControllerRig(null, {
+    acquireAuthRefreshLease: async (reason) => {
+      events.push(`lease:${reason}`);
+      return { ok: true, leaseId: 'lease-audit' };
+    },
+    releaseAuthRefreshLease: async (leaseId) => {
+      events.push(`release:${leaseId}`);
+    },
+    authSyncAudit: async () => {
+      events.push('audit');
+      return {
+        requestId: 'audit-1',
+        nodesExpected: 3,
+        nodesResponded: 3,
+        missingPeers: [],
+        busyNodes: [],
+        checkedCandidates: 2,
+        validCandidates: 1,
+        invalidCandidates: 1,
+        synchronizedCandidates: ['auth.json_a'],
+        consensusInvalidCandidates: ['auth.json_b'],
+        identityConflicts: [],
+      };
+    },
+    authSyncPushAll: async () => {
+      events.push('push');
+      return { sent: 2, skipped: 0 };
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  installTempAuthFiles(t, rig.tempDir);
+  rig.store.setChatLocale('telegram:99::root', 'zh');
+
+  await (rig.controller as any).handleCommand(createEvent('/auth'), 'zh', 'auth', []);
+  const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
+  assert.ok(list);
+  assert.deepEqual(rig.sentKeyboards[0]?.at(-2), [
+    { text: '🩺 全节点自检并同步', callback_data: `auth:${list.localId}:cluster_audit` },
+  ]);
+
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:cluster_audit`, 1));
+
+  assert.deepEqual(events, [
+    'lease:cluster auth audit and stale refresh',
+    'audit',
+    'push',
+    'release:lease-audit',
+  ]);
+  assert.equal(rig.callbackAnswers.at(-1), '正在通知所有 auth sync 节点逐账号自检，协商最新有效凭据，并由本节点刷新已满 8 天的 auth...');
+  assert.match(rig.editedRichMessages[0]!, /正在通知所有 auth sync 节点逐账号自检/);
+  assert.match(rig.editedRichMessages.at(-1)!, /集群 auth 自检：节点 3\/3/);
+  assert.match(rig.editedRichMessages.at(-1)!, /多节点确认无效，已标记问号等待人工处理：auth\.json_b/);
+  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.at(-2), [
+    { text: '🩺 全节点自检并同步', callback_data: `auth:${list.localId}:cluster_audit` },
+  ]);
+});
+
 test('/auth switch recovers a newer same-account credential before restart and syncs after restart', async (t) => {
   const events: string[] = [];
   const rig = createControllerRig(null, {
@@ -3061,9 +3123,12 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
   });
   rig.store.rememberTelegramPrivateScope('bot1', 'telegram:99::root', '99');
   const authDir = installTempAuthFiles(t, rig.tempDir);
-  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', '2026-01-01T00:00:00.000Z');
-  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date().toISOString());
-  writeChatGptAuthCandidate(authDir, 'auth.json_c', 'acct-c', '2026-01-01T00:00:00.000Z');
+  const staleRefresh = new Date(Date.now() - 8 * 24 * 60 * 60_000 - 60_000).toISOString();
+  const notYetStaleRefresh = new Date(Date.now() - 8 * 24 * 60 * 60_000 + 60 * 60_000).toISOString();
+  const refreshedAt = new Date().toISOString();
+  writeChatGptAuthCandidate(authDir, 'auth.json_a', 'acct-a', staleRefresh);
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', notYetStaleRefresh);
+  writeChatGptAuthCandidate(authDir, 'auth.json_c', 'acct-c', staleRefresh);
   rig.store.setCodexAuthCandidateDisabled('auth.json_c', true, 'default');
 
   let restarts = 0;
@@ -3074,7 +3139,7 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
     assert.equal(refreshToken, true);
     const currentName = path.basename(fs.realpathSync(path.join(authDir, 'auth.json')));
     events.push(`refresh:${currentName}`);
-    writeChatGptAuthCandidate(authDir, currentName, 'acct-a', '2026-02-01T00:00:00.000Z');
+    writeChatGptAuthCandidate(authDir, currentName, 'acct-a', refreshedAt);
     return {
       type: 'chatgpt',
       email: 'user@example.com',
@@ -3112,9 +3177,9 @@ test('proactive auth refresh locks peers and refreshes stale enabled ChatGPT can
   assert.equal(proactiveStatus.refreshed, 1);
   assert.equal(proactiveStatus.skipped, 0);
   assert.equal(proactiveStatus.failed, 0);
-  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
-  assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-01T00:00:00.000Z/);
-  assert.doesNotMatch(fs.readFileSync(path.join(authDir, 'auth.json_c'), 'utf8'), /2026-02-01T00:00:00.000Z/);
+  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), new RegExp(refreshedAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), new RegExp(notYetStaleRefresh.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(fs.readFileSync(path.join(authDir, 'auth.json_c'), 'utf8'), new RegExp(staleRefresh.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
   await (rig.controller as any).handleCommand(createEvent('/auth sync status'), 'en', 'auth', ['sync', 'status']);
   assert.match(rig.sentMessages[0]!, /Recent proactive refresh:/);
