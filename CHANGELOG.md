@@ -2,7 +2,7 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
-## 0.5.75 - 2026-07-11
+## 0.5.76 - 2026-07-11
 
 ### 中文
 - `/auth` 面板新增“全节点自检并同步”按钮，命令等价入口为 `/auth sync audit`。发起节点会申请跨节点刷新锁，通知所有已配置 peer 逐个通过 Codex usage 接口验证 auth，并在同一轮中汇总节点、有效候选、无效候选、未回应、忙碌和身份冲突状态。

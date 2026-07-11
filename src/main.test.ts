@@ -6,6 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const projectRoot = process.cwd();
+const packageVersion = (JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')) as { version: string }).version;
 
 function stripProxychainsNoise(output: string): string {
   return output
@@ -41,16 +42,14 @@ function runFoxclawCliWithEnv(extraEnv: NodeJS.ProcessEnv, ...args: string[]): {
 }
 
 test('CLI version and help commands do not enter serve mode', () => {
-  const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')) as { version: string };
-
   const version = runFoxclawCli('--version');
   assert.equal(version.status, 0);
-  assert.equal(version.stdout.trim(), pkg.version);
+  assert.equal(version.stdout.trim(), packageVersion);
   assert.equal(version.stderr, '');
 
   const shortVersion = runFoxclawCli('-v');
   assert.equal(shortVersion.status, 0);
-  assert.equal(shortVersion.stdout.trim(), pkg.version);
+  assert.equal(shortVersion.stdout.trim(), packageVersion);
 
   const help = runFoxclawCli('--help');
   assert.equal(help.status, 0);
@@ -130,7 +129,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
         scopeId: 'telegram:1::root',
         locale: 'zh',
         fromVersion: '0.5.40',
-        toVersion: '0.5.74',
+        toVersion: packageVersion,
         error: null,
         updatedAt: new Date().toISOString(),
       },
@@ -142,7 +141,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
     assert.match(summary.stdout, /Codex homes:\n[ ]{2}@bot_one: \/tmp\/bot-one-codex-home\n[ ]{2}@bot_two: \/tmp\/bot-two-codex-home/);
     assert.match(summary.stdout, /Work: active 1, queued 3, approvals 1, questions 0/);
     assert.match(summary.stdout, /Auth sync: peers 1, pending imports 4/);
-    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.74/);
+    assert.match(summary.stdout, new RegExp(`Last update: 0\\.5\\.40 -> ${packageVersion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
     assert.doesNotMatch(summary.stdout.trim(), /^\{/);
 
     const raw = runFoxclawCliWithEnv({ STATUS_PATH: statusPath }, 'status', '--json');
