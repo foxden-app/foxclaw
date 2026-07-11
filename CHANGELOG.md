@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.74 - 2026-07-11
+
+### 中文
+- FoxClaw 现在优先保留 Node 实际调用的 `process.argv[1]` 作为自身入口，而不是使用会解析软链接的 `import.meta.url`。这样 pnpm 11 shim 中的 `global/v11/<instance>` 布局信息不会在进入更新器前丢失，自更新可以保持在 pnpm 11 隔离全局目录中完成。
+
+### English
+- FoxClaw now preserves Node's invoked `process.argv[1]` as its own entry point instead of relying on `import.meta.url`, which resolves symlinks. This retains pnpm 11's `global/v11/<instance>` layout information before self-update starts, allowing updates to remain within the pnpm 11 isolated global installation.
+
 ## 0.5.73 - 2026-07-11
 
 ### 中文

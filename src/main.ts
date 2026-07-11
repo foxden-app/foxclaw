@@ -63,7 +63,9 @@ const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
 loadEnv();
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const entryPoint = fileURLToPath(import.meta.url);
+const entryPoint = process.argv[1]
+  ? path.resolve(process.argv[1])
+  : fileURLToPath(import.meta.url);
 const PROXY_ENV_KEYS = [
   'HTTP_PROXY',
   'HTTPS_PROXY',
