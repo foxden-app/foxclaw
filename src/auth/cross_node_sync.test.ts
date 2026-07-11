@@ -452,6 +452,49 @@ test('CrossNodeAuthSync cluster audit marks an auth for repair only after multi-
   }
 });
 
+test('CrossNodeAuthSync asks another node to verify a single-node invalid auth before marking repair', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-single-invalid-'));
+  try {
+    const expired = record('auth.json_legacy', 'acct-legacy', '2026-06-01T00:00:00.000Z');
+    expired.raw = rawAuth('acct-legacy', '2026-06-01T00:00:00.000Z', Math.floor(Date.now() / 1000) - 60);
+    const repairOnA: string[] = [];
+    const services: { a?: CrossNodeAuthSync; b?: CrossNodeAuthSync } = {};
+    const serviceA = new CrossNodeAuthSync(
+      config(root, 'node-a', ['@botB']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.b!.handleIncomingEnvelope(envelope, { userId: '100', username: 'botA' }).then(() => undefined) },
+      callbacks({
+        records: [expired],
+        markCandidateState: async (candidateName, state) => {
+          if (state === 'needs_repair') repairOnA.push(candidateName);
+          return true;
+        },
+      }),
+    );
+    services.a = serviceA;
+    const serviceB = new CrossNodeAuthSync(
+      config(root, 'node-b', ['@botA']),
+      loggerStub as any,
+      { send: async (_peer, envelope) => services.a!.handleIncomingEnvelope(envelope, { userId: '200', username: 'botB' }).then(() => undefined) },
+      callbacks({
+        records: [],
+        markCandidateState: async () => false,
+      }),
+    );
+    services.b = serviceB;
+    await serviceA.initialize();
+    await serviceB.initialize();
+
+    const result = await serviceA.auditCluster();
+
+    assert.deepEqual(result.consensusInvalidCandidates, ['auth.json_legacy']);
+    assert.deepEqual(repairOnA, ['auth.json_legacy']);
+    assert.equal(serviceA.getStatus().recentEvents.some(event => event.kind === 'audit.verify.response'), true);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync cluster audit does not mark repair when a peer is busy', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-busy-'));
   try {

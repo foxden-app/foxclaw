@@ -268,7 +268,7 @@ foxclaw send-media /absolute/path/output.mp4 "caption"
 It controls:
 
 - Model: server default, or a model returned by app-server.
-- Reasoning effort: for example `low`, `medium`, `high`, or `xhigh`, depending on model support.
+- Reasoning effort: for example `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`, depending on model support.
 - Fast tier: available when supported by the selected model.
 - Access: `read-only`, `default`, or `full-access`.
 - Mode: `Agent` or `Plan`.
@@ -433,13 +433,13 @@ Quota remaining: window:percent|auth
 [✅ 20|25|personal] [✅]
 [🔐 —|—|team]       [✅]
 [☑️ All] [Enabled] [Attention]
-[🛡️ Access]             [🔑 Login]
-[🔄 Reload auth]
+[🔑 Login]
+[🩺 Safe sync]
 ```
 
 The right-side `✅` / `⏸️` button controls whether the candidate participates in auto-rotation. Tapping it toggles enabled/disabled, and the refreshed list shows the new state. Tapping a candidate switches auth, restarts that runtime, and refreshes the same panel with its buttons intact so you can switch again immediately. `--` means no quota snapshot has been observed for that candidate yet. Health summaries distinguish ready, low quota, quota exhausted, quota unknown, not recently refreshed, API key, invalid auth file, and needs login repair states.
 
-The **Check all nodes and reconcile auth** button asks every configured auth-sync peer to validate its candidates. FoxClaw adopts the newest valid copy, distributes it, marks an account `?` only after complete multi-node invalid consensus, and has the initiating node refresh enabled ChatGPT credentials last refreshed at least 8 days ago. Missing, busy, or identity-conflicting peers prevent invalid marking and stale refresh for that run.
+The **Safe sync** button asks every configured auth-sync peer to validate candidates, adopts the newest valid same-account copy, and distributes it. A candidate that exists on only one node is sent to other nodes for validation only, without being imported; it is marked `?` only when no node validates it and at least two nodes independently reject it. The initiating node also refreshes enabled ChatGPT credentials last refreshed at least 8 days ago. Missing, busy, or identity-conflicting peers prevent stale refresh for that run.
 
 When an auth candidate has already failed while in use and FoxClaw cannot recover a newer same-account credential from local mirror or cross-node sync, it is marked as `needs login repair`. These candidates are skipped by auto-rotation and proactive refresh, and are hidden from the `Enabled` filter. Their row shows a `?` action. Tapping it opens two choices: Login repair starts device-code login with that candidate selected; Delete removes the candidate from canonical storage and all local bot runtimes, and clears cached quota for it.
 
@@ -497,7 +497,7 @@ Commands:
 - `/auth sync events [filter]`: show recent sync event records, optionally filtered by candidate, peer, request id, kind, stage, or detail.
 - `/auth sync trace <requestId>`: show recent records for one request id or event id.
 - `/auth sync test`: send an encrypted ping and wait for peer pong replies to verify peer config, shared key, and Bot-to-Bot private messages.
-- `/auth sync audit`: run the same validate, reconcile, consensus, stale-refresh, and distribution flow as the `/auth` cluster-check button.
+- `/auth sync safe`: run the same all-node validation, reconciliation, invalid verification, stale-refresh, and distribution flow as the `/auth` Safe sync button. `/auth sync audit` remains a compatibility alias.
 - `/auth sync push all`: manually broadcast all locally verified candidates without refreshing tokens. “Sent” does not mean the peer imported files; check `/auth sync status` and `/auth` on the peer.
 
 Equivalent commands:

@@ -268,7 +268,7 @@ foxclaw send-media /absolute/path/output.mp4 "说明"
 它能配置：
 
 - 模型：使用服务端默认模型，或选择 app-server 返回的模型。
-- reasoning effort：例如 `low`、`medium`、`high`、`xhigh`，取决于模型支持情况。
+- reasoning effort：例如 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`，取决于模型支持情况。
 - Fast tier：模型支持时可开关 fast 服务档。
 - Access：`read-only`、`default`、`full-access`。
 - Mode：`Agent` 或 `Plan`。
@@ -433,13 +433,13 @@ Candidates: 2
 [✅ 20|25|personal] [✅]
 [🔐 —|—|team]       [✅]
 [☑️ 全部] [已启用] [需关注]
-[🛡️ Access]             [🔑 设备登录]
-[🔄 Reload auth]
+[🔑 设备登录]
+[🩺 安全同步]
 ```
 
 右侧 `✅` / `⏸️` 表示当前是否参与自动轮转。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--` 表示该候选还没有额度历史快照。健康摘要会区分正常、额度偏低、额度耗尽、额度未知、长期未刷新、API key、无效 auth 文件和需要登录修复。
 
-**全节点自检并同步** 按钮会通知所有已配置 auth-sync peer 验证本机候选。FoxClaw 会采用并分发最新有效副本；只有完整的多节点无效共识才会标记 `?`；`last_refresh` 已满 8 天的已启用 ChatGPT auth 由发起节点刷新后再分发。存在未回应、忙碌或身份冲突节点时，本轮不会做无效裁决和临期刷新。
+**安全同步** 按钮会通知所有已配置 auth-sync peer 验证候选，采用并分发同账号最新有效副本。只存在于一台机器的无效候选也会交给其他节点做只验证、不导入的复核；没有任何节点验证有效且至少两个节点独立确认无效后才标记 `?`。`last_refresh` 已满 8 天的已启用 ChatGPT auth 由发起节点刷新后再分发。存在未回应、忙碌或身份冲突节点时，本轮不会做临期刷新。
 
 当某个候选在实际使用中已经失败，并且 FoxClaw 无法从本机 mirror 或跨节点同步恢复同账号较新凭据时，会标为“需要登录修复”。这类候选不会参与自动轮转和后台主动刷新，也不会出现在“已启用”筛选里。它的按钮会显示 `?`。点击后有两个选择：`登录修复` 会在选中该候选的状态下启动设备码登录；`删除` 会从 canonical 和所有本机 bot runtime 中删除这个候选，并清理它的额度缓存。
 
@@ -497,7 +497,7 @@ AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 - `/auth sync events [过滤]`：查看最近同步事件，可按候选名、peer、request id、事件类型、阶段或详情过滤。
 - `/auth sync trace <requestId>`：查看某个 request id 或事件 id 的最近流水。
 - `/auth sync test`：发送加密 ping 并等待 peer 返回 pong，确认 peer、共享密钥和 Bot-to-Bot 私聊可用。
-- `/auth sync audit`：执行与 `/auth` 面板“全节点自检并同步”按钮相同的验证、协商、无效共识、临期刷新和分发流程。
+- `/auth sync safe`：执行与 `/auth` 面板“安全同步”按钮相同的全节点验证、协商、无效复核、临期刷新和分发流程。`/auth sync audit` 保留为兼容别名。
 - `/auth sync push all`：手动广播当前节点已验证的全部候选，不刷新 token；“已发送”不等于对端已经导入，需要在 peer 上看 `/auth sync status` 和 `/auth`。
 
 命令等价用法：

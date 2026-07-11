@@ -1423,7 +1423,7 @@ function normalizeCollaborationMode(value: unknown): 'default' | 'plan' | null {
 }
 
 function normalizeReasoningEffort(value: unknown): ReasoningEffortValue | null {
-  return typeof value === 'string' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(value)
+  return typeof value === 'string' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(value)
     ? value as ReasoningEffortValue
     : null;
 }

@@ -153,11 +153,11 @@ Auth sync test complete: sent 1, replies 1.
 
 If it shows `Missing replies: @peer_bot`, Telegram delivery may have succeeded, but the peer did not receive, decrypt, pass allowlist validation, or run the same auth sync configuration.
 
-The `/auth` panel also provides **Check all nodes and reconcile auth** (`/auth sync audit`). It asks every configured peer to validate every local candidate against the usage endpoint, then:
+The `/auth` panel's **Safe sync** action (`/auth sync safe`; `/auth sync audit` remains a compatibility alias) performs the complete all-node audit and reconciliation flow. It asks every configured peer to validate every local candidate against the usage endpoint, then:
 
 - selects the newest usage-validated copy for each same-name, same-account and same-user identity and distributes it to every peer;
 - allows a validated older copy to replace a newer timestamped copy only when the newer copy failed this explicit audit;
-- marks a candidate `?` only when every peer responded, no node has a valid copy, and at least two nodes independently reported it invalid;
+- sends a single-node invalid candidate through the encrypted channel for validation-only checks on other nodes, without importing it, and marks it `?` only when no valid result exists and at least two nodes independently report it invalid;
 - leaves candidates unchanged when any peer is missing or busy, or when account/user identities conflict;
 - refreshes enabled ChatGPT candidates whose `last_refresh` is at least 8 days old on the initiating node, then distributes the refreshed copies.
 

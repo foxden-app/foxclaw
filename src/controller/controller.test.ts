@@ -1098,6 +1098,32 @@ test('/fast persists priority when supported and rejects unsupported models', as
   assert.equal(rig.sentMessages.at(-1), 'Current model does not support Fast.');
 });
 
+test('/effort accepts max and ultra when the current model advertises them', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  (rig.controller as any).app.listModels = async () => [{
+    id: 'model-next',
+    model: 'gpt-next',
+    displayName: 'GPT Next',
+    description: '',
+    isDefault: true,
+    supportedReasoningEfforts: ['high', 'max', 'ultra'],
+    defaultReasoningEffort: 'high',
+    serviceTiers: [],
+  }];
+
+  await (rig.controller as any).handleCommand(createEvent('/effort max'), 'en', 'effort', ['max']);
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.reasoningEffort, 'max');
+  assert.match(rig.sentMessages[0]!, /Configured effort: max/);
+
+  await (rig.controller as any).handleCallback(createCallback('setup:effort:ultra', 10));
+  assert.equal(rig.store.getChatSettings('telegram:99::root')?.reasoningEffort, 'ultra');
+  assert.equal(rig.callbackAnswers.at(-1), 'Effort: ultra');
+});
+
 test('setup callbacks update settings and preserve settings:* back-compat', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
@@ -1253,6 +1279,7 @@ test('/status includes Codex account usage without exposing email', async (t) =>
   assert.equal(rig.sentMessages.length, 1);
   assert.match(rig.sentMessages[0]!, /Codex account: ChatGPT/);
   assert.ok(rig.sentMessages[0]!.includes(`CWD: ${rig.tempDir}`));
+  assert.ok(rig.sentMessages[0]!.includes(`Codex home: ${rig.config.codexHome ?? path.join(os.homedir(), '.codex')}`));
   assert.match(rig.sentMessages[0]!, /Codex plan: Plus/);
   assert.match(rig.sentMessages[0]!, /Codex usage \(codex\):/);
   assert.match(rig.sentMessages[0]!, /5h window: 37% remaining/);
@@ -2202,7 +2229,7 @@ test('/auth lists candidates and switches auth via callback', async (t) => {
   assert.match(rig.editedRichKeyboards.at(-1)?.[0]?.[0]?.text, /✅ 20\|25\|a/);
 });
 
-test('time-sensitive auth and threads panels expire after the configured idle period', async (t) => {
+test('time-sensitive auth, threads, and status panels expire after the configured idle period', async (t) => {
   const rig = createControllerRig();
   t.after(async () => {
     await rig.controller.stop();
@@ -2214,9 +2241,10 @@ test('time-sensitive auth and threads panels expire after the configured idle pe
 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
   await (rig.controller as any).handleCommand(createEvent('/threads'), 'en', 'threads', []);
+  await (rig.controller as any).handleCommand(createEvent('/status'), 'en', 'status', []);
   await new Promise(resolve => setTimeout(resolve, 30));
 
-  assert.deepEqual(rig.deletedMessageIds.sort((left, right) => left - right), [1, 1001]);
+  assert.deepEqual(rig.deletedMessageIds.sort((left, right) => left - right), [1, 2, 1001]);
 });
 
 test('/auth switch validates selected candidate and marks unusable auth for repair', async (t) => {
@@ -2404,13 +2432,20 @@ test('/auth sync commands report status, test peers, and push all', async (t) =>
   assert.equal(pushed, true);
 });
 
-test('/auth panel can trigger safe auth sync', async (t) => {
-  let pushed = false;
+test('/auth panel safe sync runs the full cluster audit', async (t) => {
+  const events: string[] = [];
   const rig = createControllerRig(null, {
-    authSyncSafeAll: async () => {
-      pushed = true;
-      return { localSynced: 1, localSkipped: 2, sent: 3, skipped: 4 };
+    acquireAuthRefreshLease: async () => ({ ok: true, leaseId: 'safe-lease' }),
+    releaseAuthRefreshLease: async () => undefined,
+    authSyncAudit: async () => {
+      events.push('audit');
+      return {
+        requestId: 'audit-safe', nodesExpected: 2, nodesResponded: 2, missingPeers: [], busyNodes: [],
+        checkedCandidates: 2, validCandidates: 1, invalidCandidates: 1,
+        synchronizedCandidates: ['auth.json_a'], consensusInvalidCandidates: ['auth.json_b'], identityConflicts: [],
+      };
     },
+    authSyncPushAll: async () => ({ sent: 1, skipped: 0 }),
   });
   t.after(() => {
     rig.store.close();
@@ -2421,17 +2456,17 @@ test('/auth panel can trigger safe auth sync', async (t) => {
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'en', 'auth', []);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
-  assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
-    { text: '🧷 Safe sync', callback_data: `auth:${list.localId}:safe_sync` },
-    { text: '🔄 Reload auth', callback_data: `auth:${list.localId}:reload` },
+  assert.deepEqual(rig.sentKeyboards[0]?.slice(-2), [
+    [{ text: '🔑 Login', callback_data: `auth:${list.localId}:login_device` }],
+    [{ text: '🩺 Safe sync', callback_data: `auth:${list.localId}:safe_sync` }],
   ]);
 
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:safe_sync`, 1));
 
-  assert.equal(pushed, true);
-  assert.equal(rig.callbackAnswers.at(-1), 'Safely syncing auth across local bot runtimes and cross-node peers...');
-  assert.match(rig.editedRichMessages[0]!, /Safely syncing auth across local bot runtimes and cross-node peers/);
-  assert.match(rig.editedRichMessages.at(-1)!, /Safe auth sync complete: local synced 1, local skipped 2; cross-node sent 3, skipped 4\./);
+  assert.deepEqual(events, ['audit']);
+  assert.equal(rig.callbackAnswers.at(-1), 'Auditing every node, selecting the newest valid auth, and safely synchronizing the cluster...');
+  assert.match(rig.editedRichMessages[0]!, /Auditing every node/);
+  assert.match(rig.editedRichMessages.at(-1)!, /Cluster auth check<\/td><td>nodes 2\/2/);
   assert.match(rig.editedRichMessages.at(-1)!, /Codex auth files:/);
 });
 
@@ -2476,11 +2511,11 @@ test('/auth panel can run a cluster audit and keep the rich panel interactive', 
   await (rig.controller as any).handleCommand(createEvent('/auth'), 'zh', 'auth', []);
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
-  assert.deepEqual(rig.sentKeyboards[0]?.at(-2), [
-    { text: '🩺 全节点自检并同步', callback_data: `auth:${list.localId}:cluster_audit` },
+  assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
+    { text: '🩺 安全同步', callback_data: `auth:${list.localId}:safe_sync` },
   ]);
 
-  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:cluster_audit`, 1));
+  await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:safe_sync`, 1));
 
   assert.deepEqual(events, [
     'lease:cluster auth audit and stale refresh',
@@ -2488,12 +2523,12 @@ test('/auth panel can run a cluster audit and keep the rich panel interactive', 
     'push',
     'release:lease-audit',
   ]);
-  assert.equal(rig.callbackAnswers.at(-1), '正在通知所有 auth sync 节点逐账号自检，协商最新有效凭据，并由本节点刷新已满 8 天的 auth...');
-  assert.match(rig.editedRichMessages[0]!, /正在通知所有 auth sync 节点逐账号自检/);
+  assert.equal(rig.callbackAnswers.at(-1), '正在自检全部节点、选择最新有效 auth，并安全同步整个集群...');
+  assert.match(rig.editedRichMessages[0]!, /正在自检全部节点/);
   assert.match(rig.editedRichMessages.at(-1)!, /集群 auth 自检：节点 3\/3/);
   assert.match(rig.editedRichMessages.at(-1)!, /多节点确认无效，已标记问号等待人工处理：auth\.json_b/);
-  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.at(-2), [
-    { text: '🩺 全节点自检并同步', callback_data: `auth:${list.localId}:cluster_audit` },
+  assert.deepEqual(rig.editedRichKeyboards.at(-1)?.at(-1), [
+    { text: '🩺 安全同步', callback_data: `auth:${list.localId}:safe_sync` },
   ]);
 });
 
@@ -3083,8 +3118,7 @@ test('/auth refresh all command can refresh all ChatGPT candidates and keep an a
   const list = [...(rig.controller as any).pendingAuthChoiceLists.values()][0];
   assert.ok(list);
   assert.deepEqual(rig.sentKeyboards[0]?.at(-1), [
-    { text: '🧷 Safe sync', callback_data: `auth:${list.localId}:safe_sync` },
-    { text: '🔄 Reload auth', callback_data: `auth:${list.localId}:reload` },
+    { text: '🩺 Safe sync', callback_data: `auth:${list.localId}:safe_sync` },
   ]);
   events.length = 0;
 
@@ -3115,8 +3149,7 @@ test('/auth refresh all command can refresh all ChatGPT candidates and keep an a
   assert.match(rig.editedRichMessages.at(-1)!, /Auth refresh all complete: 2 refreshed, 1 skipped, 0 failed/);
   assert.match(rig.editedRichMessages.at(-1)!, /Current auth<\/td><td>a/);
   assert.deepEqual(rig.editedRichKeyboards.at(-1)?.at(-1), [
-    { text: '🧷 Safe sync', callback_data: `auth:${confirmationList.localId}:safe_sync` },
-    { text: '🔄 Reload auth', callback_data: `auth:${confirmationList.localId}:reload` },
+    { text: '🩺 Safe sync', callback_data: `auth:${confirmationList.localId}:safe_sync` },
   ]);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_a'), 'utf8'), /2026-02-01T00:00:00.000Z/);
   assert.match(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), /2026-02-02T00:00:00.000Z/);

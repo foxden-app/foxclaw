@@ -1016,7 +1016,11 @@ export class BridgeSessionCore {
         }
         lines.push(...codexUsageLines);
         lines.push(...codexLocalUsageLines);
-        await this.sendRichInternalMessage(scopeId, '/status', lines.join('\n'));
+        lines.splice(5, 0, t(locale, 'status_codex_home', {
+          value: this.config.codexHome ?? path.join(os.homedir(), '.codex'),
+        }));
+        const messageId = await this.sendRichInternalMessage(scopeId, '/status', lines.join('\n'));
+        this.scheduleStalePanelDeletion(scopeId, messageId);
         return;
       }
       case 'account': {
@@ -6093,7 +6097,7 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, message);
       return;
     }
-    if (action === 'audit' || action === 'check') {
+    if (action === 'audit' || action === 'check' || action === 'safe') {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.sendMessage(scopeId, t(locale, 'auth_cluster_audit_blocked_active'));
         return;
@@ -6104,10 +6108,10 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
         return;
       }
-      await this.sendRichInternalMessage(scopeId, '/auth sync audit', formatAuthClusterAuditResult(locale, outcome));
+      await this.sendRichInternalMessage(scopeId, '/auth sync safe', formatAuthClusterAuditResult(locale, outcome));
       return;
     }
-    if (action === 'safe' || (action === 'push' && args[1]?.toLowerCase() === 'all')) {
+    if (action === 'push' && args[1]?.toLowerCase() === 'all') {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_push_blocked_active'));
         return;
@@ -7047,8 +7051,24 @@ export class BridgeSessionCore {
       if (record.messageId !== null) {
         await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_safe_starting'), []);
       }
-      const result = await this.runAuthSafeSyncAll();
-      if (!result) {
+      if (record.messageId !== null) {
+        this.pauseStalePanelDeletion(event.scopeId, record.messageId);
+      }
+      let outcome: CodexAuthClusterAuditOutcome | null;
+      try {
+        outcome = await this.runAuthClusterAudit();
+      } catch (error) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_cluster_audit_failed', { error: formatUserError(error) }),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      if (!outcome) {
         if (record.messageId !== null) {
           await this.editAuthPanelMessage(
             event.scopeId,
@@ -7068,12 +7088,7 @@ export class BridgeSessionCore {
         await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
-          `${t(locale, 'auth_sync_safe_done', {
-            localSynced: result.localSynced,
-            localSkipped: result.localSkipped,
-            sent: result.sent,
-            skipped: result.skipped,
-          })}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
+          `${formatAuthClusterAuditResult(locale, outcome)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
           authChoiceKeyboard(locale, record),
         );
       }
@@ -12504,17 +12519,8 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
   if (record.searchTerm) {
     rows.push([{ text: t(locale, 'button_clear_filter'), callback_data: `auth:${record.localId}:clear_search` }]);
   }
-  rows.push([
-    { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
-    { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
-  ]);
-  rows.push([
-    { text: t(locale, 'button_auth_cluster_audit'), callback_data: `auth:${record.localId}:cluster_audit` },
-  ]);
-  rows.push([
-    { text: t(locale, 'button_auth_safe_sync'), callback_data: `auth:${record.localId}:safe_sync` },
-    { text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` },
-  ]);
+  rows.push([{ text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` }]);
+  rows.push([{ text: t(locale, 'button_auth_safe_sync'), callback_data: `auth:${record.localId}:safe_sync` }]);
   return rows;
 }
 

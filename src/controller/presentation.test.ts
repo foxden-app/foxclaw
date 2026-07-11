@@ -396,6 +396,8 @@ test('clampEffortToModel falls back to model default when unsupported', () => {
 
 test('normalizeRequestedEffort validates allowed effort names', () => {
   assert.equal(normalizeRequestedEffort('HIGH'), 'high');
+  assert.equal(normalizeRequestedEffort('MAX'), 'max');
+  assert.equal(normalizeRequestedEffort('ultra'), 'ultra');
   assert.equal(normalizeRequestedEffort('invalid'), null);
 });
 

@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.78 - 2026-07-12
+
+### 中文
+- `/auth` 面板收敛为“设备登录”和“安全同步”两个维护入口，移除权限、重载 auth 和单独的全节点审计按钮。“安全同步”现在直接执行完整的全节点验证、最新有效副本协商、8 天临期刷新和最终分发；`/auth sync audit` 继续作为兼容别名。
+- 全节点审计现在也覆盖只存在于单个节点的旧候选：通过现有 AES-256-GCM 通道发送给其他节点做只验证、不导入的独立复核。任一节点验证有效就恢复并分发；没有有效结果且至少两个节点确认无效才标记 `?`。
+- Telegram `/status` 新增当前 bot 实际使用的 Codex Home，并与 `/auth`、`/threads` 等时效面板一样按 `TELEGRAM_PANEL_TTL_MS` 自动撤回，默认 5 分钟。
+- 完整支持 Codex 新增的 `max`、`ultra` 推理强度，包括模型能力读取、命令解析、设置持久化和下一轮请求透传，不再提示“未知推理强度”。
+
+### English
+- Simplified the `/auth` panel to Device login and Safe sync, removing the Permissions, Reload auth, and separate cluster-audit buttons. Safe sync now runs the complete all-node validation, newest-valid-copy reconciliation, 8-day stale refresh, and final distribution flow; `/auth sync audit` remains a compatibility alias.
+- All-node audits now cover legacy candidates found on only one node. The candidate is sent through the existing AES-256-GCM channel for independent validation without import. Any valid result restores and distributes it; it is marked `?` only when no valid result exists and at least two nodes reject it.
+- Telegram `/status` now shows the effective Codex Home for the current bot and expires through `TELEGRAM_PANEL_TTL_MS`, like `/auth` and `/threads`, with a five-minute default.
+- Added end-to-end support for the new Codex `max` and `ultra` reasoning efforts across model capability parsing, commands, persisted settings, and turn requests.
+
 ## 0.5.77 - 2026-07-11
 
 ### 中文

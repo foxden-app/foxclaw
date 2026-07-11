@@ -12,7 +12,7 @@ export type SandboxModeValue = 'read-only' | 'workspace-write' | 'danger-full-ac
 export type AccessPresetValue = 'read-only' | 'default' | 'full-access';
 export type CollaborationModeValue = 'default' | 'plan';
 export type ActiveTurnMessageMode = 'steer' | 'queue';
-export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type ThreadStatusKind = 'active' | 'idle' | 'notLoaded' | 'systemError';
 
 export interface ChatSessionSettings {

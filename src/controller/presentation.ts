@@ -716,6 +716,8 @@ export function normalizeRequestedEffort(value: string): ReasoningEffortValue | 
     || normalized === 'medium'
     || normalized === 'high'
     || normalized === 'xhigh'
+    || normalized === 'max'
+    || normalized === 'ultra'
   ) {
     return normalized;
   }
