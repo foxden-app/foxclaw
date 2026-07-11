@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.73 - 2026-07-11
+
+### 中文
+- 当 pnpm 10 与 pnpm 11 全局安装同时存在时，自更新会根据 `pnpm root -g` 返回的当前布局选择对应 CLI shim：`global/5` 使用 `PNPM_HOME/foxclaw`，`global/v11` 使用 `PNPM_HOME/bin/foxclaw`，避免升级后把 systemd 服务切到另一套全局安装。
+
+### English
+- When pnpm 10 and pnpm 11 global installations coexist, self-update now selects the CLI shim that matches the current `pnpm root -g` layout: `PNPM_HOME/foxclaw` for `global/5`, and `PNPM_HOME/bin/foxclaw` for `global/v11`. This prevents the systemd service from switching to the other global installation after an update.
+
 ## 0.5.72 - 2026-07-11
 
 ### 中文

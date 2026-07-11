@@ -628,13 +628,14 @@ export function resolveFoxclawEntryPointFromGlobalRoot(
 
 export function resolveFoxclawEntryPointFromPnpmHome(
   pnpmHome: string,
+  preferBin: boolean = false,
   exists: (target: string) => boolean = fs.existsSync,
   readText: (target: string) => string = (target) => fs.readFileSync(target, 'utf8'),
 ): string | null {
-  const shimCandidates = [
-    path.join(pnpmHome, process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw'),
-    path.join(pnpmHome, 'bin', process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw'),
-  ];
+  const commandName = process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw';
+  const rootShim = path.join(pnpmHome, commandName);
+  const binShim = path.join(pnpmHome, 'bin', commandName);
+  const shimCandidates = preferBin ? [binShim, rootShim] : [rootShim, binShim];
   for (const shim of shimCandidates) {
     if (!exists(shim)) continue;
     let contents = '';
@@ -665,7 +666,7 @@ function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.Pr
     throw new Error(`Could not locate the updated global package root using ${installer.manager}.`);
   }
   const updatedEntryPoint = (installer.pnpmHome
-    ? resolveFoxclawEntryPointFromPnpmHome(installer.pnpmHome)
+    ? resolveFoxclawEntryPointFromPnpmHome(installer.pnpmHome, /^v\d+$/.test(path.basename(globalRoot)))
     : null)
     ?? resolveFoxclawEntryPointFromGlobalRoot(globalRoot);
   if (!updatedEntryPoint) {

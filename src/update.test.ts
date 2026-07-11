@@ -152,16 +152,28 @@ test('inferPnpmFallbackPackageFromEntryPoint keeps known layouts on their pnpm m
 
 test('resolveFoxclawEntryPointFromPnpmHome reads a pnpm 11 isolated package shim', () => {
   const pnpmHome = '/home/user/.local/share/pnpm';
-  const shim = `${pnpmHome}/bin/foxclaw`;
-  const entryPoint = `${pnpmHome}/global/v11/instance/node_modules/@foxden-app/foxclaw/dist/main.js`;
-  const files = new Set([shim, entryPoint]);
-  const contents = `#!/bin/sh\nexec node "${entryPoint}" "$@"\n# cmd-shim-target=${entryPoint}\n`;
+  const rootShim = `${pnpmHome}/foxclaw`;
+  const binShim = `${pnpmHome}/bin/foxclaw`;
+  const pnpm10Entry = `${pnpmHome}/global/5/.pnpm/foxclaw/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const pnpm11Entry = `${pnpmHome}/global/v11/instance/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const files = new Set([rootShim, binShim, pnpm10Entry, pnpm11Entry]);
+  const contents: Record<string, string> = {
+    [rootShim]: `#!/bin/sh\n# cmd-shim-target=${pnpm10Entry}\n`,
+    [binShim]: `#!/bin/sh\n# cmd-shim-target=${pnpm11Entry}\n`,
+  };
 
   assert.equal(resolveFoxclawEntryPointFromPnpmHome(
     pnpmHome,
+    true,
     target => files.has(target),
-    target => target === shim ? contents : '',
-  ), entryPoint);
+    target => contents[target] ?? '',
+  ), pnpm11Entry);
+  assert.equal(resolveFoxclawEntryPointFromPnpmHome(
+    pnpmHome,
+    false,
+    target => files.has(target),
+    target => contents[target] ?? '',
+  ), pnpm10Entry);
 });
 
 test('resolveSelfUpdateInstaller uses the npm beside Node for npm installations', () => {
