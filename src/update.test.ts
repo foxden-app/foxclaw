@@ -8,6 +8,7 @@ import {
   clearPendingClusterUpdateBroadcast,
   createSelfUpdateRuntime,
   extractReleaseNotes,
+  inferPnpmFallbackPackageFromEntryPoint,
   readPendingClusterUpdateBroadcast,
   resolveFoxclawEntryPointFromGlobalRoot,
   readSelfUpdateStatus,
@@ -117,13 +118,32 @@ test('resolveSelfUpdateInstaller falls back to npm exec when pnpm is not install
   assert.deepEqual(installer.installArgs, [
     'exec',
     '--yes',
-    '--package=pnpm@latest',
+    '--package=pnpm@10',
     '--',
     'pnpm',
     'add',
     '--global',
     '@foxden-app/foxclaw@latest',
   ]);
+});
+
+test('resolveSelfUpdateInstaller preserves the pnpm 11 global layout in its npm exec fallback', () => {
+  const entryPoint = '/home/user/.local/share/pnpm/global/v11/node_modules/.pnpm/@foxden-app+foxclaw@0.5.70/node_modules/@foxden-app/foxclaw/dist/main.js';
+  const installer = resolveSelfUpdateInstaller(
+    entryPoint,
+    '/home/user/.nvm/versions/node/v24/bin/node',
+    (target) => target === '/home/user/.nvm/versions/node/v24/bin/npm',
+    { PATH: '/usr/bin:/bin' },
+  );
+
+  assert.deepEqual(installer.installArgs.slice(0, 3), ['exec', '--yes', '--package=pnpm@11']);
+  assert.deepEqual(installer.rootArgs.slice(0, 3), ['exec', '--yes', '--package=pnpm@11']);
+});
+
+test('inferPnpmFallbackPackageFromEntryPoint keeps known layouts on their pnpm major', () => {
+  assert.equal(inferPnpmFallbackPackageFromEntryPoint('/home/user/.local/share/pnpm/global/5/.pnpm/pkg/index.js'), 'pnpm@10');
+  assert.equal(inferPnpmFallbackPackageFromEntryPoint('/home/user/.local/share/pnpm/global/v11/node_modules/.pnpm/pkg/index.js'), 'pnpm@11');
+  assert.equal(inferPnpmFallbackPackageFromEntryPoint('/opt/foxclaw/dist/main.js'), 'pnpm@latest');
 });
 
 test('resolveSelfUpdateInstaller uses the npm beside Node for npm installations', () => {

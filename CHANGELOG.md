@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.71 - 2026-07-11
+
+### 中文
+- 自更新找不到当前 pnpm 可执行文件时，不再通过 `pnpm@latest` 跨 major 安装：`global/5` 旧布局固定使用 pnpm 10，`global/v11` 布局固定使用 pnpm 11，避免同一次升级同时产生两套全局目录和 CLI 入口。
+- 保留 pnpm 10 与 pnpm 11 两种全局 root 解析，确保安装后的自检和服务重启使用与当前 FoxClaw 安装布局一致的新入口。
+
+### English
+- Self-update no longer crosses pnpm major versions through `pnpm@latest` when the current pnpm executable is unavailable. The legacy `global/5` layout uses pnpm 10, while `global/v11` uses pnpm 11, preventing one update from creating duplicate global trees and CLI entry points.
+- Kept global-root resolution for both pnpm 10 and pnpm 11 so post-install checks and service restart use the new entry point from the same layout as the current FoxClaw installation.
+
 ## 0.5.70 - 2026-07-11
 
 ### 中文

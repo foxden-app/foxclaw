@@ -101,6 +101,18 @@ export function inferPnpmHomeFromEntryPoint(entryPoint: string): string | null {
   return normalizedEntryPoint.slice(0, globalIndex);
 }
 
+export function inferPnpmFallbackPackageFromEntryPoint(entryPoint: string): string {
+  const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
+  const versionedLayout = normalizedEntryPoint.match(/\/global\/v(\d+)(?:\/|$)/);
+  if (versionedLayout?.[1]) {
+    return `pnpm@${versionedLayout[1]}`;
+  }
+  if (/\/global\/\d+(?:\/|$)/.test(normalizedEntryPoint)) {
+    return 'pnpm@10';
+  }
+  return 'pnpm@latest';
+}
+
 export function resolveSelfUpdateInstaller(
   entryPoint: string,
   nodePath = process.execPath,
@@ -129,11 +141,12 @@ export function resolveSelfUpdateInstaller(
     const npmCommandName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const npmCommand = executableCandidates(npmCommandName, nodePath, env)
       .find((candidate) => exists(candidate)) ?? npmCommandName;
+    const fallbackPackage = inferPnpmFallbackPackageFromEntryPoint(entryPoint);
     return {
       manager: 'pnpm',
       command: npmCommand,
-      installArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'add', '--global', PACKAGE_SPEC],
-      rootArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'root', '--global'],
+      installArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', 'add', '--global', PACKAGE_SPEC],
+      rootArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', 'root', '--global'],
       pnpmHome,
     };
   }

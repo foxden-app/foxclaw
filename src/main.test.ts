@@ -130,7 +130,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
         scopeId: 'telegram:1::root',
         locale: 'zh',
         fromVersion: '0.5.40',
-        toVersion: '0.5.70',
+        toVersion: '0.5.71',
         error: null,
         updatedAt: new Date().toISOString(),
       },
@@ -142,7 +142,7 @@ test('CLI status prints a compact summary by default and keeps --json', () => {
     assert.match(summary.stdout, /Codex homes:\n[ ]{2}@bot_one: \/tmp\/bot-one-codex-home\n[ ]{2}@bot_two: \/tmp\/bot-two-codex-home/);
     assert.match(summary.stdout, /Work: active 1, queued 3, approvals 1, questions 0/);
     assert.match(summary.stdout, /Auth sync: peers 1, pending imports 4/);
-    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.70/);
+    assert.match(summary.stdout, /Last update: 0\.5\.40 -> 0\.5\.71/);
     assert.doesNotMatch(summary.stdout.trim(), /^\{/);
 
     const raw = runFoxclawCliWithEnv({ STATUS_PATH: statusPath }, 'status', '--json');
