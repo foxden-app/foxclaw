@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.69 - 2026-07-11
+
+### 中文
+- 修复 pnpm 11 的自更新路径解析：`pnpm root -g` 在 pnpm 11 返回全局目录本身（例如 `.../global/v11`），而不是旧版返回的 `node_modules` 目录。FoxClaw 现在同时识别两种布局，升级后可以正确执行自检和服务重启。
+
+### English
+- Fixed self-update path resolution for pnpm 11. `pnpm root -g` now returns the global directory itself (for example `.../global/v11`) rather than the `node_modules` directory returned by earlier pnpm versions. FoxClaw now recognizes both layouts and can correctly run post-update checks and restart the service.
+
 ## 0.5.68 - 2026-07-01
 
 ### 中文

@@ -9,6 +9,7 @@ import {
   createSelfUpdateRuntime,
   extractReleaseNotes,
   readPendingClusterUpdateBroadcast,
+  resolveFoxclawEntryPointFromGlobalRoot,
   readSelfUpdateStatus,
   resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
@@ -16,6 +17,18 @@ import {
   writePendingClusterUpdateBroadcast,
   writeSelfUpdateStatus,
 } from './update.js';
+
+test('resolveFoxclawEntryPointFromGlobalRoot supports pnpm 10 and pnpm 11 global roots', () => {
+  const pnpm10Root = '/home/user/.local/share/pnpm/global/5/node_modules';
+  const pnpm11Root = '/home/user/.local/share/pnpm/global/v11';
+  const pnpm10Entry = `${pnpm10Root}/@foxden-app/foxclaw/dist/main.js`;
+  const pnpm11Entry = `${pnpm11Root}/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const files = new Set([pnpm10Entry, pnpm11Entry]);
+
+  assert.equal(resolveFoxclawEntryPointFromGlobalRoot(pnpm10Root, target => files.has(target)), pnpm10Entry);
+  assert.equal(resolveFoxclawEntryPointFromGlobalRoot(pnpm11Root, target => files.has(target)), pnpm11Entry);
+  assert.equal(resolveFoxclawEntryPointFromGlobalRoot('/missing', target => files.has(target)), null);
+});
 
 test('extractReleaseNotes reads localized bullets from packaged changelog text', () => {
   const changelog = [

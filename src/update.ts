@@ -615,6 +615,19 @@ function runInherited(command: string, args: string[], env: NodeJS.ProcessEnv): 
   }
 }
 
+export function resolveFoxclawEntryPointFromGlobalRoot(
+  globalRoot: string,
+  exists: (target: string) => boolean = fs.existsSync,
+): string | null {
+  // pnpm <= 10 prints the global node_modules directory; pnpm >= 11 prints
+  // the global directory itself. Accept both documented layouts.
+  const candidates = [
+    path.join(globalRoot, '@foxden-app', 'foxclaw', 'dist', 'main.js'),
+    path.join(globalRoot, 'node_modules', '@foxden-app', 'foxclaw', 'dist', 'main.js'),
+  ];
+  return candidates.find(candidate => exists(candidate)) ?? null;
+}
+
 function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.ProcessEnv): string {
   const result = spawnSync(installer.command, installer.rootArgs, { encoding: 'utf8', env });
   if (result.error) {
@@ -627,9 +640,11 @@ function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.Pr
   if (!globalRoot) {
     throw new Error(`Could not locate the updated global package root using ${installer.manager}.`);
   }
-  const updatedEntryPoint = path.join(globalRoot, '@foxden-app', 'foxclaw', 'dist', 'main.js');
-  if (!fs.existsSync(updatedEntryPoint)) {
-    throw new Error(`Updated FoxClaw entry point was not found at ${updatedEntryPoint}.`);
+  const updatedEntryPoint = resolveFoxclawEntryPointFromGlobalRoot(globalRoot);
+  if (!updatedEntryPoint) {
+    throw new Error(
+      `Updated FoxClaw entry point was not found below ${globalRoot} (checked direct and node_modules layouts).`,
+    );
   }
   return updatedEntryPoint;
 }
