@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.77 - 2026-07-11
+
+### 中文
+- 修复跨节点升级广播触发的后台升级完成后，旧服务把内部 `cluster:*` scope 当成 Telegram scope 解析并反复记录 `Expected telegram: scope` 的问题。集群升级现在只记录完成状态并清理轮询文件，不再尝试向不存在的聊天发送回报。
+
+### English
+- Fixed cluster-broadcast updates repeatedly logging `Expected telegram: scope` after completion because the old service tried to parse the internal `cluster:*` scope as a Telegram destination. Cluster updates now record completion and clear the poll state without trying to send a chat reply to a non-chat scope.
+
 ## 0.5.76 - 2026-07-11
 
 ### 中文

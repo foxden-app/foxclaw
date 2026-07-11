@@ -1429,6 +1429,43 @@ test('/update launches a background self-update and reports the completed result
   assert.equal(completed.status?.toVersion, '0.3.14');
 });
 
+test('cluster-triggered updates complete without parsing an internal scope as Telegram', async (t) => {
+  let status: SelfUpdateStatus | null = {
+    state: 'succeeded',
+    scopeId: 'cluster:workstation-T490:request-1',
+    locale: 'zh',
+    fromVersion: '0.5.76',
+    toVersion: '0.5.77',
+    error: null,
+    updatedAt: new Date().toISOString(),
+  };
+  const completion: { status: SelfUpdateStatus | null } = { status: null };
+  const updater: SelfUpdateRuntime = {
+    async launch() {},
+    async readStatus() {
+      return status;
+    },
+    async clearStatus() {
+      status = null;
+    },
+  };
+  const rig = createControllerRig(updater, {
+    selfUpdateCompleted: (terminalStatus) => {
+      completion.status = terminalStatus;
+    },
+  });
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await (rig.controller as any).pollSelfUpdateStatus();
+
+  assert.equal(status, null);
+  assert.equal(completion.status?.toVersion, '0.5.77');
+  assert.deepEqual(rig.sentMessages, []);
+});
+
 test('/update reports terminal fallback when self-update is unavailable', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

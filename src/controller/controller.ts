@@ -5758,6 +5758,11 @@ export class BridgeSessionCore {
       this.scheduleSelfUpdateStatusPoll();
       return;
     }
+    if (status.scopeId.startsWith('cluster:')) {
+      this.coordinator?.selfUpdateCompleted?.(status);
+      await this.selfUpdater?.clearStatus();
+      return;
+    }
     if (!this.ownsScope(status.scopeId)) {
       this.scheduleSelfUpdateStatusPoll();
       return;
