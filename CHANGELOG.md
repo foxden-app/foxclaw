@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.72 - 2026-07-11
+
+### 中文
+- 完整适配 pnpm 11 隔离全局包布局：升级后从 pnpm 生成的 `foxclaw` shim 读取 `global/v11/<instance>/node_modules/.../dist/main.js` 真实入口，不再把 `pnpm root -g` 误当成包目录。
+- pnpm 管理的 FoxClaw 自更新现在按现有安装布局固定 pnpm major，避免 pnpm 10 安装误选 `PNPM_HOME/bin` 中的 pnpm 11；本次更新显式设置 `minimumReleaseAge=0`，确保刚发布的 `@latest` 不会被 pnpm 11 默认 24 小时发布年龄策略回退到旧版。
+
+### English
+- Fully supports pnpm 11's isolated global package layout. After installation, FoxClaw reads the real `global/v11/<instance>/node_modules/.../dist/main.js` target from pnpm's generated CLI shim instead of treating `pnpm root -g` as the package directory.
+- Self-update now pins the pnpm major to the existing installation layout, preventing a pnpm 10 installation from selecting pnpm 11 under `PNPM_HOME/bin`. The update also sets `minimumReleaseAge=0` so pnpm 11's default 24-hour release-age policy does not resolve `@latest` to an older FoxClaw release.
+
 ## 0.5.71 - 2026-07-11
 
 ### 中文

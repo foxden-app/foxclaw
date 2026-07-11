@@ -113,6 +113,8 @@ For more peers, separate bot usernames with commas:
 AUTH_SYNC_PEERS=@foxclaw_node_a_bot,@foxclaw_node_b_bot,@foxclaw_node_c_bot
 ```
 
+Auth imported from a remote peer is not automatically forwarded to other peers, which prevents synchronization loops. A star topology therefore guarantees only direct leaf-to-hub synchronization. If auth newly produced on any leaf must reach every node, every contact bot must list all other contact bots in `AUTH_SYNC_PEERS`, with matching reciprocal allowlists on those peers.
+
 Generate a shared key with a password manager or `openssl`:
 
 ```bash

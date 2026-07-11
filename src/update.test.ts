@@ -11,6 +11,7 @@ import {
   inferPnpmFallbackPackageFromEntryPoint,
   readPendingClusterUpdateBroadcast,
   resolveFoxclawEntryPointFromGlobalRoot,
+  resolveFoxclawEntryPointFromPnpmHome,
   readSelfUpdateStatus,
   resolveCodexUpdateInstaller,
   resolveSelfUpdateInstaller,
@@ -54,54 +55,56 @@ test('extractReleaseNotes reads localized bullets from packaged changelog text',
   assert.equal(extractReleaseNotes(changelog, '0.1.0', 'zh'), null);
 });
 
-test('resolveSelfUpdateInstaller preserves pnpm-managed global installations', () => {
+test('resolveSelfUpdateInstaller pins pnpm 10 for a legacy global installation', () => {
   const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.13/node_modules/@foxden-app/foxclaw/dist/main.js';
   const installer = resolveSelfUpdateInstaller(
     entryPoint,
     '/home/user/.nvm/versions/node/v24/bin/node',
-    (target) => target === '/home/user/.local/share/pnpm/pnpm',
+    (target) => target === '/home/user/.nvm/versions/node/v24/bin/npm',
   );
 
   assert.equal(installer.manager, 'pnpm');
-  assert.equal(installer.command, '/home/user/.local/share/pnpm/pnpm');
-  assert.deepEqual(installer.installArgs, ['add', '--global', '@foxden-app/foxclaw@latest']);
+  assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/npm');
+  assert.deepEqual(installer.installArgs.slice(0, 3), ['exec', '--yes', '--package=pnpm@10']);
 });
 
-test('resolveSelfUpdateInstaller finds pnpm beside the Node executable when PNPM_HOME has no binary', () => {
+test('resolveSelfUpdateInstaller does not trust an unversioned pnpm beside Node', () => {
   const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
   const installer = resolveSelfUpdateInstaller(
     entryPoint,
     '/home/user/.nvm/versions/node/v24/bin/node',
-    (target) => target === '/home/user/.nvm/versions/node/v24/bin/pnpm',
+    (target) => target === '/home/user/.nvm/versions/node/v24/bin/pnpm'
+      || target === '/home/user/.nvm/versions/node/v24/bin/npm',
     { PATH: '/usr/bin:/bin' },
   );
 
   assert.equal(installer.manager, 'pnpm');
-  assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/pnpm');
+  assert.equal(installer.command, '/home/user/.nvm/versions/node/v24/bin/npm');
 });
 
-test('resolveSelfUpdateInstaller finds pnpm in PNPM_HOME bin layout', () => {
+test('resolveSelfUpdateInstaller does not cross layouts through PNPM_HOME bin', () => {
   const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
   const installer = resolveSelfUpdateInstaller(
     entryPoint,
     '/opt/node/bin/node',
-    (target) => target === '/home/user/.local/share/pnpm/bin/pnpm',
+    (target) => target === '/home/user/.local/share/pnpm/bin/pnpm'
+      || target === '/opt/node/bin/npm',
     { PATH: '/usr/bin:/bin' },
   );
 
-  assert.equal(installer.command, '/home/user/.local/share/pnpm/bin/pnpm');
+  assert.equal(installer.command, '/opt/node/bin/npm');
 });
 
-test('resolveSelfUpdateInstaller finds pnpm in PATH for a pnpm-managed install', () => {
+test('resolveSelfUpdateInstaller does not trust an unversioned pnpm in PATH', () => {
   const entryPoint = '/home/user/.local/share/pnpm/global/5/.pnpm/@foxden-app+foxclaw@0.3.14/node_modules/@foxden-app/foxclaw/dist/main.js';
   const installer = resolveSelfUpdateInstaller(
     entryPoint,
     '/opt/node/bin/node',
-    (target) => target === '/home/user/bin/pnpm',
+    (target) => target === '/home/user/bin/pnpm' || target === '/opt/node/bin/npm',
     { PATH: '/home/user/bin:/usr/bin' },
   );
 
-  assert.equal(installer.command, '/home/user/bin/pnpm');
+  assert.equal(installer.command, '/opt/node/bin/npm');
 });
 
 test('resolveSelfUpdateInstaller falls back to npm exec when pnpm is not installed', () => {
@@ -121,6 +124,7 @@ test('resolveSelfUpdateInstaller falls back to npm exec when pnpm is not install
     '--package=pnpm@10',
     '--',
     'pnpm',
+    '--config.minimum-release-age=0',
     'add',
     '--global',
     '@foxden-app/foxclaw@latest',
@@ -144,6 +148,20 @@ test('inferPnpmFallbackPackageFromEntryPoint keeps known layouts on their pnpm m
   assert.equal(inferPnpmFallbackPackageFromEntryPoint('/home/user/.local/share/pnpm/global/5/.pnpm/pkg/index.js'), 'pnpm@10');
   assert.equal(inferPnpmFallbackPackageFromEntryPoint('/home/user/.local/share/pnpm/global/v11/node_modules/.pnpm/pkg/index.js'), 'pnpm@11');
   assert.equal(inferPnpmFallbackPackageFromEntryPoint('/opt/foxclaw/dist/main.js'), 'pnpm@latest');
+});
+
+test('resolveFoxclawEntryPointFromPnpmHome reads a pnpm 11 isolated package shim', () => {
+  const pnpmHome = '/home/user/.local/share/pnpm';
+  const shim = `${pnpmHome}/bin/foxclaw`;
+  const entryPoint = `${pnpmHome}/global/v11/instance/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const files = new Set([shim, entryPoint]);
+  const contents = `#!/bin/sh\nexec node "${entryPoint}" "$@"\n# cmd-shim-target=${entryPoint}\n`;
+
+  assert.equal(resolveFoxclawEntryPointFromPnpmHome(
+    pnpmHome,
+    target => files.has(target),
+    target => target === shim ? contents : '',
+  ), entryPoint);
 });
 
 test('resolveSelfUpdateInstaller uses the npm beside Node for npm installations', () => {
@@ -256,7 +274,8 @@ test('resolveCodexUpdateInstaller upgrades a pnpm-managed Codex package', () => 
   );
 
   assert.equal(installer?.manager, 'pnpm');
-  assert.deepEqual(installer?.installArgs, ['add', '--global', '@openai/codex@latest']);
+  assert.equal(installer?.installArgs.at(-1), '@openai/codex@latest');
+  assert.ok(installer?.installArgs.includes('--package=pnpm@10'));
 });
 
 test('resolveCodexUpdateInstaller leaves unrecognized Codex installations alone', () => {
@@ -287,7 +306,8 @@ test('resolveCodexUpdateInstaller follows pnpm command launchers and FoxClaw wra
   );
 
   assert.equal(installer?.manager, 'pnpm');
-  assert.deepEqual(installer?.installArgs, ['add', '--global', '@openai/codex@latest']);
+  assert.equal(installer?.installArgs.at(-1), '@openai/codex@latest');
+  assert.ok(installer?.installArgs.includes('--package=pnpm@10'));
 });
 
 test('self-update statuses are stored alongside runtime status', () => {

@@ -113,6 +113,8 @@ AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 AUTH_SYNC_PEERS=@foxclaw_node_a_bot,@foxclaw_node_b_bot,@foxclaw_node_c_bot
 ```
 
+远端导入的 auth 不会再次自动转发给本节点的其他 peer，以避免同步环路。因此星形拓扑只保证每个叶子与中心节点直接互通；如果任意叶子节点产生的新 auth 都要到达所有节点，每个联系人 bot 都必须把其他联系人 bot 列入 `AUTH_SYNC_PEERS`，并在对端做对称 allowlist 配置。
+
 建议用密码管理器或 `openssl` 生成共享密钥：
 
 ```bash

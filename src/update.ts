@@ -95,7 +95,9 @@ export function inferPnpmHomeFromEntryPoint(entryPoint: string): string | null {
   const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
   const globalMarker = '/global/';
   const globalIndex = normalizedEntryPoint.indexOf(globalMarker);
-  if (globalIndex <= 0 || !normalizedEntryPoint.includes('/.pnpm/')) {
+  const pnpm10Layout = normalizedEntryPoint.includes('/.pnpm/');
+  const pnpm11Layout = /\/global\/v\d+\/[^/]+\/node_modules\/@foxden-app\/foxclaw\//.test(normalizedEntryPoint);
+  if (globalIndex <= 0 || (!pnpm10Layout && !pnpm11Layout)) {
     return null;
   }
   return normalizedEntryPoint.slice(0, globalIndex);
@@ -121,23 +123,6 @@ export function resolveSelfUpdateInstaller(
 ): SelfUpdateInstaller {
   const pnpmHome = inferPnpmHomeFromEntryPoint(entryPoint);
   if (pnpmHome) {
-    const commandName = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-    const candidates = executableCandidates(commandName, nodePath, env, [
-      path.join(pnpmHome, commandName),
-      path.join(pnpmHome, 'bin', commandName),
-      env.PNPM_HOME?.trim() ? path.join(env.PNPM_HOME.trim(), commandName) : '',
-      env.PNPM_HOME?.trim() ? path.join(env.PNPM_HOME.trim(), 'bin', commandName) : '',
-    ]);
-    const pnpmCommand = candidates.find((candidate) => exists(candidate));
-    if (pnpmCommand) {
-      return {
-        manager: 'pnpm',
-        command: pnpmCommand,
-        installArgs: ['add', '--global', PACKAGE_SPEC],
-        rootArgs: ['root', '--global'],
-        pnpmHome,
-      };
-    }
     const npmCommandName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const npmCommand = executableCandidates(npmCommandName, nodePath, env)
       .find((candidate) => exists(candidate)) ?? npmCommandName;
@@ -145,8 +130,8 @@ export function resolveSelfUpdateInstaller(
     return {
       manager: 'pnpm',
       command: npmCommand,
-      installArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', 'add', '--global', PACKAGE_SPEC],
-      rootArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', 'root', '--global'],
+      installArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', '--config.minimum-release-age=0', 'add', '--global', PACKAGE_SPEC],
+      rootArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', '--config.minimum-release-age=0', 'root', '--global'],
       pnpmHome,
     };
   }
@@ -641,6 +626,32 @@ export function resolveFoxclawEntryPointFromGlobalRoot(
   return candidates.find(candidate => exists(candidate)) ?? null;
 }
 
+export function resolveFoxclawEntryPointFromPnpmHome(
+  pnpmHome: string,
+  exists: (target: string) => boolean = fs.existsSync,
+  readText: (target: string) => string = (target) => fs.readFileSync(target, 'utf8'),
+): string | null {
+  const shimCandidates = [
+    path.join(pnpmHome, process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw'),
+    path.join(pnpmHome, 'bin', process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw'),
+  ];
+  for (const shim of shimCandidates) {
+    if (!exists(shim)) continue;
+    let contents = '';
+    try {
+      contents = readText(shim);
+    } catch {
+      continue;
+    }
+    const matches = contents.match(/(?:[A-Za-z]:[\\/]|\/)[^\r\n"']*?[\\/]node_modules[\\/]@foxden-app[\\/]foxclaw[\\/]dist[\\/]main\.js/g);
+    const entryPoint = matches?.at(-1) ?? null;
+    if (entryPoint && exists(entryPoint)) {
+      return entryPoint;
+    }
+  }
+  return null;
+}
+
 function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.ProcessEnv): string {
   const result = spawnSync(installer.command, installer.rootArgs, { encoding: 'utf8', env });
   if (result.error) {
@@ -653,7 +664,10 @@ function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.Pr
   if (!globalRoot) {
     throw new Error(`Could not locate the updated global package root using ${installer.manager}.`);
   }
-  const updatedEntryPoint = resolveFoxclawEntryPointFromGlobalRoot(globalRoot);
+  const updatedEntryPoint = (installer.pnpmHome
+    ? resolveFoxclawEntryPointFromPnpmHome(installer.pnpmHome)
+    : null)
+    ?? resolveFoxclawEntryPointFromGlobalRoot(globalRoot);
   if (!updatedEntryPoint) {
     throw new Error(
       `Updated FoxClaw entry point was not found below ${globalRoot} (checked direct and node_modules layouts).`,
