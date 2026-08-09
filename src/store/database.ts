@@ -176,7 +176,7 @@ export class BridgeStore {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, name)
       );
-CREATE TABLE IF NOT EXISTS codex_auth_quota_snapshots (
+      CREATE TABLE IF NOT EXISTS codex_auth_quota_snapshots (
         runtime_id TEXT NOT NULL,
         candidate_name TEXT NOT NULL,
         account_id TEXT NOT NULL,
@@ -188,26 +188,6 @@ CREATE TABLE IF NOT EXISTS codex_auth_quota_snapshots (
         secondary_remaining_percent REAL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (runtime_id, candidate_name)
-      );
-      CREATE TABLE IF NOT EXISTS opencode_bindings (
-        chat_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        title TEXT,
-        cwd TEXT,
-        updated_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS opencode_pending_permissions (
-        local_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        permission_id TEXT NOT NULL,
-        scope_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        title TEXT NOT NULL,
-        pattern TEXT,
-        metadata_json TEXT,
-        message_id INTEGER,
-        created_at INTEGER NOT NULL,
-        resolved_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS codex_auth_quota_snapshots_account_idx
         ON codex_auth_quota_snapshots(account_id);
@@ -283,72 +263,8 @@ CREATE TABLE IF NOT EXISTS codex_auth_quota_snapshots (
     `).run(chatId, threadId, cwd, Date.now());
   }
 
-clearBinding(chatId: string): void {
+  clearBinding(chatId: string): void {
     this.db.prepare('DELETE FROM chat_bindings WHERE chat_id = ?').run(chatId);
-  }
-
-  getOpencodeBinding(chatId: string): { sessionId: string; title: string | null; cwd: string | null; updatedAt: number } | null {
-    const row = this.db.prepare('SELECT session_id, title, cwd, updated_at FROM opencode_bindings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
-    if (!row) return null;
-    return {
-      sessionId: String(row.session_id),
-      title: row.title === null ? null : String(row.title),
-      cwd: row.cwd === null ? null : String(row.cwd),
-      updatedAt: Number(row.updated_at),
-    };
-  }
-
-  setOpencodeBinding(chatId: string, sessionId: string, title: string | null, cwd: string | null): void {
-    this.db.prepare(`
-      INSERT INTO opencode_bindings (chat_id, session_id, title, cwd, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(chat_id) DO UPDATE SET session_id = excluded.session_id, title = excluded.title, cwd = excluded.cwd, updated_at = excluded.updated_at
-    `).run(chatId, sessionId, title, cwd, Date.now());
-  }
-
-  clearOpencodeBinding(chatId: string): void {
-    this.db.prepare('DELETE FROM opencode_bindings WHERE chat_id = ?').run(chatId);
-  }
-
-  getOpencodePendingPermission(localId: string): Record<string, unknown> | null {
-    const row = this.db.prepare('SELECT * FROM opencode_pending_permissions WHERE local_id = ?').get(localId) as Record<string, unknown> | undefined;
-    return row ?? null;
-  }
-
-  saveOpencodePendingPermission(record: {
-    localId: string;
-    sessionId: string;
-    permissionId: string;
-    scopeId: string;
-    kind: string;
-    title: string;
-    pattern: string | null;
-    metadataJson: string | null;
-    messageId: number | null;
-  }): void {
-    this.db.prepare(`
-      INSERT INTO opencode_pending_permissions (local_id, session_id, permission_id, scope_id, kind, title, pattern, metadata_json, message_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      record.localId,
-      record.sessionId,
-      record.permissionId,
-      record.scopeId,
-      record.kind,
-      record.title,
-      record.pattern,
-      record.metadataJson,
-      record.messageId,
-      Date.now(),
-    );
-  }
-
-  updateOpencodePermissionMessage(localId: string, messageId: number): void {
-    this.db.prepare('UPDATE opencode_pending_permissions SET message_id = ? WHERE local_id = ?').run(messageId, localId);
-  }
-
-  resolveOpencodePendingPermission(localId: string): void {
-    this.db.prepare('UPDATE opencode_pending_permissions SET resolved_at = ? WHERE local_id = ?').run(Date.now(), localId);
   }
 
   getChatSettings(chatId: string): ChatSessionSettings | null {
