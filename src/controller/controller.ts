@@ -2025,6 +2025,14 @@ export class BridgeSessionCore {
   }
 
   private async handleCodexErrorNotification(params: any): Promise<void> {
+    if (isRetryableCodexTransportError(params)) {
+      this.logger.info('codex.transport.retrying', {
+        message: stringOrNull(params?.error?.message),
+        threadId: stringOrNull(params?.threadId),
+        turnId: stringOrNull(params?.turnId),
+      });
+      return;
+    }
     const message = formatCodexNotificationError(params);
     this.lastError = message;
     this.logger.error('codex.notification.error', params);
@@ -2490,6 +2498,13 @@ export class BridgeSessionCore {
   }
 
   private async handleBridgeWarningNotification(method: string, params: any): Promise<void> {
+    if (isCodexTransportFallbackWarning(method, params)) {
+      this.logger.info('codex.transport.fallback', {
+        message: stringOrNull(params?.message),
+        threadId: stringOrNull(params?.threadId),
+      });
+      return;
+    }
     const threadId = stringOrNull(params?.threadId);
     const scopeId = threadId ? this.findChatByThread(threadId) : null;
     const locale = scopeId ? this.localeForChat(scopeId) : 'en';
@@ -11744,6 +11759,13 @@ function formatWarningNotification(locale: AppLocale, method: string, params: an
   return `${t(locale, 'warning_title')}\n${String(params?.message ?? t(locale, 'unknown'))}`;
 }
 
+function isCodexTransportFallbackWarning(method: string, params: any): boolean {
+  if (method !== 'warning') {
+    return false;
+  }
+  return /falling back from websockets? to https transport/i.test(String(params?.message ?? ''));
+}
+
 function normalizeThreadStatusLabel(raw: any): string {
   if (typeof raw === 'string') {
     return raw;
@@ -12998,6 +13020,14 @@ function formatCodexNotificationError(params: any): string {
     return clipUserFacingError(cleanUserFacingError(code));
   }
   return clipUserFacingError(cleanUserFacingError(JSON.stringify(params?.error ?? params ?? {})));
+}
+
+function isRetryableCodexTransportError(params: any): boolean {
+  if (params?.willRetry !== true) {
+    return false;
+  }
+  const errorInfo = params?.error?.codexErrorInfo;
+  return Boolean(errorInfo && typeof errorInfo === 'object' && 'responseStreamDisconnected' in errorInfo);
 }
 
 function collectCodexErrorText(params: any): string {

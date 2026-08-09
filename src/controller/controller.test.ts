@@ -3932,6 +3932,48 @@ test('Codex error notifications are shown on the active Telegram turn', async (t
   assert.ok(rig.sentMessages.includes('Codex error: Usage limit exceeded'));
 });
 
+test('retryable WebSocket transport fallback stays silent unless recovery finally fails', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+  const scopeId = 'telegram:99::root';
+  rig.store.setBinding(scopeId, 'thread-1', rig.tempDir);
+  const active = (rig.controller as any).createActiveTurnState(scopeId, '99', 'private', null, 'thread-1', 'turn-1', 0);
+  setActiveTurnForTest(rig, active);
+  const retryError = {
+    error: {
+      message: 'Reconnecting... 5/5',
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      additionalDetails: 'stream disconnected before completion: websocket closed by server before response.completed',
+    },
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    willRetry: true,
+  };
+
+  await (rig.controller as any).handleNotification({ method: 'error', params: retryError });
+  await (rig.controller as any).handleNotification({
+    method: 'warning',
+    params: {
+      threadId: 'thread-1',
+      message: 'Falling back from WebSockets to HTTPS transport. stream disconnected before completion',
+    },
+  });
+
+  assert.equal(rig.sentMessages.length, 0);
+  assert.equal(active.finalText, null);
+  assert.equal((rig.controller as any).lastError, null);
+
+  await (rig.controller as any).handleNotification({
+    method: 'error',
+    params: { ...retryError, willRetry: false },
+  });
+
+  assert.ok(rig.sentMessages.includes('Codex error: Reconnecting... 5/5'));
+});
+
 test('ChatGPT backend HTML 403 errors are summarized and do not rotate auth', async (t) => {
   const rig = createControllerRig();
   t.after(() => {

@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.4 - 2026-08-09
+
+### 中文
+- 将 Codex 上游 `willRetry: true` 的 `responseStreamDisconnected` 识别为自动恢复中的传输事件，不再把 `Reconnecting... n/5` 写入 Telegram 最终回复或桥接错误状态。
+- WebSocket 重试耗尽后自动切换 HTTPS 的 `Falling back from WebSockets to HTTPS transport` 提示改为仅记录内部 info 日志，不再单独打扰聊天；若 HTTPS 最终仍失败且 `willRetry: false`，真实错误继续正常展示。
+
+### English
+- Treats Codex `responseStreamDisconnected` events with `willRetry: true` as in-progress transport recovery, so `Reconnecting... n/5` no longer replaces Telegram output or becomes the bridge's last error.
+- Records the automatic `Falling back from WebSockets to HTTPS transport` notice as internal info instead of a separate chat warning. A final HTTPS failure with `willRetry: false` remains user-visible.
+
 ## 0.6.3 - 2026-08-09
 
 ### 中文
