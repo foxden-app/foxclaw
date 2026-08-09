@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.3 - 2026-08-09
+
+### 中文
+- 修复 Codex app-server 重启只终止 Node 包装进程、未终止同一 detached 进程组内原生 Codex 子进程的问题。认证刷新或手动重载后，不再遗留旧服务持有 thread writer lock 并触发 `already has an active writer`。
+- 托管服务关闭现在先向整个进程组发送 `SIGTERM`，超时后升级为 `SIGKILL`；强制终止后仍存活会明确失败并阻止新实例叠加启动。加入忽略 `SIGTERM` 的父子进程树回归测试。
+
+### English
+- Fixed Codex app-server restarts terminating only the Node wrapper while leaving the native Codex child alive in the same detached process group. Auth refreshes and manual reloads no longer leave an old server holding a thread writer lock and causing `already has an active writer`.
+- Managed shutdown now sends `SIGTERM` to the whole process group, escalates to `SIGKILL` on timeout, and fails explicitly instead of starting another instance if the group still survives. Added a regression test with a parent/child process tree that ignores `SIGTERM`.
+
 ## 0.6.2 - 2026-08-09
 
 ### 中文

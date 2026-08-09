@@ -898,23 +898,23 @@ export class CodexAppClient extends EventEmitter {
     const state = this.readServerState();
     const pid = child?.pid ?? state?.pid ?? null;
     this.child = null;
-    this.clearServerState();
-    if (pid === null || !isProcessAlive(pid)) {
+    if (pid === null || !isManagedProcessGroupAlive(pid)) {
+      this.clearServerState();
       return;
     }
     try {
-      process.kill(pid, 'SIGTERM');
+      const result = await terminateManagedProcessGroup(pid);
+      if (result === 'killed') {
+        this.logger.warn('codex.app-server.force_killed', { pid });
+      }
     } catch (error) {
       this.logger.warn('codex.app-server.kill_failed', {
         pid,
         error: error instanceof Error ? error.message : String(error),
       });
-      return;
+      throw error;
     }
-    const exited = await waitForProcessExit(pid, 3000);
-    if (!exited) {
-      this.logger.warn('codex.app-server.kill_timeout', { pid });
-    }
+    this.clearServerStateForPid(pid);
   }
 
   private openServerLogFiles(): [number, number] {
@@ -1025,15 +1025,70 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+export async function terminateManagedProcessGroup(
+  pid: number,
+  gracefulTimeoutMs = 3000,
+  forcedTimeoutMs = 2000,
+): Promise<'not-running' | 'terminated' | 'killed'> {
+  if (!isManagedProcessGroupAlive(pid)) {
+    return 'not-running';
+  }
+  signalManagedProcessGroup(pid, 'SIGTERM');
+  if (await waitForProcessGroupExit(pid, gracefulTimeoutMs)) {
+    return 'terminated';
+  }
+  signalManagedProcessGroup(pid, 'SIGKILL');
+  if (await waitForProcessGroupExit(pid, forcedTimeoutMs)) {
+    return 'killed';
+  }
+  throw new Error(`Codex app-server process group ${pid} did not exit after SIGKILL`);
+}
+
+function signalManagedProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+      throw error;
+    }
+    try {
+      process.kill(pid, signal);
+    } catch (fallbackError) {
+      if ((fallbackError as NodeJS.ErrnoException).code !== 'ESRCH') {
+        throw fallbackError;
+      }
+    }
+  }
+}
+
+function isManagedProcessGroupAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EPERM') {
+      return true;
+    }
+    if (code === 'ESRCH') {
+      return isProcessAlive(pid);
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    if (!isProcessAlive(pid)) {
+    if (!isManagedProcessGroupAlive(pid)) {
       return true;
     }
     await sleep(100);
   }
-  return !isProcessAlive(pid);
+  return !isManagedProcessGroupAlive(pid);
 }
 
 function mapThread(raw: any): AppThread {
