@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   APP_HOME,
+  buildCodexApiProviderOverrides,
   DEFAULT_CODEX_TELEGRAM_HOME,
   DEFAULT_ENV_PATH,
   DEFAULT_LOG_PATH,
@@ -19,23 +20,52 @@ import {
   type AppConfig,
 } from './config.js';
 import type { AuthSyncNotification } from './auth/cross_node_sync.js';
-import type { AppLocale } from './types.js';
+import type { AuthMirrorNotification } from './auth/mirror.js';
+import {
+  createAuthRefreshNotificationAggregator,
+  type AuthRefreshNotificationAggregator,
+} from './auth/notifications.js';
+import type { CodexAuthPoolStats } from './store/database.js';
+import type { AppLocale, RuntimeStatus } from './types.js';
+import { installBundledCodexSkills } from './codex_skills.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
-import { buildFoxclawSystemdUnitText, refreshFoxclawExecStartDropIns, removeFoxclawExecStartDropIns } from './systemd.js';
 import {
+  buildFoxclawLaunchdPlistText,
+  extractNodePathFromLaunchdPlist,
+} from './launchd.js';
+import {
+  buildFoxclawSystemdUnitText,
+  buildSystemdRestartHelperArgs,
+  cgroupContainsSystemdUnit,
+  refreshFoxclawExecStartDropIns,
+  removeFoxclawExecStartDropIns,
+} from './systemd.js';
+import {
+  clearPendingClusterUpdateBroadcast,
   createSelfUpdateRuntime,
   inferPnpmHomeFromEntryPoint,
   performSelfUpdate,
+  readPendingClusterUpdateBroadcast,
   readSelfUpdateStatus,
+  type SelfUpdateRuntime,
   writeSelfUpdateStatus,
 } from './update.js';
+import {
+  TELEGRAM_VOICE_MAX_BYTES,
+  TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
+  telegramVoiceContentType,
+} from './voice/files.js';
+import { inferTelegramBotId, resolveTelegramVoiceTarget } from './voice/target.js';
+import { shouldShowRuntimeLastUpdate } from './update_status.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
 loadEnv();
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const entryPoint = fileURLToPath(import.meta.url);
+const entryPoint = process.argv[1]
+  ? path.resolve(process.argv[1])
+  : fileURLToPath(import.meta.url);
 const PROXY_ENV_KEYS = [
   'HTTP_PROXY',
   'HTTPS_PROXY',
@@ -48,8 +78,117 @@ const PROXY_ENV_KEYS = [
 ] as const;
 const STANDARD_NODE_PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'] as const;
 const LOCAL_AUTH_REFRESH_LEASE_TTL_MS = 10 * 60_000;
+const CLUSTER_UPDATE_BROADCAST_PATH = path.join(APP_HOME, 'runtime', 'pending-cluster-update-broadcast.json');
+const TELEGRAM_PUBLIC_BOT_API_UPLOAD_HINT_BYTES = 50 * 1024 * 1024;
+
+type TelegramOutboundMediaKind = 'photo' | 'video' | 'animation' | 'document';
+
+type TelegramOutboundMediaPlan = {
+  kind: TelegramOutboundMediaKind;
+  method: 'sendPhoto' | 'sendVideo' | 'sendAnimation' | 'sendDocument';
+  fieldName: 'photo' | 'video' | 'animation' | 'document';
+  contentType: string;
+};
 
 type LocalAuthRefreshLeaseResult = { ok: boolean; leaseId: string | null; reason?: string | null };
+
+type ClusterUpdateSource = {
+  requestId: string;
+  nodeId: string;
+  label?: string | null;
+  targetVersion: string | null;
+  requestedAt: string;
+};
+
+type ClusterUpdateScheduler = {
+  schedule: (source: ClusterUpdateSource) => Promise<{ accepted: boolean; reason?: string | null }>;
+};
+
+function createClusterUpdateScheduler(options: {
+  selfUpdater: SelfUpdateRuntime;
+  canUpdate: () => boolean;
+  currentVersion: () => string;
+  logger: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
+}): ClusterUpdateScheduler {
+  let pending: ClusterUpdateSource | null = null;
+  let timer: NodeJS.Timeout | null = null;
+
+  const scheduleRetry = (): void => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void tryLaunch().catch((error) => {
+        options.logger.warn('cluster.update.launch_failed', { error: serializeError(error) });
+        scheduleRetry();
+      });
+    }, 30_000);
+    timer.unref();
+  };
+
+  const tryLaunch = async (): Promise<void> => {
+    if (!pending) return;
+    const source = pending;
+    if (source.targetVersion && source.targetVersion === options.currentVersion()) {
+      options.logger.info('cluster.update.skipped_current', { targetVersion: source.targetVersion, requestId: source.requestId });
+      pending = null;
+      return;
+    }
+    if (!options.canUpdate()) {
+      scheduleRetry();
+      return;
+    }
+    pending = null;
+    options.logger.info('cluster.update.starting', {
+      requestId: source.requestId,
+      sourceNodeId: source.nodeId,
+      sourceLabel: source.label ?? null,
+      targetVersion: source.targetVersion,
+    });
+    await options.selfUpdater.launch(`cluster:${source.nodeId}:${source.requestId}`, 'zh');
+  };
+
+  return {
+    schedule: async (source): Promise<{ accepted: boolean; reason?: string | null }> => {
+      if (source.targetVersion && source.targetVersion === options.currentVersion()) {
+        return { accepted: false, reason: `already at ${source.targetVersion}` };
+      }
+      if (pending?.requestId === source.requestId) {
+        return { accepted: false, reason: 'update request is already scheduled' };
+      }
+      pending = source;
+      if (options.canUpdate()) {
+        void tryLaunch().catch((error) => {
+          options.logger.warn('cluster.update.launch_failed', { error: serializeError(error) });
+          scheduleRetry();
+        });
+      } else {
+        scheduleRetry();
+      }
+      return { accepted: true, reason: options.canUpdate() ? 'starting when updater accepts the request' : 'queued until runtime is idle' };
+    },
+  };
+}
+
+async function publishPendingClusterUpdateBroadcast(
+  authSync: { publishServiceUpdateRequest: (targetVersion: string | null) => Promise<{ sent: number; peers: string[] }> } | null,
+  logger: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void },
+): Promise<void> {
+  if (!authSync) return;
+  const pending = readPendingClusterUpdateBroadcast(CLUSTER_UPDATE_BROADCAST_PATH);
+  if (!pending) return;
+  try {
+    const result = await authSync.publishServiceUpdateRequest(pending.targetVersion);
+    clearPendingClusterUpdateBroadcast(CLUSTER_UPDATE_BROADCAST_PATH);
+    logger.info('cluster.update.broadcast_sent', {
+      targetVersion: pending.targetVersion,
+      fromVersion: pending.fromVersion,
+      sent: result.sent,
+      peers: result.peers,
+    });
+  } catch (error) {
+    logger.warn('cluster.update.broadcast_failed', { error: serializeError(error) });
+  }
+}
 
 function createLocalAuthRefreshLease(): {
   isIdle: () => boolean;
@@ -94,7 +233,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (isHelpCommand(command)) {
+  if (isHelpCommand(command) || hasHelpFlag()) {
     printUsage();
     return;
   }
@@ -129,6 +268,7 @@ async function main(): Promise<void> {
       entryPoint,
       nodePath: process.execPath,
       version: readPackageVersion(),
+      clusterBroadcastFile: CLUSTER_UPDATE_BROADCAST_PATH,
       ...(process.env.CODEX_CLI_BIN || resolveCommand('codex')
         ? { codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex')! }
         : {}),
@@ -148,6 +288,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'uninstall-launchd') {
+    uninstallLaunchd();
+    return;
+  }
+
   if (command === 'install-launchd') {
     requireNode24(command);
     installLaunchd();
@@ -160,7 +305,11 @@ async function main(): Promise<void> {
       console.log('No runtime status found.');
       process.exit(1);
     }
-    console.log(JSON.stringify(status, null, 2));
+    if (process.argv.slice(3).includes('--json')) {
+      console.log(JSON.stringify(status, null, 2));
+    } else {
+      console.log(formatRuntimeStatusSummary(status));
+    }
     return;
   }
 
@@ -172,6 +321,18 @@ async function main(): Promise<void> {
   if (command === 'weixin-login') {
     requireNode24(command);
     await runWeixinLoginCli();
+    return;
+  }
+
+  if (command === 'send-voice' || command === 'voice-file') {
+    requireNode24(command);
+    await runSendVoiceCli();
+    return;
+  }
+
+  if (command === 'send-media' || command === 'media-file') {
+    requireNode24(command);
+    await runSendMediaCli();
     return;
   }
 
@@ -193,6 +354,10 @@ function isHelpCommand(value: string): boolean {
   return value === 'help' || value === '--help' || value === '-h';
 }
 
+function hasHelpFlag(): boolean {
+  return process.argv.slice(3).some(isHelpCommand);
+}
+
 function readPackageVersion(): string {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')) as { version?: unknown };
@@ -212,11 +377,292 @@ Usage:
   foxclaw status
   foxclaw start|restart|stop
   foxclaw update
+  foxclaw send-voice <path> [caption]
+  foxclaw send-media <path> [caption]
   foxclaw install-systemd|uninstall-systemd
-  foxclaw install-launchd
+  foxclaw install-launchd|uninstall-launchd
   foxclaw weixin-login [account-id]
   foxclaw --version
   foxclaw --help`);
+}
+
+async function runSendVoiceCli(): Promise<void> {
+  const parsed = parseSendVoiceCliArgs(process.argv.slice(3));
+  if (!parsed.fileArg) {
+    console.error('Usage: foxclaw send-voice <path> [caption] [--bot-id <bot-id>] [--chat-id <chat-id>]');
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = loadConfig();
+  const filePath = path.resolve(config.defaultCwd, parsed.fileArg);
+  const contentType = telegramVoiceContentType(filePath);
+  if (!contentType) {
+    throw new Error(`Unsupported Telegram voice file format. Supported formats: ${TELEGRAM_VOICE_SUPPORTED_EXTENSIONS}.`);
+  }
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile()) {
+    throw new Error(`Audio file not found: ${filePath}`);
+  }
+  if (stat.size > TELEGRAM_VOICE_MAX_BYTES) {
+    throw new Error('Telegram voice files must be 50MB or smaller.');
+  }
+
+  const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
+  const { botId, botToken } = resolveTelegramVoiceTarget(config.tgBotTokens, inferredBotId);
+  const { BridgeStore } = await import('./store/database.js');
+  const store = new BridgeStore(config.storePath);
+  let chatId = parsed.chatId;
+  try {
+    chatId ??= botId ? store.getTelegramPrivateScope(botId)?.chatId ?? null : null;
+  } finally {
+    store.close();
+  }
+  if (!chatId) {
+    const target = botId ? ` for ${botId}` : '';
+    throw new Error(`No remembered Telegram private chat${target}. Send /status to the bot once, or pass --chat-id <chat-id>.`);
+  }
+
+  const contents = await fs.promises.readFile(filePath);
+  const { callTelegramMultipartApi } = await import('./telegram/api.js');
+  const result = await callTelegramMultipartApi<{ message_id: number }>(
+    botToken,
+    'sendVoice',
+    {
+      chat_id: chatId,
+      caption: parsed.caption || 'FoxClaw voice',
+    },
+    [{
+      fieldName: 'voice',
+      filename: path.basename(filePath),
+      contents,
+      contentType,
+    }],
+  );
+  if (!result.ok || !result.result) {
+    throw new Error(result.description || 'Telegram sendVoice failed.');
+  }
+  console.log(`Sent Telegram voice message ${result.result.message_id}: ${filePath}`);
+}
+
+async function runSendMediaCli(): Promise<void> {
+  const parsed = parseSendVoiceCliArgs(process.argv.slice(3));
+  if (!parsed.fileArg) {
+    console.error('Usage: foxclaw send-media <path> [caption] [--bot-id <bot-id>] [--chat-id <chat-id>]');
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = loadConfig();
+  const filePath = path.resolve(config.defaultCwd, parsed.fileArg);
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile()) {
+    throw new Error(`Media file not found: ${filePath}`);
+  }
+  const plan = planTelegramOutboundMedia(filePath);
+
+  const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
+  const { botId, botToken } = resolveTelegramVoiceTarget(config.tgBotTokens, inferredBotId);
+  const { BridgeStore } = await import('./store/database.js');
+  const store = new BridgeStore(config.storePath);
+  let chatId = parsed.chatId;
+  try {
+    chatId ??= botId ? store.getTelegramPrivateScope(botId)?.chatId ?? null : null;
+  } finally {
+    store.close();
+  }
+  if (!chatId) {
+    const target = botId ? ` for ${botId}` : '';
+    throw new Error(`No remembered Telegram private chat${target}. Send /status to the bot once, or pass --chat-id <chat-id>.`);
+  }
+
+  if (stat.size > TELEGRAM_PUBLIC_BOT_API_UPLOAD_HINT_BYTES && !isLocalTelegramBotApiConfigured()) {
+    console.warn([
+      `Media is ${formatBytes(stat.size)}. Public Telegram Bot API uploads may reject large files.`,
+      'For long videos, configure TELEGRAM_BOT_API_BASE_URL to a Local Bot API Server.',
+    ].join(' '));
+  }
+
+  const contents = await fs.promises.readFile(filePath);
+  const { callTelegramMultipartApi } = await import('./telegram/api.js');
+  const fields: Record<string, string> = {
+    chat_id: chatId,
+    ...(parsed.caption ? { caption: parsed.caption } : {}),
+    ...(plan.kind === 'video' ? { supports_streaming: 'true' } : {}),
+  };
+  const result = await callTelegramMultipartApi<{ message_id: number }>(
+    botToken,
+    plan.method,
+    fields,
+    [{
+      fieldName: plan.fieldName,
+      filename: path.basename(filePath),
+      contents,
+      contentType: plan.contentType,
+    }],
+  );
+  if (!result.ok || !result.result) {
+    throw new Error(result.description || `Telegram ${plan.method} failed.`);
+  }
+  console.log(`Sent Telegram ${plan.kind} message ${result.result.message_id}: ${filePath}`);
+}
+
+function parseSendVoiceCliArgs(args: string[]): {
+  fileArg: string | null;
+  caption: string;
+  botId: string | null;
+  chatId: string | null;
+} {
+  const positional: string[] = [];
+  let botId: string | null = null;
+  let chatId: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--bot-id' || arg === '--chat-id') {
+      const value = args[index + 1]?.trim();
+      if (!value) {
+        throw new Error(`${arg} requires a value.`);
+      }
+      if (arg === '--bot-id') botId = value;
+      else chatId = value;
+      index += 1;
+      continue;
+    }
+    positional.push(arg);
+  }
+  return {
+    fileArg: positional[0]?.trim() || null,
+    caption: positional.slice(1).join(' ').trim(),
+    botId,
+    chatId,
+  };
+}
+
+function planTelegramOutboundMedia(filePath: string): TelegramOutboundMediaPlan {
+  const extension = path.extname(filePath).toLowerCase();
+  switch (extension) {
+    case '.jpg':
+    case '.jpeg':
+      return { kind: 'photo', method: 'sendPhoto', fieldName: 'photo', contentType: 'image/jpeg' };
+    case '.png':
+      return { kind: 'photo', method: 'sendPhoto', fieldName: 'photo', contentType: 'image/png' };
+    case '.webp':
+      return { kind: 'photo', method: 'sendPhoto', fieldName: 'photo', contentType: 'image/webp' };
+    case '.gif':
+      return { kind: 'animation', method: 'sendAnimation', fieldName: 'animation', contentType: 'image/gif' };
+    case '.mp4':
+    case '.m4v':
+      return { kind: 'video', method: 'sendVideo', fieldName: 'video', contentType: 'video/mp4' };
+    case '.mov':
+      return { kind: 'video', method: 'sendVideo', fieldName: 'video', contentType: 'video/quicktime' };
+    case '.pdf':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/pdf' };
+    case '.json':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/json' };
+    case '.md':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'text/markdown' };
+    case '.txt':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'text/plain' };
+    case '.zip':
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/zip' };
+    default:
+      return { kind: 'document', method: 'sendDocument', fieldName: 'document', contentType: 'application/octet-stream' };
+  }
+}
+
+function isLocalTelegramBotApiConfigured(): boolean {
+  const value = process.env.TELEGRAM_BOT_API_BASE_URL?.trim();
+  return Boolean(value && !/^https:\/\/api\.telegram\.org\/?$/i.test(value));
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  const kib = bytes / 1024;
+  if (kib < 1024) return `${kib.toFixed(1)}KiB`;
+  const mib = kib / 1024;
+  if (mib < 1024) return `${mib.toFixed(1)}MiB`;
+  return `${(mib / 1024).toFixed(2)}GiB`;
+}
+
+function formatRuntimeStatusSummary(status: RuntimeStatus): string {
+  const lines: string[] = [];
+  const age = formatAge(status.updatedAt);
+  lines.push(`FoxClaw status: ${status.running ? 'running' : 'stopped'}${status.connected ? ', connected' : ', disconnected'}${age ? ` (${age})` : ''}`);
+  if (status.userAgent) {
+    lines.push(`Codex: ${status.userAgent}`);
+  }
+  const botHomes = (status.bots ?? [])
+    .flatMap(bot => bot.codexHome ? [{ label: bot.username ? `@${bot.username}` : bot.id, home: bot.codexHome }] : []);
+  if (botHomes.length > 1) {
+    lines.push('Codex homes:');
+    for (const { label, home } of botHomes) {
+      lines.push(`  ${label}: ${home}`);
+    }
+  } else if (botHomes.length === 1) {
+    lines.push(`Codex home: ${botHomes[0]!.home}`);
+  } else if (status.codexHome) {
+    lines.push(`Codex home: ${status.codexHome}`);
+  }
+  if (status.codexAppServer) {
+    lines.push(`App server: ${status.codexAppServer.running ? 'running' : 'stopped'}${status.codexAppServer.pid ? ` pid=${status.codexAppServer.pid}` : ''}${status.codexAppServer.port ? ` port=${status.codexAppServer.port}` : ''}`);
+  }
+  lines.push(`Work: active ${status.activeTurns}, queued ${status.queuedTurns}, approvals ${status.pendingApprovals}, questions ${status.pendingUserInputs}`);
+  if (status.bots?.length) {
+    const activeBots = status.bots
+      .filter(bot => bot.activeTurns > 0 || !bot.connected)
+      .map(bot => `${bot.username ? `@${bot.username}` : bot.id}:${bot.connected ? `${bot.activeTurns} active` : 'offline'}`);
+    lines.push(`Bots: ${status.bots.length}${activeBots.length ? ` (${activeBots.join(', ')})` : ''}`);
+  } else if (status.botUsername) {
+    lines.push(`Bot: @${status.botUsername}`);
+  }
+  if (status.weixinRuntime) {
+    lines.push(`Weixin: ${status.weixinRuntime.connected ? 'connected' : 'disconnected'}, active ${status.weixinRuntime.activeTurns}`);
+  }
+  if (status.authSync?.enabled) {
+    const failures = status.authSync.candidateFailures?.length ?? 0;
+    lines.push(`Auth sync: peers ${status.authSync.peers.length}, pending imports ${status.authSync.pendingImports}, failures ${failures}${status.authSync.lastReceivedAt ? `, last received ${formatAge(status.authSync.lastReceivedAt)}` : ''}`);
+    if (status.authSync.lastError) {
+      lines.push(`Auth sync error: ${status.authSync.lastError}`);
+    }
+    const latestFailure = status.authSync.candidateFailures?.[0];
+    if (latestFailure) {
+      lines.push(`Latest auth failure: ${latestFailure.candidateName}: ${truncateStatusLine(latestFailure.reason, 140)}`);
+    }
+  }
+  if (status.authMirror) {
+    lines.push(`Auth mirror: ${status.authMirror.candidateName} from ${status.authMirror.sourceLabel} ${formatAge(status.authMirror.syncedAt)}`);
+  }
+  if (status.authProactiveRefresh) {
+    lines.push(`Auth refresh: ${status.authProactiveRefresh.state}${status.authProactiveRefresh.finishedAt ? ` ${formatAge(status.authProactiveRefresh.finishedAt)}` : ''}`);
+  }
+  if (shouldShowRuntimeLastUpdate(status, readPackageVersion())) {
+    const lastUpdate = status.lastUpdate!;
+    lines.push(`Last update: ${lastUpdate.fromVersion} -> ${lastUpdate.toVersion ?? 'unknown'} ${formatAge(lastUpdate.updatedAt)}`);
+  }
+  if (status.lastError) {
+    lines.push(`Last error: ${truncateStatusLine(status.lastError, 160)}`);
+  }
+  lines.push('Use `foxclaw status --json` for full raw status.');
+  return lines.join('\n');
+}
+
+function formatAge(value: string | null | undefined): string {
+  if (!value) return '';
+  const ms = Date.now() - Date.parse(value);
+  if (!Number.isFinite(ms)) return value;
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function truncateStatusLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
 async function runServeCli(): Promise<void> {
@@ -253,6 +699,11 @@ async function runServeCli(): Promise<void> {
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
+  const codexApiProviderOverrides = buildCodexApiProviderOverrides(
+    config.codexApiProviders,
+    config.codexApiDefaultProvider,
+  );
+  const authNotificationAggregator = createAuthRefreshNotificationAggregator(logger);
   attachIlinkRuntimeFromBridgeLogger(logger, config.wxIlinkRouteTag);
   const processLock = acquireProcessLock(config.lockPath);
   let store: InstanceType<typeof BridgeStore> | null = null;
@@ -302,6 +753,7 @@ async function runServeCli(): Promise<void> {
         if (!sharedDefaultRuntime) {
           fs.mkdirSync(home, { recursive: true, mode: 0o700 });
         }
+        installBundledCodexSkills(packageRoot, home);
         const runtimeConfig = {
           ...config,
           tgBotToken: token,
@@ -328,12 +780,16 @@ async function runServeCli(): Promise<void> {
           runtimeConfig.codexAppServerLogPath,
           logger,
           childEnv,
-          sharedDefaultRuntime ? [] : ['cli_auth_credentials_store="file"'],
+          [
+            ...codexApiProviderOverrides,
+            ...(sharedDefaultRuntime ? [] : ['cli_auth_credentials_store="file"']),
+          ],
         );
         seeds.push({ id, home, authDir, sharedDefaultRuntime, config: runtimeConfig, bot, app });
       }
 
       let authSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
+      const authRuntimeIds = seeds.map((runtime) => runtime.id);
       const mirror = new AuthCandidateMirror(
         canonicalAuthDir,
         seeds.map((runtime) => ({
@@ -341,18 +797,19 @@ async function runServeCli(): Promise<void> {
           label: runtime.bot.username ? `@${runtime.bot.username}` : runtime.id,
           authDir: runtime.authDir,
           validate: async (context) => validateRefreshedAuthCandidate(runtime, context.candidateName),
-          notify: async (message: string): Promise<void> => {
-            const chatId = store!.getTelegramPrivateChatId(runtime.id);
-            if (chatId) {
-              await runtime.bot.sendMessage(chatId, message);
-            }
-          },
+          notify: createAuthMirrorNotifier(store!, runtime.id, runtime.bot, authNotificationAggregator, {
+            quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+            suppressBackgroundNotifications: () => true,
+          }),
         })),
         logger,
         path.join(APP_HOME, 'runtime', 'auth-mirror.json'),
         {
           onSynced: async (event): Promise<void> => {
             await authSync?.publishCandidate(event.record.candidateName);
+          },
+          onRemoteImported: (event): void => {
+            restoreImportedAuthCandidateState(store!, event.record.candidateName, authRuntimeIds);
           },
         },
       );
@@ -375,6 +832,7 @@ async function runServeCli(): Promise<void> {
       const writeAggregateStatus = (running = true): void => {
         const statuses = runtimes.map((runtime) => runtime.core.getRuntimeStatus());
         const weixinStatus = activeWeixinCore?.getRuntimeStatus() ?? null;
+        const authProactiveRefresh = newestAuthProactiveRefreshStatus([...statuses, ...(weixinStatus ? [weixinStatus] : [])]);
         const first = statuses[0] ?? null;
         writeRuntimeStatus(config.statusPath, {
           running,
@@ -382,11 +840,13 @@ async function runServeCli(): Promise<void> {
             && statuses.every((status) => status.connected)
             && (!weixinStatus || weixinStatus.connected),
           userAgent: first?.userAgent ?? null,
+          codexHome: first?.codexHome ?? null,
           ...(first?.codexAppServer ? { codexAppServer: first.codexAppServer } : {}),
           botUsername: first?.botUsername ?? null,
           currentBindings: store!.countBindings(),
           pendingApprovals: store!.countPendingApprovals(),
           pendingUserInputs: store!.countPendingUserInputs(),
+          queuedTurns: store!.countQueuedTurnInputs(),
           activeTurns: statuses.reduce((sum, status) => sum + status.activeTurns, 0)
             + (weixinStatus?.activeTurns ?? 0),
           lastError: statuses.find((status) => status.lastError)?.lastError
@@ -400,6 +860,7 @@ async function runServeCli(): Promise<void> {
             connected: running && Boolean(statuses[index]?.connected),
             activeTurns: running ? (statuses[index]?.activeTurns ?? 0) : 0,
             runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
+            codexHome: statuses[index]?.codexHome ?? runtime.home,
             ...(statuses[index]?.codexAppServer ? { codexAppServer: statuses[index].codexAppServer } : {}),
           })),
           ...(weixinStatus ? {
@@ -411,17 +872,29 @@ async function runServeCli(): Promise<void> {
           } : {}),
           authMirror: mirror.getStatus(),
           authSync: authSync?.getStatus() ?? null,
+          authProactiveRefresh,
           lastUpdate: lastSelfUpdate,
         });
       };
       const authSyncLocalIdle = (): boolean => runtimes.every((runtime) => runtime.core.isIdleForServiceUpdate())
           && (!activeWeixinCore || activeWeixinCore.isIdleForServiceUpdate())
           && mirror.isIdle();
+      const clusterUpdateScheduler = createClusterUpdateScheduler({
+        selfUpdater,
+        canUpdate: () => authSyncLocalIdle()
+          && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
+        currentVersion: readPackageVersion,
+        logger,
+      });
       const coordinator = {
         canSelfUpdate: (): boolean => authSyncLocalIdle()
           && (authSync ? authSync.isIdle() : localAuthRefreshLease.isIdle()),
         authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
           mirror.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined),
+        authCandidateDeleted: async (_runtimeId: string, candidateName: string, reason: string | null = null): Promise<void> => {
+          await mirror.deleteCandidate(candidateName);
+          await authSync?.publishCandidateDeletion(candidateName, reason);
+        },
         recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
           const local = await mirror.recoverRuntimeCandidate(runtimeId, candidateName);
           if (local) return true;
@@ -430,6 +903,7 @@ async function runServeCli(): Promise<void> {
             ?? await mirror.readNewestCandidate(candidateName);
           return await authSync?.requestRecovery(candidateName, {
             accountId: current?.accountId ?? null,
+            quotaIdentityId: current?.quotaIdentityId ?? null,
             lastRefreshMs: current?.lastRefreshMs ?? null,
           }) ?? false;
         },
@@ -438,10 +912,22 @@ async function runServeCli(): Promise<void> {
         releaseAuthRefreshLease: (leaseId: string | null) => authSync?.releaseRefreshLease(leaseId)
           ?? localAuthRefreshLease.release(leaseId),
         getAuthSyncStatus: () => authSync?.getStatus() ?? null,
+        authSyncSafeAll: async () => {
+          const local = await mirror.syncAllRuntimeCandidates();
+          const remote = await authSync?.pushAll() ?? { sent: 0, skipped: 0 };
+          return {
+            localSynced: local.synced,
+            localSkipped: local.skipped,
+            sent: remote.sent,
+            skipped: remote.skipped,
+          };
+        },
         authSyncPushAll: () => authSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
         authSyncTest: () => authSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
+        authSyncAudit: () => authSync?.auditCluster() ?? Promise.resolve(null),
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
+          currentVersion: readPackageVersion(),
           bots: await Promise.all(runtimes.map(async (runtime) => {
             const status = runtime.core.getRuntimeStatus();
             return {
@@ -451,6 +937,7 @@ async function runServeCli(): Promise<void> {
               activeTurns: status.activeTurns,
               runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
               currentAuth: await runtime.core.getCurrentAuthLabel().catch(() => null),
+              codexHome: status.codexHome ?? runtime.home,
               ...(status.codexAppServer ? { codexAppServer: status.codexAppServer } : {}),
             };
           })),
@@ -463,6 +950,10 @@ async function runServeCli(): Promise<void> {
           } : {}),
           authMirror: mirror.getStatus(),
           authSync: authSync?.getStatus() ?? null,
+          authProactiveRefresh: newestAuthProactiveRefreshStatus([
+            ...runtimes.map(runtime => runtime.core.getRuntimeStatus()),
+            ...(activeWeixinCore ? [activeWeixinCore.getRuntimeStatus()] : []),
+          ]),
           lastUpdate: lastSelfUpdate,
         }),
         selfUpdateCompleted: (status: import('./update.js').SelfUpdateStatus): void => {
@@ -485,6 +976,8 @@ async function runServeCli(): Promise<void> {
           config.codexAppServerStatePath,
           config.codexAppServerLogPath,
           logger,
+          null,
+          codexApiProviderOverrides,
         );
         const outbound = new BridgeMessagingRouter(
           new TelegramMessagingPort(seeds[0]!.bot),
@@ -527,6 +1020,7 @@ async function runServeCli(): Promise<void> {
           {
             readLocalCandidate: (candidateName: string) => mirror.readNewestCandidate(candidateName),
             listLocalCandidates: () => mirror.listNewestCandidates(),
+            listLocalCandidateCopies: () => mirror.listCandidateCopies(),
             validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
               if (!authSyncLocalIdle()) {
                 return { ok: false, reason: 'runtime is not idle' };
@@ -538,14 +1032,39 @@ async function runServeCli(): Promise<void> {
               return runtime.core.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
             },
             importCandidate: (candidateName, raw, source) => mirror.importExternalCandidate(candidateName, raw, source),
+            markCandidateState: (candidateName, state, expected) => markAuditedAuthCandidateState(
+              store!,
+              mirror,
+              candidateName,
+              state,
+              expected,
+              authRuntimeIds,
+            ),
+            deleteLocalCandidate: async (candidateName, source) => {
+              if (!authSyncLocalIdle()) {
+                return { ok: false, deleted: false, reason: 'runtime is not idle' };
+              }
+              await mirror.deleteCandidate(candidateName);
+              store!.deleteCodexAuthCandidate(candidateName);
+              await Promise.all(runtimes.map(runtime => runtime.core.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null)));
+              if (activeWeixinCore) {
+                await activeWeixinCore.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null);
+              }
+              return { ok: true, deleted: true, reason: source.reason ?? null };
+            },
+            scheduleServiceUpdate: (source) => clusterUpdateScheduler.schedule(source),
             isIdle: authSyncLocalIdle,
-            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot),
+            notify: createAuthSyncNotifier(store!, authSyncTransportBot.bot, authNotificationAggregator, {
+              quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+              suppressBackgroundNotifications: () => true,
+            }),
           },
         );
         await authSync.initialize();
         activeAuthSync = authSync;
         attachTelegramAuthSync(authSyncTransportBot.bot, authSync, config, logger);
         authSync.start();
+        void publishPendingClusterUpdateBroadcast(authSync, logger);
       }
       mirror.start();
 
@@ -568,6 +1087,7 @@ async function runServeCli(): Promise<void> {
 
       const shutdown = async (signal: string): Promise<void> => {
         logger.info('bridge.shutting_down', { signal });
+        await authNotificationAggregator.flushAll();
         authSync?.stop();
         mirror.stop();
         await weixinAdapter?.stop();
@@ -586,6 +1106,8 @@ async function runServeCli(): Promise<void> {
       process.on('SIGTERM', () => void shutdown('SIGTERM'));
       return;
     }
+    const singleCodexHome = config.codexHome ?? path.join(os.homedir(), '.codex');
+    installBundledCodexSkills(packageRoot, singleCodexHome);
     const bot = new TelegramGateway(
       config.tgBotToken,
       config.tgAllowedUserId,
@@ -601,6 +1123,8 @@ async function runServeCli(): Promise<void> {
       config.codexAppServerStatePath,
       config.codexAppServerLogPath,
       logger,
+      config.codexHome ? { CODEX_HOME: config.codexHome } : null,
+      codexApiProviderOverrides,
     );
     const telegramMessaging = new TelegramMessagingPort(bot);
     const weixinMessaging = config.wxEnabled
@@ -622,11 +1146,22 @@ async function runServeCli(): Promise<void> {
     const singleLocalAuthRefreshLease = createLocalAuthRefreshLease();
     const singleAuthSyncLocalIdle = (): boolean => Boolean(core?.isIdleForServiceUpdate())
       && (!singleMirror || singleMirror.isIdle());
+    const singleClusterUpdateScheduler = createClusterUpdateScheduler({
+      selfUpdater,
+      canUpdate: () => singleAuthSyncLocalIdle()
+        && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
+      currentVersion: readPackageVersion,
+      logger,
+    });
     const singleCoordinator = config.authSyncEnabled ? {
       canSelfUpdate: (): boolean => singleAuthSyncLocalIdle()
         && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
       authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
         singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
+      authCandidateDeleted: async (_runtimeId: string, candidateName: string, reason: string | null = null): Promise<void> => {
+        await singleMirror?.deleteCandidate(candidateName);
+        await singleAuthSync?.publishCandidateDeletion(candidateName, reason);
+      },
       recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
         const local = await singleMirror?.recoverRuntimeCandidate(runtimeId, candidateName) ?? null;
         if (local) return true;
@@ -636,6 +1171,7 @@ async function runServeCli(): Promise<void> {
           ?? null;
         return await singleAuthSync?.requestRecovery(candidateName, {
           accountId: current?.accountId ?? null,
+          quotaIdentityId: current?.quotaIdentityId ?? null,
           lastRefreshMs: current?.lastRefreshMs ?? null,
         }) ?? false;
       },
@@ -644,8 +1180,19 @@ async function runServeCli(): Promise<void> {
       releaseAuthRefreshLease: (leaseId: string | null) => singleAuthSync?.releaseRefreshLease(leaseId)
         ?? singleLocalAuthRefreshLease.release(leaseId),
       getAuthSyncStatus: () => singleAuthSync?.getStatus() ?? null,
+      authSyncSafeAll: async () => {
+        const local = await singleMirror?.syncAllRuntimeCandidates() ?? { synced: 0, skipped: 0 };
+        const remote = await singleAuthSync?.pushAll() ?? { sent: 0, skipped: 0 };
+        return {
+          localSynced: local.synced,
+          localSkipped: local.skipped,
+          sent: remote.sent,
+          skipped: remote.skipped,
+        };
+      },
       authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
       authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
+      authSyncAudit: () => singleAuthSync?.auditCluster() ?? Promise.resolve(null),
       statusUpdated: (status: import('./types.js').RuntimeStatus): void => {
         writeRuntimeStatus(config.statusPath, {
           ...status,
@@ -673,6 +1220,9 @@ async function runServeCli(): Promise<void> {
           onSynced: async (event): Promise<void> => {
             await singleAuthSync?.publishCandidate(event.record.candidateName);
           },
+          onRemoteImported: (event): void => {
+            restoreImportedAuthCandidateState(store!, event.record.candidateName, ['default']);
+          },
         },
       );
       await singleMirror.initialize();
@@ -697,6 +1247,7 @@ async function runServeCli(): Promise<void> {
         {
           readLocalCandidate: (candidateName: string) => singleMirror!.readNewestCandidate(candidateName),
           listLocalCandidates: () => singleMirror!.listNewestCandidates(),
+          listLocalCandidateCopies: () => singleMirror!.listCandidateCopies(),
           validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
             if (!singleAuthSyncLocalIdle()) {
               return { ok: false, reason: 'runtime is not idle' };
@@ -704,14 +1255,36 @@ async function runServeCli(): Promise<void> {
             return core!.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
           },
           importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
+          markCandidateState: (candidateName, state, expected) => markAuditedAuthCandidateState(
+            store!,
+            singleMirror!,
+            candidateName,
+            state,
+            expected,
+            ['default'],
+          ),
+          deleteLocalCandidate: async (candidateName, source) => {
+            if (!singleAuthSyncLocalIdle()) {
+              return { ok: false, deleted: false, reason: 'runtime is not idle' };
+            }
+            await singleMirror!.deleteCandidate(candidateName);
+            store!.deleteCodexAuthCandidate(candidateName);
+            await core!.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null);
+            return { ok: true, deleted: true, reason: source.reason ?? null };
+          },
+          scheduleServiceUpdate: (source) => singleClusterUpdateScheduler.schedule(source),
           isIdle: singleAuthSyncLocalIdle,
-          notify: createAuthSyncNotifier(store!, bot),
+          notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator, {
+            quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
+            suppressBackgroundNotifications: () => true,
+          }),
         },
       );
       await singleAuthSync.initialize();
       activeAuthSync = singleAuthSync;
       attachTelegramAuthSync(bot, singleAuthSync, config, logger);
       singleAuthSync.start();
+      void publishPendingClusterUpdateBroadcast(singleAuthSync, logger);
       singleMirror.start();
     }
     const telegram = new TelegramChannelAdapter(core);
@@ -737,6 +1310,7 @@ async function runServeCli(): Promise<void> {
 
     const shutdown = async (signal: string): Promise<void> => {
       logger.info('bridge.shutting_down', { signal });
+      await authNotificationAggregator.flushAll();
       singleAuthSync?.stop();
       singleMirror?.stop();
       await weixinAdapter?.stop();
@@ -745,11 +1319,13 @@ async function runServeCli(): Promise<void> {
         running: false,
         connected: false,
         userAgent: app.getUserAgent(),
+        codexHome: singleCodexHome,
         codexAppServer: app.getServerStatus(),
         botUsername: bot.username,
         currentBindings: 0,
         pendingApprovals: 0,
         pendingUserInputs: 0,
+        queuedTurns: 0,
         activeTurns: 0,
         lastError: null,
         updatedAt: new Date().toISOString(),
@@ -766,6 +1342,7 @@ async function runServeCli(): Promise<void> {
     process.on('SIGINT', () => void shutdown('SIGINT'));
     process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
+    await authNotificationAggregator.flushAll().catch(() => {});
     activeAuthSync?.stop();
     activeAuthMirror?.stop();
     await weixinAdapter?.stop().catch(() => {});
@@ -786,16 +1363,211 @@ interface AuthSyncNotifyBot {
 interface AuthSyncNotifyStore {
   getTelegramPrivateScope(botId: string): { scopeId: string; chatId: string } | null;
   getChatSettings(scopeId: string): { locale: AppLocale | null } | null;
+  getCodexAuthPoolStats(): CodexAuthPoolStats;
+  setCodexAuthCandidateState(name: string, state: 'active' | 'needs_repair', runtimeId?: string): void;
+  setCodexAuthCandidateDisabled(name: string, disabled: boolean, runtimeId?: string): void;
 }
 
-function createAuthSyncNotifier(store: AuthSyncNotifyStore, bot: AuthSyncNotifyBot): (event: AuthSyncNotification) => Promise<void> {
+interface AuthSyncNotifierOptions {
+  quietAuthPoolMode?: () => boolean;
+  suppressBackgroundNotifications?: () => boolean;
+}
+
+interface AuthMirrorNotifierOptions {
+  quietAuthPoolMode?: () => boolean;
+  suppressBackgroundNotifications?: () => boolean;
+}
+
+interface AuthMirrorNotifyBot {
+  sendMessage(chatId: string, text: string): Promise<number>;
+}
+
+function restoreImportedAuthCandidateState(
+  store: AuthSyncNotifyStore,
+  candidateName: string,
+  runtimeIds: string[],
+): void {
+  store.setCodexAuthCandidateState(candidateName, 'active');
+  store.setCodexAuthCandidateDisabled(candidateName, false);
+  for (const runtimeId of runtimeIds) {
+    store.setCodexAuthCandidateState(candidateName, 'active', runtimeId);
+    store.setCodexAuthCandidateDisabled(candidateName, false, runtimeId);
+  }
+}
+
+async function markAuditedAuthCandidateState(
+  store: AuthSyncNotifyStore,
+  mirror: { readNewestCandidate(candidateName: string): Promise<import('./auth/mirror.js').AuthMirrorCandidateRecord | null> },
+  candidateName: string,
+  state: 'active' | 'needs_repair',
+  expected: { accountId: string; quotaIdentityId: string | null; maxLastRefreshMs: number },
+  runtimeIds: string[],
+): Promise<boolean> {
+  const record = await mirror.readNewestCandidate(candidateName);
+  if (!record || record.accountId !== expected.accountId || record.lastRefreshMs > expected.maxLastRefreshMs) {
+    return false;
+  }
+  if (
+    expected.quotaIdentityId
+    && expected.quotaIdentityId !== expected.accountId
+    && record.quotaIdentityId !== record.accountId
+    && record.quotaIdentityId !== expected.quotaIdentityId
+  ) {
+    return false;
+  }
+  store.setCodexAuthCandidateState(candidateName, state);
+  if (state === 'active') {
+    store.setCodexAuthCandidateDisabled(candidateName, false);
+  }
+  for (const runtimeId of runtimeIds) {
+    store.setCodexAuthCandidateState(candidateName, state, runtimeId);
+    if (state === 'active') {
+      store.setCodexAuthCandidateDisabled(candidateName, false, runtimeId);
+    }
+  }
+  return true;
+}
+
+function createAuthMirrorNotifier(
+  store: AuthSyncNotifyStore,
+  botId: string,
+  bot: AuthMirrorNotifyBot,
+  aggregator: AuthRefreshNotificationAggregator,
+  options: AuthMirrorNotifierOptions = {},
+): (event: AuthMirrorNotification) => Promise<void> {
+  return async (event: AuthMirrorNotification): Promise<void> => {
+    if (options.suppressBackgroundNotifications?.()) return;
+    if (options.quietAuthPoolMode?.()) return;
+    const privateScope = store.getTelegramPrivateScope(botId);
+    if (!privateScope) return;
+    const locale = store.getChatSettings(privateScope.scopeId)?.locale ?? 'en';
+    aggregator.enqueueMirror({
+      key: authNotificationDestinationKey(botId, privateScope.chatId),
+      locale,
+      sendMessage: (text) => bot.sendMessage(privateScope.chatId, text),
+    }, event);
+  };
+}
+
+function createAuthSyncNotifier(
+  store: AuthSyncNotifyStore,
+  bot: AuthSyncNotifyBot,
+  aggregator: AuthRefreshNotificationAggregator,
+  options: AuthSyncNotifierOptions = {},
+): (event: AuthSyncNotification) => Promise<void> {
+  const poolSummaryQueues = new Map<string, {
+    locale: AppLocale;
+    sendMessage: (text: string) => Promise<number>;
+    timer: NodeJS.Timeout;
+  }>();
+
+  const enqueuePoolSummary = (destination: {
+    key: string;
+    locale: AppLocale;
+    sendMessage: (text: string) => Promise<number>;
+  }): void => {
+    const existing = poolSummaryQueues.get(destination.key);
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+    const timer = setTimeout(() => {
+      const queued = poolSummaryQueues.get(destination.key);
+      if (!queued) return;
+      poolSummaryQueues.delete(destination.key);
+      void queued.sendMessage(formatAuthPoolSummary(queued.locale, store.getCodexAuthPoolStats())).catch(() => undefined);
+    }, 2_000);
+    timer.unref();
+    poolSummaryQueues.set(destination.key, {
+      locale: destination.locale,
+      sendMessage: destination.sendMessage,
+      timer,
+    });
+  };
+
   return async (event: AuthSyncNotification): Promise<void> => {
+    if (options.suppressBackgroundNotifications?.()) return;
     if (!bot.identity) return;
     const privateScope = store.getTelegramPrivateScope(bot.identity);
     if (!privateScope) return;
     const locale = store.getChatSettings(privateScope.scopeId)?.locale ?? 'en';
+    const destination = {
+      key: authNotificationDestinationKey(bot.identity, privateScope.chatId),
+      locale,
+      sendMessage: (text: string) => bot.sendMessage(privateScope.chatId, text),
+    };
+    if (options.quietAuthPoolMode?.() && isQuietAuthPoolNotification(event)) {
+      if (shouldSendQuietAuthPoolSummary(event)) {
+        enqueuePoolSummary(destination);
+      }
+      return;
+    }
+    if (aggregator.enqueueAuthSync(destination, event)) {
+      return;
+    }
     await bot.sendMessage(privateScope.chatId, formatAuthSyncNotification(locale, event));
   };
+}
+
+function authNotificationDestinationKey(botId: string, chatId: string): string {
+  return `${botId}:${chatId}`;
+}
+
+function formatAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): string {
+  return locale === 'zh'
+    ? `auth 池：历史 ${stats.totalSeen}，存活 ${stats.alive}，因失效剔除 ${stats.deletedInvalid}。`
+    : `Auth pool: total seen ${stats.totalSeen}, alive ${stats.alive}, invalid-deleted ${stats.deletedInvalid}.`;
+}
+
+function newestAuthProactiveRefreshStatus(
+  statuses: RuntimeStatus[],
+): NonNullable<RuntimeStatus['authProactiveRefresh']> | null {
+  const entries = statuses
+    .map(status => status.authProactiveRefresh ?? null)
+    .filter((status): status is NonNullable<RuntimeStatus['authProactiveRefresh']> => status !== null);
+  if (entries.length === 0) return null;
+  return entries.reduce((newest, status) => {
+    const newestTime = newest.finishedAt ?? newest.startedAt;
+    const statusTime = status.finishedAt ?? status.startedAt;
+    return Date.parse(statusTime) >= Date.parse(newestTime) ? status : newest;
+  });
+}
+
+function isQuietAuthPoolNotification(event: AuthSyncNotification): boolean {
+  switch (event.kind) {
+    case 'candidate_publish_started':
+    case 'candidate_publish_completed':
+    case 'push_all_started':
+    case 'push_all_completed':
+    case 'remote_bundle_received':
+    case 'remote_import_imported':
+    case 'remote_import_skipped':
+    case 'candidate_delete_sent':
+    case 'remote_delete_received':
+    case 'remote_delete_deleted':
+    case 'remote_delete_skipped':
+    case 'recovery_started':
+    case 'recovery_peer_empty':
+    case 'recovery_peer_bundle_received':
+    case 'recovery_failed':
+    case 'pull_request_received':
+    case 'pull_response_sent':
+    case 'service_update_sent':
+    case 'service_update_received':
+      return true;
+    default:
+      return false;
+  }
+}
+
+function shouldSendQuietAuthPoolSummary(event: AuthSyncNotification): boolean {
+  switch (event.kind) {
+    case 'candidate_delete_sent':
+    case 'remote_delete_deleted':
+    case 'remote_delete_skipped':
+      return true;
+    default:
+      return false;
+  }
 }
 
 function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotification): string {
@@ -826,6 +1598,23 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
         return `${event.mode === 'pull' ? '跨节点拉取未改动本机文件' : '收到跨节点 auth 但未写盘'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
       case 'remote_import_failed':
         return `${event.mode === 'pull' ? '跨节点拉取导入失败' : '跨节点 auth 导入失败'}：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}\n需要注意：如果其他候选也无法恢复，请人工介入重新登录或刷新这个 auth。`;
+      case 'candidate_delete_sent':
+        return `跨节点 auth 删除已发出：${event.candidateName}\nPeer：${peers}${event.reason ? `\n原因：${event.reason}` : ''}`;
+      case 'candidate_delete_failed':
+        return `跨节点 auth 删除发送失败：${event.candidateName}\nPeer：${peers}\n原因：${event.reason}`;
+      case 'remote_delete_received':
+        return [
+          `收到跨节点 auth 删除：${event.candidateName}`,
+          `来源：${formatSource(event.sourceLabel, event.sourceNodeId)}，peer ${event.peer}`,
+          `处理：${event.queued ? `本机忙，已排队等待空闲后删除；当前待删除 ${event.queueLength}` : '本机空闲，正在删除同名候选'}`,
+          event.reason ? `原因：${event.reason}` : null,
+        ].filter(Boolean).join('\n');
+      case 'remote_delete_deleted':
+        return `已执行跨节点 auth 删除：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}${event.reason ? `\n原因：${event.reason}` : ''}`;
+      case 'remote_delete_skipped':
+        return `跨节点 auth 删除未改动本机文件：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
+      case 'remote_delete_failed':
+        return `跨节点 auth 删除失败：${event.candidateName}\n来源：${formatSource(event.sourceLabel, event.sourceNodeId)}\n原因：${event.reason}`;
       case 'recovery_started':
         return `auth 恢复开始：${event.candidateName}\nRequest：${event.requestId}\n处理：同节点没有可用较新副本，正在向跨节点 peer 查询：${peers}，最长等待 ${event.timeoutMs}ms`;
       case 'recovery_peer_empty':
@@ -846,6 +1635,15 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
         return `收到 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}，请求节点：${event.requesterNodeId}`;
       case 'pull_response_sent':
         return `已回应 peer 的 auth 查询：${event.candidateName}\nPeer：${event.peer}\n结果：${formatPullResponseResult(event.result, event.reason, locale)}`;
+      case 'service_update_sent':
+        return `跨节点升级广播已发出：${event.targetVersion ?? 'latest'}\nRequest：${event.requestId}\nPeer：${peers}`;
+      case 'service_update_received':
+        return [
+          `收到跨节点升级请求：${event.targetVersion ?? 'latest'}`,
+          `来源：${formatSource(event.sourceLabel, event.sourceNodeId)}，peer ${event.peer}`,
+          `处理：${event.accepted ? '已安排本机空闲后升级' : '已跳过'}`,
+          event.reason ? `原因：${event.reason}` : null,
+        ].filter(Boolean).join('\n');
       case 'sync_error':
         return `auth sync 需要注意：\n${event.reason}`;
     }
@@ -875,6 +1673,23 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
       return `${event.mode === 'pull' ? 'Cross-node pull did not change local files' : 'Received cross-node auth but did not write it'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
     case 'remote_import_failed':
       return `${event.mode === 'pull' ? 'Cross-node pull import failed' : 'Cross-node auth import failed'}: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}\nAttention: if no other candidate can recover this account, run device login or refresh this auth manually.`;
+    case 'candidate_delete_sent':
+      return `Cross-node auth delete sent: ${event.candidateName}\nPeers: ${peers}${event.reason ? `\nReason: ${event.reason}` : ''}`;
+    case 'candidate_delete_failed':
+      return `Cross-node auth delete send failed: ${event.candidateName}\nPeers: ${peers}\nReason: ${event.reason}`;
+    case 'remote_delete_received':
+      return [
+        `Received cross-node auth delete: ${event.candidateName}`,
+        `Source: ${formatSource(event.sourceLabel, event.sourceNodeId)}, peer ${event.peer}`,
+        `Action: ${event.queued ? `queued until this node is idle; pending deletes ${event.queueLength}` : 'deleting the matching local candidate'}`,
+        event.reason ? `Reason: ${event.reason}` : null,
+      ].filter(Boolean).join('\n');
+    case 'remote_delete_deleted':
+      return `Applied cross-node auth delete: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}${event.reason ? `\nReason: ${event.reason}` : ''}`;
+    case 'remote_delete_skipped':
+      return `Cross-node auth delete did not change local files: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
+    case 'remote_delete_failed':
+      return `Cross-node auth delete failed: ${event.candidateName}\nSource: ${formatSource(event.sourceLabel, event.sourceNodeId)}\nReason: ${event.reason}`;
     case 'recovery_started':
       return `Auth recovery started: ${event.candidateName}\nRequest: ${event.requestId}\nAction: no newer same-node copy was available; querying cross-node peers: ${peers}; timeout ${event.timeoutMs}ms`;
     case 'recovery_peer_empty':
@@ -895,6 +1710,15 @@ function formatAuthSyncNotification(locale: AppLocale, event: AuthSyncNotificati
       return `Received peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}, requester node: ${event.requesterNodeId}`;
     case 'pull_response_sent':
       return `Replied to peer auth recovery request: ${event.candidateName}\nPeer: ${event.peer}\nResult: ${formatPullResponseResult(event.result, event.reason, locale)}`;
+    case 'service_update_sent':
+      return `Cross-node update broadcast sent: ${event.targetVersion ?? 'latest'}\nRequest: ${event.requestId}\nPeers: ${peers}`;
+    case 'service_update_received':
+      return [
+        `Received cross-node update request: ${event.targetVersion ?? 'latest'}`,
+        `Source: ${formatSource(event.sourceLabel, event.sourceNodeId)}, peer ${event.peer}`,
+        `Action: ${event.accepted ? 'scheduled local update when idle' : 'skipped'}`,
+        event.reason ? `Reason: ${event.reason}` : null,
+      ].filter(Boolean).join('\n');
     case 'sync_error':
       return `Auth sync needs attention:\n${event.reason}`;
   }
@@ -1375,6 +2199,7 @@ function runDoctorChecks(): boolean {
   warnIfProxyEnvMissingFromLoadedEnv();
   warnIfProxyConfigNeedsAttention();
   warnIfInstalledServiceNodeLooksWrong();
+  warnIfInstalledLaunchdNodeLooksWrong();
   warnIfSystemdUserLingerDisabled();
   return passed;
 }
@@ -1403,7 +2228,11 @@ function warnIfProxyConfigNeedsAttention(): void {
     return;
   }
   console.log('[WARN] Only ALL_PROXY/all_proxy is configured. Node service proxying works best with HTTP_PROXY/HTTPS_PROXY.');
-  console.log('[WARN] For SOCKS-only hosts, set FOXCLAW_PROXYCHAINS_CONF=/absolute/path/to/proxychains.conf and run foxclaw restart.');
+  if (process.platform === 'linux') {
+    console.log('[WARN] For SOCKS-only hosts, set FOXCLAW_PROXYCHAINS_CONF=/absolute/path/to/proxychains.conf and run foxclaw restart.');
+  } else {
+    console.log('[WARN] On macOS launchd, prefer HTTP_PROXY/HTTPS_PROXY; FOXCLAW_PROXYCHAINS_CONF is Linux-only.');
+  }
 }
 
 function warnIfProxyEnvMissingFromLoadedEnv(): void {
@@ -1447,6 +2276,37 @@ function warnIfInstalledServiceNodeLooksWrong(): void {
   }
   console.log(`[WARN] installed service node is older than 24: ${nodePath}${version ? ` (${version})` : ''}`);
   console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the service unit.');
+}
+
+function warnIfInstalledLaunchdNodeLooksWrong(): void {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+  const plistPath = launchdPlistPath();
+  let text = '';
+  try {
+    text = fs.readFileSync(plistPath, 'utf8');
+  } catch {
+    return;
+  }
+  const nodePath = extractNodePathFromLaunchdPlist(text);
+  if (!nodePath) {
+    return;
+  }
+  if (!fs.existsSync(nodePath)) {
+    console.log(`[WARN] installed launchd node is missing: ${nodePath}`);
+    console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the launchd plist.');
+    return;
+  }
+  const result = spawnSync(nodePath, ['-p', 'process.versions.node'], { encoding: 'utf8' });
+  const version = result.status === 0 ? result.stdout.trim() : '';
+  const major = Number.parseInt(version.split('.')[0] ?? '', 10);
+  if (Number.isFinite(major) && major >= 24) {
+    console.log(`[OK] launchd node >= 24: ${nodePath}`);
+    return;
+  }
+  console.log(`[WARN] installed launchd node is older than 24: ${nodePath}${version ? ` (${version})` : ''}`);
+  console.log('[WARN] Run foxclaw start from a Node 24 shell to refresh the launchd plist.');
 }
 
 function warnIfSystemdUserLingerDisabled(): void {
@@ -1525,13 +2385,47 @@ function installSystemd(): void {
   ensureSystemdUserLingerEnabled();
   spawnChecked('systemctl', ['--user', 'daemon-reload']);
   spawnChecked('systemctl', ['--user', 'enable', unitName]);
+  restartSystemdUnit(unitName);
+  console.log(`Installed ${unitPath}`);
+  console.log(`Status: systemctl --user status ${unitName}`);
+  console.log(`Logs:   journalctl --user -u ${unitName} -f`);
+}
+
+function restartSystemdUnit(unitName: string): void {
+  if (isCurrentProcessInSystemdUnit(unitName)) {
+    const systemdRun = resolveCommand('systemd-run');
+    if (systemdRun) {
+      const helperUnitName = `foxclaw-restart-${process.pid}-${Date.now()}`;
+      const result = spawnSync(systemdRun, buildSystemdRestartHelperArgs({
+        unitName,
+        helperUnitName,
+        delaySeconds: 1,
+      }), { stdio: 'inherit' });
+      if (result.status === 0) {
+        console.log(`[OK] scheduled ${unitName} restart via transient systemd helper: ${helperUnitName}`);
+        return;
+      }
+      console.log('[WARN] transient systemd restart helper failed; falling back to direct restart.');
+    } else {
+      console.log('[WARN] systemd-run not found; falling back to direct restart.');
+    }
+  }
+
   const restarted = spawnSync('systemctl', ['--user', 'restart', unitName], { stdio: 'inherit' });
   if (restarted.status !== 0) {
     spawnChecked('systemctl', ['--user', 'start', unitName]);
   }
-  console.log(`Installed ${unitPath}`);
-  console.log(`Status: systemctl --user status ${unitName}`);
-  console.log(`Logs:   journalctl --user -u ${unitName} -f`);
+}
+
+function isCurrentProcessInSystemdUnit(unitName: string): boolean {
+  if (process.platform !== 'linux') {
+    return false;
+  }
+  try {
+    return cgroupContainsSystemdUnit(fs.readFileSync('/proc/self/cgroup', 'utf8'), unitName);
+  } catch {
+    return false;
+  }
 }
 
 function ensureSystemdUserLingerEnabled(): void {
@@ -1591,56 +2485,30 @@ function installLaunchd(): void {
     process.exit(1);
   }
   const home = process.env.HOME || '';
-  const plist = path.join(home, 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
+  const plist = launchdPlistPath();
   const envPath = serviceEnvPath();
   const configDir = path.dirname(envPath);
   const nodeProxyArgs = hasStandardNodeProxyEnv() ? ['--use-env-proxy'] : [];
-  const nodeProxyArgXml = nodeProxyArgs.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join('\n');
-  const proxyEnvXml = buildLaunchdProxyEnvironmentXml();
   fs.mkdirSync(path.dirname(plist), { recursive: true });
   fs.mkdirSync(configDir, { recursive: true });
   fs.mkdirSync(path.join(APP_HOME, 'logs'), { recursive: true });
   fs.writeFileSync(
     plist,
-    `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>app.foxden.foxclaw</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${xmlEscape(process.execPath)}</string>
-${nodeProxyArgXml ? `${nodeProxyArgXml}\n` : ''}    <string>${xmlEscape(entryPoint)}</string>
-    <string>serve</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${xmlEscape(configDir)}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${xmlEscape(process.env.PATH || '')}</string>
-    <key>HOME</key>
-    <string>${xmlEscape(home)}</string>
-    <key>USER</key>
-    <string>${xmlEscape(process.env.USER || '')}</string>
-    <key>LOGNAME</key>
-    <string>${xmlEscape(process.env.LOGNAME || process.env.USER || '')}</string>
-    <key>FOXCLAW_ENV</key>
-    <string>${xmlEscape(envPath)}</string>
-${proxyEnvXml}
-  </dict>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${xmlEscape(path.join(APP_HOME, 'logs', 'launchd.out.log'))}</string>
-  <key>StandardErrorPath</key>
-  <string>${xmlEscape(path.join(APP_HOME, 'logs', 'launchd.err.log'))}</string>
-</dict>
-</plist>
-`,
+    buildFoxclawLaunchdPlistText({
+      label: 'app.foxden.foxclaw',
+      nodePath: process.execPath,
+      nodeArgs: nodeProxyArgs,
+      entryPoint,
+      workingDirectory: configDir,
+      pathValue: process.env.PATH || '',
+      home,
+      user: process.env.USER || '',
+      logname: process.env.LOGNAME || process.env.USER || '',
+      envPath,
+      proxyEnv: launchdProxyEnvironment(),
+      stdoutPath: path.join(APP_HOME, 'logs', 'launchd.out.log'),
+      stderrPath: path.join(APP_HOME, 'logs', 'launchd.err.log'),
+    }),
   );
   spawnSync('launchctl', ['unload', plist], { stdio: 'ignore' });
   spawnChecked('launchctl', ['load', plist]);
@@ -1655,13 +2523,28 @@ function stopLaunchd(): void {
     console.error('launchd stop is only available on macOS');
     process.exit(1);
   }
-  const plist = path.join(process.env.HOME || '', 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
+  const plist = launchdPlistPath();
   if (!fs.existsSync(plist)) {
     console.error(`launchd plist not found: ${plist}`);
     process.exit(1);
   }
   spawnChecked('launchctl', ['unload', plist]);
   console.log(`Stopped ${plist}`);
+}
+
+function uninstallLaunchd(): void {
+  if (process.platform !== 'darwin') {
+    console.error('launchd uninstall is only available on macOS');
+    process.exit(1);
+  }
+  const plist = launchdPlistPath();
+  spawnSync('launchctl', ['unload', plist], { stdio: 'ignore' });
+  fs.rmSync(plist, { force: true });
+  console.log(`Removed ${plist}`);
+}
+
+function launchdPlistPath(): string {
+  return path.join(process.env.HOME || '', 'Library', 'LaunchAgents', 'app.foxden.foxclaw.plist');
 }
 
 function buildServicePath(nodeDir: string): string {
@@ -1730,15 +2613,14 @@ function proxyEnvValue(key: string): string {
   return process.env[key]?.trim() || '';
 }
 
-function buildLaunchdProxyEnvironmentXml(): string {
-  const entries: string[] = [];
+function launchdProxyEnvironment(): Record<string, string> {
+  const entries: Record<string, string> = {};
   for (const key of PROXY_ENV_KEYS) {
     const value = proxyEnvValue(key);
     if (!value) continue;
-    entries.push(`    <key>${xmlEscape(key)}</key>`);
-    entries.push(`    <string>${xmlEscape(value)}</string>`);
+    entries[key] = value;
   }
-  return entries.length > 0 ? `${entries.join('\n')}\n` : '';
+  return entries;
 }
 
 function spawnChecked(commandName: string, args: string[]): void {
@@ -1754,15 +2636,6 @@ function systemdEscape(value: string): string {
 
 function systemdUnescape(value: string): string {
   return value.replace(/\\x20/g, ' ').replace(/\\\\/g, '\\');
-}
-
-function xmlEscape(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
 }
 
 async function runWeixinLoginCli(): Promise<void> {

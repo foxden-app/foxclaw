@@ -14,6 +14,13 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
+If FoxClaw is installed as a macOS launchd service, check:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
 ## Doctor Failures
 
 | Symptom | Meaning | Fix |
@@ -136,6 +143,13 @@ systemctl --user is-active foxclaw.service
 pgrep -af foxclaw
 ```
 
+On macOS, use:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+pgrep -af foxclaw
+```
+
 Stop the extra process or service, then restart FoxClaw:
 
 ```bash
@@ -200,10 +214,16 @@ When multiple bots share a group, unaddressed messages intentionally do not trig
 
 If Telegram shows `ChatGPT backend 403 Forbidden`, or the app-server log contains `Unable to load site`, `cf-ray`, or `chatgpt.com/backend-api`, the auth file is not necessarily broken. The service process is usually reaching ChatGPT with the wrong network/proxy/IP.
 
-A common cause is that your shell or project `.env` has proxy variables, while the systemd/launchd service reads a different env file. Check the env file installed into the service:
+A common cause is that your shell or project `.env` has proxy variables, while the systemd/launchd service reads a different env file. On Linux, check the env file installed into the service:
 
 ```bash
 systemctl --user cat foxclaw.service
+```
+
+On macOS, inspect `FOXCLAW_ENV` in the launchd plist:
+
+```bash
+plutil -p ~/Library/LaunchAgents/app.foxden.foxclaw.plist | grep FOXCLAW_ENV -A1
 ```
 
 `foxclaw init` detects proxy environment variables in the current shell and asks whether to save them into the FoxClaw `.env`. If you skipped that step, `foxclaw doctor` warns when it sees proxy variables in the shell but not in the FoxClaw env file.
@@ -243,6 +263,8 @@ FoxClaw writes proxychains into the main service and removes stale FoxClaw `Exec
 
 The systemd installer records the absolute path of the Node process that is currently running FoxClaw. It does not rely on systemd loading `nvm.sh` or any other shell init script. Whether you use nvm, fnm, asdf, mise, Volta, Homebrew, or system Node, run `foxclaw start` from a Node 24+ shell and the service will keep using that Node 24+ path.
 
+macOS launchd follows the same rule: the plist records the absolute Node path that ran `foxclaw start` and does not rely on login-shell initialization.
+
 If you installed the service from a shell using Node 22 or older, reinstall it from a Node 24+ shell. Example for nvm users:
 
 ```bash
@@ -251,7 +273,15 @@ foxclaw start
 systemctl --user status foxclaw.service
 ```
 
-The status output should show a Node 24+ path in `ExecStart`. `foxclaw doctor` also checks the installed service Node path and warns if it is missing or older than 24.
+On macOS:
+
+```bash
+nvm use 24
+foxclaw start
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+```
+
+The status output should show a Node 24+ path. `foxclaw doctor` also checks the installed systemd/launchd service Node path and warns if it is missing or older than 24.
 
 ## Does It Run After Reboot?
 

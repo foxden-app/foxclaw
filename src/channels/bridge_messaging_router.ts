@@ -46,6 +46,27 @@ export class BridgeMessagingRouter {
     return this.telegram.sendHtml(scopeId, text, keyboard);
   }
 
+  sendRichHtml(scopeId: string, html: string, fallbackHtml: string, keyboard?: InlineKeyboard): Promise<number> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).sendHtml(scopeId, fallbackHtml, keyboard);
+    }
+    return this.telegram.sendRichHtml(scopeId, html, keyboard);
+  }
+
+  sendRichMarkdown(scopeId: string, markdown: string, fallbackText: string, keyboard?: InlineKeyboard): Promise<number> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).sendPlain(scopeId, fallbackText, keyboard);
+    }
+    return this.telegram.sendRichMarkdown(scopeId, markdown, keyboard);
+  }
+
+  sendVoice(scopeId: string, filename: string, contents: Buffer, caption?: string, contentType?: string): Promise<number> {
+    if (this.isWeixinScope(scopeId)) {
+      throw new Error(`Voice messages are not supported for Weixin scope ${scopeId}`);
+    }
+    return this.telegram.sendVoice(scopeId, filename, contents, caption, contentType);
+  }
+
   editPlain(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
     if (this.isWeixinScope(scopeId)) {
       return this.requireWeixinTransport(scopeId).editPlain(scopeId, messageId, text, keyboard);
@@ -58,6 +79,20 @@ export class BridgeMessagingRouter {
       return this.requireWeixinTransport(scopeId).editHtml(scopeId, messageId, text, keyboard);
     }
     return this.telegram.editHtml(scopeId, messageId, text, keyboard);
+  }
+
+  editRichHtml(scopeId: string, messageId: number, html: string, fallbackHtml: string, keyboard?: InlineKeyboard): Promise<void> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).editHtml(scopeId, messageId, fallbackHtml, keyboard);
+    }
+    return this.telegram.editRichHtml(scopeId, messageId, html, keyboard);
+  }
+
+  editRichMarkdown(scopeId: string, messageId: number, markdown: string, fallbackText: string, keyboard?: InlineKeyboard): Promise<void> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).editPlain(scopeId, messageId, fallbackText, keyboard);
+    }
+    return this.telegram.editRichMarkdown(scopeId, messageId, markdown, keyboard);
   }
 
   deleteMessage(scopeId: string, messageId: number): Promise<void> {
@@ -86,6 +121,20 @@ export class BridgeMessagingRouter {
       return this.requireWeixinTransport(scopeId).sendDraft(scopeId, draftId, text);
     }
     return this.telegram.sendDraft(scopeId, draftId, text);
+  }
+
+  sendRichDraft(scopeId: string, draftId: number, html: string, fallbackText: string): Promise<void> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).sendDraft(scopeId, draftId, fallbackText);
+    }
+    return this.telegram.sendRichDraft(scopeId, draftId, html);
+  }
+
+  sendRichMarkdownDraft(scopeId: string, draftId: number, markdown: string, fallbackText: string): Promise<void> {
+    if (this.isWeixinScope(scopeId)) {
+      return this.requireWeixinTransport(scopeId).sendDraft(scopeId, draftId, fallbackText);
+    }
+    return this.telegram.sendRichMarkdownDraft(scopeId, draftId, markdown);
   }
 
   answerCallback(callbackQueryId: string, text: string): Promise<void> {

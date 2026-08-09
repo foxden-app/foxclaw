@@ -17,6 +17,8 @@ export interface SelfUpdateStatus {
   locale: AppLocale;
   fromVersion: string;
   toVersion: string | null;
+  releaseNotes?: string[] | null;
+  releaseNotesVersion?: string | null;
   codexUpdate?: string | null;
   codexFromVersion?: string | null;
   codexToVersion?: string | null;
@@ -54,6 +56,7 @@ interface PerformSelfUpdateOptions {
   nodePath: string;
   version: string;
   notificationFile?: string;
+  clusterBroadcastFile?: string;
   codexCliBin?: string;
   env?: NodeJS.ProcessEnv;
 }
@@ -72,6 +75,12 @@ export interface SelfUpdateOutcome {
   error: string | null;
 }
 
+export interface PendingClusterUpdateBroadcast {
+  targetVersion: string | null;
+  fromVersion: string;
+  updatedAt: string;
+}
+
 interface CodexCliUpdateResult {
   message: string;
   fromVersion: string | null;
@@ -86,10 +95,24 @@ export function inferPnpmHomeFromEntryPoint(entryPoint: string): string | null {
   const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
   const globalMarker = '/global/';
   const globalIndex = normalizedEntryPoint.indexOf(globalMarker);
-  if (globalIndex <= 0 || !normalizedEntryPoint.includes('/.pnpm/')) {
+  const pnpm10Layout = normalizedEntryPoint.includes('/.pnpm/');
+  const pnpm11Layout = /\/global\/v\d+\/[^/]+\/node_modules\/@foxden-app\/foxclaw\//.test(normalizedEntryPoint);
+  if (globalIndex <= 0 || (!pnpm10Layout && !pnpm11Layout)) {
     return null;
   }
   return normalizedEntryPoint.slice(0, globalIndex);
+}
+
+export function inferPnpmFallbackPackageFromEntryPoint(entryPoint: string): string {
+  const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
+  const versionedLayout = normalizedEntryPoint.match(/\/global\/v(\d+)(?:\/|$)/);
+  if (versionedLayout?.[1]) {
+    return `pnpm@${versionedLayout[1]}`;
+  }
+  if (/\/global\/\d+(?:\/|$)/.test(normalizedEntryPoint)) {
+    return 'pnpm@10';
+  }
+  return 'pnpm@latest';
 }
 
 export function resolveSelfUpdateInstaller(
@@ -100,31 +123,15 @@ export function resolveSelfUpdateInstaller(
 ): SelfUpdateInstaller {
   const pnpmHome = inferPnpmHomeFromEntryPoint(entryPoint);
   if (pnpmHome) {
-    const commandName = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
-    const candidates = executableCandidates(commandName, nodePath, env, [
-      path.join(pnpmHome, commandName),
-      path.join(pnpmHome, 'bin', commandName),
-      env.PNPM_HOME?.trim() ? path.join(env.PNPM_HOME.trim(), commandName) : '',
-      env.PNPM_HOME?.trim() ? path.join(env.PNPM_HOME.trim(), 'bin', commandName) : '',
-    ]);
-    const pnpmCommand = candidates.find((candidate) => exists(candidate));
-    if (pnpmCommand) {
-      return {
-        manager: 'pnpm',
-        command: pnpmCommand,
-        installArgs: ['add', '--global', PACKAGE_SPEC],
-        rootArgs: ['root', '--global'],
-        pnpmHome,
-      };
-    }
     const npmCommandName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const npmCommand = executableCandidates(npmCommandName, nodePath, env)
       .find((candidate) => exists(candidate)) ?? npmCommandName;
+    const fallbackPackage = inferPnpmFallbackPackageFromEntryPoint(entryPoint);
     return {
       manager: 'pnpm',
       command: npmCommand,
-      installArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'add', '--global', PACKAGE_SPEC],
-      rootArgs: ['exec', '--yes', '--package=pnpm@latest', '--', 'pnpm', 'root', '--global'],
+      installArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', '--config.minimum-release-age=0', 'add', '--global', PACKAGE_SPEC],
+      rootArgs: ['exec', '--yes', `--package=${fallbackPackage}`, '--', 'pnpm', '--config.minimum-release-age=0', 'root', '--global'],
       pnpmHome,
     };
   }
@@ -227,6 +234,10 @@ export function readSelfUpdateStatus(statusFile: string): SelfUpdateStatus | nul
       locale: parsed.locale,
       fromVersion: parsed.fromVersion,
       toVersion: typeof parsed.toVersion === 'string' ? parsed.toVersion : null,
+      ...(Array.isArray(parsed.releaseNotes) ? {
+        releaseNotes: parsed.releaseNotes.filter((entry): entry is string => typeof entry === 'string'),
+      } : {}),
+      ...(typeof parsed.releaseNotesVersion === 'string' ? { releaseNotesVersion: parsed.releaseNotesVersion } : {}),
       ...(typeof parsed.codexUpdate === 'string' ? { codexUpdate: parsed.codexUpdate } : {}),
       ...(typeof parsed.codexFromVersion === 'string' ? { codexFromVersion: parsed.codexFromVersion } : {}),
       ...(typeof parsed.codexToVersion === 'string' ? { codexToVersion: parsed.codexToVersion } : {}),
@@ -286,6 +297,8 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
         locale,
         fromVersion: options.version,
         toVersion: null,
+        releaseNotes: null,
+        releaseNotesVersion: null,
         codexUpdate: null,
         codexFromVersion: null,
         codexToVersion: null,
@@ -332,6 +345,8 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           locale,
           fromVersion: options.version,
           toVersion: null,
+          releaseNotes: null,
+          releaseNotesVersion: null,
           codexUpdate: null,
           codexFromVersion: null,
           codexToVersion: null,
@@ -410,9 +425,17 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     runInherited(installer.command, installer.installArgs, installerEnv);
     const updatedEntryPoint = resolveUpdatedEntryPoint(installer, installerEnv);
     toVersion = readInstalledPackageVersion(updatedEntryPoint);
+    const releaseNotes = readInstalledReleaseNotes(updatedEntryPoint, toVersion, options.notificationFile);
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
     runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
-    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null);
+    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null, releaseNotes);
+    if (options.clusterBroadcastFile && env.FOXCLAW_SUPPRESS_UPDATE_BROADCAST !== '1') {
+      writePendingClusterUpdateBroadcast(options.clusterBroadcastFile, {
+        targetVersion: toVersion,
+        fromVersion: options.version,
+        updatedAt: new Date().toISOString(),
+      });
+    }
     console.log(`[OK] FoxClaw updated and restarted: ${options.version} -> ${toVersion}`);
     return {
       ok: true,
@@ -422,7 +445,7 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     };
   } catch (error) {
     const message = formatError(error);
-    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message);
+    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message, null);
     console.error(`[FAIL] FoxClaw update failed: ${message}`);
     return {
       ok: false,
@@ -431,6 +454,38 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
       error: message,
     };
   }
+}
+
+export function readPendingClusterUpdateBroadcast(filePath: string): PendingClusterUpdateBroadcast | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<PendingClusterUpdateBroadcast>;
+    if (
+      (typeof parsed.targetVersion !== 'string' && parsed.targetVersion !== null)
+      || typeof parsed.fromVersion !== 'string'
+      || typeof parsed.updatedAt !== 'string'
+      || !Number.isFinite(Date.parse(parsed.updatedAt))
+    ) {
+      return null;
+    }
+    return {
+      targetVersion: parsed.targetVersion ?? null,
+      fromVersion: parsed.fromVersion,
+      updatedAt: parsed.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writePendingClusterUpdateBroadcast(filePath: string, value: PendingClusterUpdateBroadcast): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporaryFile = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryFile, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temporaryFile, filePath);
+}
+
+export function clearPendingClusterUpdateBroadcast(filePath: string): void {
+  fs.rmSync(filePath, { force: true });
 }
 
 function updateManagedCodexCli(codexCliBin: string, nodePath: string, env: NodeJS.ProcessEnv): CodexCliUpdateResult {
@@ -558,6 +613,46 @@ function runInherited(command: string, args: string[], env: NodeJS.ProcessEnv): 
   }
 }
 
+export function resolveFoxclawEntryPointFromGlobalRoot(
+  globalRoot: string,
+  exists: (target: string) => boolean = fs.existsSync,
+): string | null {
+  // pnpm <= 10 prints the global node_modules directory; pnpm >= 11 prints
+  // the global directory itself. Accept both documented layouts.
+  const candidates = [
+    path.join(globalRoot, '@foxden-app', 'foxclaw', 'dist', 'main.js'),
+    path.join(globalRoot, 'node_modules', '@foxden-app', 'foxclaw', 'dist', 'main.js'),
+  ];
+  return candidates.find(candidate => exists(candidate)) ?? null;
+}
+
+export function resolveFoxclawEntryPointFromPnpmHome(
+  pnpmHome: string,
+  preferBin: boolean = false,
+  exists: (target: string) => boolean = fs.existsSync,
+  readText: (target: string) => string = (target) => fs.readFileSync(target, 'utf8'),
+): string | null {
+  const commandName = process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw';
+  const rootShim = path.join(pnpmHome, commandName);
+  const binShim = path.join(pnpmHome, 'bin', commandName);
+  const shimCandidates = preferBin ? [binShim, rootShim] : [rootShim, binShim];
+  for (const shim of shimCandidates) {
+    if (!exists(shim)) continue;
+    let contents = '';
+    try {
+      contents = readText(shim);
+    } catch {
+      continue;
+    }
+    const matches = contents.match(/(?:[A-Za-z]:[\\/]|\/)[^\r\n"']*?[\\/]node_modules[\\/]@foxden-app[\\/]foxclaw[\\/]dist[\\/]main\.js/g);
+    const entryPoint = matches?.at(-1) ?? null;
+    if (entryPoint && exists(entryPoint)) {
+      return entryPoint;
+    }
+  }
+  return null;
+}
+
 function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.ProcessEnv): string {
   const result = spawnSync(installer.command, installer.rootArgs, { encoding: 'utf8', env });
   if (result.error) {
@@ -570,9 +665,14 @@ function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.Pr
   if (!globalRoot) {
     throw new Error(`Could not locate the updated global package root using ${installer.manager}.`);
   }
-  const updatedEntryPoint = path.join(globalRoot, '@foxden-app', 'foxclaw', 'dist', 'main.js');
-  if (!fs.existsSync(updatedEntryPoint)) {
-    throw new Error(`Updated FoxClaw entry point was not found at ${updatedEntryPoint}.`);
+  const updatedEntryPoint = (installer.pnpmHome
+    ? resolveFoxclawEntryPointFromPnpmHome(installer.pnpmHome, /^v\d+$/.test(path.basename(globalRoot)))
+    : null)
+    ?? resolveFoxclawEntryPointFromGlobalRoot(globalRoot);
+  if (!updatedEntryPoint) {
+    throw new Error(
+      `Updated FoxClaw entry point was not found below ${globalRoot} (checked direct and node_modules layouts).`,
+    );
   }
   return updatedEntryPoint;
 }
@@ -587,12 +687,78 @@ function readInstalledPackageVersion(updatedEntryPoint: string): string {
   }
 }
 
+function readInstalledReleaseNotes(
+  updatedEntryPoint: string,
+  version: string | null,
+  notificationFile: string | undefined,
+): string[] | null {
+  if (!version || version === 'unknown') {
+    return null;
+  }
+  const pending = notificationFile ? readSelfUpdateStatus(notificationFile) : null;
+  const locale = pending?.locale ?? 'zh';
+  const changelogPath = path.resolve(path.dirname(updatedEntryPoint), '..', 'CHANGELOG.md');
+  try {
+    return extractReleaseNotes(fs.readFileSync(changelogPath, 'utf8'), version, locale);
+  } catch {
+    return null;
+  }
+}
+
+export function extractReleaseNotes(changelog: string, version: string, locale: AppLocale): string[] | null {
+  const escapedVersion = escapeRegExp(version.replace(/^v/i, ''));
+  const versionHeadingPattern = new RegExp(`^##\\s+\\[?v?${escapedVersion}\\]?\\b.*$`, 'im');
+  const versionMatch = versionHeadingPattern.exec(changelog);
+  if (!versionMatch || versionMatch.index === undefined) {
+    return null;
+  }
+  const sectionStart = versionMatch.index + versionMatch[0].length;
+  const nextHeadingMatch = /^##\s+/m.exec(changelog.slice(sectionStart));
+  const versionSection = nextHeadingMatch
+    ? changelog.slice(sectionStart, sectionStart + nextHeadingMatch.index)
+    : changelog.slice(sectionStart);
+  const localizedSection = extractLocalizedReleaseNoteSection(versionSection, locale) ?? versionSection;
+  const bullets = localizedSection
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => /^[-*]\s+/.test(line))
+    .map(line => line.replace(/^[-*]\s+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return bullets.length > 0 ? bullets : null;
+}
+
+function extractLocalizedReleaseNoteSection(section: string, locale: AppLocale): string | null {
+  const headingPattern = /^###\s+(.+)$/gm;
+  const headings = [...section.matchAll(headingPattern)];
+  if (headings.length === 0) {
+    return null;
+  }
+  const preferred = locale === 'zh' ? ['中文', 'Chinese'] : ['English', '英文'];
+  for (let index = 0; index < headings.length; index += 1) {
+    const heading = headings[index]!;
+    const headingText = heading[1]!.trim().toLowerCase();
+    if (!preferred.some(label => headingText === label.toLowerCase())) {
+      continue;
+    }
+    const start = heading.index! + heading[0].length;
+    const next = headings[index + 1];
+    return next ? section.slice(start, next.index) : section.slice(start);
+  }
+  return null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function completeNotification(
   notificationFile: string | undefined,
   state: Extract<SelfUpdateState, 'succeeded' | 'failed'>,
   toVersion: string | null,
   codexUpdate: CodexCliUpdateResult | null,
   error: string | null,
+  releaseNotes: string[] | null,
 ): void {
   if (!notificationFile) {
     return;
@@ -605,6 +771,8 @@ function completeNotification(
     ...pending,
     state,
     toVersion,
+    releaseNotes,
+    releaseNotesVersion: releaseNotes && toVersion ? toVersion : null,
     codexUpdate: codexUpdate?.message ?? null,
     codexFromVersion: codexUpdate?.fromVersion ?? null,
     codexToVersion: codexUpdate?.toVersion ?? null,

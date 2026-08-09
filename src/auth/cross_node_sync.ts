@@ -76,6 +76,20 @@ export interface AuthSyncValidationResult {
   reason?: string | null;
 }
 
+export interface AuthSyncClusterAuditResult {
+  requestId: string;
+  nodesExpected: number;
+  nodesResponded: number;
+  missingPeers: string[];
+  busyNodes: string[];
+  checkedCandidates: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  synchronizedCandidates: string[];
+  consensusInvalidCandidates: string[];
+  identityConflicts: string[];
+}
+
 export type AuthSyncRemoteImportMode = 'push' | 'pull';
 
 export type AuthSyncPullResponseResult = 'sent' | 'candidate_not_found' | 'account_mismatch' | 'not_newer';
@@ -91,23 +105,44 @@ export type AuthSyncNotification =
   | { kind: 'remote_import_imported'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode }
   | { kind: 'remote_import_skipped'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode; reason: string }
   | { kind: 'remote_import_failed'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; mode: AuthSyncRemoteImportMode; reason: string }
+  | { kind: 'candidate_delete_sent'; candidateName: string; peers: string[]; reason: string | null }
+  | { kind: 'candidate_delete_failed'; candidateName: string; peers: string[]; reason: string }
+  | { kind: 'remote_delete_received'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; queued: boolean; queueLength: number; reason: string | null }
+  | { kind: 'remote_delete_deleted'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; reason: string | null }
+  | { kind: 'remote_delete_skipped'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; reason: string }
+  | { kind: 'remote_delete_failed'; candidateName: string; sourceNodeId: string; sourceLabel: string; peer: string; reason: string }
   | { kind: 'recovery_started'; candidateName: string; requestId: string; peers: string[]; timeoutMs: number }
   | { kind: 'recovery_peer_empty'; candidateName: string; peer: string; reason: string }
   | { kind: 'recovery_peer_bundle_received'; candidateName: string; peer: string; sourceNodeId: string }
   | { kind: 'recovery_failed'; candidateName: string; requestId?: string; peers: string[]; reason: string; waitMs?: number; peerReachability?: AuthSyncPeerReachability[] }
   | { kind: 'pull_request_received'; candidateName: string; peer: string; requesterNodeId: string }
   | { kind: 'pull_response_sent'; candidateName: string; peer: string; result: AuthSyncPullResponseResult; reason: string | null }
+  | { kind: 'service_update_sent'; requestId: string; targetVersion: string | null; peers: string[] }
+  | { kind: 'service_update_received'; requestId: string; targetVersion: string | null; sourceNodeId: string; sourceLabel: string; peer: string; accepted: boolean; reason: string | null }
   | { kind: 'sync_error'; reason: string };
 
 export interface AuthSyncImportCallbacks {
   readLocalCandidate: (candidateName: string) => Promise<AuthMirrorCandidateRecord | null>;
   listLocalCandidates: () => Promise<AuthMirrorCandidateRecord[]>;
+  listLocalCandidateCopies?: () => Promise<AuthMirrorCandidateRecord[]>;
   validateCandidate: (candidateName: string, raw: string, expectedAccountId: string) => Promise<AuthSyncValidationResult>;
   importCandidate: (
     candidateName: string,
     raw: string,
-    source: { nodeId: string; label?: string | null },
+    source: { nodeId: string; label?: string | null; replaceExisting?: boolean },
   ) => Promise<AuthMirrorImportResult>;
+  markCandidateState?: (
+    candidateName: string,
+    state: 'active' | 'needs_repair',
+    expected: { accountId: string; quotaIdentityId: string | null; maxLastRefreshMs: number },
+  ) => Promise<boolean>;
+  deleteLocalCandidate?: (
+    candidateName: string,
+    source: { nodeId: string; label?: string | null; reason?: string | null },
+  ) => Promise<{ ok: boolean; deleted: boolean; reason?: string | null }>;
+  scheduleServiceUpdate?: (
+    source: { requestId: string; nodeId: string; label?: string | null; targetVersion: string | null; requestedAt: string },
+  ) => Promise<{ accepted: boolean; reason?: string | null }>;
   isIdle: () => boolean;
   notify?: (event: AuthSyncNotification) => Promise<void>;
 }
@@ -140,22 +175,62 @@ interface AuthSyncBundlePayload {
   requestId?: string | null;
   candidateName: string;
   accountId: string;
+  quotaIdentityId?: string | null;
   lastRefreshMs: number;
   rawAuth: string;
   authSha256: string;
 }
 
+interface AuthSyncAuditRecord {
+  candidateName: string;
+  accountId: string;
+  quotaIdentityId: string | null;
+  lastRefreshMs: number;
+  status: 'valid' | 'invalid';
+  reason: string | null;
+  bundle: AuthSyncBundlePayload | null;
+}
+
+interface AuthSyncAuditNodeReport {
+  nodeId: string;
+  status: 'completed' | 'busy';
+  records: AuthSyncAuditRecord[];
+  reason: string | null;
+}
+
+interface AuthSyncAuditVerificationRecord {
+  candidateName: string;
+  authSha256: string;
+  status: 'valid' | 'invalid';
+  reason: string | null;
+}
+
+interface AuthSyncAuditVerificationReport {
+  nodeId: string;
+  status: 'completed' | 'busy';
+  records: AuthSyncAuditVerificationRecord[];
+  reason: string | null;
+}
+
 type AuthSyncPlainMessage =
   | ({ kind: 'push.bundle'; requestId?: string | null } & AuthSyncBundlePayload)
-  | { kind: 'pull.request'; requestId: string; candidateName: string; accountId: string | null; lastRefreshMs: number | null }
+  | { kind: 'pull.request'; requestId: string; candidateName: string; accountId: string | null; quotaIdentityId?: string | null; lastRefreshMs: number | null }
   | { kind: 'pull.response'; requestId: string; bundle: AuthSyncBundlePayload | null; reason?: string | null }
+  | { kind: 'delete.candidate'; requestId: string; candidateName: string; reason?: string | null; deletedAt: string }
   | { kind: 'digest'; records: Array<{ candidateName: string; accountIdHash: string; lastRefreshMs: number }> }
   | { kind: 'test.ping'; requestId: string }
   | { kind: 'test.pong'; requestId: string; nodeId: string }
   | { kind: 'lease.request'; leaseId: string; reason: string; expiresAt: number }
   | { kind: 'lease.grant'; leaseId: string; expiresAt: number }
   | { kind: 'lease.deny'; leaseId: string; reason: string }
-  | { kind: 'lease.release'; leaseId: string };
+  | { kind: 'lease.release'; leaseId: string }
+  | { kind: 'audit.request'; requestId: string; requestedAt: string }
+  | { kind: 'audit.response'; requestId: string; report: AuthSyncAuditNodeReport }
+  | { kind: 'audit.verify.request'; requestId: string; verificationId: string; bundles: AuthSyncBundlePayload[] }
+  | { kind: 'audit.verify.response'; requestId: string; verificationId: string; report: AuthSyncAuditVerificationReport }
+  | { kind: 'audit.apply'; requestId: string; bundle: AuthSyncBundlePayload; replaceExisting: boolean }
+  | { kind: 'audit.state'; requestId: string; candidateName: string; state: 'active' | 'needs_repair'; accountId: string; quotaIdentityId: string | null; maxLastRefreshMs: number }
+  | { kind: 'service.update.request'; requestId: string; targetVersion: string | null; requestedAt: string };
 
 interface AuthSyncEnvelope {
   magic: 'foxclaw-auth-sync';
@@ -174,6 +249,17 @@ interface PendingRemoteImport {
   sourceLabel: string | null;
   receivedAt: number;
   fromPeer: string;
+  mode: AuthSyncRemoteImportMode;
+}
+
+interface PendingRemoteDelete {
+  candidateName: string;
+  requestId: string;
+  sourceNodeId: string;
+  sourceLabel: string | null;
+  receivedAt: number;
+  fromPeer: string;
+  reason: string | null;
 }
 
 interface AuthSyncImportOutcome {
@@ -209,6 +295,22 @@ interface PendingTest {
   finished: boolean;
 }
 
+interface PendingAudit {
+  peers: string[];
+  reports: Map<string, AuthSyncAuditNodeReport>;
+  resolve: (value: { reports: Map<string, AuthSyncAuditNodeReport>; missing: string[] }) => void;
+  timer: NodeJS.Timeout;
+  finished: boolean;
+}
+
+interface PendingAuditVerification {
+  peers: string[];
+  reports: Map<string, AuthSyncAuditVerificationReport>;
+  resolve: (value: Map<string, AuthSyncAuditVerificationReport>) => void;
+  timer: NodeJS.Timeout;
+  finished: boolean;
+}
+
 export interface AuthSyncLeaseResult {
   ok: boolean;
   leaseId: string | null;
@@ -225,6 +327,7 @@ const ENVELOPE_MAGIC = 'foxclaw-auth-sync';
 const NONCE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const PULL_TIMEOUT_MS = 12_000;
 const TEST_TIMEOUT_MS = 8_000;
+const AUDIT_TIMEOUT_MS = 5 * 60_000;
 const LEASE_TIMEOUT_MS = 8_000;
 const LEASE_TTL_MS = 10 * 60_000;
 const REMOTE_ACCESS_TOKEN_MIN_TTL_MS = 60_000;
@@ -236,13 +339,17 @@ export class CrossNodeAuthSync {
   private readonly peers: string[];
   private readonly peerKeys: Set<string>;
   private readonly pendingImports: PendingRemoteImport[] = [];
+  private readonly pendingDeletes: PendingRemoteDelete[] = [];
   private readonly pendingPulls = new Map<string, PendingPull>();
   private readonly pendingLeases = new Map<string, PendingLease>();
   private readonly pendingTests = new Map<string, PendingTest>();
+  private readonly pendingAudits = new Map<string, PendingAudit>();
+  private readonly pendingAuditVerifications = new Map<string, PendingAuditVerification>();
   private seenNonces = new Map<string, number>();
   private lastPeerActivityAt = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
   private importProcessorActive = false;
+  private deleteProcessorActive = false;
   private activeRemoteLease: { leaseId: string; peer: string; expiresAt: number } | null = null;
   private activeLocalLease: { leaseId: string; expiresAt: number } | null = null;
   private lastNotifiedError: string | null = null;
@@ -296,8 +403,8 @@ export class CrossNodeAuthSync {
     if (!this.config.enabled || this.timer) return;
     this.timer = setInterval(() => {
       this.expireLeases();
-      void this.processPendingImports().catch((error) => {
-        this.recordError(`pending import failed: ${formatError(error)}`);
+      void this.processPendingDeletes().then(() => this.processPendingImports()).catch((error) => {
+        this.recordError(`pending auth sync work failed: ${formatError(error)}`);
       });
     }, 5_000);
     this.timer.unref();
@@ -343,10 +450,13 @@ export class CrossNodeAuthSync {
 
   isIdle(): boolean {
     return this.pendingImports.length === 0
+      && this.pendingDeletes.length === 0
       && !this.importProcessorActive
+      && !this.deleteProcessorActive
       && this.pendingPulls.size === 0
       && this.pendingLeases.size === 0
       && this.pendingTests.size === 0
+      && this.pendingAudits.size === 0
       && this.activeLocalLease === null
       && this.activeRemoteLease === null;
   }
@@ -422,6 +532,47 @@ export class CrossNodeAuthSync {
     }
   }
 
+  async publishCandidateDeletion(candidateName: string, reason: string | null = null): Promise<boolean> {
+    if (!this.isReady() || !isAuthCandidateName(candidateName)) return false;
+    const requestId = crypto.randomUUID();
+    try {
+      await this.sendToAll({
+        kind: 'delete.candidate',
+        requestId,
+        candidateName,
+        reason,
+        deletedAt: new Date().toISOString(),
+      });
+      this.recordEvent({
+        direction: 'local',
+        kind: 'delete.candidate',
+        stage: 'sent',
+        peer: null,
+        requestId,
+        candidateName,
+        detail: reason,
+      });
+      this.clearCandidateFailure(candidateName);
+      await this.writeState();
+      this.notify({ kind: 'candidate_delete_sent', candidateName, peers: [...this.peers], reason });
+      return true;
+    } catch (error) {
+      const formatted = formatError(error);
+      this.recordError(`candidate delete publish failed for ${candidateName}: ${formatted}`, false);
+      this.recordEvent({
+        direction: 'local',
+        kind: 'delete.candidate',
+        stage: 'send_failed',
+        peer: null,
+        requestId,
+        candidateName,
+        detail: formatted,
+      });
+      this.notify({ kind: 'candidate_delete_failed', candidateName, peers: [...this.peers], reason: formatted });
+      throw error;
+    }
+  }
+
   async publishDigest(): Promise<void> {
     if (!this.isReady()) return;
     const records = (await this.callbacks.listLocalCandidates()).map(record => ({
@@ -432,7 +583,10 @@ export class CrossNodeAuthSync {
     await this.sendToAll({ kind: 'digest', records });
   }
 
-  async requestRecovery(candidateName: string, current?: { accountId: string | null; lastRefreshMs: number | null }): Promise<boolean> {
+  async requestRecovery(
+    candidateName: string,
+    current?: { accountId: string | null; quotaIdentityId?: string | null; lastRefreshMs: number | null },
+  ): Promise<boolean> {
     if (!this.isReady() || !isAuthCandidateName(candidateName)) return false;
     const requestId = crypto.randomUUID();
     const peers = [...this.peers];
@@ -491,6 +645,7 @@ export class CrossNodeAuthSync {
         requestId,
         candidateName,
         accountId: current?.accountId ?? null,
+        quotaIdentityId: current?.quotaIdentityId ?? null,
         lastRefreshMs: current?.lastRefreshMs ?? null,
       }).catch((error) => {
         clearTimeout(timer);
@@ -542,7 +697,22 @@ export class CrossNodeAuthSync {
     const expiresAt = Date.now() + LEASE_TTL_MS;
     const result = await new Promise<AuthSyncLeaseResult>((resolve) => {
       const timer = setTimeout(() => {
+        const pending = this.pendingLeases.get(leaseId);
         this.pendingLeases.delete(leaseId);
+        if (pending && pending.denies.length === 0) {
+          const detail = `partial grants=${pending.grants.size}/${this.peers.length}; reason=${reason}`;
+          this.recordEvent({
+            direction: 'local',
+            kind: 'lease.request',
+            stage: 'partial_granted',
+            peer: null,
+            requestId: leaseId,
+            candidateName: null,
+            detail,
+          });
+          resolve({ ok: true, leaseId, reason: detail });
+          return;
+        }
         this.recordEvent({
           direction: 'local',
           kind: 'lease.request',
@@ -575,7 +745,7 @@ export class CrossNodeAuthSync {
     });
     if (result.ok) {
       this.activeLocalLease = { leaseId, expiresAt };
-      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'granted', peer: null, requestId: leaseId, candidateName: null, detail: reason });
+      this.recordEvent({ direction: 'local', kind: 'lease.request', stage: result.reason?.startsWith('partial grants=') ? 'granted_partial' : 'granted', peer: null, requestId: leaseId, candidateName: null, detail: result.reason ?? reason });
     } else {
       this.recordEvent({ direction: 'local', kind: 'lease.request', stage: 'denied', peer: null, requestId: leaseId, candidateName: null, detail: result.reason ?? reason });
       await this.releaseRefreshLease(leaseId);
@@ -629,6 +799,96 @@ export class CrossNodeAuthSync {
     return resultPromise;
   }
 
+  async auditCluster(): Promise<AuthSyncClusterAuditResult> {
+    const requestId = crypto.randomUUID();
+    const peers = [...this.peers];
+    const localReportPromise = this.buildAuditReport();
+    const remoteReportsPromise = new Promise<{ reports: Map<string, AuthSyncAuditNodeReport>; missing: string[] }>((resolve) => {
+      if (!this.isReady() || peers.length === 0) {
+        resolve({ reports: new Map(), missing: [] });
+        return;
+      }
+      const timer = setTimeout(() => this.finishPendingAudit(requestId), AUDIT_TIMEOUT_MS);
+      timer.unref();
+      this.pendingAudits.set(requestId, {
+        peers,
+        reports: new Map(),
+        resolve,
+        timer,
+        finished: false,
+      });
+    });
+
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.request',
+      stage: 'started',
+      peer: null,
+      requestId,
+      candidateName: null,
+      detail: `peers=${peers.join(', ') || 'none'}`,
+    });
+    if (this.isReady() && peers.length > 0) {
+      try {
+        await this.sendToAll({ kind: 'audit.request', requestId, requestedAt: new Date().toISOString() });
+      } catch (error) {
+        const pending = this.pendingAudits.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          this.pendingAudits.delete(requestId);
+          pending.finished = true;
+          pending.resolve({ reports: pending.reports, missing: pending.peers.filter(peer => !pending.reports.has(peer)) });
+        }
+        throw error;
+      }
+    }
+
+    const [localReport, remote] = await Promise.all([localReportPromise, remoteReportsPromise]);
+    const reports = [localReport, ...remote.reports.values()];
+    await this.verifySingleNodeInvalidCandidates(requestId, reports);
+    const result = await this.reconcileAuditReports(requestId, reports, remote.missing);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.request',
+      stage: 'completed',
+      peer: null,
+      requestId,
+      candidateName: null,
+      detail: `responded=${result.nodesResponded}/${result.nodesExpected}; synchronized=${result.synchronizedCandidates.length}; repair=${result.consensusInvalidCandidates.length}`,
+    });
+    return result;
+  }
+
+  async publishServiceUpdateRequest(targetVersion: string | null): Promise<{ sent: number; peers: string[] }> {
+    if (!this.isReady()) {
+      return { sent: 0, peers: [] };
+    }
+    const requestId = crypto.randomUUID();
+    const peers = [...this.peers];
+    await this.sendToAll({
+      kind: 'service.update.request',
+      requestId,
+      targetVersion,
+      requestedAt: new Date().toISOString(),
+    });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'service.update.request',
+      stage: 'broadcast',
+      peer: null,
+      requestId,
+      candidateName: null,
+      detail: targetVersion ? `target=${targetVersion}` : null,
+    });
+    this.notify({
+      kind: 'service_update_sent',
+      requestId,
+      targetVersion,
+      peers,
+    });
+    return { sent: peers.length, peers };
+  }
+
   async handleIncomingEnvelope(rawEnvelope: string, peer: AuthSyncPeerIdentity): Promise<boolean> {
     if (!this.isReady() || !this.isAllowedPeer(peer)) {
       return false;
@@ -671,6 +931,9 @@ export class CrossNodeAuthSync {
       case 'pull.response':
         await this.handlePullResponse(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
         return;
+      case 'delete.candidate':
+        this.enqueueDelete(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
+        return;
       case 'digest':
         await this.handleDigest(message, normalizePeerIdentity(peer));
         return;
@@ -698,9 +961,496 @@ export class CrossNodeAuthSync {
           this.recordEvent({ direction: 'in', kind: 'lease.release', stage: 'released', peer: normalizePeerIdentity(peer), requestId: message.leaseId, candidateName: null, detail: null });
         }
         return;
+      case 'audit.request':
+        await this.handleAuditRequest(message, normalizePeerIdentity(peer));
+        return;
+      case 'audit.response':
+        this.handleAuditResponse(message, normalizePeerIdentity(peer));
+        return;
+      case 'audit.verify.request':
+        await this.handleAuditVerificationRequest(message, normalizePeerIdentity(peer));
+        return;
+      case 'audit.verify.response':
+        this.handleAuditVerificationResponse(message, normalizePeerIdentity(peer));
+        return;
+      case 'audit.apply':
+        await this.handleAuditApply(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
+        return;
+      case 'audit.state':
+        await this.applyAuditState(message);
+        return;
+      case 'service.update.request':
+        await this.handleServiceUpdateRequest(message, senderNodeId, sourceLabel, normalizePeerIdentity(peer));
+        return;
       default:
         return;
     }
+  }
+
+  private async handleAuditRequest(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.request' }>,
+    peer: string,
+  ): Promise<void> {
+    const report = await this.buildAuditReport();
+    await this.sendToPeer(peer, { kind: 'audit.response', requestId: message.requestId, report });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.response',
+      stage: 'sent',
+      peer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: `${report.status}; records=${report.records.length}`,
+    });
+  }
+
+  private handleAuditResponse(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.response' }>,
+    peer: string,
+  ): void {
+    const pending = this.pendingAudits.get(message.requestId);
+    if (!pending || pending.finished || !isValidAuditReport(message.report)) return;
+    const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
+    pending.reports.set(matchedPeer, message.report);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.response',
+      stage: 'received',
+      peer: matchedPeer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: `${message.report.status}; records=${message.report.records.length}; node=${message.report.nodeId}`,
+    });
+    if (pending.peers.every(peerName => pending.reports.has(peerName))) {
+      this.finishPendingAudit(message.requestId);
+    }
+  }
+
+  private async handleAuditVerificationRequest(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.verify.request' }>,
+    peer: string,
+  ): Promise<void> {
+    let report: AuthSyncAuditVerificationReport;
+    if (!this.callbacks.isIdle()) {
+      report = { nodeId: this.nodeId ?? 'local', status: 'busy', records: [], reason: 'runtime is not idle' };
+    } else {
+      const records: AuthSyncAuditVerificationRecord[] = [];
+      const bundles = Array.isArray(message.bundles)
+        ? message.bundles.filter(bundle => isValidBundle(bundle) && sha256(bundle.rawAuth) === bundle.authSha256)
+        : [];
+      for (const bundle of bundles) {
+        const validation = await this.validateAuditBundle(bundle);
+        records.push({
+          candidateName: bundle.candidateName,
+          authSha256: bundle.authSha256,
+          status: validation.ok ? 'valid' : 'invalid',
+          reason: validation.ok ? null : validation.reason ?? 'usage validation failed',
+        });
+      }
+      report = { nodeId: this.nodeId ?? 'local', status: 'completed', records, reason: null };
+    }
+    await this.sendToPeer(peer, {
+      kind: 'audit.verify.response',
+      requestId: message.requestId,
+      verificationId: message.verificationId,
+      report,
+    });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.verify.response',
+      stage: 'sent',
+      peer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: `${report.status}; records=${report.records.length}`,
+    });
+  }
+
+  private handleAuditVerificationResponse(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.verify.response' }>,
+    peer: string,
+  ): void {
+    const pending = this.pendingAuditVerifications.get(message.verificationId);
+    if (!pending || pending.finished || !isValidAuditVerificationReport(message.report)) return;
+    const matchedPeer = this.matchConfiguredPeer(peer) ?? peer;
+    pending.reports.set(matchedPeer, message.report);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.verify.response',
+      stage: 'received',
+      peer: matchedPeer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: `${message.report.status}; records=${message.report.records.length}; node=${message.report.nodeId}`,
+    });
+    if (pending.peers.every(peerName => pending.reports.has(peerName))) {
+      this.finishPendingAuditVerification(message.verificationId);
+    }
+  }
+
+  private async handleAuditApply(
+    message: Extract<AuthSyncPlainMessage, { kind: 'audit.apply' }>,
+    senderNodeId: string,
+    sourceLabel: string,
+    peer: string,
+  ): Promise<void> {
+    const outcome = await this.validateAndImport(
+      { ...message.bundle, requestId: message.requestId },
+      senderNodeId,
+      sourceLabel,
+      peer,
+      'push',
+      message.replaceExisting,
+    );
+    if (!outcome.ok) return;
+    const bundle = message.bundle;
+    const stateRestored = await this.callbacks.markCandidateState?.(bundle.candidateName, 'active', {
+      accountId: bundle.accountId,
+      quotaIdentityId: bundle.quotaIdentityId ?? null,
+      maxLastRefreshMs: bundle.lastRefreshMs,
+    });
+    if (stateRestored && this.clearCandidateFailure(bundle.candidateName)) {
+      await this.writeState();
+    }
+  }
+
+  private async applyAuditState(message: Extract<AuthSyncPlainMessage, { kind: 'audit.state' }>): Promise<void> {
+    const applied = await this.callbacks.markCandidateState?.(message.candidateName, message.state, {
+      accountId: message.accountId,
+      quotaIdentityId: message.quotaIdentityId,
+      maxLastRefreshMs: message.maxLastRefreshMs,
+    });
+    if (applied && message.state === 'active' && this.clearCandidateFailure(message.candidateName)) {
+      await this.writeState();
+    }
+    this.recordEvent({
+      direction: 'local',
+      kind: 'audit.state',
+      stage: message.state,
+      peer: null,
+      requestId: message.requestId,
+      candidateName: message.candidateName,
+      detail: null,
+    });
+  }
+
+  private async buildAuditReport(): Promise<AuthSyncAuditNodeReport> {
+    if (!this.callbacks.isIdle()) {
+      return {
+        nodeId: this.nodeId ?? 'local',
+        status: 'busy',
+        records: [],
+        reason: 'runtime is not idle',
+      };
+    }
+    const records: AuthSyncAuditRecord[] = [];
+    const candidates = await (this.callbacks.listLocalCandidateCopies?.() ?? this.callbacks.listLocalCandidates());
+    for (const candidate of candidates) {
+      const bundle = bundleFromRecord(candidate);
+      const expiresAt = readAccessTokenExpiresAtMs(candidate.raw);
+      let validation: AuthSyncValidationResult;
+      if (expiresAt === null || expiresAt <= Date.now() + REMOTE_ACCESS_TOKEN_MIN_TTL_MS) {
+        validation = { ok: false, reason: 'access token is expired or missing exp' };
+      } else {
+        validation = await this.callbacks.validateCandidate(candidate.candidateName, candidate.raw, candidate.accountId);
+      }
+      records.push({
+        candidateName: candidate.candidateName,
+        accountId: candidate.accountId,
+        quotaIdentityId: candidate.quotaIdentityId ?? null,
+        lastRefreshMs: candidate.lastRefreshMs,
+        status: validation.ok ? 'valid' : 'invalid',
+        reason: validation.ok ? null : validation.reason ?? 'usage validation failed',
+        bundle,
+      });
+    }
+    return {
+      nodeId: this.nodeId ?? 'local',
+      status: 'completed',
+      records,
+      reason: null,
+    };
+  }
+
+  private async verifySingleNodeInvalidCandidates(
+    requestId: string,
+    reports: AuthSyncAuditNodeReport[],
+  ): Promise<void> {
+    const completedReports = reports.filter(report => report.status === 'completed');
+    const entries = new Map<string, Array<{ report: AuthSyncAuditNodeReport; record: AuthSyncAuditRecord }>>();
+    for (const report of completedReports) {
+      for (const record of report.records) {
+        const candidateEntries = entries.get(record.candidateName) ?? [];
+        candidateEntries.push({ report, record });
+        entries.set(record.candidateName, candidateEntries);
+      }
+    }
+    const bundles: AuthSyncBundlePayload[] = [];
+    for (const candidateEntries of entries.values()) {
+      if (candidateEntries.some(entry => entry.record.status === 'valid')) continue;
+      const invalidNodes = new Set(candidateEntries.map(entry => entry.report.nodeId));
+      if (invalidNodes.size >= 2) continue;
+      const latest = candidateEntries
+        .filter(entry => entry.record.bundle !== null)
+        .sort((left, right) => right.record.lastRefreshMs - left.record.lastRefreshMs)[0];
+      if (latest?.record.bundle) bundles.push(latest.record.bundle);
+    }
+    if (bundles.length === 0) return;
+
+    const localReport = completedReports.find(report => report.nodeId === this.nodeId);
+    if (localReport) {
+      await this.verifyBundlesIntoAuditReport(localReport, bundles);
+    }
+    if (!this.isReady()) return;
+
+    const verificationId = crypto.randomUUID();
+    const remoteReports = await new Promise<Map<string, AuthSyncAuditVerificationReport>>((resolve) => {
+      const timer = setTimeout(() => this.finishPendingAuditVerification(verificationId), AUDIT_TIMEOUT_MS);
+      timer.unref();
+      this.pendingAuditVerifications.set(verificationId, {
+        peers: [...this.peers],
+        reports: new Map(),
+        resolve,
+        timer,
+        finished: false,
+      });
+      void this.sendToAll({ kind: 'audit.verify.request', requestId, verificationId, bundles }).catch(() => {
+        this.finishPendingAuditVerification(verificationId);
+      });
+    });
+    const bundlesByHash = new Map(bundles.map(bundle => [bundle.authSha256, bundle]));
+    for (const verification of remoteReports.values()) {
+      if (verification.status !== 'completed') continue;
+      let target = completedReports.find(report => report.nodeId === verification.nodeId);
+      if (!target) {
+        target = { nodeId: verification.nodeId, status: 'completed', records: [], reason: null };
+        reports.push(target);
+        completedReports.push(target);
+      }
+      for (const record of verification.records) {
+        const bundle = bundlesByHash.get(record.authSha256);
+        if (!bundle || bundle.candidateName !== record.candidateName) continue;
+        if (record.status === 'valid') {
+          target.records = target.records.filter(existing => existing.candidateName !== record.candidateName);
+        } else if (target.records.some(existing => existing.candidateName === record.candidateName)) {
+          continue;
+        }
+        target.records.push({
+          candidateName: bundle.candidateName,
+          accountId: bundle.accountId,
+          quotaIdentityId: bundle.quotaIdentityId ?? null,
+          lastRefreshMs: bundle.lastRefreshMs,
+          status: record.status,
+          reason: record.reason,
+          bundle,
+        });
+      }
+    }
+  }
+
+  private async verifyBundlesIntoAuditReport(
+    report: AuthSyncAuditNodeReport,
+    bundles: AuthSyncBundlePayload[],
+  ): Promise<void> {
+    for (const bundle of bundles) {
+      if (report.records.some(record => record.candidateName === bundle.candidateName)) continue;
+      const validation = await this.validateAuditBundle(bundle);
+      report.records.push({
+        candidateName: bundle.candidateName,
+        accountId: bundle.accountId,
+        quotaIdentityId: bundle.quotaIdentityId ?? null,
+        lastRefreshMs: bundle.lastRefreshMs,
+        status: validation.ok ? 'valid' : 'invalid',
+        reason: validation.ok ? null : validation.reason ?? 'usage validation failed',
+        bundle,
+      });
+    }
+  }
+
+  private async validateAuditBundle(bundle: AuthSyncBundlePayload): Promise<AuthSyncValidationResult> {
+    const expiresAt = readAccessTokenExpiresAtMs(bundle.rawAuth);
+    if (expiresAt === null || expiresAt <= Date.now() + REMOTE_ACCESS_TOKEN_MIN_TTL_MS) {
+      return { ok: false, reason: 'access token is expired or missing exp' };
+    }
+    return this.callbacks.validateCandidate(bundle.candidateName, bundle.rawAuth, bundle.accountId);
+  }
+
+  private async reconcileAuditReports(
+    requestId: string,
+    reports: AuthSyncAuditNodeReport[],
+    missingPeers: string[],
+  ): Promise<AuthSyncClusterAuditResult> {
+    const completedReports = reports.filter(report => report.status === 'completed');
+    const busyNodes = reports.filter(report => report.status === 'busy').map(report => report.nodeId);
+    const byCandidate = new Map<string, Array<{ report: AuthSyncAuditNodeReport; record: AuthSyncAuditRecord }>>();
+    for (const report of completedReports) {
+      for (const record of report.records) {
+        const entries = byCandidate.get(record.candidateName) ?? [];
+        entries.push({ report, record });
+        byCandidate.set(record.candidateName, entries);
+      }
+    }
+
+    const synchronizedCandidates: string[] = [];
+    const consensusInvalidCandidates: string[] = [];
+    const identityConflicts: string[] = [];
+    const completeAudit = missingPeers.length === 0 && busyNodes.length === 0;
+    let validCandidates = 0;
+    let invalidCandidates = 0;
+    for (const [candidateName, entries] of byCandidate) {
+      const identities = new Set(entries.map(({ record }) => auditIdentityKey(record.accountId, record.quotaIdentityId)));
+      if (identities.size !== 1) {
+        identityConflicts.push(candidateName);
+        continue;
+      }
+      const valid = entries
+        .filter(({ record }) => record.status === 'valid' && record.bundle !== null)
+        .sort((left, right) => right.record.lastRefreshMs - left.record.lastRefreshMs);
+      if (valid.length > 0) {
+        validCandidates += 1;
+        const selected = valid[0]!;
+        const bundle = selected.record.bundle!;
+        const currentLocal = await this.callbacks.readLocalCandidate(candidateName);
+        let locallyValidated = selected.report.nodeId === this.nodeId
+          && currentLocal?.lastRefreshMs === bundle.lastRefreshMs
+          && sha256(currentLocal.raw) === bundle.authSha256;
+        if (!locallyValidated) {
+          const outcome = await this.validateAndImport(
+            { ...bundle, requestId },
+            selected.report.nodeId,
+            selected.report.nodeId,
+            selected.report.nodeId,
+            'push',
+            completeAudit,
+          );
+          locallyValidated = outcome.ok;
+        }
+        if (!locallyValidated) continue;
+        const stateRestored = await this.callbacks.markCandidateState?.(candidateName, 'active', {
+          accountId: bundle.accountId,
+          quotaIdentityId: bundle.quotaIdentityId ?? null,
+          maxLastRefreshMs: bundle.lastRefreshMs,
+        });
+        if (stateRestored && this.clearCandidateFailure(candidateName)) {
+          await this.writeState();
+        }
+        if (this.isReady()) {
+          await this.sendToAll({ kind: 'audit.apply', requestId, bundle, replaceExisting: completeAudit });
+          await this.sendToAll({
+            kind: 'audit.state',
+            requestId,
+            candidateName,
+            state: 'active',
+            accountId: bundle.accountId,
+            quotaIdentityId: bundle.quotaIdentityId ?? null,
+            maxLastRefreshMs: bundle.lastRefreshMs,
+          });
+        }
+        synchronizedCandidates.push(candidateName);
+        continue;
+      }
+
+      invalidCandidates += 1;
+      const invalidEntries = entries.filter(({ record }) => record.status === 'invalid');
+      const invalidNodes = new Set(invalidEntries.map(({ report }) => report.nodeId));
+      const consensusReached = completeAudit
+        && invalidNodes.size >= 2
+        && invalidEntries.length === entries.length;
+      if (!consensusReached) continue;
+      const latest = invalidEntries.reduce((current, entry) => (
+        !current || entry.record.lastRefreshMs > current.record.lastRefreshMs ? entry : current
+      ), null as (typeof invalidEntries)[number] | null);
+      if (!latest) continue;
+      const expected = {
+        accountId: latest.record.accountId,
+        quotaIdentityId: latest.record.quotaIdentityId,
+        maxLastRefreshMs: latest.record.lastRefreshMs,
+      };
+      await this.callbacks.markCandidateState?.(candidateName, 'needs_repair', expected);
+      if (this.isReady()) {
+        await this.sendToAll({
+          kind: 'audit.state',
+          requestId,
+          candidateName,
+          state: 'needs_repair',
+          ...expected,
+        });
+      }
+      consensusInvalidCandidates.push(candidateName);
+    }
+
+    return {
+      requestId,
+      nodesExpected: this.peers.length + 1,
+      nodesResponded: reports.length,
+      missingPeers,
+      busyNodes,
+      checkedCandidates: byCandidate.size,
+      validCandidates,
+      invalidCandidates,
+      synchronizedCandidates,
+      consensusInvalidCandidates,
+      identityConflicts,
+    };
+  }
+
+  private finishPendingAudit(requestId: string): void {
+    const pending = this.pendingAudits.get(requestId);
+    if (!pending || pending.finished) return;
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingAudits.delete(requestId);
+    const missing = pending.peers.filter(peer => !pending.reports.has(peer));
+    pending.resolve({ reports: pending.reports, missing });
+  }
+
+  private finishPendingAuditVerification(verificationId: string): void {
+    const pending = this.pendingAuditVerifications.get(verificationId);
+    if (!pending || pending.finished) return;
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingAuditVerifications.delete(verificationId);
+    pending.resolve(pending.reports);
+  }
+
+  private async handleServiceUpdateRequest(
+    message: Extract<AuthSyncPlainMessage, { kind: 'service.update.request' }>,
+    senderNodeId: string,
+    sourceLabel: string,
+    peer: string,
+  ): Promise<void> {
+    let result: { accepted: boolean; reason?: string | null } = {
+      accepted: false,
+      reason: 'service update scheduling is not configured',
+    };
+    if (this.callbacks.scheduleServiceUpdate) {
+      result = await this.callbacks.scheduleServiceUpdate({
+        requestId: message.requestId,
+        nodeId: senderNodeId,
+        label: sourceLabel,
+        targetVersion: message.targetVersion,
+        requestedAt: message.requestedAt,
+      });
+    }
+    this.recordEvent({
+      direction: 'local',
+      kind: 'service.update.request',
+      stage: result.accepted ? 'accepted' : 'skipped',
+      peer,
+      requestId: message.requestId,
+      candidateName: null,
+      detail: result.reason ?? (message.targetVersion ? `target=${message.targetVersion}` : null),
+    });
+    this.notify({
+      kind: 'service_update_received',
+      requestId: message.requestId,
+      targetVersion: message.targetVersion,
+      sourceNodeId: senderNodeId,
+      sourceLabel,
+      peer,
+      accepted: result.accepted,
+      reason: result.reason ?? null,
+    });
   }
 
   private async handlePullRequest(message: Extract<AuthSyncPlainMessage, { kind: 'pull.request' }>, requesterNodeId: string, peer: string): Promise<void> {
@@ -733,6 +1483,18 @@ export class CrossNodeAuthSync {
         peer,
         result: 'account_mismatch',
         reason: 'account mismatch',
+      });
+      return;
+    }
+    if (!quotaIdentitiesCompatible(record.accountId, record.quotaIdentityId, message.quotaIdentityId ?? null)) {
+      await this.sendToPeer(peer, { kind: 'pull.response', requestId: message.requestId, bundle: null, reason: 'quota identity mismatch' });
+      this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'account_mismatch', peer, requestId: message.requestId, candidateName: message.candidateName, detail: 'quota identity mismatch' });
+      this.notify({
+        kind: 'pull_response_sent',
+        candidateName: message.candidateName,
+        peer,
+        result: 'account_mismatch',
+        reason: 'quota identity mismatch',
       });
       return;
     }
@@ -790,6 +1552,11 @@ export class CrossNodeAuthSync {
       peer,
       sourceNodeId: senderNodeId,
     });
+    if (this.shouldQueueRemoteImport()) {
+      this.finishPendingPullAsAccepted(pending, peer, 'queued until local runtime is idle');
+      this.enqueueImport(message.bundle, senderNodeId, sourceLabel, peer, 'pull');
+      return;
+    }
     const outcome = await this.validateAndImport(message.bundle, senderNodeId, sourceLabel, peer, 'pull');
     if (!outcome.imported) {
       this.markPullPeerUnavailable(message.requestId, matchedPeer, outcome.reason ?? 'peer candidate was not imported');
@@ -801,6 +1568,22 @@ export class CrossNodeAuthSync {
     this.pendingPulls.delete(message.requestId);
     pending.resolve(true);
     this.recordEvent({ direction: 'local', kind: 'pull.response', stage: 'imported', peer, requestId: message.requestId, candidateName: pending.candidateName, detail: null });
+  }
+
+  private finishPendingPullAsAccepted(pending: PendingPull, peer: string, detail: string): void {
+    pending.finished = true;
+    clearTimeout(pending.timer);
+    this.pendingPulls.delete(pending.requestId);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'pull.response',
+      stage: 'queued',
+      peer,
+      requestId: pending.requestId,
+      candidateName: pending.candidateName,
+      detail,
+    });
+    pending.resolve(true);
   }
 
   private markPullPeerUnavailable(requestId: string, peer: string, reason: string): void {
@@ -896,18 +1679,33 @@ export class CrossNodeAuthSync {
     }
   }
 
-  private enqueueImport(bundle: AuthSyncBundlePayload, sourceNodeId: string, sourceLabel: string | null, fromPeer: string): void {
-    const queued = this.importProcessorActive || !this.callbacks.isIdle() || this.pendingImports.length > 0;
+  private shouldQueueRemoteImport(): boolean {
+    return this.importProcessorActive
+      || this.deleteProcessorActive
+      || !this.callbacks.isIdle()
+      || this.pendingImports.length > 0
+      || this.pendingDeletes.length > 0;
+  }
+
+  private enqueueImport(
+    bundle: AuthSyncBundlePayload,
+    sourceNodeId: string,
+    sourceLabel: string | null,
+    fromPeer: string,
+    mode: AuthSyncRemoteImportMode = 'push',
+  ): void {
+    const queued = this.shouldQueueRemoteImport();
     this.pendingImports.push({
       bundle,
       sourceNodeId,
       sourceLabel,
       receivedAt: Date.now(),
       fromPeer,
+      mode,
     });
     this.recordEvent({
       direction: 'local',
-      kind: 'push.bundle',
+      kind: mode === 'pull' ? 'pull.response' : 'push.bundle',
       stage: queued ? 'queued' : 'processing',
       peer: fromPeer,
       requestId: bundle.requestId ?? null,
@@ -930,17 +1728,165 @@ export class CrossNodeAuthSync {
 
   private async processPendingImports(): Promise<void> {
     if (this.importProcessorActive) return;
+    if (this.pendingDeletes.length > 0 || this.deleteProcessorActive) return;
     if (!this.callbacks.isIdle()) return;
     this.importProcessorActive = true;
     try {
       while (this.pendingImports.length > 0) {
         if (!this.callbacks.isIdle()) return;
         const pending = this.pendingImports.shift()!;
-        await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, 'push');
+        await this.validateAndImport(pending.bundle, pending.sourceNodeId, pending.sourceLabel, pending.fromPeer, pending.mode);
       }
     } finally {
       this.importProcessorActive = false;
     }
+  }
+
+  private enqueueDelete(
+    message: Extract<AuthSyncPlainMessage, { kind: 'delete.candidate' }>,
+    sourceNodeId: string,
+    sourceLabel: string | null,
+    fromPeer: string,
+  ): void {
+    if (!isAuthCandidateName(message.candidateName)) return;
+    const queued = this.deleteProcessorActive
+      || this.importProcessorActive
+      || !this.callbacks.isIdle()
+      || this.pendingImports.length > 0
+      || this.pendingDeletes.length > 0;
+    for (let index = this.pendingImports.length - 1; index >= 0; index -= 1) {
+      if (this.pendingImports[index]?.bundle.candidateName === message.candidateName) {
+        this.pendingImports.splice(index, 1);
+      }
+    }
+    this.pendingDeletes.push({
+      candidateName: message.candidateName,
+      requestId: message.requestId,
+      sourceNodeId,
+      sourceLabel,
+      receivedAt: Date.now(),
+      fromPeer,
+      reason: message.reason ?? null,
+    });
+    this.recordEvent({
+      direction: 'local',
+      kind: 'delete.candidate',
+      stage: queued ? 'queued' : 'processing',
+      peer: fromPeer,
+      requestId: message.requestId,
+      candidateName: message.candidateName,
+      detail: message.reason ?? null,
+    });
+    this.notify({
+      kind: 'remote_delete_received',
+      candidateName: message.candidateName,
+      sourceNodeId,
+      sourceLabel: sourceLabel ?? fromPeer,
+      peer: fromPeer,
+      queued,
+      queueLength: this.pendingDeletes.length,
+      reason: message.reason ?? null,
+    });
+    void this.processPendingDeletes().then(() => this.processPendingImports()).catch((error) => {
+      this.recordError(`remote delete failed: ${formatError(error)}`);
+    });
+  }
+
+  private async processPendingDeletes(): Promise<void> {
+    if (this.deleteProcessorActive) return;
+    if (!this.callbacks.isIdle()) return;
+    this.deleteProcessorActive = true;
+    try {
+      while (this.pendingDeletes.length > 0) {
+        if (!this.callbacks.isIdle()) return;
+        const pending = this.pendingDeletes.shift()!;
+        await this.deleteRemoteCandidate(pending);
+      }
+    } finally {
+      this.deleteProcessorActive = false;
+    }
+  }
+
+  private async deleteRemoteCandidate(pending: PendingRemoteDelete): Promise<void> {
+    const source = pending.sourceLabel ?? pending.fromPeer;
+    if (!this.callbacks.deleteLocalCandidate) {
+      this.recordEvent({
+        direction: 'local',
+        kind: 'delete.candidate',
+        stage: 'skipped',
+        peer: pending.fromPeer,
+        requestId: pending.requestId,
+        candidateName: pending.candidateName,
+        detail: 'delete callback is not configured',
+      });
+      this.notify({
+        kind: 'remote_delete_skipped',
+        candidateName: pending.candidateName,
+        sourceNodeId: pending.sourceNodeId,
+        sourceLabel: source,
+        peer: pending.fromPeer,
+        reason: 'delete callback is not configured',
+      });
+      return;
+    }
+    const result = await this.callbacks.deleteLocalCandidate(pending.candidateName, {
+      nodeId: pending.sourceNodeId,
+      label: source,
+      reason: pending.reason,
+    });
+    if (!result.ok) {
+      const reason = result.reason ?? 'remote delete failed';
+      this.recordEvent({
+        direction: 'local',
+        kind: 'delete.candidate',
+        stage: 'failed',
+        peer: pending.fromPeer,
+        requestId: pending.requestId,
+        candidateName: pending.candidateName,
+        detail: reason,
+      });
+      this.notify({
+        kind: 'remote_delete_failed',
+        candidateName: pending.candidateName,
+        sourceNodeId: pending.sourceNodeId,
+        sourceLabel: source,
+        peer: pending.fromPeer,
+        reason,
+      });
+      return;
+    }
+    const clearedFailure = this.clearCandidateFailure(pending.candidateName);
+    this.recordEvent({
+      direction: 'local',
+      kind: 'delete.candidate',
+      stage: result.deleted ? 'deleted' : 'skipped',
+      peer: pending.fromPeer,
+      requestId: pending.requestId,
+      candidateName: pending.candidateName,
+      detail: result.reason ?? pending.reason,
+    });
+    if (clearedFailure) {
+      await this.writeState();
+    }
+    if (result.deleted) {
+      this.notify({
+        kind: 'remote_delete_deleted',
+        candidateName: pending.candidateName,
+        sourceNodeId: pending.sourceNodeId,
+        sourceLabel: source,
+        peer: pending.fromPeer,
+        reason: pending.reason,
+      });
+      return;
+    }
+    this.notify({
+      kind: 'remote_delete_skipped',
+      candidateName: pending.candidateName,
+      sourceNodeId: pending.sourceNodeId,
+      sourceLabel: source,
+      peer: pending.fromPeer,
+      reason: result.reason ?? 'candidate was already absent',
+    });
   }
 
   private async validateAndImport(
@@ -949,6 +1895,7 @@ export class CrossNodeAuthSync {
     sourceLabel: string | null,
     fromPeer: string,
     mode: AuthSyncRemoteImportMode,
+    replaceExisting = false,
   ): Promise<AuthSyncImportOutcome> {
     const source = sourceLabel ?? fromPeer;
     if (!isValidBundle(bundle)) {
@@ -957,6 +1904,9 @@ export class CrossNodeAuthSync {
     const metadata = parseChatGptAuthMetadata(bundle.rawAuth);
     if (!metadata || metadata.accountId !== bundle.accountId || metadata.lastRefreshMs !== bundle.lastRefreshMs) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle metadata mismatch for ${bundle.candidateName}`);
+    }
+    if (bundle.quotaIdentityId && metadata.quotaIdentityId !== bundle.quotaIdentityId) {
+      return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle quota identity mismatch for ${bundle.candidateName}`);
     }
     if (sha256(bundle.rawAuth) !== bundle.authSha256) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote bundle hash mismatch for ${bundle.candidateName}`);
@@ -972,6 +1922,7 @@ export class CrossNodeAuthSync {
     const result = await this.callbacks.importCandidate(bundle.candidateName, bundle.rawAuth, {
       nodeId: sourceNodeId,
       label: source,
+      replaceExisting,
     });
     if (!result.ok) {
       return this.rejectImport(bundle, sourceNodeId, source, fromPeer, mode, `remote candidate import failed for ${bundle.candidateName}: ${result.reason ?? 'unknown'}`);
@@ -1340,6 +2291,7 @@ function bundleFromRecord(record: AuthMirrorCandidateRecord): AuthSyncBundlePayl
   return {
     candidateName: record.candidateName,
     accountId: record.accountId,
+    quotaIdentityId: record.quotaIdentityId,
     lastRefreshMs: record.lastRefreshMs,
     rawAuth: record.raw,
     authSha256: sha256(record.raw),
@@ -1350,10 +2302,57 @@ function isValidBundle(value: AuthSyncBundlePayload): boolean {
   return typeof value.candidateName === 'string'
     && isAuthCandidateName(value.candidateName)
     && typeof value.accountId === 'string'
+    && (value.quotaIdentityId === undefined || value.quotaIdentityId === null || typeof value.quotaIdentityId === 'string')
     && typeof value.lastRefreshMs === 'number'
     && Number.isFinite(value.lastRefreshMs)
     && typeof value.rawAuth === 'string'
     && typeof value.authSha256 === 'string';
+}
+
+function isValidAuditReport(value: AuthSyncAuditNodeReport): boolean {
+  return Boolean(value)
+    && typeof value.nodeId === 'string'
+    && (value.status === 'completed' || value.status === 'busy')
+    && Array.isArray(value.records)
+    && (typeof value.reason === 'string' || value.reason === null)
+    && value.records.every(record => (
+      typeof record.candidateName === 'string'
+      && isAuthCandidateName(record.candidateName)
+      && typeof record.accountId === 'string'
+      && (typeof record.quotaIdentityId === 'string' || record.quotaIdentityId === null)
+      && typeof record.lastRefreshMs === 'number'
+      && Number.isFinite(record.lastRefreshMs)
+      && (record.status === 'valid' || record.status === 'invalid')
+      && (typeof record.reason === 'string' || record.reason === null)
+      && (record.bundle === null || isValidBundle(record.bundle))
+      && (record.status !== 'valid' || record.bundle !== null)
+    ));
+}
+
+function isValidAuditVerificationReport(value: AuthSyncAuditVerificationReport): boolean {
+  return Boolean(value)
+    && typeof value.nodeId === 'string'
+    && (value.status === 'completed' || value.status === 'busy')
+    && Array.isArray(value.records)
+    && (typeof value.reason === 'string' || value.reason === null)
+    && value.records.every(record => (
+      typeof record.candidateName === 'string'
+      && isAuthCandidateName(record.candidateName)
+      && typeof record.authSha256 === 'string'
+      && (record.status === 'valid' || record.status === 'invalid')
+      && (typeof record.reason === 'string' || record.reason === null)
+    ));
+}
+
+function auditIdentityKey(accountId: string, quotaIdentityId: string | null): string {
+  return `${accountId}\u0000${quotaIdentityId || accountId}`;
+}
+
+function quotaIdentitiesCompatible(accountId: string, left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right || left === accountId || right === accountId) {
+    return true;
+  }
+  return left === right;
 }
 
 function decodeSharedKey(raw: string): Buffer {
@@ -1464,8 +2463,16 @@ function requestIdFromMessage(message: AuthSyncPlainMessage): string | null {
       return message.requestId ?? null;
     case 'pull.request':
     case 'pull.response':
+    case 'delete.candidate':
     case 'test.ping':
     case 'test.pong':
+    case 'audit.request':
+    case 'audit.response':
+    case 'audit.verify.request':
+    case 'audit.verify.response':
+    case 'audit.apply':
+    case 'audit.state':
+    case 'service.update.request':
       return message.requestId;
     case 'lease.request':
       return message.leaseId;
@@ -1482,9 +2489,16 @@ function candidateNameFromMessage(message: AuthSyncPlainMessage): string | null 
   switch (message.kind) {
     case 'push.bundle':
     case 'pull.request':
+    case 'delete.candidate':
       return message.candidateName;
     case 'pull.response':
       return message.bundle?.candidateName ?? null;
+    case 'audit.apply':
+      return message.bundle.candidateName;
+    case 'audit.verify.request':
+      return message.bundles.length === 1 ? message.bundles[0]?.candidateName ?? null : null;
+    case 'audit.state':
+      return message.candidateName;
     default:
       return null;
   }

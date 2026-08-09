@@ -145,7 +145,14 @@ systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
 ```
 
-macOS 上 `foxclaw start` 会管理 launchd。前台排障时，先停后台服务，再运行：
+macOS 上 `foxclaw start` 会管理 launchd。查看 launchd 状态和启动日志：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
+
+前台排障时，先停后台服务，再运行：
 
 ```bash
 foxclaw stop
@@ -243,6 +250,17 @@ TG_ALLOWED_TOPIC_ID=42
 
 这些命令适合排查“为什么手机上跑出来的权限、模型或 provider 和预期不同”。
 
+### 3.4 媒体投递 CLI
+
+Codex 可以把已经生成的文件直接送回当前 Telegram 私聊，不需要你手动输入 Telegram 命令：
+
+```bash
+foxclaw send-voice /absolute/path/audio.ogg "说明"
+foxclaw send-media /absolute/path/output.mp4 "说明"
+```
+
+`send-media` 会按文件扩展名自动选择 Telegram `sendPhoto`、`sendVideo`、`sendAnimation` 或 `sendDocument`。MP4 视频会带 `supports_streaming=true`，只要编码兼容，Telegram 客户端就可以内联播放。长视频建议使用 H.264/AAC MP4。公网 Bot API 上传大文件可能被拒绝；需要交付大视频时，建议配置 Local Bot API Server，并设置 `TELEGRAM_BOT_API_BASE_URL` 和更长的 `TELEGRAM_BOT_API_TIMEOUT_MS`。
+
 ## 4. `/setup` 会话设置面板
 
 `/setup` 是手机端最重要的面板之一。它按聊天范围保存设置，私聊、群组、topic 可以有不同设置。
@@ -250,13 +268,17 @@ TG_ALLOWED_TOPIC_ID=42
 它能配置：
 
 - 模型：使用服务端默认模型，或选择 app-server 返回的模型。
-- reasoning effort：例如 `low`、`medium`、`high`、`xhigh`，取决于模型支持情况。
+- reasoning effort：例如 `low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`，取决于模型支持情况。
 - Fast tier：模型支持时可开关 fast 服务档。
 - Access：`read-only`、`default`、`full-access`。
 - Mode：`Agent` 或 `Plan`。
 - Active turn：新消息是 steer 当前 turn，还是 queue 到下一轮。
 
 Telegram 会把 HTML 和按钮渲染出来。这里用等宽框模拟实际面板：
+
+Telegram Rich Message 能力的专项盘点和后续接入路线见 [Telegram Rich Message 适配专项检查](./telegram-rich-messages.md)。当前默认通道仍优先使用兼容性更稳的 Telegram HTML。
+
+可以发送 `/rich` 在当前 Telegram 客户端查看 RichMessage demo。`/diff` 也会优先用 RichMessage 展示 details 和 diff code block，失败时自动回退到 Telegram HTML。
 
 ```text
 会话偏好
@@ -359,7 +381,7 @@ FoxClaw 识别这些候选文件名：
 - `auth.json.<name>`
 - `auth.json-<name>`
 
-`auth.json` 是 Codex 当前使用的文件。切换账号时，FoxClaw 会把 `auth.json` 指向某个候选文件。候选文件内容是 Codex CLI 生成的 JSON，不建议手写这些字段。多 bot 镜像只在账号标识一致、刷新时间更新，并且由当前 app-server 通过 ChatGPT 用量接口在线验证时复制候选，避免同名候选意外覆盖成另一个账号。切换或重载 auth 之前，FoxClaw 还会在其他 Codex home 中查找同账号 ID 的较新凭据，先恢复到发起操作的 runtime，再在重启后验证并镜像。
+`auth.json` 是 Codex 当前使用的文件。切换账号时，FoxClaw 会把 `auth.json` 指向某个候选文件。候选文件内容是 Codex CLI 生成的 JSON，不建议手写这些字段。多 bot 镜像只在账号标识和可识别的 ChatGPT 用户/邮箱身份兼容、刷新时间更新，并且由当前 app-server 通过 ChatGPT 用量接口在线验证时复制候选，避免同名候选意外覆盖成另一个账号或同一 Team 下的另一个 seat。切换或重载 auth 之前，FoxClaw 还会在其他 Codex home 中查找兼容的较新凭据，先恢复到发起操作的 runtime，再在重启后验证并镜像。
 
 如果你已经有一个可用的 `auth.json`，可以先备份成候选：
 
@@ -395,7 +417,7 @@ cp -L ~/.codex/auth.json ~/.codex/auth.json_personal
 
 `/auth` 会列出候选账号、当前账号和 auth 目录，并提供按钮切换、禁用、登录和重载。多 bot 模式中，面板顶部还会显示当前正在管理的 `@botname`，因为该 bot 内的私聊、群聊和话题共享同一个当前 auth。面板每页显示 8 个候选，支持翻页、`全部 / 已启用 / 需关注` 筛选和 `/auth list <关键词>` 文件名搜索，适合管理较大的本地候选清单。面板文本和按钮会省略标准候选文件名中重复的 `auth.json_` 前缀，例如磁盘上的 `auth.json_personal` 显示为 `personal`；文件本身不会重命名，搜索和命令仍按原候选工作。命令 `/auth use <n>` 的编号始终对应完整候选列表，不会因为分页变化。
 
-文本列表中每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。按钮为了适配窄屏，只显示两个剩余百分比数字，例如 `20|25`；未知值显示为 `—`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 账号，FoxClaw 会按已验证的账号 ID 合并它们缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把不同账号混在一起。
+文本列表中每个候选名前的 `窗口:剩余百分比` 来自最近一次观察到的真实额度窗口，例如 Plus 账号可能显示 `5h:20|7d:25`，只有一个月度窗口的账号可能显示 `30d:97`。按钮为了适配窄屏，只显示两个剩余百分比数字，例如 `20|25`；未知值显示为 `—`。当前 auth 会在打开面板时刷新额度；其他候选不会为了查询额度被自动切换。如果多个 bot runtime 最近使用过同一个 ChatGPT 额度身份，FoxClaw 会按账号下已验证的用户/邮箱身份合并缓存到的额度快照，因此一个 bot 的 `/auth` 面板可以显示另一个 bot 掌握到的额度信息，同时不会把同一个 Team account 里的不同 seat 混在一起。
 
 示意：
 
@@ -411,19 +433,23 @@ Candidates: 2
 [✅ 20|25|personal] [✅]
 [🔐 —|—|team]       [✅]
 [☑️ 全部] [已启用] [需关注]
-[🛡️ Access]             [🔑 设备登录]
-[🔄 Reload auth]
+[🔑 设备登录]
+[🩺 安全同步]
 ```
 
-右侧 `✅` / `⏸️` 表示当前是否参与自动轮转。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--` 表示该候选还没有额度历史快照。健康摘要会区分正常、额度偏低、额度耗尽、额度未知、长期未刷新、API key 和无效 auth 文件。
+右侧 `✅` / `⏸️` 表示当前是否参与自动轮转。点一下会切换启用/禁用，列表刷新后图标会随状态变化。点击候选会切换 auth、重启对应 runtime，并在原消息上刷新面板且保留按钮，因此可以立即连续切换。`--` 表示该候选还没有额度历史快照。健康摘要会区分正常、额度偏低、额度耗尽、额度未知、长期未刷新、API key、无效 auth 文件和需要登录修复。
+
+**安全同步** 按钮会通知所有已配置 auth-sync peer 验证候选，采用并分发同账号最新有效副本。只存在于一台机器的无效候选也会交给其他节点做只验证、不导入的复核；没有任何节点验证有效且至少两个节点独立确认无效后才标记 `?`。`last_refresh` 已满 8 天的已启用 ChatGPT auth 由发起节点刷新后再分发。存在未回应、忙碌或身份冲突节点时，本轮不会做临期刷新。
+
+当某个候选在实际使用中已经失败，并且 FoxClaw 无法从本机 mirror 或跨节点同步恢复同账号较新凭据时，会标为“需要登录修复”。这类候选不会参与自动轮转和后台主动刷新，也不会出现在“已启用”筛选里。它的按钮会显示 `?`。点击后有两个选择：`登录修复` 会在选中该候选的状态下启动设备码登录；`删除` 会从 canonical 和所有本机 bot runtime 中删除这个候选，并清理它的额度缓存。
 
 `/auth refresh all` 是仅命令入口的维护操作，因为 ChatGPT refresh token 会被轮换。只有所有 Telegram runtime、微信 runtime、审批、待输入、登录流程和 auth 镜像写入都空闲时才允许执行。命令会先显示风险确认：如果 OpenAI/Codex 已经消费旧 refresh token，但因为网络、进程或磁盘故障导致新 token 没能成功保存，该候选可能需要重新设备登录，甚至重新手机号验证。确认后，它会逐个访问 ChatGPT 候选，让 Codex 通过 `account/read refreshToken=true` 强制刷新 token，再用 usage 接口验证，成功后镜像到其他 bot home，最后恢复原本的当前 auth 并显示摘要。
 
-OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 超过 9 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。主动刷新完成后会私聊通知，并把较新的候选继续镜像和跨节点同步。
+OpenAI 没有公开 ChatGPT refresh token 的固定有效期或旧 token 重放宽限期。Codex 会在 access token 临近到期时自动刷新；如果 access token 里无法解析 `exp`，Codex 当前使用 `last_refresh` 超过约 8 天作为兜底刷新条件。面板把超过 8 天没有刷新记录的候选标为“长期未刷新”。FoxClaw 还会在后台每小时检查一次：已启用的 ChatGPT 候选如果 `last_refresh` 已满 8 天，会在所有 runtime 空闲、没有审批/待输入/登录/auth 镜像写入，并且拿到跨节点刷新锁后，主动刷新这一批候选。私聊里会显示一条主动刷新状态消息，并在结束时编辑成最终结果；较新的候选会继续镜像和跨节点同步，成批出现的镜像/跨节点刷新通知会合并成简短汇总。
 
 ### 6.4 跨节点 auth 同步
 
-跨节点 auth 同步默认关闭。它适合你在多台自己控制的机器上使用同一组合法 ChatGPT 账号候选，并希望某台机器上 Codex 自动刷新出的新 token 能同步到其他机器。v1 使用 Telegram Bot-to-Bot 私聊传输加密文件，不需要公网 IP 或 FRP。推荐每台机器选择一个联系人 bot；同一节点内其他 bot 继续使用本机 auth 镜像。多 bot 模式下，默认联系人是 `TG_BOT_TOKENS` 的第一个 token。联系人 bot 的私聊会报告发送、接收、排队、导入、失败、恢复查询和人工介入提示；单个候选验证失败会作为“候选失败”显示，不会覆盖同步系统级最近错误。最近 bot-to-bot 通讯会保存在事件环里，可用 `/auth sync events [过滤]` 和 `/auth sync trace <requestId>` 追查某个候选、peer 或请求。
+跨节点 auth 同步默认关闭。它适合你在多台自己控制的机器上使用同一组合法 ChatGPT 账号候选，并希望某台机器上 Codex 自动刷新出的新 token 能同步到其他机器。v1 使用 Telegram Bot-to-Bot 私聊传输加密文件，不需要公网 IP 或 FRP。推荐每台机器选择一个联系人 bot；同一节点内其他 bot 继续使用本机 auth 镜像。多 bot 模式下，默认联系人是 `TG_BOT_TOKENS` 的第一个 token。联系人 bot 的私聊会报告发送、接收、排队、导入、失败、恢复查询和人工介入提示；刷新、发送、导入密集发生时会合并成汇总，恢复和人工介入提示仍会明确发出。远端导入验证会临时重启本机 Codex app-server；FoxClaw 会把这段窗口标记为非空闲，期间收到的普通消息会收到稍后重发提示，不再进入正在重启的 bridge。单个候选验证失败会作为“候选失败”显示，不会覆盖同步系统级最近错误。最近 bot-to-bot 通讯会保存在事件环里，可用 `/auth sync events [过滤]` 和 `/auth sync trace <requestId>` 追查某个候选、peer 或请求。
 
 完整设计、安全边界、`.env` 示例和排查步骤见 [跨节点 auth 同步配置指南](./cross-node-auth-sync.md)。
 
@@ -446,6 +472,8 @@ AUTH_SYNC_PEERS=@other_node_bot,@third_node_bot
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 # 可选；不填时 FoxClaw 会生成并持久化本机 node id
 AUTH_SYNC_NODE_ID=workstation-a
+# 可选；资源富裕模式下自动跨节点剔除无法恢复的候选
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 安全边界：
@@ -453,14 +481,15 @@ AUTH_SYNC_NODE_ID=workstation-a
 - Telegram 只承载密文；auth 文件内容、候选名、account id、`last_refresh` 都在 AES-256-GCM 加密 payload 内。
 - 只接收 `AUTH_SYNC_PEERS` 中 peer bot 发来的同步文件；密钥、cluster、nonce 或 payload 校验失败时不会写盘。
 - 远端导入必须等本机全局空闲，再临时切换到待验证 auth、重启 app-server、读取 usage 验证成功后才写入候选。
-- 同名候选如果已知属于不同 account id，永远拒绝覆盖。
-- 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 9 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
+- 同名候选如果已知属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱，永远拒绝覆盖。
+- 跨节点恢复只拉取 peer 已持有的有效副本，不会在恢复过程中直接轮换 refresh token；找不到有效副本时会停止，提示你人工维护授权。后台 8 天主动刷新会单独申请跨节点刷新锁，拿不到锁就跳过本轮。
+- 如果开启 `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 或在 `/config` 中打开自动剔除，无法恢复的候选会直接删除并向 peer 传播删除 tombstone；私聊通知会压缩为 auth 池摘要：历史总数、存活数、因失效剔除数。
 
 双主动流程：
 
 - push：本节点登录、Codex 自动刷新或 `/auth refresh all` 成功并通过本机镜像验证后，会主动把较新的候选加密推送给 peer。
 - pull：本节点切换或重载 auth 前如果发现本地候选不是最新，会先查本机其他 runtime；仍找不到时，再向 peer 拉取同名同账号的较新副本。
-- lease：执行会旋转 refresh token 的 `/auth refresh all confirm` 或后台 9 天主动刷新前，会向 peer 申请跨节点刷新锁。任一 peer 忙碌、拒绝或无响应都会阻止刷新。
+- lease：执行会旋转 refresh token 的 `/auth refresh all confirm`、后台 8 天主动刷新或集群自检前，会向 peer 申请跨节点刷新锁。任一 peer 忙碌、拒绝或无响应都会阻止刷新。
 
 命令：
 
@@ -468,6 +497,7 @@ AUTH_SYNC_NODE_ID=workstation-a
 - `/auth sync events [过滤]`：查看最近同步事件，可按候选名、peer、request id、事件类型、阶段或详情过滤。
 - `/auth sync trace <requestId>`：查看某个 request id 或事件 id 的最近流水。
 - `/auth sync test`：发送加密 ping 并等待 peer 返回 pong，确认 peer、共享密钥和 Bot-to-Bot 私聊可用。
+- `/auth sync safe`：执行与 `/auth` 面板“安全同步”按钮相同的全节点验证、协商、无效复核、临期刷新和分发流程。`/auth sync audit` 保留为兼容别名。
 - `/auth sync push all`：手动广播当前节点已验证的全部候选，不刷新 token；“已发送”不等于对端已经导入，需要在 peer 上看 `/auth sync status` 和 `/auth`。
 
 命令等价用法：

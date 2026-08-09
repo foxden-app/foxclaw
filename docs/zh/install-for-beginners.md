@@ -261,7 +261,12 @@ journalctl --user -u foxclaw.service -f
 sudo loginctl enable-linger "$USER"
 ```
 
-macOS 上 `foxclaw start` 管理 launchd，并在你登录后启动 FoxClaw。
+macOS 上 `foxclaw start` 管理 launchd，并在你登录后启动 FoxClaw。查看状态和启动日志：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
 
 前台调试时，先停后台服务，再运行 `foxclaw serve`。
 
@@ -289,6 +294,12 @@ foxclaw stop
 
 ```bash
 foxclaw uninstall-systemd
+```
+
+卸载 macOS launchd 服务：
+
+```bash
+foxclaw uninstall-launchd
 ```
 
 以后升级 FoxClaw：

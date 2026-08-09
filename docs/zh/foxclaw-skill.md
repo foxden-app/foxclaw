@@ -2,6 +2,8 @@
 
 仓库内置的 `skills/foxclaw` 是给 Codex 使用的安装技能。它的用途是让 Codex 在本机或远程 Mac 上自动完成 FoxClaw bootstrap，包括写 `.env`、安装依赖、构建、跑 `doctor`、安装 launchd 服务，并引导你完成第一次 Telegram 消息验证。
 
+仓库还内置 `skills/telegram-voice-delivery` 和 `skills/telegram-media-delivery`。FoxClaw 启动时会把它们自动同步到每个 Telegram runtime 的 `CODEX_HOME`。当 Codex 已经生成音频、图片、封面、截图或视频时，它会直接运行 `foxclaw send-voice <path> [caption]` 或 `foxclaw send-media <path> [caption]`，从当前 `CODEX_HOME` 识别 Telegram bot，并将文件投递到该 bot 最近记录的私聊，不需要用户再输入命令。
+
 ## 适合什么时候用
 
 - 你想让 Codex 通过 SSH 帮另一台 Mac 安装 FoxClaw。

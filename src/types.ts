@@ -12,7 +12,7 @@ export type SandboxModeValue = 'read-only' | 'workspace-write' | 'danger-full-ac
 export type AccessPresetValue = 'read-only' | 'default' | 'full-access';
 export type CollaborationModeValue = 'default' | 'plan';
 export type ActiveTurnMessageMode = 'steer' | 'queue';
-export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ReasoningEffortValue = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 export type ThreadStatusKind = 'active' | 'idle' | 'notLoaded' | 'systemError';
 
 export interface ChatSessionSettings {
@@ -26,6 +26,64 @@ export interface ChatSessionSettings {
   serviceTier: string | null;
   activeTurnMessageMode: ActiveTurnMessageMode | null;
   updatedAt: number;
+}
+
+export type QueuedTurnInputStatus = 'queued' | 'processing' | 'completed' | 'cancelled' | 'failed';
+
+export interface QueuedTurnInputRecord {
+  queueId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  inputJson: string;
+  sourceSummary: string;
+  messageId: number | null;
+  status: QueuedTurnInputStatus;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
+export type PendingAttachmentBatchStatus = 'pending' | 'consumed' | 'cleared';
+
+export interface PendingAttachmentBatchRecord {
+  batchId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  cwd: string | null;
+  mediaGroupId: string | null;
+  attachmentsJson: string;
+  caption: string;
+  messageId: number | null;
+  status: PendingAttachmentBatchStatus;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
+export type GuidedPlanSessionState = 'awaiting_confirmation' | 'executing' | 'cancelled' | 'completed';
+
+export interface GuidedPlanSessionRecord {
+  sessionId: string;
+  scopeId: string;
+  chatId: string;
+  chatType: string;
+  topicId: number | null;
+  threadId: string;
+  turnId: string;
+  cwd: string | null;
+  planMarkdown: string;
+  messageId: number | null;
+  state: GuidedPlanSessionState;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
 }
 
 export interface CachedThread {
@@ -343,6 +401,8 @@ export interface RuntimeStatus {
   running: boolean;
   connected: boolean;
   userAgent: string | null;
+  /** Effective Codex home used by this runtime, including the implicit ~/.codex default. */
+  codexHome?: string | null;
   codexAppServer?: {
     pid: number | null;
     port: number | null;
@@ -353,6 +413,7 @@ export interface RuntimeStatus {
   currentBindings: number;
   pendingApprovals: number;
   pendingUserInputs: number;
+  queuedTurns: number;
   activeTurns: number;
   lastError: string | null;
   updatedAt: string;
@@ -365,6 +426,7 @@ export interface RuntimeStatus {
     activeTurns: number;
     runtimeKind?: 'default' | 'isolated';
     currentAuth?: string | null;
+    codexHome?: string | null;
     codexAppServer?: RuntimeStatus['codexAppServer'];
   }>;
   weixinRuntime?: {
@@ -416,6 +478,17 @@ export interface RuntimeStatus {
       candidateName: string | null;
       detail: string | null;
     }>;
+  } | null;
+  authProactiveRefresh?: {
+    state: 'running' | 'completed' | 'lease_failed' | 'failed';
+    startedAt: string;
+    finishedAt: string | null;
+    candidates: string[];
+    refreshed: number;
+    skipped: number;
+    failed: number;
+    error: string | null;
+    details: string[];
   } | null;
   lastUpdate?: {
     state: string;

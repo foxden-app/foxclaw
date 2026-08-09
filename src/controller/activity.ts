@@ -131,6 +131,10 @@ function normalizeStartedEvent(params: any): TurnActivityEvent | null {
       state: 'thinking',
     };
   }
+  const toolEvent = normalizeThreadItemToolEvent(params, 'tool_started');
+  if (toolEvent) {
+    return toolEvent;
+  }
   if (!isRelayableTextItemType(itemType)) {
     return null;
   }
@@ -193,6 +197,10 @@ function normalizeCompletedEvent(params: any): TurnActivityEvent | null {
       state: 'thinking',
     };
   }
+  const toolEvent = normalizeThreadItemToolEvent(params, 'tool_completed');
+  if (toolEvent) {
+    return toolEvent;
+  }
   if (!isRelayableTextItemType(itemType)) {
     return null;
   }
@@ -246,12 +254,100 @@ function normalizeToolEvent(
   };
 }
 
+function normalizeThreadItemToolEvent(
+  params: any,
+  kind: 'tool_started' | 'tool_completed',
+): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  const item = params?.item;
+  const itemId = extractItemId(item);
+  const itemType = normalizeEventItemType(item);
+  if (!turnId || !itemId || !itemType) {
+    return null;
+  }
+
+  let command: string[] = [];
+  let cwd: string | null = null;
+  let parsedCmd: any[] = [];
+  switch (itemType) {
+    case 'commandexecution':
+      command = typeof item.command === 'string' ? [item.command] : [];
+      cwd = typeof item.cwd === 'string' ? item.cwd : null;
+      parsedCmd = normalizeCommandActions(item.commandActions);
+      break;
+    case 'filechange':
+      parsedCmd = normalizeFileChanges(item.changes);
+      break;
+    case 'websearch':
+      parsedCmd = [{
+        type: 'search',
+        query: typeof item.query === 'string' ? item.query : '',
+        path: null,
+      }];
+      break;
+    case 'imageview':
+      parsedCmd = [{ type: 'read', path: typeof item.path === 'string' ? item.path : null }];
+      break;
+    case 'mcptoolcall':
+      command = [`MCP ${String(item.server ?? 'server')}/${String(item.tool ?? 'tool')}`];
+      break;
+    case 'dynamictoolcall':
+      command = [`Tool ${item.namespace ? `${String(item.namespace)}/` : ''}${String(item.tool ?? 'tool')}`];
+      break;
+    case 'collabagenttoolcall':
+      command = [`Agent ${String(item.tool ?? 'operation')}`];
+      break;
+    case 'imagegeneration':
+      command = ['Image generation'];
+      break;
+    default:
+      return null;
+  }
+
+  const exec: RawExecCommandEvent = {
+    callId: itemId,
+    turnId,
+    command,
+    cwd,
+    parsedCmd,
+  };
+  return {
+    kind,
+    turnId,
+    exec,
+    state: inferToolActivityState(exec),
+  };
+}
+
+function normalizeCommandActions(value: unknown): any[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry: any) => {
+    const type = typeof entry?.type === 'string' ? entry.type : '';
+    if (type === 'listFiles') {
+      return { ...entry, type: 'list_files' };
+    }
+    return entry;
+  });
+}
+
+function normalizeFileChanges(value: unknown): any[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry: any) => ({
+    type: 'apply_patch',
+    path: typeof entry?.path === 'string' ? entry.path : null,
+  }));
+}
+
 export function classifyAgentOutput(phase: string | null, completed: boolean): TurnOutputKind {
   if (!phase) {
     return completed ? 'final_answer' : 'commentary';
   }
   const normalized = phase.replace(/[^a-z]/gi, '').toLowerCase();
-  if (normalized === 'final' || normalized === 'answer' || normalized === 'response') {
+  if (normalized === 'final' || normalized === 'finalanswer' || normalized === 'answer' || normalized === 'response') {
     return 'final_answer';
   }
   return 'commentary';

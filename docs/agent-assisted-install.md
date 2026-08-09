@@ -48,6 +48,7 @@ Tasks:
 8. Ask me to send /help, /status, and /auth privately to each configured Telegram bot; confirm /auth names that bot runtime.
 9. Verify the final state:
    - foxclaw.service is active/enabled on Linux
+   - the app.foxden.foxclaw launchd job is loaded on macOS, with no startup errors in ~/.foxclaw/logs/launchd.err.log
    - foxclaw status works
 10. Report the commands used, the final status, and the log command I should use if something stops working. Redact TG_BOT_TOKENS and never print the full token or full .env content.
 11. If multiple bots are enabled, confirm foxclaw status lists independent app-servers; group-chat tests must mention or reply to the intended bot.

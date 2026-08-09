@@ -3,10 +3,29 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { AppConfig } from '../config.js';
+import {
+  TELEGRAM_VOICE_MAX_BYTES,
+  TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
+  telegramVoiceContentType,
+} from '../voice/files.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
-import type { BridgeStore, CodexAuthQuotaSnapshotRecord, PendingUserInputStoredRecord } from '../store/database.js';
-import { parseChatGptAuthMetadata, readChatGptAuthMetadata } from '../auth/mirror.js';
+import type {
+  ActiveTurnPreviewRecord,
+  BridgeStore,
+  CodexAuthCandidateState,
+  CodexAuthPoolStats,
+  CodexAuthQuotaSnapshotRecord,
+  PendingUserInputStoredRecord,
+} from '../store/database.js';
+import {
+  chatGptAuthMetadataMatchesCandidateName,
+  parseChatGptAuthMetadata,
+  readChatGptAuthRecord,
+  readChatGptAuthMetadata,
+  type ChatGptAuthMetadata,
+} from '../auth/mirror.js';
+import { readAccessTokenExpiresAtMs, type AuthSyncClusterAuditResult } from '../auth/cross_node_sync.js';
 import type {
   AppLocale,
   ActiveTurnMessageMode,
@@ -31,9 +50,13 @@ import type {
   CodexSkillsListEntry,
   CodexThreadGoal,
   CollaborationModeValue,
+  GuidedPlanSessionRecord,
+  AppThreadSnapshot,
   AppTurnSnapshot,
   ModelInfo,
+  PendingAttachmentBatchRecord,
   PendingApprovalRecord,
+  QueuedTurnInputRecord,
   ReasoningEffortValue,
   ReviewTarget,
   RuntimeStatus,
@@ -42,6 +65,7 @@ import type {
   ThreadSessionState,
 } from '../types.js';
 import { parseCommand } from './commands.js';
+import { shouldShowRuntimeLastUpdate } from '../update_status.js';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
@@ -89,10 +113,21 @@ import {
   chunkTelegramStreamMessage,
   clipTelegramDraftMessage,
 } from '../telegram/text.js';
+import {
+  escapeTelegramHtml,
+  telegramBold,
+  telegramDetails,
+  telegramExpandableBlockquote,
+  telegramPre,
+  telegramPreCode,
+} from '../telegram/html.js';
+import { TELEGRAM_RICH_MESSAGE_TEXT_LIMIT } from '../telegram/rich.js';
+import { renderTelegramMarkdownRichHtml } from '../telegram/rich_markdown.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
+import { normalizeVoiceText, synthesizeTelegramVoice } from '../voice/tts.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
 import {
   readCodexLocalUsageSnapshot,
@@ -119,29 +154,45 @@ import { renderActiveTurnStatus } from './status.js';
 import { writeRuntimeStatus } from '../runtime.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
+const AUTH_DELETE_REASON_NEEDS_REPAIR = 'needs_repair';
+const RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS = [3000, 7000, 15_000, 30_000, 45_000, 60_000, 60_000, 60_000];
+const TOOL_ARCHIVE_MAX_LINES = 12;
+const TOOL_ARCHIVE_LINE_LIMIT = 240;
+
+type AuthProactiveRefreshStatus = NonNullable<RuntimeStatus['authProactiveRefresh']>;
+
 export interface CoreCoordinator {
   canSelfUpdate?: () => boolean;
   authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
+  authCandidateDeleted?: (runtimeId: string, candidateName: string, reason?: string | null) => Promise<void>;
   recoverAuthCandidate?: (runtimeId: string, candidateName: string, options?: { crossNode?: boolean }) => Promise<boolean>;
   acquireAuthRefreshLease?: (reason: string) => Promise<{ ok: boolean; leaseId: string | null; reason?: string | null }>;
   releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
   getAuthSyncStatus?: () => RuntimeStatus['authSync'];
+  authSyncSafeAll?: () => Promise<{ localSynced: number; localSkipped: number; sent: number; skipped: number }>;
   authSyncPushAll?: () => Promise<{ sent: number; skipped: number }>;
   authSyncTest?: () => Promise<{ sent: number; replied: number; missing: string[] }>;
+  authSyncAudit?: () => Promise<AuthSyncClusterAuditResult | null>;
   statusUpdated?: (status: RuntimeStatus) => void;
   getServiceStatus?: () => Promise<{
+    currentVersion?: string;
     bots: NonNullable<RuntimeStatus['bots']>;
     weixinRuntime?: RuntimeStatus['weixinRuntime'];
     authMirror?: RuntimeStatus['authMirror'];
     authSync?: RuntimeStatus['authSync'];
+    authProactiveRefresh?: AuthProactiveRefreshStatus | null;
     lastUpdate?: SelfUpdateStatus | null;
   }>;
   selfUpdateCompleted?: (status: SelfUpdateStatus) => void;
 }
 
+type ServiceRuntimeStatus = NonNullable<Awaited<ReturnType<NonNullable<CoreCoordinator['getServiceStatus']>>>>;
+
 interface RenderedTelegramMessage {
   messageId: number;
   text: string;
+  richHtml?: string | null;
+  richFailedForText?: string | null;
 }
 
 interface ActiveTurnSegment {
@@ -151,7 +202,10 @@ interface ActiveTurnSegment {
   isPlan: boolean;
   text: string;
   completed: boolean;
+  startedAtMs: number;
+  completedAtMs: number | null;
   messages: RenderedTelegramMessage[];
+  voiceSnippetId: string | null;
 }
 
 interface ToolBatchCounts {
@@ -174,6 +228,12 @@ interface ArchivedStatusContent {
   html: string | null;
 }
 
+interface SelfUpdateBroadcastSummary {
+  state: 'sent' | 'pending' | 'disabled';
+  sent: number;
+  peers: string[];
+}
+
 interface ToolDescriptor {
   kind: keyof ToolBatchCounts;
   key: string;
@@ -189,10 +249,12 @@ interface ActiveTurn {
   isObserved: boolean;
   threadId: string;
   turnId: string;
+  queuedInputId: string | null;
   previewMessageId: number;
   previewActive: boolean;
   draftId: number | null;
   draftText: string | null;
+  richDraftDisabled: boolean;
   buffer: string;
   finalText: string | null;
   interruptRequested: boolean;
@@ -232,11 +294,6 @@ interface ObservedThreadWatcher {
   sessionRemainder: string;
   sessionCursor: SessionLogCursor;
   stopped: boolean;
-}
-
-interface QueuedPromptRequest {
-  event: TelegramTextEvent;
-  text: string;
 }
 
 interface PendingUserInputOption {
@@ -306,20 +363,30 @@ interface CodexAuthCandidate {
   path: string;
   isCurrent: boolean;
   disabled: boolean;
+  state: CodexAuthCandidateState;
   mtimeMs: number;
   credentialKind: 'chatgpt' | 'api-key' | 'invalid';
   credentialLastRefreshMs: number | null;
+  credentialExpiresAtMs: number | null;
   quota: CodexAuthQuotaSnapshot | null;
 }
 
 interface CodexAuthQuotaSnapshot {
   capturedAtMs: number;
   accountId?: string | null;
+  quotaIdentityId?: string | null;
   planType: string | null;
   primaryWindowDurationMins: number | null;
   primaryRemainingPercent: number | null;
+  primaryResetsAt: number | null;
   secondaryWindowDurationMins: number | null;
   secondaryRemainingPercent: number | null;
+  secondaryResetsAt: number | null;
+}
+
+interface CodexAuthQuotaIdentity {
+  accountId: string;
+  quotaIdentityId: string;
 }
 
 interface CodexAuthState {
@@ -335,10 +402,33 @@ interface CodexAuthSwitchResult {
   toLabel: string;
 }
 
+interface CodexAuthSwitchOutcome extends CodexAuthSwitchResult {
+  ok: boolean;
+  candidateName: string;
+  recovered: boolean;
+  error: string | null;
+  validationFailureKind: CodexAuthRotationReason | null;
+  restoredPrevious: boolean;
+  autoDeleted: boolean;
+  deleteRestarted: boolean;
+}
+
+interface CodexAuthRepairDisposition {
+  deleted: boolean;
+  restarted: boolean;
+}
+
 interface CodexAuthRefreshAllResult {
   refreshed: string[];
   skipped: string[];
   failed: Array<{ name: string; error: string }>;
+}
+
+interface CodexAuthClusterAuditOutcome {
+  audit: AuthSyncClusterAuditResult;
+  refresh: CodexAuthRefreshAllResult;
+  push: { sent: number; skipped: number };
+  refreshSkippedReason: string | null;
 }
 
 interface CodexAuthSelection {
@@ -347,7 +437,7 @@ interface CodexAuthSelection {
   toLabel: string;
 }
 
-type CodexAuthCandidateHealth = 'disabled' | 'ready' | 'low' | 'exhausted' | 'stale' | 'unknown' | 'api-key' | 'invalid';
+type CodexAuthCandidateHealth = 'disabled' | 'needs_repair' | 'ready' | 'low' | 'exhausted' | 'stale' | 'unknown' | 'api-key' | 'invalid';
 type CodexAuthListFilter = 'all' | 'enabled' | 'attention';
 
 interface CodexAuthListView {
@@ -386,6 +476,7 @@ interface PendingAuthAdd {
   name: string;
   path: string;
   previousTargetPath: string | null;
+  mode: 'add' | 'repair';
   createdAt: number;
 }
 
@@ -400,9 +491,12 @@ interface AuthRetryContext {
   failedAuthTargets: Set<string>;
 }
 
+type CodexAuthRotationReason = 'auth_invalid' | 'quota_limited';
+
 interface PendingAuthRotation {
   scopeId: string;
   reason: string;
+  reasonKind: CodexAuthRotationReason;
   retry: AuthRetryContext | null;
 }
 
@@ -424,11 +518,12 @@ const CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME = 'codex-auth-quota.json';
 const CODEX_AUTH_LIST_PAGE_SIZE = 8;
 const CODEX_AUTH_LOW_QUOTA_PERCENT = 10;
 const CODEX_AUTH_STALE_CREDENTIAL_DAYS = 8;
-const CODEX_AUTH_PROACTIVE_REFRESH_DAYS = 9;
+const CODEX_AUTH_PROACTIVE_REFRESH_DAYS = 8;
 const CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS = 60 * 60_000;
 const CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS = 5 * 60_000;
 const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
 const SELF_UPDATE_STATUS_POLL_MS = 1000;
+const ATTACHMENT_BATCH_MERGE_WINDOW_MS = 120_000;
 const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
 const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
 
@@ -448,6 +543,7 @@ const PINNED_HELP_COMMANDS: HelpCommandEntry[] = [
 const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
   { key: 'fast', line: '/fast <on|off|toggle>' },
   { key: 'active', line: '/active <steer|queue>' },
+  { key: 'rich', line: '/rich' },
   { key: 'account', line: '/account' },
   { key: 'quota', line: '/quota' },
   { key: 'update', line: '/update' },
@@ -499,11 +595,9 @@ export class BridgeSessionCore {
   private activeTurns = new Map<string, ActiveTurn>();
   private activeTurnsByTurnId = new Map<string, Set<string>>();
   private observedThreadWatchers = new Map<string, ObservedThreadWatcher>();
-  private queuedPrompts = new Map<string, QueuedPromptRequest>();
   private pendingTurnErrors = new Map<string, string>();
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
   private pendingMcpElicitations = new Map<string, PendingMcpElicitation>();
-  private pendingPlanImplementations = new Map<string, PendingPlanImplementation>();
   private pendingLoginsByScope = new Map<string, string>();
   private pendingLoginScopesById = new Map<string, string>();
   private pendingAuthAddsByLoginId = new Map<string, PendingAuthAdd>();
@@ -514,6 +608,8 @@ export class BridgeSessionCore {
   private pendingAuthRotation: PendingAuthRotation | null = null;
   private authRotationInProgress = false;
   private authRefreshAllInProgress = false;
+  private externalAuthValidationInProgress = false;
+  private turnStartInProgress = 0;
   private authRotationFailedTargets = new Set<string>();
   private localUsageCache: CodexLocalUsageSnapshot | null = null;
   private localUsageCacheLoaded = false;
@@ -528,9 +624,14 @@ export class BridgeSessionCore {
   private locks = new Map<string, Promise<void>>();
   private approvalTimers = new Map<string, NodeJS.Timeout>();
   private submittedUserInputTimers = new Map<string, NodeJS.Timeout>();
+  private restartPreviewRecoveryTimers = new Map<string, NodeJS.Timeout>();
+  private voiceSnippets = new Map<string, { scopeId: string; text: string; createdAt: number }>();
+  private latestVoiceSnippetByScope = new Map<string, string>();
   private selfUpdatePollTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshTimer: NodeJS.Timeout | null = null;
   private proactiveAuthRefreshInProgress = false;
+  private proactiveAuthRefreshStatus: AuthProactiveRefreshStatus | null = null;
+  private stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
   private botUsername: string | null = null;
   private lastError: string | null = null;
@@ -595,7 +696,6 @@ export class BridgeSessionCore {
     });
     this.app.on('disconnected', () => {
       this.attachedThreads.clear();
-      this.queuedPrompts.clear();
       this.threadTokenUsageAlerts.clear();
       this.clearObservedThreadWatchers();
       void this.abandonActiveTurns().catch((error) => {
@@ -605,8 +705,13 @@ export class BridgeSessionCore {
     });
 
     await this.app.start();
+    this.store.requeueInterruptedQueuedTurnInputs();
     await this.restorePendingUserInputs();
+    await this.restoreGuidedPlanSessions();
     await this.cleanupStaleTurnPreviews();
+    void this.recoverQueuedTurns().catch((error) => {
+      this.logger.warn('codex.queued_turn_recovery_failed', { error: toErrorMeta(error) });
+    });
     void this.refreshCodexLocalUsageIfNeeded().catch((error) => {
       this.logger.warn('codex.local_usage_background_refresh_failed', { error: formatUserError(error) });
     });
@@ -630,11 +735,9 @@ export class BridgeSessionCore {
   }
 
   async stop(): Promise<void> {
-    this.queuedPrompts.clear();
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
     this.pendingMcpElicitations.clear();
-    this.pendingPlanImplementations.clear();
     this.pendingLoginsByScope.clear();
     this.pendingLoginScopesById.clear();
     this.pendingAuthAddsByLoginId.clear();
@@ -647,6 +750,8 @@ export class BridgeSessionCore {
     this.commandUsageSequence = 0;
     this.pendingAuthRotation = null;
     this.authRefreshAllInProgress = false;
+    this.externalAuthValidationInProgress = false;
+    this.turnStartInProgress = 0;
     this.clearObservedThreadWatchers();
     this.releaseActiveTurnsForBridgeShutdown();
     this.bot.stop();
@@ -658,8 +763,13 @@ export class BridgeSessionCore {
       clearTimeout(timer);
     }
     this.submittedUserInputTimers.clear();
+    this.clearRestartPreviewRecoveryTimers();
     this.clearSelfUpdateStatusPoll();
     this.clearProactiveAuthRefreshTimer();
+    for (const timer of this.stalePanelDeleteTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.stalePanelDeleteTimers.clear();
     await this.app.stop({ terminateServer: false });
     this.updateStatus();
   }
@@ -669,11 +779,13 @@ export class BridgeSessionCore {
       running: true,
       connected: this.app.isConnected(),
       userAgent: this.app.getUserAgent(),
+      codexHome: this.config.codexHome ?? path.join(os.homedir(), '.codex'),
       codexAppServer: this.app.getServerStatus(),
       botUsername: this.botUsername,
       currentBindings: this.store.countBindings(),
       pendingApprovals: this.store.countPendingApprovals(),
       pendingUserInputs: this.store.countPendingUserInputs(),
+      queuedTurns: this.store.countQueuedTurnInputs(),
       activeTurns: this.activeTurns.size,
       lastError: this.lastError,
       updatedAt: new Date().toISOString(),
@@ -681,6 +793,7 @@ export class BridgeSessionCore {
         telegram: this.ownsTelegramRuntime,
         weixin: Boolean(this.config.wxEnabled && this.messaging.hasWeixinTransport),
       },
+      authProactiveRefresh: this.proactiveAuthRefreshStatus,
     };
   }
 
@@ -712,6 +825,10 @@ export class BridgeSessionCore {
       }
       if (this.findActiveTurn(scopeId)) {
         await this.handleActiveTurnInboundMessage(event, locale, event.text.trim());
+        return;
+      }
+      if (this.externalAuthValidationInProgress) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
         return;
       }
       await this.startBoundTurnFromEvent(event, locale, event.text.trim());
@@ -758,8 +875,21 @@ export class BridgeSessionCore {
       return;
     }
 
+    if (event.attachments.length > 0) {
+      await this.handleTelegramAttachmentBatch(event, locale, decision.text);
+      return;
+    }
+
+    if (await this.consumePendingAttachmentBatchWithText(event, locale, decision.text)) {
+      return;
+    }
+
     if (this.findActiveTurn(scopeId)) {
       await this.handleActiveTurnInboundMessage(event, locale, decision.text);
+      return;
+    }
+    if (this.externalAuthValidationInProgress) {
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
       return;
     }
 
@@ -817,7 +947,9 @@ export class BridgeSessionCore {
           t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
           t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
           t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
+          t(locale, 'status_queued_turns', { value: this.store.countQueuedTurnInputs(scopeId) }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
+          formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()),
         ];
         if (serviceStatus) {
           lines.push('', t(locale, 'status_runtime_overview'));
@@ -862,13 +994,19 @@ export class BridgeSessionCore {
               }));
             }
           }
-          if (serviceStatus.lastUpdate) {
-            lines.push(t(locale, 'status_last_update', {
-              from: serviceStatus.lastUpdate.fromVersion,
-              to: serviceStatus.lastUpdate.toVersion ?? t(locale, 'unknown'),
-              time: serviceStatus.lastUpdate.updatedAt,
+          if (serviceStatus.authProactiveRefresh) {
+            lines.push(t(locale, 'status_auth_proactive_refresh', {
+              value: formatAuthProactiveRefreshStatus(locale, serviceStatus.authProactiveRefresh),
             }));
-            const codexUpdateLine = this.formatCodexUpdateResult(serviceStatus.lastUpdate);
+          }
+          if (shouldShowRuntimeLastUpdate(serviceStatus)) {
+            const lastUpdate = serviceStatus.lastUpdate!;
+            lines.push(t(locale, 'status_last_update', {
+              from: lastUpdate.fromVersion,
+              to: lastUpdate.toVersion ?? t(locale, 'unknown'),
+              time: lastUpdate.updatedAt,
+            }));
+            const codexUpdateLine = this.formatCodexUpdateResult(lastUpdate);
             if (codexUpdateLine) {
               lines.push(t(locale, 'status_last_codex_update', { value: codexUpdateLine }));
             }
@@ -878,7 +1016,11 @@ export class BridgeSessionCore {
         }
         lines.push(...codexUsageLines);
         lines.push(...codexLocalUsageLines);
-        await this.sendMessage(scopeId, lines.join('\n'));
+        lines.splice(5, 0, t(locale, 'status_codex_home', {
+          value: this.config.codexHome ?? path.join(os.homedir(), '.codex'),
+        }));
+        const messageId = await this.sendRichInternalMessage(scopeId, '/status', lines.join('\n'));
+        this.scheduleStalePanelDeletion(scopeId, messageId);
         return;
       }
       case 'account': {
@@ -895,6 +1037,10 @@ export class BridgeSessionCore {
       }
       case 'quota_nudge': {
         await this.handleQuotaNudgeCommand(scopeId, locale, args);
+        return;
+      }
+      case 'voice': {
+        await this.handleVoiceCommand(scopeId, locale, args);
         return;
       }
       case 'login':
@@ -990,7 +1136,7 @@ export class BridgeSessionCore {
           await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
           return;
         }
-        this.queuedPrompts.delete(scopeId);
+        this.store.cancelQueuedTurnInputs(scopeId);
         await this.stopWatchingScopeThread(scopeId, thread.threadId);
         let binding: ThreadBinding;
         try {
@@ -1090,6 +1236,10 @@ export class BridgeSessionCore {
         await this.handleReviewCommand(event, locale, args);
         return;
       }
+      case 'rich': {
+        await this.handleRichCommand(scopeId, locale);
+        return;
+      }
       case 'diff': {
         await this.handleDiffCommand(scopeId, locale);
         return;
@@ -1139,7 +1289,7 @@ export class BridgeSessionCore {
         return;
       }
       case 'config': {
-        await this.handleConfigCommand(scopeId, locale);
+        await this.handleConfigCommand(scopeId, locale, args);
         return;
       }
       case 'requirements': {
@@ -1463,9 +1613,45 @@ export class BridgeSessionCore {
       );
       return;
     }
+    const configMatch = /^config:(auth_auto_delete|delete_tool_details):(on|off)$/.exec(event.data);
+    if (configMatch) {
+      await this.handleConfigToggleCallback(
+        event,
+        configMatch[1]! as 'auth_auto_delete' | 'delete_tool_details',
+        configMatch[2] === 'on',
+        locale,
+      );
+      return;
+    }
+    const voiceMatch = /^voice:([a-f0-9]+)$/.exec(event.data);
+    if (voiceMatch) {
+      await this.handleVoiceCallback(event, voiceMatch[1]!, locale);
+      return;
+    }
     const settingsMatch = /^settings:(model|effort|access):(.+)$/.exec(event.data);
     if (settingsMatch) {
       await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort' | 'access', settingsMatch[2]!, locale);
+      return;
+    }
+    const authRepairActionMatch = /^auth:([a-f0-9]+):repair_(login|delete|cancel):(\d+)$/.exec(event.data);
+    if (authRepairActionMatch) {
+      await this.handleAuthRepairActionCallback(
+        event,
+        authRepairActionMatch[1]!,
+        authRepairActionMatch[2]! as 'login' | 'delete' | 'cancel',
+        Number.parseInt(authRepairActionMatch[3]!, 10),
+        locale,
+      );
+      return;
+    }
+    const authRepairMatch = /^auth:([a-f0-9]+):repair:(\d+)$/.exec(event.data);
+    if (authRepairMatch) {
+      await this.handleAuthRepairMenuCallback(
+        event,
+        authRepairMatch[1]!,
+        Number.parseInt(authRepairMatch[2]!, 10),
+        locale,
+      );
       return;
     }
     const authToggleMatch = /^auth:([a-f0-9]+):toggle:(\d+)$/.exec(event.data);
@@ -1503,12 +1689,12 @@ export class BridgeSessionCore {
       await this.handleAuthListViewCallback(event, authClearSearchMatch[1]!, 'clear_search', locale);
       return;
     }
-    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
+    const authActionMatch = /^auth:([a-f0-9]+):(login_device|reload|safe_sync|cluster_audit|refresh_all_confirm|refresh_all_cancel|refresh_all)$/.exec(event.data);
     if (authActionMatch) {
       await this.handleAuthPanelActionCallback(
         event,
         authActionMatch[1]!,
-        authActionMatch[2]! as 'login_device' | 'reload' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
+        authActionMatch[2]! as 'login_device' | 'reload' | 'safe_sync' | 'cluster_audit' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
         locale,
       );
       return;
@@ -1540,6 +1726,16 @@ export class BridgeSessionCore {
         event,
         planImplMatch[1]!,
         planImplMatch[2]! as 'run' | 'fresh' | 'stay',
+        locale,
+      );
+      return;
+    }
+    const attachmentBatchMatch = /^attach:([a-f0-9]+):(analyze|clear)$/.exec(event.data);
+    if (attachmentBatchMatch) {
+      await this.handleAttachmentBatchCallback(
+        event,
+        attachmentBatchMatch[1]!,
+        attachmentBatchMatch[2]! as 'analyze' | 'clear',
         locale,
       );
       return;
@@ -1840,7 +2036,8 @@ export class BridgeSessionCore {
       : threadId
         ? this.findActiveTurnsByThreadId(threadId)
         : [];
-    const isAuthRotationError = isCodexAuthRotationError(params);
+    const authRotationReason = classifyCodexAuthRotationError(params);
+    const isAuthRotationError = authRotationReason !== null;
     const willRetry = params?.willRetry === true;
     const active = isAuthRotationError
       ? activeTurns.find(turn => turn.authRetry !== null) ?? activeTurns.find(turn => !turn.isObserved) ?? activeTurns[0] ?? null
@@ -1853,12 +2050,13 @@ export class BridgeSessionCore {
     } else if (turnId) {
       this.pendingTurnErrors.set(turnId, message);
     }
-    if (isAuthRotationError && !willRetry && active?.authRetry) {
+    if (authRotationReason && !willRetry && active?.authRetry) {
       const scopeId = active.scopeId;
       if (scopeId) {
         this.pendingAuthRotation = {
           scopeId,
           reason: message,
+          reasonKind: authRotationReason,
           retry: cloneAuthRetryContext(active.authRetry),
         };
       }
@@ -1915,6 +2113,9 @@ export class BridgeSessionCore {
     if (status === 'idle') {
       return;
     }
+    if (status === 'active' || status === 'running') {
+      return;
+    }
     const locale = this.localeForChat(scopeId);
     await this.sendMessage(scopeId, t(locale, 'thread_status_changed', { threadId, status }));
   }
@@ -1956,7 +2157,6 @@ export class BridgeSessionCore {
     }
     const locale = this.localeForChat(scopeId);
     if (method === 'thread/goal/cleared') {
-      await this.sendMessage(scopeId, t(locale, 'goal_cleared_notification', { threadId }));
       return;
     }
     const goal = mapGoalNotification(params?.goal);
@@ -2160,8 +2360,11 @@ export class BridgeSessionCore {
       if (!success) {
         await this.restorePendingAuthAdd(pendingAuthAdd);
         await this.sendMessage(scopeId, [
-          t(locale, 'auth_add_failed', { value: pendingAuthAdd.name, error: params?.error ?? t(locale, 'unknown') }),
-          t(locale, 'auth_add_reverted'),
+          t(locale, pendingAuthAdd.mode === 'repair' ? 'auth_repair_failed' : 'auth_add_failed', {
+            value: pendingAuthAdd.name,
+            error: params?.error ?? t(locale, 'unknown'),
+          }),
+          t(locale, pendingAuthAdd.mode === 'repair' ? 'auth_repair_reverted' : 'auth_add_reverted'),
         ].join('\n'));
         return;
       }
@@ -2169,12 +2372,26 @@ export class BridgeSessionCore {
       if (!stat?.isFile()) {
         await this.restorePendingAuthAdd(pendingAuthAdd);
         await this.sendMessage(scopeId, [
-          t(locale, 'auth_add_missing_file', { value: pendingAuthAdd.name }),
-          t(locale, 'auth_add_reverted'),
+          t(locale, pendingAuthAdd.mode === 'repair' ? 'auth_repair_missing_file' : 'auth_add_missing_file', { value: pendingAuthAdd.name }),
+          t(locale, pendingAuthAdd.mode === 'repair' ? 'auth_repair_reverted' : 'auth_add_reverted'),
         ].join('\n'));
         return;
       }
-      const lines = [t(locale, 'auth_add_done', { value: pendingAuthAdd.name })];
+      if (pendingAuthAdd.mode === 'repair') {
+        const metadata = await readChatGptAuthMetadata(pendingAuthAdd.path);
+        if (!metadata || !chatGptAuthMetadataMatchesCandidateName(pendingAuthAdd.name, metadata)) {
+          await this.restorePendingAuthAdd(pendingAuthAdd);
+          await this.sendMessage(scopeId, [
+            t(locale, 'auth_repair_identity_mismatch', { value: pendingAuthAdd.name }),
+            t(locale, 'auth_repair_reverted'),
+          ].join('\n'));
+          return;
+        }
+        this.markCodexAuthCandidateActive(pendingAuthAdd.name);
+        this.store.setCodexAuthCandidateDisabled(pendingAuthAdd.name, false);
+        this.store.setCodexAuthCandidateDisabled(pendingAuthAdd.name, false, this.authRuntimeId());
+      }
+      const lines = [t(locale, pendingAuthAdd.mode === 'repair' ? 'auth_repair_done' : 'auth_add_done', { value: pendingAuthAdd.name })];
       try {
         await this.coordinator?.authCandidateUpdated?.(this.authRuntimeId(), pendingAuthAdd.name);
       } catch (error) {
@@ -2194,6 +2411,7 @@ export class BridgeSessionCore {
     }
     const currentCandidate = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
     if (currentCandidate) {
+      this.markCodexAuthCandidateActive(currentCandidate.name);
       await this.syncCodexAuthCandidate(currentCandidate.name);
     }
     await this.sendMessage(scopeId, t(locale, 'login_completed'));
@@ -2255,6 +2473,10 @@ export class BridgeSessionCore {
     const message = params?.error
       ? `MCP ${name}: ${status} (${String(params.error)})`
       : `MCP ${name}: ${status}`;
+    const normalized = status.toLowerCase();
+    if (!params?.error && ['ready', 'running', 'starting', 'connected'].includes(normalized)) {
+      return;
+    }
     await this.notifyBoundScopes(message);
   }
 
@@ -2297,6 +2519,7 @@ export class BridgeSessionCore {
     const segment = ensureTurnSegment(active, `${active.turnId}:codex-error`, 'final_answer', 'final_answer', false);
     segment.text = text;
     segment.completed = true;
+    segment.completedAtMs = Date.now();
     await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
   }
 
@@ -2306,8 +2529,9 @@ export class BridgeSessionCore {
     }
     try {
       await this.completeTurn(active);
-      await this.cleanupObservedTransientMessages(active);
+      await this.cleanupTransientProgressMessages(active);
       await this.finalizeUserInputsForTurn(active, 'resolved');
+      this.markQueuedTurnCompleted(active);
     } finally {
       if (active.isObserved) {
         this.clearObservedTurnWatcher(active.turnId, active.scopeId);
@@ -2644,7 +2868,7 @@ export class BridgeSessionCore {
   }
 
   private async maybeSendPlanImplementationPrompt(active: ActiveTurn): Promise<boolean> {
-    if (active.interruptRequested || this.queuedPrompts.has(active.scopeId)) {
+    if (active.interruptRequested || this.store.countQueuedTurnInputs(active.scopeId) > 0) {
       return false;
     }
     if (this.hasPendingUserInputForTurn(active.scopeId, active.turnId)) {
@@ -2661,8 +2885,8 @@ export class BridgeSessionCore {
     }
 
     const binding = this.store.getBinding(active.scopeId);
-    const record: PendingPlanImplementation = {
-      localId: crypto.randomBytes(8).toString('hex'),
+    const session: GuidedPlanSessionRecord = {
+      sessionId: crypto.randomBytes(8).toString('hex'),
       scopeId: active.scopeId,
       chatId: active.chatId,
       chatType: active.chatType,
@@ -2672,37 +2896,84 @@ export class BridgeSessionCore {
       cwd: binding?.cwd ?? null,
       planMarkdown,
       messageId: null,
+      state: 'awaiting_confirmation',
       createdAt: Date.now(),
+      updatedAt: Date.now(),
+      resolvedAt: null,
     };
-    this.pendingPlanImplementations.set(record.localId, record);
+    this.store.saveGuidedPlanSession(session);
+    const record = this.pendingPlanImplementationFromSession(session);
     const locale = this.localeForChat(active.scopeId);
     const messageId = await this.sendMessage(
       active.scopeId,
       renderPlanImplementationPrompt(locale, record),
       planImplementationKeyboard(locale, record.localId),
     );
-    record.messageId = messageId;
+    this.store.updateGuidedPlanSessionMessage(session.sessionId, messageId);
     return true;
   }
 
   private findPendingPlanImplementation(scopeId: string, turnId?: string): PendingPlanImplementation | null {
-    for (const record of this.pendingPlanImplementations.values()) {
-      if (record.scopeId !== scopeId) {
-        continue;
-      }
-      if (turnId !== undefined && record.turnId !== turnId) {
-        continue;
-      }
-      return record;
-    }
-    return null;
+    const session = this.store.findOpenGuidedPlanSession(scopeId, turnId);
+    return session ? this.pendingPlanImplementationFromSession(session) : null;
   }
 
   private clearPlanImplementationPromptsForScope(scopeId: string): void {
-    for (const [localId, record] of this.pendingPlanImplementations.entries()) {
-      if (record.scopeId === scopeId) {
-        this.pendingPlanImplementations.delete(localId);
+    const record = this.store.findOpenGuidedPlanSession(scopeId);
+    if (record) {
+      this.store.updateGuidedPlanSessionState(record.sessionId, 'cancelled');
+    }
+  }
+
+  private pendingPlanImplementationFromSession(session: GuidedPlanSessionRecord): PendingPlanImplementation {
+    return {
+      localId: session.sessionId,
+      scopeId: session.scopeId,
+      chatId: session.chatId,
+      chatType: session.chatType,
+      topicId: session.topicId,
+      threadId: session.threadId,
+      turnId: session.turnId,
+      cwd: session.cwd,
+      planMarkdown: session.planMarkdown,
+      messageId: session.messageId,
+      createdAt: session.createdAt,
+    };
+  }
+
+  private async restoreGuidedPlanSessions(): Promise<void> {
+    for (const session of this.store.listOpenGuidedPlanSessions()) {
+      if (!this.messaging.canSendToScope(session.scopeId)) {
+        continue;
       }
+      const locale = this.localeForChat(session.scopeId);
+      const record = this.pendingPlanImplementationFromSession(session);
+      if (session.messageId !== null) {
+        try {
+          await this.editMessage(
+            session.scopeId,
+            session.messageId,
+            renderPlanImplementationPrompt(locale, record),
+            planImplementationKeyboard(locale, record.localId),
+          );
+          continue;
+        } catch (error) {
+          if (!isTelegramMessageGone(error)) {
+            this.logger.warn('telegram.plan_impl_restore_edit_failed', {
+              sessionId: session.sessionId,
+              scopeId: session.scopeId,
+              messageId: session.messageId,
+              error: toErrorMeta(error),
+            });
+          }
+        }
+      }
+      const messageId = await this.sendMessage(
+        session.scopeId,
+        renderPlanImplementationPrompt(locale, record),
+        planImplementationKeyboard(locale, record.localId),
+      );
+      this.store.updateGuidedPlanSessionMessage(session.sessionId, messageId);
     }
   }
 
@@ -2764,17 +3035,18 @@ export class BridgeSessionCore {
     action: 'run' | 'fresh' | 'stay',
     locale: AppLocale,
   ): Promise<void> {
-    const record = this.pendingPlanImplementations.get(localId);
-    if (!record) {
+    const session = this.store.getGuidedPlanSession(localId);
+    if (!session || session.state !== 'awaiting_confirmation') {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'plan_impl_expired'));
       return;
     }
+    const record = this.pendingPlanImplementationFromSession(session);
     if (record.scopeId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'plan_impl_mismatch'));
       return;
     }
     if (action === 'stay') {
-      this.pendingPlanImplementations.delete(localId);
+      this.store.updateGuidedPlanSessionState(localId, 'cancelled');
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
       if (record.messageId !== null) {
         await this.editMessage(record.scopeId, record.messageId, t(locale, 'plan_impl_staying'), []);
@@ -2786,9 +3058,9 @@ export class BridgeSessionCore {
       return;
     }
 
-    this.pendingPlanImplementations.delete(localId);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     const turn = await this.startPlanImplementationTurn(record, action === 'fresh');
+    this.store.updateGuidedPlanSessionState(localId, 'completed');
     if (record.messageId !== null) {
       await this.editMessage(
         record.scopeId,
@@ -2809,17 +3081,18 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'usage_planimpl'));
       return;
     }
-    const record = this.pendingPlanImplementations.get(localId);
-    if (!record) {
+    const session = this.store.getGuidedPlanSession(localId);
+    if (!session || session.state !== 'awaiting_confirmation') {
       await this.sendMessage(scopeId, t(locale, 'plan_impl_expired'));
       return;
     }
+    const record = this.pendingPlanImplementationFromSession(session);
     if (record.scopeId !== scopeId) {
       await this.sendMessage(scopeId, t(locale, 'plan_impl_mismatch'));
       return;
     }
     if (action === 'stay') {
-      this.pendingPlanImplementations.delete(localId);
+      this.store.updateGuidedPlanSessionState(localId, 'cancelled');
       if (record.messageId !== null) {
         await this.editMessage(record.scopeId, record.messageId, t(locale, 'plan_impl_staying'), []);
       } else {
@@ -2832,8 +3105,8 @@ export class BridgeSessionCore {
       return;
     }
 
-    this.pendingPlanImplementations.delete(localId);
     const turn = await this.startPlanImplementationTurn(record, action === 'fresh');
+    this.store.updateGuidedPlanSessionState(localId, 'completed');
     const message = t(locale, action === 'fresh' ? 'plan_impl_started_fresh' : 'plan_impl_started', {
       threadId: turn.threadId,
       turnId: turn.turnId,
@@ -3061,7 +3334,10 @@ export class BridgeSessionCore {
     scopeId: string,
     binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
     input: TurnInput[],
-    overrides: { collaborationMode?: CollaborationModeValue | null | undefined; recoverMissingThread?: boolean | undefined } = {},
+    overrides: {
+      collaborationMode?: CollaborationModeValue | null | undefined;
+      recoverMissingThread?: boolean | undefined;
+    } = {},
   ): Promise<{ threadId: string; turnId: string; collaborationMode: CollaborationModeValue }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
@@ -3140,6 +3416,25 @@ export class BridgeSessionCore {
       text_elements: [],
     }];
     for (const attachment of stagedAttachments) {
+      if (!attachment.nativeImage) continue;
+      input.push({
+        type: 'localImage',
+        path: attachment.localPath,
+      });
+    }
+    return input;
+  }
+
+  private buildTurnInputFromStagedAttachments(
+    text: string,
+    attachments: readonly StagedTelegramAttachment[],
+  ): TurnInput[] {
+    const input: TurnInput[] = [{
+      type: 'text',
+      text: buildAttachmentPrompt(text, attachments),
+      text_elements: [],
+    }];
+    for (const attachment of attachments) {
       if (!attachment.nativeImage) continue;
       input.push({
         type: 'localImage',
@@ -3251,6 +3546,209 @@ export class BridgeSessionCore {
     return staged;
   }
 
+  private async handleTelegramAttachmentBatch(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<void> {
+    const active = this.findActiveTurn(event.scopeId);
+    if (active?.isObserved) {
+      await this.sendMessage(event.scopeId, t(locale, 'watch_read_only_active'));
+      return;
+    }
+
+    const existingBinding = this.store.getBinding(event.scopeId);
+    const binding = active
+      ? {
+          threadId: active.threadId,
+          cwd: existingBinding?.cwd ?? this.config.defaultCwd,
+        }
+      : existingBinding
+        ? await this.ensureThreadReady(event.scopeId, existingBinding)
+        : await this.createBinding(event.scopeId, null);
+    const cwd = binding.cwd ?? this.config.defaultCwd;
+    const stagedAttachments = await this.stageAttachments(cwd, binding.threadId, event.attachments, locale);
+    const mediaGroupId = event.mediaGroupId ?? null;
+    const now = Date.now();
+    const existingBatch = mediaGroupId
+      ? this.store.findPendingAttachmentBatchByMediaGroup(event.scopeId, mediaGroupId)
+      : findReusableStandaloneAttachmentBatch(this.store.getLatestPendingAttachmentBatch(event.scopeId), now);
+    const existingAttachments = existingBatch ? parseStagedTelegramAttachments(existingBatch.attachmentsJson) : [];
+    const record: PendingAttachmentBatchRecord = {
+      batchId: existingBatch?.batchId ?? crypto.randomBytes(8).toString('hex'),
+      scopeId: event.scopeId,
+      chatId: event.chatId,
+      chatType: event.chatType,
+      topicId: event.topicId,
+      threadId: binding.threadId,
+      cwd,
+      mediaGroupId,
+      attachmentsJson: JSON.stringify([...existingAttachments, ...stagedAttachments]),
+      caption: mergeAttachmentBatchCaption(existingBatch?.caption ?? '', text.trim()),
+      messageId: existingBatch?.messageId ?? null,
+      status: 'pending',
+      createdAt: existingBatch?.createdAt ?? now,
+      updatedAt: now,
+      resolvedAt: null,
+    };
+    this.store.savePendingAttachmentBatch(record);
+    await this.renderAttachmentBatchCard(record, locale);
+  }
+
+  private async consumePendingAttachmentBatchWithText(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+  ): Promise<boolean> {
+    const prompt = text.trim();
+    if (!prompt) {
+      return false;
+    }
+    const batch = this.store.getLatestPendingAttachmentBatch(event.scopeId);
+    if (!batch) {
+      return false;
+    }
+    await this.consumePendingAttachmentBatch(batch, locale, prompt, event.messageId);
+    return true;
+  }
+
+  private async handleAttachmentBatchCallback(
+    event: TelegramCallbackEvent,
+    batchId: string,
+    action: 'analyze' | 'clear',
+    locale: AppLocale,
+  ): Promise<void> {
+    const batch = this.store.getPendingAttachmentBatch(batchId);
+    if (!batch || batch.status !== 'pending') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'attachment_batch_missing'));
+      return;
+    }
+    if (batch.scopeId !== event.scopeId || (batch.messageId !== null && batch.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'attachment_batch_mismatch'));
+      return;
+    }
+    if (action === 'clear') {
+      this.store.resolvePendingAttachmentBatch(batch.batchId, 'cleared');
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+      if (batch.messageId !== null) {
+        await this.editMessage(batch.scopeId, batch.messageId, t(locale, 'attachment_batch_cleared'), []);
+      }
+      return;
+    }
+    const prompt = batch.caption.trim() || t(locale, 'attachment_batch_default_prompt');
+    await this.consumePendingAttachmentBatch(batch, locale, prompt, batch.messageId);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+  }
+
+  private async consumePendingAttachmentBatch(
+    batch: PendingAttachmentBatchRecord,
+    locale: AppLocale,
+    prompt: string,
+    sourceMessageId: number | null,
+  ): Promise<void> {
+    const active = this.findActiveTurn(batch.scopeId);
+    if (active?.isObserved) {
+      await this.sendMessage(batch.scopeId, t(locale, 'watch_read_only_active'));
+      return;
+    }
+    const attachments = parseStagedTelegramAttachments(batch.attachmentsJson);
+    const input = this.buildTurnInputFromStagedAttachments(prompt, attachments);
+    if (active) {
+      const queueId = this.enqueuePreparedTurnInput({
+        scopeId: batch.scopeId,
+        chatId: batch.chatId,
+        chatType: batch.chatType,
+        topicId: batch.topicId,
+        threadId: active.threadId,
+        input,
+        sourceSummary: summarizeStagedAttachmentInput(prompt, attachments),
+        messageId: sourceMessageId,
+      });
+      this.store.resolvePendingAttachmentBatch(batch.batchId, 'consumed');
+      if (batch.messageId !== null) {
+        await this.editMessage(batch.scopeId, batch.messageId, t(locale, 'attachment_batch_queued', {
+          id: shortId(queueId),
+          position: this.store.countQueuedTurnInputs(batch.scopeId),
+        }), []);
+      } else {
+        await this.sendMessage(batch.scopeId, t(locale, 'attachment_batch_queued', {
+          id: shortId(queueId),
+          position: this.store.countQueuedTurnInputs(batch.scopeId),
+        }));
+      }
+      return;
+    }
+
+    this.store.resolvePendingAttachmentBatch(batch.batchId, 'consumed');
+    if (batch.messageId !== null) {
+      await this.editMessage(batch.scopeId, batch.messageId, t(locale, 'attachment_batch_consumed'), []);
+    }
+    await this.startTurnFromPreparedAttachmentBatch(batch, input);
+  }
+
+  private async startTurnFromPreparedAttachmentBatch(
+    batch: PendingAttachmentBatchRecord,
+    input: TurnInput[],
+  ): Promise<void> {
+    this.clearPlanImplementationPromptsForScope(batch.scopeId);
+    await this.stopWatchingScopeThread(batch.scopeId);
+    const existingBinding = this.store.getBinding(batch.scopeId);
+    const binding = await this.ensureThreadReady(batch.scopeId, {
+      chatId: batch.scopeId,
+      threadId: batch.threadId,
+      cwd: existingBinding?.cwd ?? batch.cwd,
+      updatedAt: Date.now(),
+    });
+    this.store.setBinding(batch.scopeId, binding.threadId, binding.cwd);
+    await this.sendTyping(batch.scopeId);
+    const turnState = await this.startTurnWithRecovery(batch.scopeId, binding, input);
+    if (turnState.collaborationMode === 'plan') {
+      this.store.setChatCollaborationMode(batch.scopeId, DEFAULT_COLLABORATION_MODE);
+    }
+    await this.registerActiveTurn(
+      batch.scopeId,
+      batch.chatId,
+      batch.chatType,
+      batch.topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        input,
+        threadId: turnState.threadId,
+        cwd: this.store.getBinding(batch.scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+        chatId: batch.chatId,
+        chatType: batch.chatType,
+        topicId: batch.topicId,
+        collaborationMode: turnState.collaborationMode,
+        failedAuthTargets: new Set(),
+      },
+      turnState.collaborationMode,
+    );
+  }
+
+  private async renderAttachmentBatchCard(record: PendingAttachmentBatchRecord, locale: AppLocale): Promise<void> {
+    const text = renderAttachmentBatchMessage(locale, record);
+    const keyboard = attachmentBatchKeyboard(locale, record.batchId);
+    if (record.messageId !== null) {
+      try {
+        await this.editMessage(record.scopeId, record.messageId, text, keyboard);
+        return;
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.attachment_batch_edit_failed', {
+            batchId: record.batchId,
+            scopeId: record.scopeId,
+            messageId: record.messageId,
+            error: toErrorMeta(error),
+          });
+        }
+      }
+    }
+    const messageId = await this.sendMessage(record.scopeId, text, keyboard);
+    this.store.updatePendingAttachmentBatchMessage(record.batchId, messageId);
+  }
+
   private async registerActiveTurn(
     scopeId: string,
     chatId: string,
@@ -3261,6 +3759,8 @@ export class BridgeSessionCore {
     previewMessageId: number,
     authRetry: AuthRetryContext | null = null,
     collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
+    queuedInputId: string | null = null,
+    archivedMessageIds: number[] = [],
   ): Promise<void> {
     const active = this.createActiveTurnState(
       scopeId,
@@ -3272,7 +3772,9 @@ export class BridgeSessionCore {
       previewMessageId,
       false,
       collaborationMode,
+      queuedInputId,
     );
+    active.archivedMessageIds = [...archivedMessageIds];
     active.authRetry = authRetry;
     this.setActiveTurn(scopeId, turnId, active);
     const pendingError = this.pendingTurnErrors.get(turnId);
@@ -3286,6 +3788,8 @@ export class BridgeSessionCore {
         scopeId,
         threadId,
         messageId: previewMessageId,
+        isObserved: active.isObserved,
+        archivedMessageIds: active.archivedMessageIds,
       });
     }
     this.updateStatus();
@@ -3306,6 +3810,7 @@ export class BridgeSessionCore {
     previewMessageId: number,
     isObserved = false,
     collaborationMode: CollaborationModeValue = DEFAULT_COLLABORATION_MODE,
+    queuedInputId: string | null = null,
   ): ActiveTurn {
     let resolver: () => void = () => {};
     const completion = new Promise<void>((resolve) => {
@@ -3320,10 +3825,12 @@ export class BridgeSessionCore {
       isObserved,
       threadId,
       turnId,
+      queuedInputId,
       previewMessageId,
       previewActive: previewMessageId > 0,
       draftId: null,
       draftText: null,
+      richDraftDisabled: false,
       buffer: '',
       finalText: null,
       interruptRequested: false,
@@ -3352,55 +3859,76 @@ export class BridgeSessionCore {
     return (await this.listCodexAuthState()).currentLabel;
   }
 
+  async handleExternalCodexAuthCandidateDeleted(candidateName: string, reason: string | null = null): Promise<void> {
+    this.store.deleteCodexAuthCandidate(candidateName);
+    if (isInvalidCodexAuthDeleteReason(reason)) {
+      this.store.recordCodexAuthCandidateInvalidDelete(candidateName, reason);
+    } else {
+      this.store.recordCodexAuthCandidateRemoved(candidateName, reason);
+    }
+    this.authRotationFailedTargets.delete(path.join(this.resolveAuthDir(), candidateName));
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    await this.app.restart();
+  }
+
   async validateExternalCodexAuthCandidate(
     candidateName: string,
     rawAuth: string,
     expectedAccountId: string,
   ): Promise<{ ok: boolean; reason?: string | null }> {
+    if (this.externalAuthValidationInProgress) {
+      return { ok: false, reason: 'runtime is not idle' };
+    }
     if (!this.isIdleForServiceUpdate()) {
       return { ok: false, reason: 'runtime is not idle' };
     }
-    const metadata = parseChatGptAuthMetadata(rawAuth);
-    if (!metadata || metadata.accountId !== expectedAccountId) {
-      return { ok: false, reason: 'remote auth account id mismatch' };
-    }
-    const state = await this.listCodexAuthState();
-    const existing = state.candidates.find(candidate => candidate.name === candidateName) ?? null;
-    if (existing) {
-      const existingMetadata = await readChatGptAuthMetadata(existing.path);
-      if (existingMetadata && existingMetadata.accountId !== expectedAccountId) {
-        return { ok: false, reason: 'same candidate belongs to a different account' };
-      }
-    }
-    const authStat = await fs.lstat(state.authPath).catch(() => null);
-    const originalRegularAuth = authStat?.isFile()
-      ? await fs.readFile(state.authPath, 'utf8').catch(() => null)
-      : null;
-    const tempPath = path.join(state.authDir, `.auth-sync-validate-${process.pid}-${Date.now()}.json`);
+    this.externalAuthValidationInProgress = true;
     try {
-      await fs.writeFile(tempPath, rawAuth, { encoding: 'utf8', mode: 0o600 });
-      await pointCodexAuthAtTarget(state.authDir, state.authPath, tempPath);
-      this.pendingTurnErrors.clear();
-      this.attachedThreads.clear();
-      await this.app.restart();
-      const account = await this.app.readAccount(false);
-      const rateLimits = await this.app.readAccountRateLimits();
-      if (!account || !rateLimits || !selectCodexRateLimitSnapshot(rateLimits)) {
-        return { ok: false, reason: 'Codex did not validate ChatGPT usage for remote auth' };
+      const metadata = parseChatGptAuthMetadata(rawAuth);
+      if (!metadata || metadata.accountId !== expectedAccountId) {
+        return { ok: false, reason: 'remote auth account id mismatch' };
       }
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, reason: formatUserError(error) };
+      const state = await this.listCodexAuthState();
+      const existing = state.candidates.find(candidate => candidate.name === candidateName) ?? null;
+      if (existing) {
+        const existingMetadata = await readChatGptAuthMetadata(existing.path);
+        if (existingMetadata && existingMetadata.accountId !== expectedAccountId) {
+          return { ok: false, reason: 'same candidate belongs to a different account' };
+        }
+      }
+      const authStat = await fs.lstat(state.authPath).catch(() => null);
+      const originalRegularAuth = authStat?.isFile()
+        ? await fs.readFile(state.authPath, 'utf8').catch(() => null)
+        : null;
+      const tempPath = path.join(state.authDir, `.auth-sync-validate-${process.pid}-${Date.now()}.json`);
+      try {
+        await fs.writeFile(tempPath, rawAuth, { encoding: 'utf8', mode: 0o600 });
+        await pointCodexAuthAtTarget(state.authDir, state.authPath, tempPath);
+        this.pendingTurnErrors.clear();
+        this.attachedThreads.clear();
+        await this.app.restart();
+        const account = await this.app.readAccount(false);
+        const rateLimits = await this.app.readAccountRateLimits();
+        if (!account || !rateLimits || !selectCodexRateLimitSnapshot(rateLimits)) {
+          return { ok: false, reason: 'Codex did not validate ChatGPT usage for remote auth' };
+        }
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, reason: formatUserError(error) };
+      } finally {
+        await restoreCodexAuthTarget(state.authDir, state.authPath, state.currentTargetPath, originalRegularAuth).catch((error) => {
+          this.logger.warn('codex.auth_sync_restore_failed', { error: toErrorMeta(error) });
+        });
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+        this.pendingTurnErrors.clear();
+        this.attachedThreads.clear();
+        await this.app.restart().catch((error) => {
+          this.logger.warn('codex.auth_sync_restart_restore_failed', { error: toErrorMeta(error) });
+        });
+      }
     } finally {
-      await restoreCodexAuthTarget(state.authDir, state.authPath, state.currentTargetPath, originalRegularAuth).catch((error) => {
-        this.logger.warn('codex.auth_sync_restore_failed', { error: toErrorMeta(error) });
-      });
-      await fs.rm(tempPath, { force: true }).catch(() => undefined);
-      this.pendingTurnErrors.clear();
-      this.attachedThreads.clear();
-      await this.app.restart().catch((error) => {
-        this.logger.warn('codex.auth_sync_restart_restore_failed', { error: toErrorMeta(error) });
-      });
+      this.externalAuthValidationInProgress = false;
     }
   }
 
@@ -3411,7 +3939,9 @@ export class BridgeSessionCore {
       && this.pendingMcpElicitations.size === 0
       && this.pendingLoginsByScope.size === 0
       && !this.authRotationInProgress
-      && !this.authRefreshAllInProgress;
+      && !this.authRefreshAllInProgress
+      && !this.externalAuthValidationInProgress
+      && this.turnStartInProgress === 0;
   }
 
   private hasLocalBlockingActivity(): boolean {
@@ -3424,7 +3954,7 @@ export class BridgeSessionCore {
 
   private authDisplayBotLabel(): string | null {
     if (!this.config.tgScopeBotId) return null;
-    return this.botUsername ? `@${this.botUsername}` : this.config.tgScopeBotId;
+    return this.botUsername ? `@${this.botUsername} (${this.config.tgScopeBotId})` : this.config.tgScopeBotId;
   }
 
   private ownsScope(scopeId: string): boolean {
@@ -3513,12 +4043,13 @@ export class BridgeSessionCore {
     let shouldMarkPartialOutput = false;
     try {
       await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
+      await this.collapseTurnCommentary(active);
       const renderedMessages = active.segments.reduce((count, segment) => count + segment.messages.length, 0);
       if (renderedMessages === 0) {
         const fallbackKey = active.interruptRequested ? 'interrupted' : 'completed';
         const finalChunks = chunkTelegramMessage(active.finalText || active.buffer, undefined, t(locale, fallbackKey));
         for (const chunk of finalChunks) {
-          await this.sendMessage(active.scopeId, chunk);
+          await this.sendRichMarkdownMessage(active.scopeId, chunk);
         }
       }
       shouldMarkPartialOutput = active.interruptRequested
@@ -3569,6 +4100,7 @@ export class BridgeSessionCore {
           }
         }
         segment.completed = true;
+        segment.completedAtMs = Date.now();
         await this.queueTurnRender(active, { forceStream: true, forceStatus: true });
         return;
       }
@@ -3601,9 +4133,10 @@ export class BridgeSessionCore {
         try {
           this.promoteReadyToolBatch(active);
           await this.completeTurn(active);
-          await this.cleanupObservedTransientMessages(active);
+          await this.cleanupTransientProgressMessages(active);
           await this.finalizeUserInputsForTurn(active, active.interruptRequested ? 'interrupted' : 'resolved');
           await this.maybeSendPlanImplementationPrompt(active);
+          this.markQueuedTurnCompleted(active);
           if (this.config.codexAppSyncOnTurnComplete) {
             const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
             if (revealError) {
@@ -3753,7 +4286,7 @@ export class BridgeSessionCore {
     text: string,
     inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
   ): Promise<number> {
-    return this.messaging.sendPlain(scopeId, text, inlineKeyboard);
+    return this.sendRichMarkdownMessage(scopeId, text, inlineKeyboard);
   }
 
   private async sendHtmlMessage(
@@ -3762,6 +4295,55 @@ export class BridgeSessionCore {
     inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
   ): Promise<number> {
     return this.messaging.sendHtml(scopeId, text, inlineKeyboard);
+  }
+
+  private async sendRichHtmlMessage(
+    scopeId: string,
+    html: string,
+    fallbackHtml: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    try {
+      return await this.messaging.sendRichHtml(scopeId, html, fallbackHtml, inlineKeyboard);
+    } catch (error) {
+      this.logger.warn('telegram.rich_message_send_failed', { scopeId, error: toErrorMeta(error) });
+      return this.sendHtmlMessage(scopeId, fallbackHtml, inlineKeyboard);
+    }
+  }
+
+  private async sendRichMarkdownMessage(
+    scopeId: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    try {
+      return await this.messaging.sendRichMarkdown(scopeId, text, text, inlineKeyboard);
+    } catch (markdownError) {
+      this.logger.warn('telegram.rich_markdown_send_failed', { scopeId, error: toErrorMeta(markdownError) });
+      return this.sendRichHtmlMessage(
+        scopeId,
+        renderTelegramMarkdownRichHtml(text),
+        escapeTelegramHtml(text),
+        inlineKeyboard,
+      );
+    }
+  }
+
+  private async sendRichInternalMessage(
+    scopeId: string,
+    title: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<number> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      return this.sendMessage(scopeId, text, inlineKeyboard);
+    }
+    return this.sendRichHtmlMessage(
+      scopeId,
+      formatRichInternalMessage(title, text),
+      escapeTelegramHtml(text),
+      inlineKeyboard,
+    );
   }
 
   private async editMessage(
@@ -3782,6 +4364,78 @@ export class BridgeSessionCore {
     await this.messaging.editHtml(scopeId, messageId, text, inlineKeyboard);
   }
 
+  private async editRichHtmlMessage(
+    scopeId: string,
+    messageId: number,
+    html: string,
+    fallbackHtml: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    try {
+      await this.messaging.editRichHtml(scopeId, messageId, html, fallbackHtml, inlineKeyboard);
+    } catch (error) {
+      this.logger.warn('telegram.rich_message_edit_failed', { scopeId, messageId, error: toErrorMeta(error) });
+      await this.editHtmlMessage(scopeId, messageId, fallbackHtml, inlineKeyboard);
+    }
+  }
+
+  private async editRichInternalMessage(
+    scopeId: string,
+    messageId: number,
+    title: string,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      await this.editMessage(scopeId, messageId, text, inlineKeyboard);
+      return;
+    }
+    await this.editRichHtmlMessage(
+      scopeId,
+      messageId,
+      formatRichInternalMessage(title, text),
+      escapeTelegramHtml(text),
+      inlineKeyboard,
+    );
+  }
+
+  private async editAuthPanelMessage(
+    scopeId: string,
+    messageId: number,
+    text: string,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    await this.editRichInternalMessage(scopeId, messageId, '/auth', text, inlineKeyboard);
+    this.scheduleStalePanelDeletion(scopeId, messageId);
+  }
+
+  private scheduleStalePanelDeletion(scopeId: string, messageId: number): void {
+    if (this.config.telegramPanelTtlMs <= 0 || parseWeixinBridgeScope(scopeId)) {
+      return;
+    }
+    const key = `${scopeId}:${messageId}`;
+    const existing = this.stalePanelDeleteTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.stalePanelDeleteTimers.delete(key);
+      void this.deleteMessage(scopeId, messageId).catch(error => {
+        this.logger.warn('telegram.stale_panel_delete_failed', { scopeId, messageId, error: toErrorMeta(error) });
+      });
+    }, this.config.telegramPanelTtlMs);
+    timer.unref();
+    this.stalePanelDeleteTimers.set(key, timer);
+  }
+
+  private pauseStalePanelDeletion(scopeId: string, messageId: number): void {
+    const key = `${scopeId}:${messageId}`;
+    const timer = this.stalePanelDeleteTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.stalePanelDeleteTimers.delete(key);
+  }
+
   private async deleteMessage(scopeId: string, messageId: number): Promise<void> {
     await this.messaging.deleteMessage(scopeId, messageId);
   }
@@ -3795,28 +4449,79 @@ export class BridgeSessionCore {
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index]!;
       const body = index === 0
-        ? `<b>${escapeTelegramHtml(OBSERVED_CLI_USER_LABEL)}</b>\n<pre>${escapeTelegramHtml(chunk)}</pre>`
-        : `<pre>${escapeTelegramHtml(chunk)}</pre>`;
+        ? `${telegramBold(OBSERVED_CLI_USER_LABEL)}\n${telegramPre(chunk)}`
+        : telegramPre(chunk);
       await this.sendHtmlMessage(scopeId, body);
     }
   }
 
-  private async cleanupObservedTransientMessages(active: ActiveTurn): Promise<void> {
-    if (!active.isObserved || !this.hasObservedPersistentReply(active)) {
+  private async collapseTurnCommentary(active: ActiveTurn): Promise<void> {
+    if (active.scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX) || !this.hasObservedPersistentReply(active)) {
+      return;
+    }
+    const segments = active.segments.filter(segment => (
+      segment.outputKind === 'commentary' && Boolean(segment.text.trim()) && segment.messages.length > 0
+    ));
+    const messages = segments.flatMap(segment => segment.messages);
+    const firstMessage = messages[0];
+    if (!firstMessage) {
+      return;
+    }
+
+    const locale = this.localeForChat(active.scopeId);
+    const html = renderCollapsedCommentary(locale, segments);
+    const fallback = locale === 'zh'
+      ? `过程汇报（${segments.length} 条，已折叠）`
+      : `Progress updates (${segments.length}, collapsed)`;
+    try {
+      await this.messaging.editRichHtml(active.scopeId, firstMessage.messageId, html, fallback, []);
+    } catch (error) {
+      this.logger.warn('telegram.commentary_collapse_failed', {
+        error: String(error),
+        turnId: active.turnId,
+        messageId: firstMessage.messageId,
+      });
+      return;
+    }
+
+    for (const message of messages.slice(1)) {
+      try {
+        await this.deleteMessage(active.scopeId, message.messageId);
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.commentary_collapse_delete_failed', {
+            error: String(error),
+            turnId: active.turnId,
+            messageId: message.messageId,
+          });
+        }
+      }
+    }
+    for (const segment of segments) {
+      segment.messages = [];
+    }
+  }
+
+  private async cleanupTransientProgressMessages(active: ActiveTurn): Promise<void> {
+    if (!this.hasObservedPersistentReply(active)) {
       return;
     }
 
     const messageIds = new Set<number>();
-    for (const segment of active.segments) {
-      if (segment.outputKind === 'final_answer') {
-        continue;
-      }
-      for (const message of segment.messages) {
-        messageIds.add(message.messageId);
+    if (active.isObserved) {
+      for (const segment of active.segments) {
+        if (segment.outputKind === 'final_answer') {
+          continue;
+        }
+        for (const message of segment.messages) {
+          messageIds.add(message.messageId);
+        }
       }
     }
-    for (const messageId of active.archivedMessageIds) {
-      messageIds.add(messageId);
+    if (this.config.telegramDeleteToolDetailsAfterFinal) {
+      for (const messageId of active.archivedMessageIds) {
+        messageIds.add(messageId);
+      }
     }
 
     for (const messageId of messageIds) {
@@ -3824,7 +4529,7 @@ export class BridgeSessionCore {
         await this.deleteMessage(active.scopeId, messageId);
       } catch (error) {
         if (!isTelegramMessageGone(error)) {
-          this.logger.warn('telegram.observed_cleanup_delete_failed', {
+          this.logger.warn('telegram.transient_progress_cleanup_delete_failed', {
             error: String(error),
             turnId: active.turnId,
             messageId,
@@ -3835,6 +4540,9 @@ export class BridgeSessionCore {
   }
 
   private hasObservedPersistentReply(active: ActiveTurn): boolean {
+    if (active.interruptRequested) {
+      return true;
+    }
     if ((active.finalText || '').trim()) {
       return true;
     }
@@ -4431,7 +5139,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    this.queuedPrompts.delete(scopeId);
+    this.store.cancelQueuedTurnInputs(scopeId);
     const active = this.findActiveTurn(scopeId);
     if (active) {
       if (active.isObserved) {
@@ -4466,9 +5174,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    const replaced = this.queuedPrompts.has(scopeId);
-    this.queuedPrompts.set(scopeId, { event, text: nextPrompt });
-    await this.sendMessage(scopeId, t(locale, replaced ? 'queued_prompt_replaced' : 'queued_prompt_set'));
+    await this.queuePromptAfterActiveTurn(event, locale, nextPrompt);
   }
 
   private async handleActiveTurnInboundMessage(
@@ -4512,9 +5218,29 @@ export class BridgeSessionCore {
     locale: AppLocale,
     text: string,
   ): Promise<void> {
-    const replaced = this.queuedPrompts.has(event.scopeId);
-    this.queuedPrompts.set(event.scopeId, { event, text });
-    await this.sendMessage(event.scopeId, t(locale, replaced ? 'queued_prompt_replaced' : 'queued_prompt_set'));
+    const active = this.findActiveTurn(event.scopeId);
+    if (!active) {
+      await this.startBoundTurnFromEvent(event, locale, text);
+      return;
+    }
+    const input = await this.buildTurnInput({
+      threadId: active.threadId,
+      cwd: this.store.getBinding(event.scopeId)?.cwd ?? this.config.defaultCwd,
+    }, { ...event, text }, locale);
+    const queueId = this.enqueuePreparedTurnInput({
+      scopeId: event.scopeId,
+      chatId: event.chatId,
+      chatType: event.chatType,
+      topicId: event.topicId,
+      threadId: active.threadId,
+      input,
+      sourceSummary: summarizeTelegramInput(text, event.attachments),
+      messageId: event.messageId,
+    });
+    await this.sendMessage(event.scopeId, t(locale, 'queued_prompt_set', {
+      id: shortId(queueId),
+      position: this.store.countQueuedTurnInputs(event.scopeId),
+    }));
   }
 
   private async steerActiveTurn(
@@ -4534,20 +5260,110 @@ export class BridgeSessionCore {
     await this.sendMessage(event.scopeId, t(locale, 'steer_sent', { turnId: active.turnId }));
   }
 
+  private enqueuePreparedTurnInput(params: {
+    scopeId: string;
+    chatId: string;
+    chatType: string;
+    topicId: number | null;
+    threadId: string;
+    input: TurnInput[];
+    sourceSummary: string;
+    messageId: number | null;
+  }): string {
+    const now = Date.now();
+    const queueId = crypto.randomBytes(8).toString('hex');
+    this.store.saveQueuedTurnInput({
+      queueId,
+      scopeId: params.scopeId,
+      chatId: params.chatId,
+      chatType: params.chatType,
+      topicId: params.topicId,
+      threadId: params.threadId,
+      inputJson: JSON.stringify(params.input),
+      sourceSummary: params.sourceSummary,
+      messageId: params.messageId,
+      status: 'queued',
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+    return queueId;
+  }
+
+  private async startBoundTurnFromQueuedInput(record: QueuedTurnInputRecord): Promise<void> {
+    const scopeId = record.scopeId;
+    this.clearPlanImplementationPromptsForScope(scopeId);
+    await this.stopWatchingScopeThread(scopeId);
+    const existingBinding = this.store.getBinding(scopeId);
+    const binding = await this.ensureThreadReady(scopeId, {
+      chatId: scopeId,
+      threadId: record.threadId,
+      cwd: existingBinding?.cwd ?? null,
+      updatedAt: Date.now(),
+    });
+    this.store.setBinding(scopeId, binding.threadId, binding.cwd);
+    await this.sendTyping(scopeId);
+    const input = parseStoredTurnInput(record.inputJson);
+    const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
+    if (turnState.collaborationMode === 'plan') {
+      this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+    }
+    await this.registerActiveTurn(
+      scopeId,
+      record.chatId,
+      record.chatType,
+      record.topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        input,
+        threadId: turnState.threadId,
+        cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+        chatId: record.chatId,
+        chatType: record.chatType,
+        topicId: record.topicId,
+        collaborationMode: turnState.collaborationMode,
+        failedAuthTargets: new Set(),
+      },
+      turnState.collaborationMode,
+      record.queueId,
+    );
+  }
+
   private async startQueuedPromptIfPresent(scopeId: string): Promise<void> {
     if (this.findActiveTurn(scopeId)) {
       return;
     }
-    const queued = this.queuedPrompts.get(scopeId);
+    const queued = this.store.peekQueuedTurnInput(scopeId);
     if (!queued) {
       return;
     }
-    this.queuedPrompts.delete(scopeId);
-    await this.startBoundTurnFromEvent(
-      queued.event,
-      this.localeForChat(scopeId, queued.event.languageCode),
-      queued.text,
-    );
+    this.store.updateQueuedTurnInputStatus(queued.queueId, 'processing');
+    try {
+      await this.startBoundTurnFromQueuedInput(queued);
+    } catch (error) {
+      this.store.updateQueuedTurnInputStatus(queued.queueId, 'failed', formatUserError(error));
+      throw error;
+    }
+  }
+
+  private async recoverQueuedTurns(): Promise<void> {
+    const scopeIds = new Set(this.store.listQueuedTurnInputs().map((record) => record.scopeId));
+    for (const scopeId of scopeIds) {
+      if (!this.messaging.canSendToScope(scopeId)) {
+        continue;
+      }
+      await this.withLock(scopeId, async () => this.startQueuedPromptIfPresent(scopeId));
+    }
+  }
+
+  private markQueuedTurnCompleted(active: ActiveTurn): void {
+    if (!active.queuedInputId) {
+      return;
+    }
+    this.store.updateQueuedTurnInputStatus(active.queuedInputId, 'completed');
   }
 
   private async handleModeCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -4769,7 +5585,7 @@ export class BridgeSessionCore {
       return;
     }
     if (!this.isIdleForServiceUpdate() || this.store.countPendingApprovals() > 0 || this.store.countPendingUserInputs() > 0 || (this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate())) {
-      await this.sendMessage(scopeId, t(locale, 'update_blocked_active'));
+      await this.sendRichInternalMessage(scopeId, '/update', await this.formatSelfUpdateBlockedMessage(locale));
       return;
     }
     const status = await this.selfUpdater.readStatus();
@@ -4788,6 +5604,131 @@ export class BridgeSessionCore {
     } catch (error) {
       await this.selfUpdater.clearStatus().catch(() => undefined);
       await this.sendMessage(scopeId, t(locale, 'update_failed', { error: formatUserError(error) }));
+    }
+  }
+
+  private async formatSelfUpdateBlockedMessage(locale: AppLocale): Promise<string> {
+    const blockers = await this.collectSelfUpdateBlockers(locale);
+    if (locale === 'zh') {
+      return [
+        '现在不能从 Telegram 里升级 FoxClaw，因为后台仍有活动：',
+        '',
+        ...(blockers.length > 0 ? blockers.map((blocker) => `- ${blocker}`) : [`- ${t(locale, 'update_blocked_active')}`]),
+        '',
+        '说明：远端 auth 候选导入队列不等于本机 auth 文件数量；它可能来自其他节点还没清理或没收到删除广播的旧 team 账号。',
+        '处理：普通 Codex 回复可用 /interrupt；auth 同步队列请等待消化，或在远端清理旧候选后补发删除/安全同步。终端 foxclaw update 不受这个聊天保护限制。',
+      ].join('\n');
+    }
+    return [
+      'FoxClaw cannot be updated from Telegram because background work is still active:',
+      '',
+      ...(blockers.length > 0 ? blockers.map((blocker) => `- ${blocker}`) : [`- ${t(locale, 'update_blocked_active')}`]),
+      '',
+      'Note: remote auth import backlog is not the same as the number of local auth files; it can come from stale team accounts on another node.',
+      'Action: use /interrupt for normal Codex turns; let auth sync drain, or clean the remote stale candidates and resend delete/safe-sync events. Terminal foxclaw update bypasses this chat guard.',
+    ].join('\n');
+  }
+
+  private async collectSelfUpdateBlockers(locale: AppLocale): Promise<string[]> {
+    const blockers: string[] = [];
+    const pendingApprovals = this.pendingApprovalMessages.size + this.store.countPendingApprovals();
+    const pendingUserInputs = this.pendingUserInputs.size + this.store.countPendingUserInputs();
+    const localLabels = locale === 'zh'
+      ? {
+          activeTurns: '当前 runtime 活跃回复',
+          approvals: '待处理审批',
+          userInputs: '待回答问题',
+          mcp: '待处理 MCP 交互',
+          logins: '登录流程',
+          rotation: 'auth 自动轮换',
+          refreshAll: 'auth 全量刷新',
+          validation: '远端 auth 校验',
+          turnStart: '回复启动中',
+          otherRuntime: '其他 runtime 活跃',
+          weixin: '微信 runtime 活跃回复',
+          authQueue: '远端 auth 候选导入队列',
+          received: '最近收到',
+          imported: '最近导入',
+          failed: '最近失败',
+          lease: 'auth 同步租约',
+          error: 'auth 同步错误',
+          coordinator: '服务协调器报告仍忙',
+        }
+      : {
+          activeTurns: 'Current runtime active turns',
+          approvals: 'Pending approvals',
+          userInputs: 'Pending questions',
+          mcp: 'Pending MCP interactions',
+          logins: 'Login flows',
+          rotation: 'Auth rotation',
+          refreshAll: 'Auth refresh-all',
+          validation: 'Remote auth validation',
+          turnStart: 'Turn startup',
+          otherRuntime: 'Other runtime active turns',
+          weixin: 'Weixin runtime active turns',
+          authQueue: 'Remote auth candidate import queue',
+          received: 'last received',
+          imported: 'last imported',
+          failed: 'recent failure',
+          lease: 'Auth sync lease',
+          error: 'Auth sync error',
+          coordinator: 'Service coordinator reports busy',
+        };
+
+    if (this.activeTurns.size > 0) blockers.push(`${localLabels.activeTurns}: ${this.activeTurns.size}`);
+    if (pendingApprovals > 0) blockers.push(`${localLabels.approvals}: ${pendingApprovals}`);
+    if (pendingUserInputs > 0) blockers.push(`${localLabels.userInputs}: ${pendingUserInputs}`);
+    if (this.pendingMcpElicitations.size > 0) blockers.push(`${localLabels.mcp}: ${this.pendingMcpElicitations.size}`);
+    if (this.pendingLoginsByScope.size > 0) blockers.push(`${localLabels.logins}: ${this.pendingLoginsByScope.size}`);
+    if (this.authRotationInProgress) blockers.push(localLabels.rotation);
+    if (this.authRefreshAllInProgress) blockers.push(localLabels.refreshAll);
+    if (this.externalAuthValidationInProgress) blockers.push(localLabels.validation);
+    if (this.turnStartInProgress > 0) blockers.push(`${localLabels.turnStart}: ${this.turnStartInProgress}`);
+
+    const serviceStatus = await this.readServiceStatusForUpdateBlockers();
+    if (serviceStatus) {
+      const activeBots = serviceStatus.bots
+        .filter((runtime) => runtime.activeTurns > 0)
+        .map((runtime) => `${runtime.username ? `@${runtime.username}` : runtime.id} ${runtime.activeTurns}`);
+      if (activeBots.length > 0) {
+        blockers.push(`${localLabels.otherRuntime}: ${activeBots.join(', ')}`);
+      }
+      if ((serviceStatus.weixinRuntime?.activeTurns ?? 0) > 0) {
+        blockers.push(`${localLabels.weixin}: ${serviceStatus.weixinRuntime!.activeTurns}`);
+      }
+      const authSync = serviceStatus.authSync;
+      if (authSync?.enabled) {
+        if (authSync.pendingImports > 0) {
+          const details = [
+            authSync.lastReceivedAt ? `${localLabels.received} ${authSync.lastReceivedAt}` : null,
+            authSync.lastImportedAt ? `${localLabels.imported} ${authSync.lastImportCandidate ?? authSync.lastImportedAt}` : null,
+          ].filter(Boolean);
+          blockers.push(`${localLabels.authQueue}: ${authSync.pendingImports}${details.length > 0 ? ` (${details.join('; ')})` : ''}`);
+        }
+        const latestFailure = authSync.candidateFailures?.[0] ?? null;
+        if (latestFailure) {
+          const source = latestFailure.sourceLabel ?? latestFailure.peer ?? latestFailure.sourceNodeId;
+          blockers.push(`${localLabels.failed}: ${latestFailure.candidateName}: ${latestFailure.reason}${source ? ` (${source})` : ''}`);
+        }
+        if (authSync.activeLeaseId) blockers.push(`${localLabels.lease}: ${authSync.activeLeaseId}`);
+        if (authSync.lastError) blockers.push(`${localLabels.error}: ${authSync.lastError}`);
+      }
+    } else if (this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate()) {
+      blockers.push(localLabels.coordinator);
+    }
+    if (blockers.length === 0 && this.coordinator?.canSelfUpdate && !this.coordinator.canSelfUpdate()) {
+      blockers.push(localLabels.coordinator);
+    }
+    return blockers;
+  }
+
+  private async readServiceStatusForUpdateBlockers(): Promise<ServiceRuntimeStatus | null> {
+    if (!this.coordinator?.getServiceStatus) return null;
+    try {
+      return await this.coordinator.getServiceStatus();
+    } catch (error) {
+      this.logger.warn('self_update.service_status_failed', { error: toErrorMeta(error) });
+      return null;
     }
   }
 
@@ -4821,26 +5762,121 @@ export class BridgeSessionCore {
       this.scheduleSelfUpdateStatusPoll();
       return;
     }
+    if (status.scopeId.startsWith('cluster:')) {
+      this.coordinator?.selfUpdateCompleted?.(status);
+      await this.selfUpdater?.clearStatus();
+      return;
+    }
     if (!this.ownsScope(status.scopeId)) {
       this.scheduleSelfUpdateStatusPoll();
       return;
     }
     this.coordinator?.selfUpdateCompleted?.(status);
-    await this.sendMessage(status.scopeId, this.formatSelfUpdateResult(status));
+    const broadcast = await this.resolveSelfUpdateBroadcastSummary(status);
+    const result = this.formatSelfUpdateResult(status, broadcast);
+    await this.sendRichHtmlMessage(status.scopeId, result.html, result.fallbackHtml);
     await this.selfUpdater?.clearStatus();
   }
 
-  private formatSelfUpdateResult(status: SelfUpdateStatus): string {
+  private formatSelfUpdateResult(
+    status: SelfUpdateStatus,
+    broadcast: SelfUpdateBroadcastSummary,
+  ): { html: string; fallbackHtml: string } {
     const codexUpdateLine = this.formatCodexUpdateResult(status);
+    const releaseNotes = this.formatSelfUpdateReleaseNotes(status);
     if (status.state === 'succeeded') {
-      const result = t(status.locale, 'update_succeeded', {
+      const foxclawResult = t(status.locale, 'update_succeeded', {
         from: status.fromVersion,
         to: status.toVersion ?? t(status.locale, 'unknown'),
       });
-      return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+      const broadcastLine = formatSelfUpdateBroadcastLine(status.locale, status.toVersion, broadcast);
+      const rows = [
+        ['FoxClaw', `${status.fromVersion} -> ${status.toVersion ?? t(status.locale, 'unknown')}`, status.locale === 'zh' ? '升级完成，服务已重启' : 'Updated; service restarted'],
+        ['Codex CLI', formatSelfUpdateVersionTransition(status.codexFromVersion, status.codexToVersion, status.locale), formatCodexUpdateState(status)],
+        [status.locale === 'zh' ? '集群广播' : 'Cluster broadcast', status.toVersion ?? t(status.locale, 'unknown'), broadcastLine],
+      ];
+      const notes = status.releaseNotes?.filter(note => note.trim()) ?? [];
+      const notesHtml = notes.length > 0
+        ? telegramDetails(
+          status.locale === 'zh' ? `查看更新内容 · ${notes.length} 项` : `Release notes · ${notes.length} items`,
+          `<ul>${notes.map(note => `<li>${escapeTelegramHtml(note)}</li>`).join('')}</ul>`,
+        )
+        : '';
+      const title = status.locale === 'zh' ? 'FoxClaw 升级完成' : 'FoxClaw update completed';
+      const html = [
+        `<h3>${escapeTelegramHtml(title)}</h3>`,
+        renderTelegramTable(
+          status.locale === 'zh' ? ['组件', '版本', '结果'] : ['Component', 'Version', 'Result'],
+          rows,
+        ),
+        notesHtml,
+        '<footer>FoxClaw · update</footer>',
+      ].filter(Boolean).join('\n');
+      const fallbackHtml = [
+        telegramBold(title),
+        escapeTelegramHtml(foxclawResult),
+        escapeTelegramHtml(codexUpdateLine ?? (status.locale === 'zh' ? 'Codex CLI：未执行升级。' : 'Codex CLI: not updated.')),
+        escapeTelegramHtml(broadcastLine),
+        releaseNotes ? escapeTelegramHtml(releaseNotes) : '',
+      ].filter(Boolean).join('\n');
+      return { html, fallbackHtml };
     }
     const result = t(status.locale, 'update_failed', { error: status.error ?? t(status.locale, 'unknown') });
-    return codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+    const fallback = codexUpdateLine ? `${result}\n${codexUpdateLine}` : result;
+    return {
+      html: `<h3>${escapeTelegramHtml(status.locale === 'zh' ? 'FoxClaw 升级失败' : 'FoxClaw update failed')}</h3><p>${escapeTelegramHtml(fallback)}</p>`,
+      fallbackHtml: escapeTelegramHtml(fallback),
+    };
+  }
+
+  private async resolveSelfUpdateBroadcastSummary(status: SelfUpdateStatus): Promise<SelfUpdateBroadcastSummary> {
+    if (status.state !== 'succeeded' || !status.toVersion || !this.coordinator?.getServiceStatus) {
+      return { state: 'pending', sent: 0, peers: [] };
+    }
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const serviceStatus = await this.coordinator.getServiceStatus().catch(() => null);
+      const authSync = serviceStatus?.authSync;
+      if (!authSync?.enabled) {
+        return { state: 'disabled', sent: 0, peers: [] };
+      }
+      const recentEvents = authSync.recentEvents ?? [];
+      const updateCompletedAt = Date.parse(status.updatedAt);
+      const broadcast = [...recentEvents].reverse().find(event => (
+        event.kind === 'service.update.request'
+        && event.stage === 'broadcast'
+        && event.detail === `target=${status.toVersion}`
+        && (!Number.isFinite(updateCompletedAt) || Date.parse(event.createdAt) >= updateCompletedAt)
+      ));
+      if (broadcast) {
+        const peers = recentEvents
+          .filter(event => (
+            event.kind === 'service.update.request'
+            && event.stage === 'sent'
+            && event.direction === 'out'
+            && event.requestId === broadcast.requestId
+            && Boolean(event.peer)
+          ))
+          .map(event => event.peer!)
+          .filter((peer, index, all) => all.indexOf(peer) === index);
+        return { state: 'sent', sent: peers.length, peers };
+      }
+      if (attempt < 4) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    return { state: 'pending', sent: 0, peers: [] };
+  }
+
+  private formatSelfUpdateReleaseNotes(status: SelfUpdateStatus): string | null {
+    const notes = status.releaseNotes?.filter(note => note.trim()) ?? [];
+    if (status.state !== 'succeeded' || notes.length === 0) {
+      return null;
+    }
+    return [
+      '',
+      t(status.locale, 'update_changes_title'),
+      ...notes.map(note => `- ${note}`),
+    ].join('\n');
   }
 
   private formatCodexUpdateResult(status: SelfUpdateStatus): string | null {
@@ -4883,6 +5919,7 @@ export class BridgeSessionCore {
     const state = await this.listCodexAuthState();
     const dueCandidates = state.candidates.filter(candidate =>
       !candidate.disabled
+      && candidate.state !== 'needs_repair'
       && candidate.credentialKind === 'chatgpt'
       && candidate.credentialLastRefreshMs !== null
       && candidate.credentialLastRefreshMs <= Date.now() - CODEX_AUTH_PROACTIVE_REFRESH_DAYS * 24 * 60 * 60_000
@@ -4892,44 +5929,71 @@ export class BridgeSessionCore {
     }
 
     this.proactiveAuthRefreshInProgress = true;
-    const locale = this.proactiveAuthRefreshLocale();
-    await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_starting', {
-      value: dueCandidates.map(candidate => candidate.name).join(', '),
-    }));
+    const startedAt = new Date().toISOString();
+    const dueCandidateNames = dueCandidates.map(candidate => candidate.name);
+    this.recordProactiveAuthRefreshStatus({
+      state: 'running',
+      startedAt,
+      finishedAt: null,
+      candidates: dueCandidateNames,
+      refreshed: 0,
+      skipped: 0,
+      failed: 0,
+      error: null,
+      details: [],
+    });
     let lease: { ok: boolean; leaseId: string | null; reason?: string | null } | undefined;
     try {
-      lease = await this.coordinator?.acquireAuthRefreshLease?.(`proactive auth refresh: ${dueCandidates.map(candidate => candidate.name).join(', ')}`);
+      lease = await this.coordinator?.acquireAuthRefreshLease?.(`proactive auth refresh: ${dueCandidateNames.join(', ')}`);
       if (lease && !lease.ok) {
         this.logger.warn('codex.auth_proactive_refresh_lease_failed', { reason: lease.reason });
-        await this.notifyProactiveAuthRefresh(locale, t(locale, 'auth_proactive_refresh_lease_failed', {
-          error: lease.reason ?? t(locale, 'unknown'),
-        }));
+        this.recordProactiveAuthRefreshStatus({
+          state: 'lease_failed',
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          candidates: dueCandidateNames,
+          refreshed: 0,
+          skipped: 0,
+          failed: 0,
+          error: lease.reason ?? 'unknown',
+          details: [],
+        });
         return;
       }
-      const result = await this.refreshCodexAuthCandidates(new Set(dueCandidates.map(candidate => candidate.name)));
-      await this.notifyProactiveAuthRefresh(locale, formatAuthRefreshAllResult(locale, result, 'proactive'));
+      const result = await this.refreshCodexAuthCandidates(new Set(dueCandidateNames));
+      this.recordProactiveAuthRefreshStatus({
+        state: 'completed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        candidates: dueCandidateNames,
+        refreshed: result.refreshed.length,
+        skipped: result.skipped.length,
+        failed: result.failed.length,
+        error: result.failed.length > 0 ? `${result.failed.length} failed` : null,
+        details: result.failed.slice(0, 5).map(failure => `${failure.name}: ${failure.error}`),
+      });
+    } catch (error) {
+      this.recordProactiveAuthRefreshStatus({
+        state: 'failed',
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        candidates: dueCandidateNames,
+        refreshed: 0,
+        skipped: 0,
+        failed: dueCandidateNames.length,
+        error: formatUserError(error),
+        details: [],
+      });
+      throw error;
     } finally {
       await this.coordinator?.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
       this.proactiveAuthRefreshInProgress = false;
     }
   }
 
-  private proactiveAuthRefreshLocale(): AppLocale {
-    const identity = this.bot.identity;
-    if (!identity) return 'en';
-    const privateScope = this.store.getTelegramPrivateScope(identity);
-    if (!privateScope) return 'en';
-    return this.localeForChat(privateScope.scopeId);
-  }
-
-  private async notifyProactiveAuthRefresh(locale: AppLocale, message: string): Promise<void> {
-    const identity = this.bot.identity;
-    if (!identity) return;
-    const privateScope = this.store.getTelegramPrivateScope(identity);
-    if (!privateScope) return;
-    await this.bot.sendMessage(privateScope.chatId, message).catch((error) => {
-      this.logger.warn('codex.auth_proactive_refresh_notify_failed', { error: toErrorMeta(error) });
-    });
+  private recordProactiveAuthRefreshStatus(status: AuthProactiveRefreshStatus): void {
+    this.proactiveAuthRefreshStatus = status;
+    this.updateStatus();
   }
 
   private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
@@ -4976,26 +6040,35 @@ export class BridgeSessionCore {
     await this.refreshCurrentCodexAuthQuota(state);
     const record = createPendingAuthChoiceList(scopeId, state.candidates, listRequest);
     this.pendingAuthChoiceLists.set(record.localId, record);
-    const messageId = await this.sendMessage(
+    const authListMessage = renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null, record);
+    const messageId = await this.sendRichInternalMessage(
       scopeId,
-      renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null, record),
+      '/auth',
+      authListMessage,
       authChoiceKeyboard(locale, record),
     );
     record.messageId = messageId;
+    this.scheduleStalePanelDeletion(scopeId, messageId);
   }
 
   private async handleAuthSyncCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase() ?? 'status';
     if (action === 'status') {
-      await this.sendMessage(scopeId, formatAuthSyncStatus(locale, this.coordinator?.getAuthSyncStatus?.() ?? null));
+      const message = formatAuthSyncStatus(
+        locale,
+        this.coordinator?.getAuthSyncStatus?.() ?? null,
+        this.getRuntimeStatus().authProactiveRefresh ?? null,
+      );
+      await this.sendRichInternalMessage(scopeId, '/auth sync status', message);
       return;
     }
     if (action === 'events') {
-      await this.sendMessage(scopeId, formatAuthSyncEvents(
+      const message = formatAuthSyncEvents(
         locale,
         this.coordinator?.getAuthSyncStatus?.() ?? null,
         args.slice(1).join(' ').trim() || null,
-      ));
+      );
+      await this.sendRichInternalMessage(scopeId, '/auth sync events', message);
       return;
     }
     if (action === 'trace') {
@@ -5004,7 +6077,11 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_trace_missing'));
         return;
       }
-      await this.sendMessage(scopeId, formatAuthSyncTrace(locale, this.coordinator?.getAuthSyncStatus?.() ?? null, requestId));
+      await this.sendRichInternalMessage(
+        scopeId,
+        '/auth sync trace',
+        formatAuthSyncTrace(locale, this.coordinator?.getAuthSyncStatus?.() ?? null, requestId),
+      );
       return;
     }
     if (action === 'test') {
@@ -5020,23 +6097,91 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, message);
       return;
     }
+    if (action === 'audit' || action === 'check' || action === 'safe') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.sendMessage(scopeId, t(locale, 'auth_cluster_audit_blocked_active'));
+        return;
+      }
+      await this.sendMessage(scopeId, t(locale, 'auth_cluster_audit_starting'));
+      const outcome = await this.runAuthClusterAudit();
+      if (!outcome) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
+        return;
+      }
+      await this.sendRichInternalMessage(scopeId, '/auth sync safe', formatAuthClusterAuditResult(locale, outcome));
+      return;
+    }
     if (action === 'push' && args[1]?.toLowerCase() === 'all') {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_push_blocked_active'));
         return;
       }
-      const result = await this.coordinator?.authSyncPushAll?.();
+      const result = await this.runAuthSafeSyncAll();
       if (!result) {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_disabled'));
         return;
       }
-      await this.sendMessage(scopeId, t(locale, 'auth_sync_push_done', {
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_safe_done', {
+        localSynced: result.localSynced,
+        localSkipped: result.localSkipped,
         sent: result.sent,
         skipped: result.skipped,
       }));
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'usage_auth_sync'));
+  }
+
+  private async runAuthSafeSyncAll(): Promise<{ localSynced: number; localSkipped: number; sent: number; skipped: number } | null> {
+    const safeResult = await this.coordinator?.authSyncSafeAll?.();
+    if (safeResult) {
+      return safeResult;
+    }
+    const pushResult = await this.coordinator?.authSyncPushAll?.();
+    return pushResult
+      ? { localSynced: 0, localSkipped: 0, sent: pushResult.sent, skipped: pushResult.skipped }
+      : null;
+  }
+
+  private async runAuthClusterAudit(): Promise<CodexAuthClusterAuditOutcome | null> {
+    if (!this.coordinator?.authSyncAudit) return null;
+    const lease = await this.coordinator.acquireAuthRefreshLease?.('cluster auth audit and stale refresh');
+    if (lease && !lease.ok) {
+      throw new UserFacingError(lease.reason ?? 'cluster auth audit lease was not granted');
+    }
+    try {
+      const audit = await this.coordinator.authSyncAudit();
+      if (!audit) return null;
+      const refresh: CodexAuthRefreshAllResult = { refreshed: [], skipped: [], failed: [] };
+      let refreshSkippedReason: string | null = null;
+      const complete = audit.nodesResponded === audit.nodesExpected
+        && audit.missingPeers.length === 0
+        && audit.busyNodes.length === 0;
+      if (complete) {
+        const state = await this.listCodexAuthState();
+        const staleNames = new Set(state.candidates
+          .filter(candidate => (
+            !candidate.disabled
+            && candidate.state !== 'needs_repair'
+            && candidate.credentialKind === 'chatgpt'
+            && candidate.credentialLastRefreshMs !== null
+            && candidate.credentialLastRefreshMs <= Date.now() - CODEX_AUTH_PROACTIVE_REFRESH_DAYS * 24 * 60 * 60_000
+          ))
+          .map(candidate => candidate.name));
+        if (staleNames.size > 0) {
+          const refreshed = await this.refreshCodexAuthCandidates(staleNames);
+          refresh.refreshed.push(...refreshed.refreshed);
+          refresh.skipped.push(...refreshed.skipped);
+          refresh.failed.push(...refreshed.failed);
+        }
+      } else {
+        refreshSkippedReason = 'cluster audit was incomplete';
+      }
+      const push = await this.coordinator.authSyncPushAll?.() ?? { sent: 0, skipped: 0 };
+      return { audit, refresh, push, refreshSkippedReason };
+    } finally {
+      await this.coordinator.releaseAuthRefreshLease?.(lease?.leaseId ?? null);
+    }
   }
 
   private async handleAuthRefreshAllCommand(scopeId: string, locale: AppLocale, confirmed = false): Promise<void> {
@@ -5101,6 +6246,10 @@ export class BridgeSessionCore {
       await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
       const state = await this.listCodexAuthState();
       await this.sendMessage(scopeId, renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(scopeId) !== null));
+      return;
+    }
+    if (candidate.state === 'needs_repair') {
+      await this.sendMessage(scopeId, t(locale, 'auth_candidate_needs_repair', { value: candidate.name }));
       return;
     }
     const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
@@ -5186,6 +6335,7 @@ export class BridgeSessionCore {
         name: candidateName,
         path: targetPath,
         previousTargetPath: state.currentTargetPath,
+        mode: 'add',
         createdAt: Date.now(),
       });
       await this.sendMessage(scopeId, [
@@ -5200,6 +6350,98 @@ export class BridgeSessionCore {
       await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, state.currentTargetPath);
       throw error;
     }
+  }
+
+  private async startAuthRepairLogin(
+    scopeId: string,
+    locale: AppLocale,
+    candidate: CodexAuthCandidate,
+  ): Promise<void> {
+    const state = await this.listCodexAuthState();
+    const target = state.candidates.find(entry => entry.name === candidate.name) ?? null;
+    if (!target) {
+      await this.sendMessage(scopeId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+
+    await pointCodexAuthAtTarget(state.authDir, state.authPath, target.path);
+    this.pendingTurnErrors.clear();
+    this.attachedThreads.clear();
+    try {
+      await this.app.restart();
+      const login = await this.app.startDeviceLogin();
+      const oldLoginId = this.pendingLoginsByScope.get(scopeId);
+      if (oldLoginId) {
+        this.pendingLoginScopesById.delete(oldLoginId);
+        this.pendingAuthAddsByLoginId.delete(oldLoginId);
+      }
+      this.pendingLoginsByScope.set(scopeId, login.loginId);
+      this.pendingLoginScopesById.set(login.loginId, scopeId);
+      this.pendingAuthAddsByLoginId.set(login.loginId, {
+        loginId: login.loginId,
+        scopeId,
+        name: target.name,
+        path: target.path,
+        previousTargetPath: state.currentTargetPath,
+        mode: 'repair',
+        createdAt: Date.now(),
+      });
+      await this.sendMessage(scopeId, [
+        t(locale, 'auth_repair_started', { value: target.name }),
+        t(locale, 'login_device_prereq'),
+        t(locale, 'login_url', { value: login.verificationUrl }),
+        t(locale, 'login_code', { value: login.userCode }),
+        t(locale, 'login_id', { value: login.loginId }),
+        t(locale, 'login_cancel_hint', { value: login.loginId }),
+      ].join('\n'));
+    } catch (error) {
+      await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, state.currentTargetPath);
+      throw error;
+    }
+  }
+
+  private async deleteCodexAuthCandidate(
+    candidate: CodexAuthCandidate,
+    reason: string | null = null,
+  ): Promise<boolean> {
+    const wasCurrent = candidate.isCurrent;
+    const authDir = this.resolveAuthDir();
+    const authPath = path.join(authDir, 'auth.json');
+    let deletedByCoordinator = false;
+    try {
+      await this.coordinator?.authCandidateDeleted?.(this.authRuntimeId(), candidate.name, reason);
+      deletedByCoordinator = Boolean(this.coordinator?.authCandidateDeleted);
+    } catch (error) {
+      this.logger.warn('codex.auth_candidate_delete_sync_failed', {
+        candidate: candidate.name,
+        runtimeId: this.authRuntimeId(),
+        error: toErrorMeta(error),
+      });
+    }
+    if (!deletedByCoordinator) {
+      await fs.rm(candidate.path, { force: true }).catch(() => undefined);
+      if (wasCurrent) {
+        await fs.rm(authPath, { force: true }).catch(() => undefined);
+      }
+    }
+    this.store.deleteCodexAuthCandidate(candidate.name);
+    if (isInvalidCodexAuthDeleteReason(reason)) {
+      this.store.recordCodexAuthCandidateInvalidDelete(candidate.name, reason);
+    } else {
+      this.store.recordCodexAuthCandidateRemoved(candidate.name, reason);
+    }
+    this.authRotationFailedTargets.delete(candidate.path);
+    const snapshots = await this.readCodexAuthQuotaSnapshots();
+    if (Object.prototype.hasOwnProperty.call(snapshots, candidate.name)) {
+      delete snapshots[candidate.name];
+      await this.writeCodexAuthQuotaSnapshots();
+    }
+    if (wasCurrent) {
+      this.pendingTurnErrors.clear();
+      this.attachedThreads.clear();
+      await this.app.restart();
+    }
+    return wasCurrent;
   }
 
   private async handleAccountCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -5234,6 +6476,92 @@ export class BridgeSessionCore {
     }
     await this.app.sendAddCreditsNudgeEmail(creditType);
     await this.sendMessage(scopeId, t(locale, 'quota_nudge_sent'));
+  }
+
+  private async handleVoiceCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (args[0]?.toLowerCase() === 'file' || args[0]?.toLowerCase() === 'send') {
+      await this.handleVoiceFileCommand(scopeId, locale, args.slice(1));
+      return;
+    }
+    const raw = args.join(' ').trim();
+    const snippetId = raw.toLowerCase() === 'last' ? this.latestVoiceSnippetByScope.get(scopeId) ?? null : null;
+    const text = snippetId ? this.voiceSnippets.get(snippetId)?.text ?? '' : raw;
+    if (!text) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '用法：/voice 要朗读的文本，或 /voice last' : 'Usage: /voice text to read, or /voice last');
+      return;
+    }
+    await this.sendVoiceForText(scopeId, locale, text);
+  }
+
+  private async handleVoiceFileCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '当前只有 Telegram 支持语音消息。' : 'Voice messages are currently supported only on Telegram.');
+      return;
+    }
+    const fileArg = args[0]?.trim();
+    if (!fileArg) {
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? '用法：/voice file /path/to/audio.ogg [说明]'
+        : 'Usage: /voice file /path/to/audio.ogg [caption]');
+      return;
+    }
+    const filePath = path.resolve(this.config.defaultCwd, fileArg);
+    const contentType = telegramVoiceContentType(filePath);
+    if (!contentType) {
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? '只支持作为 Telegram voice 发送的音频格式：.ogg、.opus、.oga、.mp3、.m4a。'
+        : `Supported Telegram voice file formats: ${TELEGRAM_VOICE_SUPPORTED_EXTENSIONS}.`);
+      return;
+    }
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (!stat?.isFile()) {
+      await this.sendMessage(scopeId, locale === 'zh' ? `找不到音频文件：${filePath}` : `Audio file not found: ${filePath}`);
+      return;
+    }
+    if (stat.size > TELEGRAM_VOICE_MAX_BYTES) {
+      await this.sendMessage(scopeId, locale === 'zh' ? 'Telegram voice 文件不能超过 50MB。' : 'Telegram voice files must be 50MB or smaller.');
+      return;
+    }
+    try {
+      const contents = await fs.readFile(filePath);
+      const caption = args.slice(1).join(' ').trim() || (locale === 'zh' ? 'FoxClaw 语音文件' : 'FoxClaw voice file');
+      await this.messaging.sendVoice(scopeId, path.basename(filePath), contents, caption, contentType);
+    } catch (error) {
+      this.logger.warn('voice.file_send_failed', { scopeId, filePath, error: toErrorMeta(error) });
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? `语音文件发送失败：${formatUserError(error)}`
+        : `Voice file send failed: ${formatUserError(error)}`);
+    }
+  }
+
+  private async handleVoiceCallback(event: TelegramCallbackEvent, localId: string, locale: AppLocale): Promise<void> {
+    const snippet = this.voiceSnippets.get(localId);
+    if (!snippet || snippet.scopeId !== event.scopeId) {
+      await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '这条总结语音已过期' : 'This voice summary has expired');
+      return;
+    }
+    await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '正在生成语音...' : 'Generating voice...');
+    await this.sendVoiceForText(event.scopeId, locale, snippet.text);
+  }
+
+  private async sendVoiceForText(scopeId: string, locale: AppLocale, text: string): Promise<void> {
+    if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '当前只有 Telegram 支持语音消息。' : 'Voice messages are currently supported only on Telegram.');
+      return;
+    }
+    if (!this.config.voiceTtsEnabled) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '语音服务未启用。' : 'Voice TTS is not enabled.');
+      return;
+    }
+    try {
+      const voice = await synthesizeTelegramVoice(text, this.config);
+      await this.messaging.sendVoice(scopeId, voice.filename, voice.contents, locale === 'zh' ? 'FoxClaw 总结语音' : 'FoxClaw voice summary');
+    } catch (error) {
+      this.logger.warn('voice.summary_failed', { scopeId, error: toErrorMeta(error) });
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? `语音生成失败：${formatUserError(error)}`
+        : `Voice generation failed: ${formatUserError(error)}`);
+    }
   }
 
   private async handleLoginDeviceCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -5430,13 +6758,25 @@ export class BridgeSessionCore {
     }
   }
 
+  private async handleRichCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    await this.sendRichHtmlMessage(
+      scopeId,
+      formatRichDemoMessage(locale),
+      formatRichDemoFallbackMessage(locale),
+    );
+  }
+
   private async handleDiffCommand(scopeId: string, locale: AppLocale): Promise<void> {
     const diff = this.latestTurnDiffs.get(scopeId);
     if (!diff?.diff.trim()) {
       await this.sendMessage(scopeId, t(locale, 'diff_unavailable'));
       return;
     }
-    await this.sendMessage(scopeId, formatDiffMessage(locale, diff.diff));
+    await this.sendRichHtmlMessage(
+      scopeId,
+      formatRichDiffMessage(locale, diff.diff),
+      formatDiffMessage(locale, diff.diff),
+    );
   }
 
   private async handleLoadedCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -5525,10 +6865,104 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, formatFeaturesMessage(locale, features));
   }
 
-  private async handleConfigCommand(scopeId: string, locale: AppLocale): Promise<void> {
+  private async handleConfigCommand(scopeId: string, locale: AppLocale, args: string[] = []): Promise<void> {
+    const action = args[0]?.toLowerCase() ?? '';
+    if (['auth_auto_delete', 'auth-auto-delete', 'auto_delete_needs_repair', 'auto-delete-needs-repair'].includes(action)) {
+      const enabled = parseConfigBooleanArg(args[1]);
+      if (enabled === null) {
+        await this.sendMessage(scopeId, t(locale, 'config_auth_auto_delete_usage'));
+        return;
+      }
+      const update = await this.setFoxClawBooleanConfig('auth_auto_delete', enabled);
+      const binding = this.store.getBinding(scopeId);
+      const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+      const sentMessageId = await this.sendMessage(
+        scopeId,
+        `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
+        configKeyboard(locale, this.config),
+      );
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
+      return;
+    }
+    if (['delete_tool_details', 'delete-tool-details', 'tool_details', 'tool-details'].includes(action)) {
+      const enabled = parseConfigBooleanArg(args[1]);
+      if (enabled === null) {
+        await this.sendMessage(scopeId, t(locale, 'config_delete_tool_details_usage'));
+        return;
+      }
+      const update = await this.setFoxClawBooleanConfig('delete_tool_details', enabled);
+      const binding = this.store.getBinding(scopeId);
+      const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+      const sentMessageId = await this.sendMessage(
+        scopeId,
+        `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
+        configKeyboard(locale, this.config),
+      );
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
+      return;
+    }
     const binding = this.store.getBinding(scopeId);
     const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-    await this.sendMessage(scopeId, formatConfigMessage(locale, result));
+    const sentMessageId = await this.sendMessage(scopeId, formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats()), configKeyboard(locale, this.config));
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
+  }
+
+  private async handleConfigToggleCallback(
+    event: TelegramCallbackEvent,
+    key: 'auth_auto_delete' | 'delete_tool_details',
+    enabled: boolean,
+    locale: AppLocale,
+  ): Promise<void> {
+    const update = await this.setFoxClawBooleanConfig(key, enabled);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+    const binding = this.store.getBinding(event.scopeId);
+    const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
+    const message = `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`;
+    if (event.messageId !== null) {
+      await this.editMessage(event.scopeId, event.messageId, message, configKeyboard(locale, this.config));
+      this.scheduleStalePanelDeletion(event.scopeId, event.messageId);
+    } else {
+      const sentMessageId = await this.sendMessage(event.scopeId, message, configKeyboard(locale, this.config));
+      this.scheduleStalePanelDeletion(event.scopeId, sentMessageId);
+    }
+  }
+
+  private async setFoxClawBooleanConfig(
+    key: 'auth_auto_delete' | 'delete_tool_details',
+    enabled: boolean,
+  ): Promise<{ key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envKey: string; envPath: string | null; envUpdated: boolean; envError: string | null }> {
+    const envKey = key === 'auth_auto_delete'
+      ? 'AUTH_AUTO_DELETE_NEEDS_REPAIR'
+      : 'TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL';
+    if (key === 'auth_auto_delete') {
+      this.config.authAutoDeleteNeedsRepair = enabled;
+    } else {
+      this.config.telegramDeleteToolDetailsAfterFinal = enabled;
+    }
+    const envPath = this.config.envPath;
+    if (!envPath) {
+      return { key, enabled, envKey, envPath: null, envUpdated: false, envError: null };
+    }
+    try {
+      await writeEnvBoolean(envPath, envKey, enabled);
+      return { key, enabled, envKey, envPath, envUpdated: true, envError: null };
+    } catch (error) {
+      this.logger.warn('config.env_update_failed', { key: envKey, envPath, error: toErrorMeta(error) });
+      return { key, enabled, envKey, envPath, envUpdated: false, envError: formatUserError(error) };
+    }
+  }
+
+  private formatConfigToggleUpdate(
+    locale: AppLocale,
+    update: { key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null },
+  ): string {
+    const lines = [t(locale, update.key === 'auth_auto_delete' ? 'config_auth_auto_delete_updated' : 'config_delete_tool_details_updated', {
+      value: t(locale, update.enabled ? 'yes' : 'no'),
+    })];
+    if (update.envError) {
+      lines.push(t(locale, 'config_env_update_failed', { value: update.envPath ?? t(locale, 'unknown'), error: update.envError }));
+    }
+    return lines.join('\n');
   }
 
   private async handleRequirementsCommand(scopeId: string, locale: AppLocale): Promise<void> {
@@ -5591,7 +7025,7 @@ export class BridgeSessionCore {
   private async handleAuthPanelActionCallback(
     event: TelegramCallbackEvent,
     localId: string,
-    action: 'login_device' | 'reload' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
+    action: 'login_device' | 'reload' | 'safe_sync' | 'cluster_audit' | 'refresh_all' | 'refresh_all_confirm' | 'refresh_all_cancel',
     locale: AppLocale,
   ): Promise<void> {
     const record = this.pendingAuthChoiceLists.get(localId);
@@ -5608,6 +7042,103 @@ export class BridgeSessionCore {
       await this.handleLoginDeviceCommand(event.scopeId, locale);
       return;
     }
+    if (action === 'safe_sync') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_sync_push_blocked_active'));
+        return;
+      }
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_sync_safe_starting'));
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_safe_starting'), []);
+      }
+      if (record.messageId !== null) {
+        this.pauseStalePanelDeletion(event.scopeId, record.messageId);
+      }
+      let outcome: CodexAuthClusterAuditOutcome | null;
+      try {
+        outcome = await this.runAuthClusterAudit();
+      } catch (error) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_cluster_audit_failed', { error: formatUserError(error) }),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      if (!outcome) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_sync_disabled'),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      clampCodexAuthListOffset(record);
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(
+          event.scopeId,
+          record.messageId,
+          `${formatAuthClusterAuditResult(locale, outcome)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
+          authChoiceKeyboard(locale, record),
+        );
+      }
+      return;
+    }
+    if (action === 'cluster_audit') {
+      if (!this.canRunGlobalAuthRefresh()) {
+        await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_cluster_audit_blocked_active'));
+        return;
+      }
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_cluster_audit_starting'));
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_cluster_audit_starting'), []);
+        this.pauseStalePanelDeletion(event.scopeId, record.messageId);
+      }
+      let outcome: CodexAuthClusterAuditOutcome | null;
+      try {
+        outcome = await this.runAuthClusterAudit();
+      } catch (error) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(
+            event.scopeId,
+            record.messageId,
+            t(locale, 'auth_cluster_audit_failed', { error: formatUserError(error) }),
+            authChoiceKeyboard(locale, record),
+          );
+        }
+        return;
+      }
+      if (!outcome) {
+        if (record.messageId !== null) {
+          await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_sync_disabled'), authChoiceKeyboard(locale, record));
+        }
+        return;
+      }
+      const state = await this.listCodexAuthState();
+      await this.applySharedCodexAuthQuotaSnapshots(state);
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      clampCodexAuthListOffset(record);
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(
+          event.scopeId,
+          record.messageId,
+          `${formatAuthClusterAuditResult(locale, outcome)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
+          authChoiceKeyboard(locale, record),
+        );
+      }
+      return;
+    }
     if (action === 'refresh_all') {
       if (!this.canRunGlobalAuthRefresh()) {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_blocked_active'));
@@ -5615,7 +7146,7 @@ export class BridgeSessionCore {
       }
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_confirm_short'));
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           t(locale, 'auth_refresh_all_confirm_message'),
@@ -5631,7 +7162,7 @@ export class BridgeSessionCore {
       record.candidates = state.candidates;
       record.createdAt = Date.now();
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
@@ -5647,12 +7178,12 @@ export class BridgeSessionCore {
       }
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_refresh_all_starting'));
       if (record.messageId !== null) {
-        await this.editMessage(event.scopeId, record.messageId, t(locale, 'auth_refresh_all_starting'), []);
+        await this.editAuthPanelMessage(event.scopeId, record.messageId, t(locale, 'auth_refresh_all_starting'), []);
       }
       const lease = await this.coordinator?.acquireAuthRefreshLease?.('auth refresh all');
       if (lease && !lease.ok) {
         if (record.messageId !== null) {
-          await this.editMessage(
+          await this.editAuthPanelMessage(
             event.scopeId,
             record.messageId,
             t(locale, 'auth_refresh_all_lease_failed', { error: lease.reason ?? t(locale, 'unknown') }),
@@ -5672,7 +7203,7 @@ export class BridgeSessionCore {
       record.candidates = state.candidates;
       record.createdAt = Date.now();
       if (record.messageId !== null) {
-        await this.editMessage(
+        await this.editAuthPanelMessage(
           event.scopeId,
           record.messageId,
           `${formatAuthRefreshAllResult(locale, result)}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
@@ -5717,10 +7248,112 @@ export class BridgeSessionCore {
     clampCodexAuthListOffset(record);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        authChoiceKeyboard(locale, record),
+      );
+    }
+  }
+
+  private async handleAuthRepairMenuCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    index: number,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingAuthChoiceLists.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
+      return;
+    }
+    const candidate = record.candidates[index];
+    if (!candidate) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_repair_actions_short'));
+    if (record.messageId !== null) {
+      await this.editAuthPanelMessage(
+        event.scopeId,
+        record.messageId,
+        t(locale, 'auth_repair_actions_message', { value: formatCodexAuthCandidateDisplayName(candidate.name) }),
+        authRepairKeyboard(locale, record, index),
+      );
+    }
+  }
+
+  private async handleAuthRepairActionCallback(
+    event: TelegramCallbackEvent,
+    localId: string,
+    action: 'login' | 'delete' | 'cancel',
+    index: number,
+    locale: AppLocale,
+  ): Promise<void> {
+    const record = this.pendingAuthChoiceLists.get(localId);
+    if (!record) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_expired'));
+      return;
+    }
+    if (record.chatId !== event.scopeId || (record.messageId !== null && record.messageId !== event.messageId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_mismatch'));
+      return;
+    }
+    const candidate = record.candidates[index];
+    if (!candidate) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    if (action === 'cancel') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
+      const state = await this.listCodexAuthState();
+      record.candidates = state.candidates;
+      record.createdAt = Date.now();
+      clampCodexAuthListOffset(record);
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(
+          event.scopeId,
+          record.messageId,
+          renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+          authChoiceKeyboard(locale, record),
+        );
+      }
+      return;
+    }
+    if (this.hasLocalBlockingActivity()) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_reload_blocked_active'));
+      return;
+    }
+    if (action === 'login') {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'login_device_started'));
+      if (record.messageId !== null) {
+        await this.editAuthPanelMessage(
+          event.scopeId,
+          record.messageId,
+          t(locale, 'auth_repair_login_preparing', { value: candidate.name }),
+          [],
+        );
+      }
+      await this.startAuthRepairLogin(event.scopeId, locale, candidate);
+      return;
+    }
+
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_candidate_deleted_short'));
+    const restarted = await this.deleteCodexAuthCandidate(candidate);
+    const state = await this.listCodexAuthState();
+    record.candidates = state.candidates;
+    record.createdAt = Date.now();
+    clampCodexAuthListOffset(record);
+    if (record.messageId !== null) {
+      await this.editAuthPanelMessage(
+        event.scopeId,
+        record.messageId,
+        `${t(locale, 'auth_candidate_deleted', { value: candidate.name })}${restarted ? `\n${t(locale, 'auth_delete_current_restarted')}` : ''}\n\n${renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record)}`,
         authChoiceKeyboard(locale, record),
       );
     }
@@ -5753,7 +7386,7 @@ export class BridgeSessionCore {
     clampCodexAuthListOffset(record);
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, disabled ? 'auth_candidate_disabled_short' : 'auth_candidate_enabled_short'));
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
         renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
@@ -5786,24 +7419,30 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
+    if (candidate.state === 'needs_repair') {
+      await this.handleAuthRepairMenuCallback(event, localId, index, locale);
+      return;
+    }
 
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_choice_recorded'));
     const switchLabels = await this.readCodexAuthSwitchLabels(candidate);
     const switchingMessage = t(locale, 'auth_switching', this.codexAuthSwitchParams(locale, switchLabels.fromLabel, switchLabels.toLabel));
     if (record.messageId !== null) {
-      await this.editMessage(event.scopeId, record.messageId, switchingMessage, []);
+      await this.editAuthPanelMessage(event.scopeId, record.messageId, switchingMessage, []);
     }
-    await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false, false);
+    const outcome = await this.switchCodexAuthAndRestart(event.scopeId, locale, candidate, false, false);
     const state = await this.listCodexAuthState();
-    await this.refreshCurrentCodexAuthQuota(state);
     record.candidates = state.candidates;
     record.createdAt = Date.now();
     clampCodexAuthListOffset(record);
     if (record.messageId !== null) {
-      await this.editMessage(
+      await this.editAuthPanelMessage(
         event.scopeId,
         record.messageId,
-        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        [
+          ...this.formatAuthSwitchValidationLines(locale, outcome),
+          renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        ].filter(Boolean).join('\n\n'),
         authChoiceKeyboard(locale, record),
       );
     }
@@ -5824,7 +7463,7 @@ export class BridgeSessionCore {
       const failedTargets = rotation.retry?.failedAuthTargets ?? this.authRotationFailedTargets;
       const locale = this.localeForChat(rotation.scopeId);
       const current = (await this.listCodexAuthState()).candidates.find(candidate => candidate.isCurrent) ?? null;
-      if (current) {
+      if (current && rotation.reasonKind === 'auth_invalid') {
         const recoveredCurrent = await this.recoverCodexAuthCandidate(current.name);
         if (recoveredCurrent) {
           await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_recovered_current', {
@@ -5841,25 +7480,40 @@ export class BridgeSessionCore {
           }
           return false;
         }
+        const disposition = await this.markCodexAuthCandidateNeedsRepair(current.name);
+        if (disposition.deleted) {
+          await this.sendMessage(rotation.scopeId, formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()));
+        }
       }
-      const selection = await this.selectNextCodexAuthCandidate(failedTargets);
-      if (!selection) {
-        await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_no_candidate', {
-          error: formatShortStatusError(rotation.reason),
-        }));
+      while (true) {
+        const selection = await this.selectNextCodexAuthCandidate(failedTargets);
+        if (!selection) {
+          await this.sendMessage(rotation.scopeId, t(locale, rotation.reasonKind === 'quota_limited' ? 'auth_quota_no_candidate' : 'auth_auto_no_candidate', {
+            error: formatShortStatusError(rotation.reason),
+          }));
+          return false;
+        }
+        const { candidate, fromLabel, toLabel } = selection;
+        const switchingKey = rotation.reasonKind === 'quota_limited'
+          ? (this.config.authAutoDeleteNeedsRepair ? 'auth_quota_switching_quiet' : 'auth_quota_switching')
+          : (this.config.authAutoDeleteNeedsRepair ? 'auth_auto_switching_quiet' : 'auth_auto_switching');
+        await this.sendMessage(rotation.scopeId, this.config.authAutoDeleteNeedsRepair
+          ? t(locale, switchingKey, { error: formatShortStatusError(rotation.reason) })
+          : t(locale, switchingKey, {
+            ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
+            error: formatShortStatusError(rotation.reason),
+          }));
+        const outcome = await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true, true, rotation.reasonKind);
+        if (!outcome.ok) {
+          failedTargets.add(candidate.path);
+          continue;
+        }
+        if (rotation.retry) {
+          await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
+          return true;
+        }
         return false;
       }
-      const { candidate, fromLabel, toLabel } = selection;
-      await this.sendMessage(rotation.scopeId, t(locale, 'auth_auto_switching', {
-        ...this.codexAuthSwitchParams(locale, fromLabel, toLabel),
-        error: formatShortStatusError(rotation.reason),
-      }));
-      await this.switchCodexAuthAndRestart(rotation.scopeId, locale, candidate, true);
-      if (rotation.retry) {
-        await this.retryTurnAfterAuthRotation(rotation.scopeId, locale, rotation.retry);
-        return true;
-      }
-      return false;
     } catch (error) {
       await this.handleAsyncError('codex.auth_rotation', error, rotation.scopeId);
       return false;
@@ -5928,7 +7582,10 @@ export class BridgeSessionCore {
     if (state.currentTargetPath) {
       failedTargets.add(state.currentTargetPath);
     }
-    const candidates = state.candidates.filter(candidate => !candidate.disabled && !failedTargets.has(candidate.path));
+    const candidates = state.candidates.filter(candidate =>
+      !candidate.disabled
+      && candidate.state !== 'needs_repair'
+      && !failedTargets.has(candidate.path));
     if (candidates.length === 0) {
       return null;
     }
@@ -5938,7 +7595,12 @@ export class BridgeSessionCore {
       : -1;
     for (let offset = 1; offset <= state.candidates.length; offset += 1) {
       const candidate = state.candidates[(currentIndex + offset + state.candidates.length) % state.candidates.length];
-      if (candidate && !candidate.disabled && !failedTargets.has(candidate.path)) {
+      if (
+        candidate
+        && !candidate.disabled
+        && candidate.state !== 'needs_repair'
+        && !failedTargets.has(candidate.path)
+      ) {
         return { candidate, fromLabel: state.currentLabel, toLabel: await authPathDisplayLabel(candidate.path) };
       }
     }
@@ -5949,18 +7611,20 @@ export class BridgeSessionCore {
   private async listCodexAuthState(): Promise<CodexAuthState> {
     const state = await listCodexAuthState(
       this.store.listDisabledCodexAuthCandidateNames(this.authRuntimeId()),
+      this.store.listCodexAuthCandidateStates(this.authRuntimeId()),
       this.resolveAuthDir(),
     );
+    this.store.recordCodexAuthPoolInventory(state.candidates.map(candidate => candidate.name));
     const snapshots = await this.readCodexAuthQuotaSnapshots();
-    const candidateAccountIds = await this.readCodexAuthCandidateAccountIds(state.candidates);
+    const candidateQuotaIdentities = await this.readCodexAuthCandidateQuotaIdentities(state.candidates);
     state.candidates.forEach((candidate) => {
-      const candidateAccountId = candidateAccountIds.get(candidate.name) ?? null;
+      const candidateQuotaIdentity = candidateQuotaIdentities.get(candidate.name) ?? null;
       const snapshot = snapshots[candidate.name] ?? null;
-      candidate.quota = this.codexAuthQuotaSnapshotMatchesAccount(snapshot, candidateAccountId)
+      candidate.quota = this.codexAuthQuotaSnapshotMatchesIdentity(snapshot, candidateQuotaIdentity)
         ? snapshot
         : null;
     });
-    await this.applySharedCodexAuthQuotaSnapshots(state, candidateAccountIds);
+    await this.applySharedCodexAuthQuotaSnapshots(state, candidateQuotaIdentities);
     return state;
   }
 
@@ -5992,28 +7656,154 @@ export class BridgeSessionCore {
     candidate: CodexAuthCandidate,
     automatic: boolean,
     sendResult = true,
-  ): Promise<void> {
+    automaticReason: CodexAuthRotationReason = 'auth_invalid',
+  ): Promise<CodexAuthSwitchOutcome> {
+    const authDir = this.resolveAuthDir();
+    const initialState = await listCodexAuthState(new Set(), new Map(), authDir);
+    const authStat = await fs.lstat(initialState.authPath).catch(() => null);
+    const originalRegularAuth = authStat?.isFile()
+      ? await fs.readFile(initialState.authPath, 'utf8').catch(() => null)
+      : null;
     const recovered = await this.recoverCodexAuthCandidate(candidate.name, { crossNode: automatic });
-    const result = await switchCodexAuth(candidate.path, this.resolveAuthDir());
+    const result = await switchCodexAuth(candidate.path, authDir);
     this.authRotationFailedTargets.delete(candidate.path);
     this.pendingTurnErrors.clear();
     this.attachedThreads.clear();
     await this.app.restart();
+    const validation = await this.validateCurrentCodexAuthCandidate(candidate);
+    if (!validation.ok) {
+      let restoredPrevious = false;
+      try {
+        await restoreCodexAuthTarget(initialState.authDir, initialState.authPath, initialState.currentTargetPath, originalRegularAuth);
+        this.pendingTurnErrors.clear();
+        this.attachedThreads.clear();
+        await this.app.restart();
+        restoredPrevious = true;
+      } catch (error) {
+        this.logger.warn('codex.auth_switch_restore_failed', {
+          candidate: candidate.name,
+          error: toErrorMeta(error),
+        });
+      }
+      const validationFailureKind: CodexAuthRotationReason = isCodexAuthInvalidError(validation.error)
+        ? 'auth_invalid'
+        : isCodexQuotaLimitError(validation.error)
+          ? 'quota_limited'
+          : 'auth_invalid';
+      const repairDisposition = validationFailureKind === 'auth_invalid'
+        ? await this.markCodexAuthCandidateNeedsRepair(candidate.name)
+        : { deleted: false, restarted: false };
+      const outcome: CodexAuthSwitchOutcome = {
+        ...result,
+        ok: false,
+        candidateName: candidate.name,
+        recovered,
+        error: validation.error,
+        validationFailureKind,
+        restoredPrevious,
+        autoDeleted: repairDisposition.deleted,
+        deleteRestarted: repairDisposition.restarted,
+      };
+      if (sendResult) {
+        const lines = this.formatAuthSwitchValidationLines(locale, outcome);
+        await this.sendMessage(scopeId, lines.join('\n'));
+      }
+      return outcome;
+    }
+
+    this.markCodexAuthCandidateActive(candidate.name);
     await this.syncCodexAuthCandidate(candidate.name);
+    const outcome: CodexAuthSwitchOutcome = {
+      ...result,
+      ok: true,
+      candidateName: candidate.name,
+      recovered,
+      error: null,
+      validationFailureKind: null,
+      restoredPrevious: false,
+      autoDeleted: false,
+      deleteRestarted: false,
+    };
 
     if (!sendResult) {
-      return;
+      return outcome;
     }
-    const lines = [t(
-      locale,
-      automatic ? 'auth_auto_done' : 'auth_switch_done',
-      this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
-    )];
+    const doneKey = automaticReason === 'quota_limited' ? 'auth_quota_done' : 'auth_auto_done';
+    const doneQuietKey = automaticReason === 'quota_limited' ? 'auth_quota_done_quiet' : 'auth_auto_done_quiet';
+    const lines = [automatic && this.config.authAutoDeleteNeedsRepair
+      ? t(locale, doneQuietKey)
+      : t(
+        locale,
+        automatic ? doneKey : 'auth_switch_done',
+        this.codexAuthSwitchParams(locale, result.fromLabel, result.toLabel),
+      )];
     if (recovered) {
       lines.push(t(locale, 'auth_recovered_newer_candidate', { value: candidate.name }));
     }
     lines.push(...await this.buildCodexUsageStatusLines(locale));
     await this.sendMessage(scopeId, lines.join('\n'));
+    return outcome;
+  }
+
+  private async validateCurrentCodexAuthCandidate(candidate: CodexAuthCandidate): Promise<{ ok: true } | { ok: false; error: string }> {
+    try {
+      if (await isCodexApiKeyAuthCandidate(candidate.path)) {
+        const account = await this.app.readAccount(false);
+        if (!account) {
+          return { ok: false, error: 'Codex did not return account info after switch' };
+        }
+        return { ok: true };
+      }
+
+      const metadata = await readChatGptAuthMetadata(candidate.path);
+      if (!metadata) {
+        return { ok: false, error: 'candidate is not a readable ChatGPT auth file' };
+      }
+      if (!chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)) {
+        return { ok: false, error: 'candidate auth identity does not match candidate name' };
+      }
+
+      const [account, rateLimits] = await Promise.all([
+        this.app.readAccount(false),
+        this.app.readAccountRateLimits(),
+      ]);
+      if (!account) {
+        return { ok: false, error: 'Codex did not return account info after switch' };
+      }
+      if (account.type !== 'chatgpt') {
+        return { ok: false, error: `Codex account type is ${account.type || 'unknown'}, expected ChatGPT` };
+      }
+      const snapshot = selectCodexRateLimitSnapshot(rateLimits);
+      if (!snapshot) {
+        return { ok: false, error: 'Codex did not return ChatGPT rate limits after switch' };
+      }
+      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata, snapshot);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: formatUserError(error) };
+    }
+  }
+
+  private formatAuthSwitchValidationLines(locale: AppLocale, outcome: CodexAuthSwitchOutcome): string[] {
+    if (outcome.ok) {
+      return [];
+    }
+    const validationKey = outcome.validationFailureKind === 'quota_limited'
+      ? 'auth_switch_validation_quota_limited'
+      : outcome.autoDeleted && this.config.authAutoDeleteNeedsRepair
+      ? 'auth_switch_validation_auto_deleted_quiet'
+      : outcome.autoDeleted
+        ? 'auth_switch_validation_auto_deleted'
+        : 'auth_switch_validation_failed';
+    return [
+      t(locale, validationKey, {
+        value: outcome.candidateName,
+        error: outcome.error ?? t(locale, 'unknown'),
+      }),
+      outcome.restoredPrevious ? t(locale, 'auth_switch_validation_reverted') : '',
+      outcome.deleteRestarted ? t(locale, 'auth_delete_current_restarted') : '',
+      outcome.autoDeleted ? formatCodexAuthPoolSummary(locale, this.store.getCodexAuthPoolStats()) : '',
+    ].filter(Boolean);
   }
 
   private async recoverCodexAuthCandidate(candidateName: string, options: { crossNode?: boolean } = { crossNode: true }): Promise<boolean> {
@@ -6030,6 +7820,29 @@ export class BridgeSessionCore {
       });
       return false;
     }
+  }
+
+  private async markCodexAuthCandidateNeedsRepair(candidateName: string): Promise<CodexAuthRepairDisposition> {
+    if (this.config.authAutoDeleteNeedsRepair) {
+      const candidate = (await this.listCodexAuthState()).candidates.find(entry => entry.name === candidateName) ?? null;
+      if (!candidate) {
+        this.store.deleteCodexAuthCandidate(candidateName);
+        this.store.recordCodexAuthCandidateInvalidDelete(candidateName, AUTH_DELETE_REASON_NEEDS_REPAIR);
+        return { deleted: true, restarted: false };
+      }
+      const restarted = await this.deleteCodexAuthCandidate(candidate, AUTH_DELETE_REASON_NEEDS_REPAIR);
+      this.logger.warn('codex.auth_candidate_auto_deleted', {
+        candidate: candidateName,
+        runtimeId: this.authRuntimeId(),
+      });
+      return { deleted: true, restarted };
+    }
+    this.store.setCodexAuthCandidateState(candidateName, 'needs_repair');
+    return { deleted: false, restarted: false };
+  }
+
+  private markCodexAuthCandidateActive(candidateName: string): void {
+    this.store.setCodexAuthCandidateState(candidateName, 'active');
   }
 
   private async syncCodexAuthCandidate(candidateName: string): Promise<void> {
@@ -6070,7 +7883,7 @@ export class BridgeSessionCore {
     try {
       for (const candidate of candidates) {
         const before = await readChatGptAuthMetadata(candidate.path);
-        if (!before) {
+        if (candidate.disabled || candidate.state === 'needs_repair' || !before || !chatGptAuthMetadataMatchesCandidateName(candidate.name, before)) {
           result.skipped.push(candidate.name);
           continue;
         }
@@ -6087,13 +7900,17 @@ export class BridgeSessionCore {
             throw new Error('Codex did not return ChatGPT rate limits after refresh');
           }
           const after = await readChatGptAuthMetadata(candidate.path);
-          if (!after || after.accountId !== before.accountId) {
-            throw new Error('refreshed auth account id did not match the original candidate');
+          if (
+            !after
+            || !chatGptAuthMetadataMatchesCandidateName(candidate.name, after)
+            || !chatGptAuthMetadataCompatible(before, after)
+          ) {
+            throw new Error('refreshed auth identity did not match the original candidate');
           }
           if (after.lastRefreshMs <= before.lastRefreshMs) {
             throw new Error('Codex did not advance last_refresh');
           }
-          await this.recordCodexAuthQuotaSnapshot(candidate.name, after.accountId, snapshot);
+          await this.recordCodexAuthQuotaSnapshot(candidate.name, after, snapshot);
           await this.syncCodexAuthCandidate(candidate.name);
           result.refreshed.push(candidate.name);
         } catch (error) {
@@ -6324,15 +8141,25 @@ export class BridgeSessionCore {
     if (!candidate) {
       return;
     }
+    if (candidate.state === 'needs_repair') {
+      return;
+    }
     try {
       const metadata = await readChatGptAuthMetadata(candidate.path);
+      if (!metadata || !chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)) {
+        return;
+      }
       const snapshot = selectCodexRateLimitSnapshot(await this.app.readAccountRateLimits());
       if (!snapshot) {
         return;
       }
-      const quota = authQuotaSnapshotFromRateLimit(snapshot, metadata?.accountId ?? null);
+      const quota = authQuotaSnapshotFromRateLimit(
+        snapshot,
+        metadata?.accountId ?? null,
+        metadata?.quotaIdentityId ?? null,
+      );
       candidate.quota = quota;
-      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata?.accountId ?? null, snapshot);
+      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata, snapshot);
       await this.applySharedCodexAuthQuotaSnapshots(state);
       await this.syncCodexAuthCandidate(candidate.name);
     } catch (error) {
@@ -6342,79 +8169,100 @@ export class BridgeSessionCore {
 
   private async applySharedCodexAuthQuotaSnapshots(
     state: CodexAuthState,
-    candidateAccountIds?: Map<string, string>,
+    candidateQuotaIdentities?: Map<string, CodexAuthQuotaIdentity>,
   ): Promise<void> {
-    const accountIds = candidateAccountIds ?? await this.readCodexAuthCandidateAccountIds(state.candidates);
-    const uniqueAccountIds = [...new Set(accountIds.values())];
-    if (uniqueAccountIds.length === 0) {
+    const quotaIdentities = candidateQuotaIdentities ?? await this.readCodexAuthCandidateQuotaIdentities(state.candidates);
+    const uniqueQuotaIdentityIds = [...new Set([...quotaIdentities.values()].map(identity => identity.quotaIdentityId))];
+    if (uniqueQuotaIdentityIds.length === 0) {
       return;
     }
-    const snapshotsByAccount = new Map<string, CodexAuthQuotaSnapshot>();
-    for (const record of this.store.listCodexAuthQuotaSnapshots(uniqueAccountIds)) {
+    const snapshotsByIdentity = new Map<string, CodexAuthQuotaSnapshot>();
+    for (const record of this.store.listCodexAuthQuotaSnapshots(uniqueQuotaIdentityIds)) {
       if (!isFiniteCodexAuthQuotaSnapshotRecord(record)) {
         continue;
       }
-      snapshotsByAccount.set(
-        record.accountId,
+      snapshotsByIdentity.set(
+        record.quotaIdentityId,
         mergeCodexAuthQuotaSnapshots(
-          snapshotsByAccount.get(record.accountId) ?? null,
+          snapshotsByIdentity.get(record.quotaIdentityId) ?? null,
           codexAuthQuotaSnapshotFromRecord(record),
         )!,
       );
     }
     for (const candidate of state.candidates) {
-      const accountId = accountIds.get(candidate.name);
-      if (!accountId) {
+      const quotaIdentity = quotaIdentities.get(candidate.name);
+      if (!quotaIdentity) {
         continue;
       }
-      candidate.quota = mergeCodexAuthQuotaSnapshots(candidate.quota, snapshotsByAccount.get(accountId) ?? null);
+      candidate.quota = mergeCodexAuthQuotaSnapshots(
+        candidate.quota,
+        snapshotsByIdentity.get(quotaIdentity.quotaIdentityId) ?? null,
+      );
     }
   }
 
   private async recordCodexAuthQuotaSnapshot(
     candidateName: string,
-    accountId: string | null,
+    metadata: ChatGptAuthMetadata | null,
     snapshot: CodexRateLimitSnapshot,
   ): Promise<void> {
-    const quota = authQuotaSnapshotFromRateLimit(snapshot, accountId);
+    const quota = authQuotaSnapshotFromRateLimit(
+      snapshot,
+      metadata?.accountId ?? null,
+      metadata?.quotaIdentityId ?? null,
+    );
     this.authQuotaSnapshots[candidateName] = quota;
-    if (accountId) {
-      this.store.setCodexAuthQuotaSnapshot(this.authRuntimeId(), candidateName, accountId, quota);
+    if (metadata) {
+      this.store.setCodexAuthQuotaSnapshot(
+        this.authRuntimeId(),
+        candidateName,
+        metadata.accountId,
+        metadata.quotaIdentityId,
+        quota,
+      );
     }
     await this.writeCodexAuthQuotaSnapshots();
   }
 
-  private async readCodexAuthCandidateAccountIds(candidates: CodexAuthCandidate[]): Promise<Map<string, string>> {
+  private async readCodexAuthCandidateQuotaIdentities(candidates: CodexAuthCandidate[]): Promise<Map<string, CodexAuthQuotaIdentity>> {
     const entries = await Promise.all(candidates.map(async (candidate) => {
-      const metadata = await readChatGptAuthMetadata(candidate.path);
-      candidate.credentialKind = metadata
+      const record = await readChatGptAuthRecord(candidate.path);
+      const metadataMatchesName = record
+        ? chatGptAuthMetadataMatchesCandidateName(candidate.name, record)
+        : false;
+      candidate.credentialKind = record && metadataMatchesName
         ? 'chatgpt'
         : await isCodexApiKeyAuthCandidate(candidate.path)
           ? 'api-key'
           : 'invalid';
-      candidate.credentialLastRefreshMs = metadata?.lastRefreshMs ?? null;
-      return [candidate.name, metadata?.accountId ?? null] as const;
+      candidate.credentialLastRefreshMs = record && metadataMatchesName ? record.lastRefreshMs : null;
+      candidate.credentialExpiresAtMs = record && metadataMatchesName ? readAccessTokenExpiresAtMs(record.raw) : null;
+      return [candidate.name, record && metadataMatchesName ? {
+        accountId: record.accountId,
+        quotaIdentityId: record.quotaIdentityId,
+      } : null] as const;
     }));
-    const accountIds = new Map<string, string>();
-    for (const [name, accountId] of entries) {
-      if (accountId) {
-        accountIds.set(name, accountId);
+    const quotaIdentities = new Map<string, CodexAuthQuotaIdentity>();
+    for (const [name, quotaIdentity] of entries) {
+      if (quotaIdentity) {
+        quotaIdentities.set(name, quotaIdentity);
       }
     }
-    return accountIds;
+    return quotaIdentities;
   }
 
-  private codexAuthQuotaSnapshotMatchesAccount(
+  private codexAuthQuotaSnapshotMatchesIdentity(
     snapshot: CodexAuthQuotaSnapshot | null,
-    accountId: string | null,
+    identity: CodexAuthQuotaIdentity | null,
   ): snapshot is CodexAuthQuotaSnapshot {
     if (!snapshot) {
       return false;
     }
-    if (!snapshot.accountId) {
-      return accountId === null;
+    const snapshotIdentityId = snapshot.quotaIdentityId ?? snapshot.accountId ?? null;
+    if (!snapshotIdentityId) {
+      return identity === null;
     }
-    return accountId !== null && snapshot.accountId === accountId;
+    return identity !== null && snapshotIdentityId === identity.quotaIdentityId;
   }
 
   private async readCodexAuthQuotaSnapshots(): Promise<Record<string, CodexAuthQuotaSnapshot>> {
@@ -6639,6 +8487,7 @@ export class BridgeSessionCore {
         ? buildThreadsKeyboard(locale, threadLikes, binding.threadId)
         : buildThreadListKeyboard(locale, threadLikes, listState, binding.threadId);
       await this.editHtmlMessage(scopeId, event.messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, event.messageId);
     }
 
     let callbackText = t(locale, 'thread_opened');
@@ -6830,7 +8679,7 @@ export class BridgeSessionCore {
     cwd: string,
     panelMessageId: number | null,
   ): Promise<void> {
-    this.queuedPrompts.delete(scopeId);
+    this.store.cancelQueuedTurnInputs(scopeId);
     await this.stopWatchingScopeThread(scopeId);
     const binding = await this.createBinding(scopeId, cwd);
     await this.sendNewThreadStartedMessage(scopeId, locale, binding, cwd);
@@ -7046,9 +8895,11 @@ export class BridgeSessionCore {
       }
       if (messageId !== undefined) {
         await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
+        this.scheduleStalePanelDeletion(scopeId, messageId);
         return;
       }
-      await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      const sentMessageId = await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
       return;
     }
 
@@ -7061,9 +8912,11 @@ export class BridgeSessionCore {
       }
       if (messageId !== undefined) {
         await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, false));
+        this.scheduleStalePanelDeletion(scopeId, messageId);
         return;
       }
-      await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      const sentMessageId = await this.sendMessage(scopeId, text, whereKeyboard(locale, false));
+      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
       return;
     }
 
@@ -7073,9 +8926,11 @@ export class BridgeSessionCore {
     }
     if (messageId !== undefined) {
       await this.editMessage(scopeId, messageId, text, whereKeyboard(locale, true));
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendMessage(scopeId, text, whereKeyboard(locale, true));
+    const sentMessageId = await this.sendMessage(scopeId, text, whereKeyboard(locale, true));
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async handleThreadListNavigationCallback(
@@ -7183,9 +9038,11 @@ export class BridgeSessionCore {
       : buildThreadListKeyboard(locale, forDisplay, presentationState, binding?.threadId ?? null);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async showModelSettingsPanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
@@ -7199,9 +9056,11 @@ export class BridgeSessionCore {
     const keyboard = buildModelSettingsKeyboard(locale, models, settings);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async showSetupPanel(
@@ -7222,9 +9081,11 @@ export class BridgeSessionCore {
     const keyboard = buildSetupPanelKeyboard(locale, { focus, models, settings, access });
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async showAccessSettingsPanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
@@ -7237,9 +9098,11 @@ export class BridgeSessionCore {
     const keyboard = buildAccessSettingsKeyboard(locale, access);
     if (messageId !== undefined) {
       await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, messageId);
       return;
     }
-    await this.sendHtmlMessage(scopeId, text, keyboard);
+    const sentMessageId = await this.sendHtmlMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
   }
 
   private async handleSettingsCallback(
@@ -7445,45 +9308,54 @@ export class BridgeSessionCore {
     text: string,
   ): Promise<void> {
     const scopeId = event.scopeId;
-    this.clearPlanImplementationPromptsForScope(scopeId);
-    await this.stopWatchingScopeThread(scopeId);
-    const existingBinding = this.store.getBinding(scopeId);
-    const binding = existingBinding
-      ? await this.ensureThreadReady(scopeId, existingBinding)
-      : await this.createBinding(scopeId, null);
-    await this.sendTyping(scopeId);
-    const previewMessageId = 0;
+    if (this.externalAuthValidationInProgress) {
+      await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
+      return;
+    }
+    this.turnStartInProgress += 1;
     try {
-      const input = await this.buildTurnInput(binding, { ...event, text }, locale);
-      const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
-      if (turnState.collaborationMode === 'plan') {
-        this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+      this.clearPlanImplementationPromptsForScope(scopeId);
+      await this.stopWatchingScopeThread(scopeId);
+      const existingBinding = this.store.getBinding(scopeId);
+      const binding = existingBinding
+        ? await this.ensureThreadReady(scopeId, existingBinding)
+        : await this.createBinding(scopeId, null);
+      await this.sendTyping(scopeId);
+      const previewMessageId = 0;
+      try {
+        const input = await this.buildTurnInput(binding, { ...event, text }, locale);
+        const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
+        if (turnState.collaborationMode === 'plan') {
+          this.store.setChatCollaborationMode(scopeId, DEFAULT_COLLABORATION_MODE);
+        }
+        await this.registerActiveTurn(
+          scopeId,
+          event.chatId,
+          event.chatType,
+          event.topicId,
+          turnState.threadId,
+          turnState.turnId,
+          previewMessageId,
+          {
+            input,
+            threadId: turnState.threadId,
+            cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
+            chatId: event.chatId,
+            chatType: event.chatType,
+            topicId: event.topicId,
+            collaborationMode: turnState.collaborationMode,
+            failedAuthTargets: new Set(),
+          },
+          turnState.collaborationMode,
+        );
+      } catch (error) {
+        if (previewMessageId > 0) {
+          await this.cleanupTransientPreview(scopeId, previewMessageId);
+        }
+        throw error;
       }
-      await this.registerActiveTurn(
-        scopeId,
-        event.chatId,
-        event.chatType,
-        event.topicId,
-        turnState.threadId,
-        turnState.turnId,
-        previewMessageId,
-        {
-          input,
-          threadId: turnState.threadId,
-          cwd: this.store.getBinding(scopeId)?.cwd ?? binding.cwd ?? this.config.defaultCwd,
-          chatId: event.chatId,
-          chatType: event.chatType,
-          topicId: event.topicId,
-          collaborationMode: turnState.collaborationMode,
-          failedAuthTargets: new Set(),
-        },
-        turnState.collaborationMode,
-      );
-    } catch (error) {
-      if (previewMessageId > 0) {
-        await this.cleanupTransientPreview(scopeId, previewMessageId);
-      }
-      throw error;
+    } finally {
+      this.turnStartInProgress -= 1;
     }
   }
 
@@ -7590,13 +9462,116 @@ export class BridgeSessionCore {
           error: toErrorMeta(error),
         });
       }
-      await this.retirePreviewMessage(
-        preview.scopeId,
-        preview.messageId,
-        t(this.localeForChat(preview.scopeId), 'stale_preview_restarted', { threadId: preview.threadId }),
-        preview.turnId,
-      );
+      this.scheduleRestartPreviewRecovery(preview, 0);
     }
+  }
+
+  private scheduleRestartPreviewRecovery(preview: ActiveTurnPreviewRecord, attempt: number): void {
+    const key = restartPreviewRecoveryKey(preview);
+    if (this.restartPreviewRecoveryTimers.has(key)) {
+      return;
+    }
+    const delayMs = RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS[attempt];
+    if (delayMs === undefined) {
+      void this.retireStaleRestartPreview(preview).catch((error) => {
+        this.logger.warn('telegram.preview_stale_retire_failed', {
+          scopeId: preview.scopeId,
+          threadId: preview.threadId,
+          turnId: preview.turnId,
+          error: toErrorMeta(error),
+        });
+      });
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.restartPreviewRecoveryTimers.delete(key);
+      void this.retryRestartPreviewRecovery(preview, attempt + 1).catch((error) => {
+        this.logger.warn('telegram.preview_recovery_retry_failed', {
+          scopeId: preview.scopeId,
+          threadId: preview.threadId,
+          turnId: preview.turnId,
+          attempt: attempt + 1,
+          error: toErrorMeta(error),
+        });
+        this.scheduleRestartPreviewRecovery(preview, attempt + 1);
+      });
+    }, delayMs);
+    timer.unref?.();
+    this.restartPreviewRecoveryTimers.set(key, timer);
+    this.logger.info('telegram.preview_recovery_deferred', {
+      scopeId: preview.scopeId,
+      threadId: preview.threadId,
+      turnId: preview.turnId,
+      attempt: attempt + 1,
+      delayMs,
+    });
+  }
+
+  private async retryRestartPreviewRecovery(preview: ActiveTurnPreviewRecord, attempt: number): Promise<void> {
+    const current = this.store.listActiveTurnPreviews().find((record) => (
+      record.scopeId === preview.scopeId
+      && record.turnId === preview.turnId
+      && record.messageId === preview.messageId
+    ));
+    if (!current) {
+      return;
+    }
+    if (!this.ownsScope(current.scopeId)) {
+      return;
+    }
+    if (!this.messaging.canSendToScope(current.scopeId)) {
+      this.store.removeActiveTurnPreview(current.turnId);
+      this.logger.info('telegram.preview_dropped_disabled_channel', {
+        scopeId: current.scopeId,
+        threadId: current.threadId,
+        turnId: current.turnId,
+      });
+      return;
+    }
+    try {
+      if (await this.recoverLiveTurnPreview(current)) {
+        this.logger.info('telegram.preview_recovery_retry_succeeded', {
+          scopeId: current.scopeId,
+          threadId: current.threadId,
+          turnId: current.turnId,
+          attempt,
+        });
+        return;
+      }
+    } catch (error) {
+      this.logger.warn('telegram.preview_recovery_retry_failed', {
+        scopeId: current.scopeId,
+        threadId: current.threadId,
+        turnId: current.turnId,
+        attempt,
+        error: toErrorMeta(error),
+      });
+    }
+    this.scheduleRestartPreviewRecovery(current, attempt);
+  }
+
+  private async retireStaleRestartPreview(preview: ActiveTurnPreviewRecord): Promise<void> {
+    const current = this.store.listActiveTurnPreviews().find((record) => (
+      record.scopeId === preview.scopeId
+      && record.turnId === preview.turnId
+      && record.messageId === preview.messageId
+    ));
+    if (!current) {
+      return;
+    }
+    await this.retirePreviewMessage(
+      current.scopeId,
+      current.messageId,
+      t(this.localeForChat(current.scopeId), 'stale_preview_restarted', { threadId: current.threadId }),
+      current.turnId,
+    );
+  }
+
+  private clearRestartPreviewRecoveryTimers(): void {
+    for (const timer of this.restartPreviewRecoveryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.restartPreviewRecoveryTimers.clear();
   }
 
   private async recoverLiveTurnPreview(preview: {
@@ -7604,6 +9579,8 @@ export class BridgeSessionCore {
     threadId: string;
     turnId: string;
     messageId: number;
+    isObserved: boolean;
+    archivedMessageIds: number[];
   }): Promise<boolean> {
     if (this.getActiveTurn(preview.scopeId, preview.turnId)) {
       return true;
@@ -7617,19 +9594,51 @@ export class BridgeSessionCore {
     }
     const snapshot = await this.app.readThreadSnapshot(preview.threadId);
     if (!snapshot) {
-      return false;
+      return preview.isObserved ? false : this.resumeInterruptedTurnAfterRestart(preview, target);
     }
     const liveTurn = findLiveTurn(snapshot);
-    if (!liveTurn || liveTurn.turnId !== preview.turnId) {
+    if (liveTurn) {
+      if (
+        liveTurn.turnId === preview.turnId
+        && snapshot.activeFlags.includes('waitingOnUserInput')
+        && !this.hasPendingUserInputForTurn(preview.scopeId, preview.turnId)
+      ) {
+        return this.interruptOrphanWaitingUserInput(preview);
+      }
+      return this.attachRecoveredTurnPreview(preview, target, snapshot, liveTurn);
+    }
+    const previousTurn = snapshot.turns.find(turn => turn.turnId === preview.turnId) ?? null;
+    if (previousTurn && previousTurn.status !== 'inProgress') {
+      if (!turnHasRelayableOutcome(previousTurn)) {
+        return this.resumeInterruptedTurnAfterRestart(preview, target);
+      }
+      await this.retirePreviewMessage(
+        preview.scopeId,
+        preview.messageId,
+        t(this.localeForChat(preview.scopeId), 'completed_see_reply_below'),
+        preview.turnId,
+      );
+      return true;
+    }
+    if (preview.isObserved) {
       return false;
     }
-    if (
-      snapshot.activeFlags.includes('waitingOnUserInput')
-      && !this.hasPendingUserInputForTurn(preview.scopeId, preview.turnId)
-    ) {
-      return this.interruptOrphanWaitingUserInput(preview);
-    }
+    return this.resumeInterruptedTurnAfterRestart(preview, target);
+  }
 
+  private async attachRecoveredTurnPreview(
+    preview: {
+      scopeId: string;
+      threadId: string;
+      turnId: string;
+      messageId: number;
+      isObserved: boolean;
+      archivedMessageIds: number[];
+    },
+    target: { chatId: string; chatType: string; topicId: number | null },
+    snapshot: AppThreadSnapshot,
+    liveTurn: AppTurnSnapshot,
+  ): Promise<boolean> {
     await this.stopWatchingScopeThread(preview.scopeId, preview.threadId);
     const active = this.createActiveTurnState(
       preview.scopeId,
@@ -7637,11 +9646,20 @@ export class BridgeSessionCore {
       target.chatType,
       target.topicId,
       preview.threadId,
-      preview.turnId,
+      liveTurn.turnId,
       preview.messageId,
-      true,
+      preview.isObserved,
     );
-    this.setActiveTurn(preview.scopeId, preview.turnId, active);
+    active.archivedMessageIds = [...preview.archivedMessageIds];
+    this.setActiveTurn(preview.scopeId, liveTurn.turnId, active);
+    this.store.saveActiveTurnPreview({
+      turnId: liveTurn.turnId,
+      scopeId: preview.scopeId,
+      threadId: preview.threadId,
+      messageId: preview.messageId,
+      isObserved: preview.isObserved,
+      archivedMessageIds: active.archivedMessageIds,
+    });
     const watcher: ObservedThreadWatcher = {
       scopeId: preview.scopeId,
       chatId: target.chatId,
@@ -7651,7 +9669,7 @@ export class BridgeSessionCore {
       mode: 'app_snapshot',
       timer: null,
       cursor: seedObservedTurnCursor(liveTurn),
-      activeTurnId: preview.turnId,
+      activeTurnId: liveTurn.turnId,
       waitingOnApproval: snapshot.activeFlags.includes('waitingOnApproval'),
       sessionPath: null,
       sessionOffset: -1,
@@ -7666,9 +9684,88 @@ export class BridgeSessionCore {
     this.logger.info('telegram.preview_recovered', {
       scopeId: preview.scopeId,
       threadId: preview.threadId,
-      turnId: preview.turnId,
+      turnId: liveTurn.turnId,
+      previousTurnId: preview.turnId,
+      isObserved: preview.isObserved,
     });
     return true;
+  }
+
+  private async resumeInterruptedTurnAfterRestart(
+    preview: {
+      scopeId: string;
+      threadId: string;
+      turnId: string;
+      messageId: number;
+      archivedMessageIds: number[];
+    },
+    target: { chatId: string; chatType: string; topicId: number | null },
+  ): Promise<boolean> {
+    const locale = this.localeForChat(preview.scopeId);
+    const storedBinding = this.store.getBinding(preview.scopeId);
+    const binding: ThreadBinding = storedBinding?.threadId === preview.threadId
+      ? storedBinding
+      : {
+          chatId: preview.scopeId,
+          threadId: preview.threadId,
+          cwd: storedBinding?.cwd ?? this.config.defaultCwd,
+          updatedAt: Date.now(),
+        };
+    const input: TurnInput[] = [{
+      type: 'text',
+      text: t(locale, 'restart_auto_resume_prompt'),
+      text_elements: [],
+    }];
+    try {
+      await this.sendTyping(preview.scopeId);
+      const readyBinding = await this.ensureThreadReady(preview.scopeId, binding, {
+        recoverMissingThread: false,
+      });
+      const turnState = await this.startTurnWithRecovery(preview.scopeId, readyBinding, input, {
+        recoverMissingThread: false,
+      });
+      const cwd = readyBinding.cwd ?? this.store.getBinding(preview.scopeId)?.cwd ?? this.config.defaultCwd;
+      if (turnState.collaborationMode === 'plan') {
+        this.store.setChatCollaborationMode(preview.scopeId, DEFAULT_COLLABORATION_MODE);
+      }
+      await this.registerActiveTurn(
+        preview.scopeId,
+        target.chatId,
+        target.chatType,
+        target.topicId,
+        turnState.threadId,
+        turnState.turnId,
+        preview.messageId,
+        {
+          input,
+          threadId: turnState.threadId,
+          cwd,
+          chatId: target.chatId,
+          chatType: target.chatType,
+          topicId: target.topicId,
+          collaborationMode: turnState.collaborationMode,
+          failedAuthTargets: new Set(),
+        },
+        turnState.collaborationMode,
+        null,
+        preview.archivedMessageIds,
+      );
+      this.logger.info('telegram.preview_auto_resumed_after_restart', {
+        scopeId: preview.scopeId,
+        threadId: preview.threadId,
+        previousTurnId: preview.turnId,
+        turnId: turnState.turnId,
+      });
+      return true;
+    } catch (error) {
+      this.logger.warn('telegram.preview_auto_resume_after_restart_failed', {
+        scopeId: preview.scopeId,
+        threadId: preview.threadId,
+        turnId: preview.turnId,
+        error: toErrorMeta(error),
+      });
+      return false;
+    }
   }
 
   private async interruptOrphanWaitingUserInput(preview: {
@@ -7767,6 +9864,9 @@ export class BridgeSessionCore {
           active.turnId,
         );
       }
+      if (active.queuedInputId) {
+        this.store.updateQueuedTurnInputStatus(active.queuedInputId, 'queued');
+      }
       active.resolver();
       this.deleteActiveTurnRecord(active);
     }
@@ -7839,6 +9939,19 @@ export class BridgeSessionCore {
     await this.messaging.sendDraft(scopeId, draftId, text);
   }
 
+  private async sendRichDraft(scopeId: string, draftId: number, html: string, fallbackText: string): Promise<void> {
+    await this.messaging.sendRichDraft(scopeId, draftId, html, fallbackText);
+  }
+
+  private async sendRichMarkdownDraft(scopeId: string, draftId: number, markdown: string, fallbackText: string): Promise<void> {
+    try {
+      await this.messaging.sendRichMarkdownDraft(scopeId, draftId, markdown, fallbackText);
+    } catch (markdownError) {
+      this.logger.warn('telegram.rich_markdown_draft_failed', { scopeId, error: toErrorMeta(markdownError) });
+      await this.sendRichDraft(scopeId, draftId, renderTelegramMarkdownRichHtml(markdown), fallbackText);
+    }
+  }
+
   private renderActiveStatus(active: ActiveTurn): string {
     const locale = this.localeForChat(active.scopeId);
     return renderActiveTurnStatus(locale, {
@@ -7880,6 +9993,8 @@ export class BridgeSessionCore {
           scopeId: active.scopeId,
           threadId: active.threadId,
           messageId,
+          isObserved: active.isObserved,
+          archivedMessageIds: active.archivedMessageIds,
         });
       } catch (error) {
         this.logger.warn('telegram.preview_send_failed', { error: String(error), turnId: active.turnId });
@@ -7907,6 +10022,7 @@ export class BridgeSessionCore {
       active.previewActive = false;
       active.statusMessageText = null;
       active.statusNeedsRebase = false;
+      this.recordArchivedMessageId(active, active.previewMessageId);
       this.store.removeActiveTurnPreview(active.turnId);
       await this.ensureStatusMessage(active, text);
       return;
@@ -7934,11 +10050,21 @@ export class BridgeSessionCore {
         } else {
           messageId = await this.sendMessage(active.scopeId, content.text);
         }
-        if (active.isObserved && messageId !== null) {
-          active.archivedMessageIds.push(messageId);
+        if (messageId !== null) {
+          this.recordArchivedMessageId(active, messageId);
         }
       } catch (error) {
-        this.logger.warn('telegram.preview_archive_send_failed', { error: String(error), turnId: active.turnId });
+        if (isTelegramMessageTooLong(error)) {
+          try {
+            const messageId = await this.sendMessage(active.scopeId, firstLine(content.text));
+            this.recordArchivedMessageId(active, messageId);
+            return true;
+          } catch (fallbackError) {
+            this.logger.warn('telegram.preview_archive_fallback_send_failed', { error: String(fallbackError), turnId: active.turnId });
+          }
+        } else {
+          this.logger.warn('telegram.preview_archive_send_failed', { error: String(error), turnId: active.turnId });
+        }
         this.scheduleRenderRetry(active);
         return false;
       }
@@ -7950,9 +10076,7 @@ export class BridgeSessionCore {
       } else {
         await this.editMessage(active.scopeId, active.previewMessageId, content.text, []);
       }
-      if (active.isObserved) {
-        active.archivedMessageIds.push(active.previewMessageId);
-      }
+      this.recordArchivedMessageId(active, active.previewMessageId);
     } catch (error) {
       if (isTelegramMessageGone(error)) {
         active.previewActive = false;
@@ -7960,6 +10084,36 @@ export class BridgeSessionCore {
         active.statusNeedsRebase = false;
         this.store.removeActiveTurnPreview(active.turnId);
         return this.archiveStatusMessage(active, content);
+      }
+      if (isTelegramMessageTooLong(error)) {
+        try {
+          await this.editMessage(active.scopeId, active.previewMessageId, firstLine(content.text), []);
+          this.recordArchivedMessageId(active, active.previewMessageId);
+          active.previewActive = false;
+          active.statusMessageText = null;
+          active.statusNeedsRebase = false;
+          this.store.removeActiveTurnPreview(active.turnId);
+          return true;
+        } catch (fallbackError) {
+          if (isTelegramMessageGone(fallbackError)) {
+            active.previewActive = false;
+            active.statusMessageText = null;
+            active.statusNeedsRebase = false;
+            this.store.removeActiveTurnPreview(active.turnId);
+            return this.archiveStatusMessage(active, { text: firstLine(content.text), html: null });
+          }
+          this.logger.warn('telegram.preview_archive_fallback_failed', {
+            error: String(fallbackError),
+            turnId: active.turnId,
+            messageId: active.previewMessageId,
+          });
+          this.recordArchivedMessageId(active, active.previewMessageId);
+          active.previewActive = false;
+          active.statusMessageText = null;
+          active.statusNeedsRebase = false;
+          this.store.removeActiveTurnPreview(active.turnId);
+          return true;
+        }
       }
       this.logger.warn('telegram.preview_archive_failed', {
         error: String(error),
@@ -7974,6 +10128,22 @@ export class BridgeSessionCore {
     active.statusNeedsRebase = false;
     this.store.removeActiveTurnPreview(active.turnId);
     return true;
+  }
+
+  private recordArchivedMessageId(active: ActiveTurn, messageId: number): void {
+    if (!active.archivedMessageIds.includes(messageId)) {
+      active.archivedMessageIds.push(messageId);
+    }
+    if (active.previewActive && active.previewMessageId > 0) {
+      this.store.saveActiveTurnPreview({
+        turnId: active.turnId,
+        scopeId: active.scopeId,
+        threadId: active.threadId,
+        messageId: active.previewMessageId,
+        isObserved: active.isObserved,
+        archivedMessageIds: active.archivedMessageIds,
+      });
+    }
   }
 
   private noteToolCommandStart(active: ActiveTurn, event: RawExecCommandEvent): void {
@@ -8101,11 +10271,36 @@ export class BridgeSessionCore {
       active.draftId = crypto.randomInt(1, 2_147_483_647);
     }
     try {
-      await this.sendDraft(active.scopeId, active.draftId, draftText);
+      if (active.richDraftDisabled) {
+        await this.sendDraft(active.scopeId, active.draftId, draftText);
+      } else {
+        await this.sendRichMarkdownDraft(
+          active.scopeId,
+          active.draftId,
+          draftText,
+          draftText,
+        );
+      }
       active.draftText = draftText;
     } catch (error) {
+      let finalError: unknown = error;
+      if (!active.richDraftDisabled) {
+        active.richDraftDisabled = true;
+        this.logger.warn('telegram.rich_draft_send_failed', {
+          error: String(finalError),
+          turnId: active.turnId,
+          draftId: active.draftId,
+        });
+        try {
+          await this.sendDraft(active.scopeId, active.draftId, draftText);
+          active.draftText = draftText;
+          return;
+        } catch (fallbackError) {
+          finalError = fallbackError;
+        }
+      }
       this.logger.warn('telegram.draft_send_failed', {
-        error: String(error),
+        error: String(finalError),
         turnId: active.turnId,
         draftId: active.draftId,
       });
@@ -8145,7 +10340,7 @@ export class BridgeSessionCore {
       if (!existing) {
         try {
           const messageId = await this.sendMessage(active.scopeId, chunk);
-          segment.messages.push({ messageId, text: chunk });
+          segment.messages.push({ messageId, text: chunk, richHtml: null, richFailedForText: null });
           active.statusNeedsRebase = true;
         } catch (error) {
           this.logger.warn('telegram.stream_send_failed', {
@@ -8167,6 +10362,8 @@ export class BridgeSessionCore {
       try {
         await this.editMessage(active.scopeId, existing.messageId, chunk);
         existing.text = chunk;
+        existing.richHtml = null;
+        existing.richFailedForText = null;
         index += 1;
       } catch (error) {
         if (isTelegramMessageGone(error)) {
@@ -8203,6 +10400,123 @@ export class BridgeSessionCore {
         }
       }
     }
+
+    if (this.shouldPromoteSegmentToRich(active, segment)) {
+      await this.promoteSegmentMessagesToRich(active, segment, chunks);
+    }
+  }
+
+  private shouldPromoteSegmentToRich(active: ActiveTurn, segment: ActiveTurnSegment): boolean {
+    return !active.scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)
+      && segment.completed
+      && segment.outputKind !== 'error'
+      && Boolean(segment.text.trim());
+  }
+
+  private async promoteSegmentMessagesToRich(
+    active: ActiveTurn,
+    segment: ActiveTurnSegment,
+    chunks: string[],
+  ): Promise<void> {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index]!;
+      const existing = segment.messages[index];
+      if (!existing || !chunk.trim()) {
+        continue;
+      }
+      if (existing.richHtml === chunk || existing.richFailedForText === chunk) {
+        continue;
+      }
+      const keyboard = this.voiceKeyboardForSegment(active, segment, index, chunks.length);
+      try {
+        await this.messaging.editRichMarkdown(active.scopeId, existing.messageId, chunk, chunk, keyboard);
+        existing.richHtml = chunk;
+        existing.richFailedForText = null;
+      } catch (markdownError) {
+        this.logger.warn('telegram.stream_rich_markdown_edit_failed', {
+          error: String(markdownError),
+          turnId: active.turnId,
+          itemId: segment.itemId,
+          messageId: existing.messageId,
+          chunkIndex: index,
+        });
+        const richHtml = renderTelegramMarkdownRichHtml(chunk);
+        try {
+          await this.messaging.editRichHtml(active.scopeId, existing.messageId, richHtml, escapeTelegramHtml(chunk), keyboard);
+          existing.richHtml = richHtml;
+          existing.richFailedForText = null;
+          continue;
+        } catch (error) {
+        if (isTelegramMessageGone(error)) {
+          segment.messages.splice(index);
+          return;
+        }
+        existing.richFailedForText = chunk;
+        this.logger.warn('telegram.stream_rich_edit_failed', {
+          error: String(error),
+          turnId: active.turnId,
+          itemId: segment.itemId,
+          messageId: existing.messageId,
+          chunkIndex: index,
+        });
+        }
+      }
+    }
+  }
+
+  private voiceKeyboardForSegment(
+    active: ActiveTurn,
+    segment: ActiveTurnSegment,
+    chunkIndex: number,
+    chunkCount: number,
+  ): Array<Array<{ text: string; callback_data: string }>> | undefined {
+    if (
+      !this.config.voiceTtsEnabled
+      || !this.config.voiceSummaryButtonEnabled
+      || active.scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)
+      || active.isObserved
+      || segment.outputKind !== 'final_answer'
+      || chunkIndex !== chunkCount - 1
+    ) {
+      return undefined;
+    }
+    const snippetId = segment.voiceSnippetId ?? this.registerVoiceSnippet(active.scopeId, segment.text);
+    segment.voiceSnippetId = snippetId;
+    const locale = this.localeForChat(active.scopeId);
+    return [[{
+      text: locale === 'zh' ? '🔊 听总结' : '🔊 Listen',
+      callback_data: `voice:${snippetId}`,
+    }]];
+  }
+
+  private registerVoiceSnippet(scopeId: string, text: string): string {
+    this.pruneVoiceSnippets();
+    const normalized = normalizeVoiceText(text, this.config.voiceSummaryTextLimit);
+    const id = crypto.randomBytes(6).toString('hex');
+    this.voiceSnippets.set(id, { scopeId, text: normalized, createdAt: Date.now() });
+    this.latestVoiceSnippetByScope.set(scopeId, id);
+    return id;
+  }
+
+  private pruneVoiceSnippets(): void {
+    const expiresBefore = Date.now() - 24 * 60 * 60_000;
+    for (const [id, snippet] of this.voiceSnippets.entries()) {
+      if (snippet.createdAt < expiresBefore) {
+        this.voiceSnippets.delete(id);
+        if (this.latestVoiceSnippetByScope.get(snippet.scopeId) === id) {
+          this.latestVoiceSnippetByScope.delete(snippet.scopeId);
+        }
+      }
+    }
+    while (this.voiceSnippets.size > 100) {
+      const oldest = [...this.voiceSnippets.entries()]
+        .sort((left, right) => left[1].createdAt - right[1].createdAt)[0];
+      if (!oldest) break;
+      this.voiceSnippets.delete(oldest[0]);
+      if (this.latestVoiceSnippetByScope.get(oldest[1].scopeId) === oldest[0]) {
+        this.latestVoiceSnippetByScope.delete(oldest[1].scopeId);
+      }
+    }
   }
 }
 
@@ -8233,10 +10547,53 @@ function ensureTurnSegment(
     isPlan: Boolean(isPlan),
     text: '',
     completed: false,
+    startedAtMs: Date.now(),
+    completedAtMs: null,
     messages: [],
+    voiceSnippetId: null,
   };
   active.segments.push(segment);
   return segment;
+}
+
+function renderCollapsedCommentary(locale: AppLocale, segments: ActiveTurnSegment[]): string {
+  const firstAt = segments[0]?.startedAtMs ?? Date.now();
+  const lastSegment = segments[segments.length - 1];
+  const lastAt = lastSegment?.completedAtMs ?? lastSegment?.startedAtMs ?? firstAt;
+  const range = firstAt === lastAt
+    ? formatClockTimestamp(firstAt)
+    : `${formatClockTimestamp(firstAt)} - ${formatClockTimestamp(lastAt)}`;
+  const summary = locale === 'zh'
+    ? `过程汇报 · ${segments.length} 条 · ${range}`
+    : `Progress · ${segments.length} updates · ${range}`;
+  const maxBodyLength = TELEGRAM_RICH_MESSAGE_TEXT_LIMIT - summary.length - 1024;
+  const blocks: string[] = [];
+  let bodyLength = 0;
+  let omitted = 0;
+
+  for (const segment of segments) {
+    const endAt = segment.completedAtMs ?? segment.startedAtMs;
+    const timestamp = endAt === segment.startedAtMs
+      ? formatClockTimestamp(segment.startedAtMs)
+      : `${formatClockTimestamp(segment.startedAtMs)} - ${formatClockTimestamp(endAt)}`;
+    const block = `<h4>${escapeTelegramHtml(timestamp)}</h4>\n${renderTelegramMarkdownRichHtml(segment.text)}`;
+    if (bodyLength + block.length > maxBodyLength) {
+      omitted += 1;
+      continue;
+    }
+    blocks.push(block);
+    bodyLength += block.length;
+  }
+  if (omitted > 0) {
+    blocks.push(`<p>${escapeTelegramHtml(locale === 'zh' ? `另有 ${omitted} 条过长内容未收入归档` : `${omitted} oversized updates omitted`)}</p>`);
+  }
+  return telegramDetails(summary, blocks.join('\n'));
+}
+
+function formatClockTimestamp(timestampMs: number): string {
+  const date = new Date(timestampMs);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function createToolBatchState(): ToolBatchState {
@@ -8277,10 +10634,12 @@ function renderArchivedToolBatchStatus(
     return { text, html: null };
   }
   const heading = formatToolBatchHeading(locale, counts, false);
-  const detailLines = actionLines.slice(0, 12).map(line => escapeTelegramHtml(line));
+  const detailLines = actionLines
+    .slice(0, TOOL_ARCHIVE_MAX_LINES)
+    .map(line => truncateInline(line, TOOL_ARCHIVE_LINE_LIMIT));
   const html = [
-    `<b>${escapeTelegramHtml(heading)}</b>`,
-    `<blockquote expandable>${detailLines.join('\n')}</blockquote>`,
+    telegramBold(heading),
+    telegramExpandableBlockquote(detailLines.join('\n')),
   ].join('\n');
   return { text, html };
 }
@@ -8435,11 +10794,8 @@ function truncateInline(value: string, limit: number): string {
   return `${value.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-function escapeTelegramHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
+function firstLine(value: string): string {
+  return value.split(/\r?\n/, 1)[0]?.trim() || value.trim();
 }
 
 function parseReviewTarget(args: string[]): ReviewTarget | null {
@@ -8563,7 +10919,382 @@ function formatMcpResourceMessage(
 
 function formatDiffMessage(locale: AppLocale, diff: string): string {
   const clipped = diff.length > 3500 ? `${diff.slice(0, 3500)}\n...` : diff;
-  return `${t(locale, 'diff_title')}\n${clipped}`;
+  return [
+    telegramBold(t(locale, 'diff_title')),
+    telegramExpandableBlockquote(clipped),
+  ].join('\n');
+}
+
+function formatRichDiffMessage(locale: AppLocale, diff: string): string {
+  const clipped = clipRichMessageText(diff, Math.min(24_000, TELEGRAM_RICH_MESSAGE_TEXT_LIMIT - 1024));
+  const summary = locale === 'zh' ? '展开 diff' : 'Expand diff';
+  const footer = locale === 'zh'
+    ? 'FoxClaw · sendRichMessage · details/pre/code'
+    : 'FoxClaw · sendRichMessage · details/pre/code';
+  return [
+    `<h3>${escapeTelegramHtml(t(locale, 'diff_title'))}</h3>`,
+    telegramDetails(summary, telegramPreCode(clipped, 'diff')),
+    `<footer>${escapeTelegramHtml(footer)}</footer>`,
+  ].join('\n');
+}
+
+function formatRichDemoMessage(locale: AppLocale): string {
+  const title = 'FoxClaw RichMessage';
+  const intro = locale === 'zh'
+    ? '这条消息通过 Telegram Bot API sendRichMessage 发送，用来验证 Rich Message 在真实客户端里的渲染。'
+    : 'This message is sent through Telegram Bot API sendRichMessage to verify Rich Message rendering in a real client.';
+  const detailsSummary = locale === 'zh' ? '展开 details + pre 示例' : 'Open details + pre sample';
+  const diffSample = [
+    'diff --git a/src/telegram/rich.ts b/src/telegram/rich.ts',
+    '+ sendRichMessage({ rich_message: { html } })',
+    '+ <details><summary>Expandable</summary>...</details>',
+    '+ <table bordered striped>...</table>',
+  ].join('\n');
+  const tableCaption = locale === 'zh' ? 'FoxClaw 可用 rich 面' : 'FoxClaw rich surfaces';
+  const surfaceHeader = locale === 'zh' ? '功能面' : 'Surface';
+  const richHeader = locale === 'zh' ? 'Rich 用法' : 'Rich usage';
+  const tableRows: Array<[string, string]> = locale === 'zh'
+    ? [
+        ['`/diff`', 'details + pre/code'],
+        ['工具状态', 'details/list'],
+        ['`/status`', 'table'],
+      ]
+    : [
+        ['`/diff`', 'details + pre/code'],
+        ['Tool status', 'details/list'],
+        ['`/status`', 'table'],
+      ];
+  const listItems = locale === 'zh'
+    ? ['Gateway 已接入 sendRichMessage', '/diff 已优先使用 RichMessage', '失败会回退到 Telegram HTML']
+    : ['Gateway now supports sendRichMessage', '/diff prefers RichMessage', 'Failures fall back to Telegram HTML'];
+  const detailBody = [
+    `<p>${escapeTelegramHtml(locale === 'zh' ? '下面是 rich pre/code block，客户端支持时会按代码块渲染。' : 'This is a rich pre/code block rendered as code by supported clients.')}</p>`,
+    telegramPreCode(diffSample, 'diff'),
+  ].join('\n');
+  return [
+    `<h2>${escapeTelegramHtml(title)}</h2>`,
+    `<p><b>Bot API 10.1</b> ${escapeTelegramHtml(intro)}</p>`,
+    '<hr/>',
+    '<table bordered striped>',
+    `<caption>${escapeTelegramHtml(tableCaption)}</caption>`,
+    `<tr><th>${escapeTelegramHtml(surfaceHeader)}</th><th>${escapeTelegramHtml(richHeader)}</th></tr>`,
+    ...tableRows.map(([surface, usage]) => `<tr><td>${escapeTelegramHtml(surface)}</td><td>${escapeTelegramHtml(usage)}</td></tr>`),
+    '</table>',
+    telegramDetails(detailsSummary, detailBody, true),
+    '<ul>',
+    ...listItems.map(item => `<li>${escapeTelegramHtml(item)}</li>`),
+    '</ul>',
+    '<footer>FoxClaw · sendRichMessage</footer>',
+  ].join('\n');
+}
+
+function formatRichDemoFallbackMessage(locale: AppLocale): string {
+  const lines = locale === 'zh'
+    ? [
+        'RichMessage fallback 预览',
+        'Gateway 已接入 sendRichMessage',
+        '/diff 已优先使用 RichMessage',
+        '如果你看到这条 HTML fallback，说明 Telegram rich API 返回了失败，正常功能仍可用。',
+      ]
+    : [
+        'RichMessage fallback preview',
+        'Gateway now supports sendRichMessage',
+        '/diff prefers RichMessage',
+        'If you see this HTML fallback, Telegram rich API failed but normal messaging still works.',
+      ];
+  return [
+    telegramBold('FoxClaw RichMessage'),
+    telegramExpandableBlockquote(lines.join('\n')),
+    telegramPreCode('sendRichMessage({ rich_message: { html } })', 'typescript'),
+  ].join('\n');
+}
+
+function formatRichInternalMessage(title: string, text: string): string {
+  const sections = splitRichInternalSections(text);
+  const body = sections.map(formatRichInternalSection).filter(Boolean).join('\n');
+  return [
+    `<h3>${escapeTelegramHtml(title)}</h3>`,
+    body || `<p>${escapeTelegramHtml(text)}</p>`,
+    telegramDetails('Plain text', telegramPreCode(text, 'text')),
+    '<footer>FoxClaw · RichMessage</footer>',
+  ].join('\n');
+}
+
+function splitRichInternalSections(text: string): string[][] {
+  const sections: string[][] = [];
+  let current: string[] = [];
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimEnd();
+    if (!line.trim()) {
+      if (current.length > 0) {
+        sections.push(current);
+        current = [];
+      }
+      continue;
+    }
+    current.push(line);
+  }
+  if (current.length > 0) {
+    sections.push(current);
+  }
+  return sections;
+}
+
+function formatRichInternalSection(lines: string[]): string {
+  const candidateRows = lines
+    .map(parseRichAuthCandidateRow)
+    .filter((row): row is RichAuthCandidateRow => row !== null);
+  if (candidateRows.length > 0) {
+    const nonCandidateLines = lines.filter(line => parseRichAuthCandidateRow(line) === null);
+    return [
+      nonCandidateLines.length > 0 ? formatRichInternalSectionWithoutCandidates(nonCandidateLines) : '',
+      formatRichAuthCandidateTable(candidateRows),
+    ].filter(Boolean).join('\n');
+  }
+  return formatRichInternalSectionWithoutCandidates(lines);
+}
+
+function formatRichInternalSectionWithoutCandidates(lines: string[]): string {
+  const rows = lines
+    .map(parseRichInternalKeyValue)
+    .filter((row): row is [string, string] => row !== null);
+  if (rows.length >= Math.max(2, Math.floor(lines.length * 0.6))) {
+    return [
+      '<table bordered striped>',
+      ...rows.map(([key, value]) => (
+        `<tr><td>${escapeTelegramHtml(key)}</td><td>${formatRichInternalValue(value)}</td></tr>`
+      )),
+      '</table>',
+    ].join('\n');
+  }
+  return [
+    '<ul>',
+    ...lines.map(line => `<li>${formatRichInternalValue(line.replace(/^\s*[-*]\s+/, '').replace(/^\s*\d+[.)]\s+/, ''))}</li>`),
+    '</ul>',
+  ].join('\n');
+}
+
+interface RichAuthCandidateRow {
+  index: string;
+  quotaA: string;
+  quotaAReset: string;
+  quotaB: string;
+  quotaBReset: string;
+  name: string;
+  current: boolean;
+  plan: string;
+  health: string;
+  refresh: string;
+  expiry: string;
+  risk: string;
+  enabled: boolean | null;
+}
+
+function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
+  const match = line.match(/^\s*(\d+)\.\s+(.+)$/);
+  if (!match) {
+    return null;
+  }
+  let body = match[2]!.trim();
+  let status = '';
+  const statusMatch = body.match(/^(.*?)\s+(\[[^\]]+\])$/);
+  if (statusMatch) {
+    body = statusMatch[1]!.trim();
+    status = statusMatch[2]!.replace(/^\[|\]$/g, '');
+  }
+  const current = body.endsWith(' *');
+  if (current) {
+    body = body.slice(0, -2).trimEnd();
+  }
+  const parts = body.split('|');
+  const name = parts.pop()?.trim() ?? '';
+  if (!name) {
+    return null;
+  }
+  const quotas = parts.map(parseRichAuthQuotaCell);
+  const statusParts = splitRichAuthStatus(status);
+  return {
+    index: match[1]!,
+    quotaA: quotas[0]?.value ?? '-',
+    quotaAReset: quotas[0]?.reset ?? '-',
+    quotaB: quotas[1]?.value ?? '-',
+    quotaBReset: quotas[1]?.reset ?? '-',
+    name,
+    current,
+    enabled: statusParts.health === 'disabled' || statusParts.health === '已禁用'
+      ? false
+      : statusParts.health === '-' ? null : true,
+    ...statusParts,
+  };
+}
+
+function formatRichAuthCandidateTable(rows: RichAuthCandidateRow[]): string {
+  return [
+    '<table bordered striped>',
+    '<tr><th>#</th><th>Quota A</th><th>A reset</th><th>Quota B</th><th>B reset</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th><th>Command</th></tr>',
+    ...rows.map(row => [
+      '<tr>',
+      `<td>${escapeTelegramHtml(row.index)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaA)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaAReset)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaB)}</td>`,
+      `<td>${escapeTelegramHtml(row.quotaBReset)}</td>`,
+      `<td>${formatRichAuthCommandLink(`/auth use ${row.index}`, row.name)}</td>`,
+      `<td>${row.current ? 'yes' : '-'}</td>`,
+      `<td>${escapeTelegramHtml(row.plan)}</td>`,
+      `<td>${escapeTelegramHtml(row.health)}</td>`,
+      `<td>${escapeTelegramHtml(row.refresh)}</td>`,
+      `<td>${escapeTelegramHtml(row.expiry)}</td>`,
+      `<td>${escapeTelegramHtml(row.risk)}</td>`,
+      `<td>${formatRichAuthCommandCell(row)}</td>`,
+      '</tr>',
+    ].join('')),
+    '</table>',
+  ].join('\n');
+}
+
+function splitRichAuthStatus(status: string): Pick<RichAuthCandidateRow, 'plan' | 'health' | 'refresh' | 'expiry' | 'risk'> {
+  const parts = status.split(' · ').map(part => part.trim()).filter(Boolean);
+  const refreshIndex = parts.findIndex(part => /^(refreshed|刷新于)\b/i.test(part));
+  const refresh = refreshIndex >= 0 ? parts.splice(refreshIndex, 1)[0]! : '-';
+  const expiryIndex = parts.findIndex(part => /^(expires|过期于)\b/i.test(part));
+  const expiry = expiryIndex >= 0 ? parts.splice(expiryIndex, 1)[0]! : '-';
+  const plan = parts.length > 1 ? parts.shift()! : '-';
+  const health = parts.shift() ?? '-';
+  return {
+    plan,
+    health,
+    refresh,
+    expiry,
+    risk: formatRichAuthRisk(health),
+  };
+}
+
+function formatRichAuthRisk(health: string): string {
+  if (/not recently refreshed|长期未刷新/i.test(health)) {
+    return `stale >${CODEX_AUTH_STALE_CREDENTIAL_DAYS}d`;
+  }
+  if (/needs login repair|需要登录修复/i.test(health)) {
+    return 'repair';
+  }
+  if (/quota exhausted|额度耗尽/i.test(health)) {
+    return 'quota exhausted';
+  }
+  if (/invalid|无效/i.test(health)) {
+    return 'invalid';
+  }
+  if (/\blow\b|偏低|低/i.test(health)) {
+    return 'low quota';
+  }
+  if (/unknown|未知/i.test(health)) {
+    return 'unknown';
+  }
+  return '-';
+}
+
+function parseRichAuthQuotaCell(value: string): { value: string; reset: string } {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '--' || trimmed === '—') {
+    return { value: '-', reset: '-' };
+  }
+  const [quotaPart, reset = '-'] = trimmed.split('@', 2);
+  const [windowLabel, percent] = quotaPart!.split(':');
+  if (!windowLabel || percent === undefined) {
+    return { value: quotaPart!, reset };
+  }
+  return { value: `${percent}%`, reset };
+}
+
+function formatRichAuthCommandCell(row: RichAuthCandidateRow): string {
+  const commands = [formatRichAuthCommandLink(`/auth use ${row.index}`, 'use')];
+  if (row.enabled === true) {
+    commands.push(formatRichAuthCommandLink(`/auth disable ${row.index}`, 'disable'));
+  } else if (row.enabled === false) {
+    commands.push(formatRichAuthCommandLink(`/auth enable ${row.index}`, 'enable'));
+  }
+  return commands.join(' ');
+}
+
+function formatRichAuthCommandLink(command: string, label: string): string {
+  const url = `tg://msg?text=${encodeURIComponent(command)}`;
+  return `<a href="${escapeTelegramHtml(url)}">${escapeTelegramHtml(label)}</a>`;
+}
+
+function parseRichInternalKeyValue(line: string): [string, string] | null {
+  const separator = line.includes('：') ? '：' : ':';
+  const index = line.indexOf(separator);
+  if (index <= 0) {
+    return null;
+  }
+  const key = line.slice(0, index).trim();
+  const value = line.slice(index + separator.length).trim();
+  if (!key || !value || key.length > 80) {
+    return null;
+  }
+  return [key, value];
+}
+
+function formatRichInternalValue(value: string): string {
+  const escaped = escapeTelegramHtml(value);
+  return escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+function renderTelegramTable(headers: string[], rows: string[][]): string {
+  return [
+    '<table bordered striped>',
+    `<thead><tr>${headers.map(header => `<th>${escapeTelegramHtml(header)}</th>`).join('')}</tr></thead>`,
+    `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${escapeTelegramHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`,
+    '</table>',
+  ].join('');
+}
+
+function formatSelfUpdateVersionTransition(
+  fromVersion: string | null | undefined,
+  toVersion: string | null | undefined,
+  locale: AppLocale,
+): string {
+  if (!fromVersion && !toVersion) {
+    return locale === 'zh' ? '未检测' : 'Not detected';
+  }
+  return `${fromVersion ?? '?'} -> ${toVersion ?? '?'}`;
+}
+
+function formatCodexUpdateState(status: SelfUpdateStatus): string {
+  if (status.codexFromVersion && status.codexToVersion) {
+    if (status.codexFromVersion === status.codexToVersion) {
+      return status.locale === 'zh' ? '已是最新版本' : 'Already current';
+    }
+    return status.locale === 'zh' ? '升级完成' : 'Updated';
+  }
+  return status.codexUpdate ?? (status.locale === 'zh' ? '未执行升级' : 'Not updated');
+}
+
+function formatSelfUpdateBroadcastLine(
+  locale: AppLocale,
+  targetVersion: string | null,
+  broadcast: SelfUpdateBroadcastSummary,
+): string {
+  if (broadcast.state === 'disabled') {
+    return locale === 'zh' ? '未启用跨节点同步' : 'Cross-node sync is disabled';
+  }
+  if (broadcast.state === 'pending') {
+    return locale === 'zh'
+      ? `目标 ${targetVersion ?? '?'}，等待广播结果`
+      : `Target ${targetVersion ?? '?'}; waiting for broadcast result`;
+  }
+  if (broadcast.peers.length === 0) {
+    return locale === 'zh' ? '广播完成，无已配置 peer' : 'Broadcast completed; no configured peers';
+  }
+  return locale === 'zh'
+    ? `已发送 ${broadcast.sent} 个 peer：${broadcast.peers.join('、')}`
+    : `Sent to ${broadcast.sent} peers: ${broadcast.peers.join(', ')}`;
+}
+
+function clipRichMessageText(value: string, limit: number): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, limit - 4))}\n...`;
 }
 
 function formatLoadedThreadsMessage(locale: AppLocale, threadIds: string[]): string {
@@ -8700,7 +11431,12 @@ function formatFeaturesMessage(locale: AppLocale, features: CodexExperimentalFea
   return lines.join('\n');
 }
 
-function formatConfigMessage(locale: AppLocale, result: Record<string, unknown>): string {
+function formatConfigMessage(
+  locale: AppLocale,
+  result: Record<string, unknown>,
+  appConfig: AppConfig,
+  authPoolStats: CodexAuthPoolStats,
+): string {
   const config = result.config && typeof result.config === 'object' ? result.config as Record<string, unknown> : {};
   const layers = Array.isArray(result.layers) ? result.layers : [];
   const keys = ['model', 'model_provider', 'approval_policy', 'sandbox_mode', 'web_search', 'service_tier', 'profile', 'review_model'];
@@ -8710,7 +11446,113 @@ function formatConfigMessage(locale: AppLocale, result: Record<string, unknown>)
     lines.push(`${key}: ${value === null || value === undefined ? '-' : formatConfigValue(value)}`);
   }
   lines.push(t(locale, 'config_layers', { count: layers.length }));
+  lines.push('');
+  lines.push(t(locale, 'config_foxclaw_title'));
+    lines.push(t(locale, 'config_auth_auto_delete_needs_repair', {
+      value: t(locale, appConfig.authAutoDeleteNeedsRepair ? 'yes' : 'no'),
+    }));
+    lines.push(`AUTH_AUTO_DELETE_NEEDS_REPAIR=${appConfig.authAutoDeleteNeedsRepair ? 'true' : 'false'}`);
+    lines.push(t(locale, 'config_delete_tool_details_after_final', {
+      value: t(locale, appConfig.telegramDeleteToolDetailsAfterFinal ? 'yes' : 'no'),
+    }));
+    lines.push(`TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=${appConfig.telegramDeleteToolDetailsAfterFinal ? 'true' : 'false'}`);
+    lines.push(t(locale, 'config_panel_ttl', { value: formatDurationMs(locale, appConfig.telegramPanelTtlMs) }));
+    lines.push(`TELEGRAM_PANEL_TTL_MS=${appConfig.telegramPanelTtlMs}`);
+    lines.push(formatCodexAuthPoolSummary(locale, authPoolStats));
+    lines.push(...formatCodexApiProviderConfigLines(locale, appConfig));
   return lines.join('\n');
+}
+
+function formatCodexApiProviderConfigLines(locale: AppLocale, appConfig: AppConfig): string[] {
+  if (appConfig.codexApiProviders.length === 0) {
+    return [t(locale, 'config_api_providers_none')];
+  }
+  const lines = [t(locale, 'config_api_providers_title')];
+  lines.push(t(locale, 'config_api_default_provider', { value: appConfig.codexApiDefaultProvider ?? '-' }));
+  for (const provider of appConfig.codexApiProviders) {
+    lines.push(t(locale, 'config_api_provider_line', {
+      id: provider.id,
+      model: provider.model ?? '-',
+      base: provider.baseUrl,
+      env: provider.apiKeyEnv,
+      key: process.env[provider.apiKeyEnv]?.trim() ? t(locale, 'yes') : t(locale, 'no'),
+    }));
+    if (provider.chatCompletionsOnly) {
+      lines.push(t(locale, 'config_api_provider_chat_warning', { id: provider.id }));
+    }
+  }
+  return lines;
+}
+
+function formatCodexAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): string {
+  return t(locale, 'auth_pool_summary', {
+    total: stats.totalSeen,
+    alive: stats.alive,
+    deleted: stats.deletedInvalid,
+  });
+}
+
+function isInvalidCodexAuthDeleteReason(reason: string | null | undefined): boolean {
+  return reason === AUTH_DELETE_REASON_NEEDS_REPAIR;
+}
+
+function configKeyboard(locale: AppLocale, appConfig: AppConfig): Array<Array<{ text: string; callback_data: string }>> {
+  const authAutoDeleteEnabled = appConfig.authAutoDeleteNeedsRepair;
+  const deleteToolDetailsEnabled = appConfig.telegramDeleteToolDetailsAfterFinal;
+  return [
+    [{
+      text: t(locale, authAutoDeleteEnabled ? 'button_config_auth_auto_delete_off' : 'button_config_auth_auto_delete_on'),
+      callback_data: `config:auth_auto_delete:${authAutoDeleteEnabled ? 'off' : 'on'}`,
+    }],
+    [{
+      text: t(locale, deleteToolDetailsEnabled ? 'button_config_delete_tool_details_off' : 'button_config_delete_tool_details_on'),
+      callback_data: `config:delete_tool_details:${deleteToolDetailsEnabled ? 'off' : 'on'}`,
+    }],
+  ];
+}
+
+function formatDurationMs(locale: AppLocale, value: number): string {
+  if (value <= 0) {
+    return locale === 'zh' ? '关闭' : 'disabled';
+  }
+  if (value % 60_000 === 0) {
+    const minutes = value / 60_000;
+    return locale === 'zh' ? `${minutes} 分钟` : `${minutes} min`;
+  }
+  if (value % 1000 === 0) {
+    const seconds = value / 1000;
+    return locale === 'zh' ? `${seconds} 秒` : `${seconds} sec`;
+  }
+  return `${value}ms`;
+}
+
+function parseConfigBooleanArg(value: string | undefined): boolean | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return null;
+  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
+  return null;
+}
+
+async function writeEnvBoolean(envPath: string, key: string, enabled: boolean): Promise<void> {
+  await fs.mkdir(path.dirname(envPath), { recursive: true });
+  const nextLine = `${key}=${enabled ? 'true' : 'false'}`;
+  let contents = '';
+  try {
+    contents = await fs.readFile(envPath, 'utf8');
+  } catch {
+    await fs.writeFile(envPath, `${nextLine}\n`, { encoding: 'utf8', mode: 0o600 });
+    return;
+  }
+  const pattern = new RegExp(`(^|\\n)[ \\t#]*${escapeRegExp(key)}\\s*=.*(?=\\r?\\n|$)`);
+  const nextContents = pattern.test(contents)
+    ? contents.replace(pattern, (_match, prefix: string) => `${prefix}${nextLine}`)
+    : `${contents}${contents.endsWith('\n') || contents.length === 0 ? '' : '\n'}${nextLine}\n`;
+  await fs.writeFile(envPath, nextContents, { encoding: 'utf8', mode: 0o600 });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function formatRequirementsMessage(locale: AppLocale, requirements: CodexConfigRequirements | null): string {
@@ -8839,6 +11681,26 @@ function summarizeTurnItems(items: AppTurnSnapshot['items']): string {
     .slice(0, 8)
     .map(([type, count]) => `${type}=${count}`)
     .join(', ');
+}
+
+function turnHasRelayableOutcome(turn: AppTurnSnapshot): boolean {
+  if (turn.error?.trim()) {
+    return true;
+  }
+  return turn.items.some((item) => {
+    const type = item.type.toLowerCase();
+    if (!item.text?.trim()) {
+      return false;
+    }
+    if (type === 'plan') {
+      return true;
+    }
+    if (type !== 'agentmessage' && type !== 'assistantmessage') {
+      return false;
+    }
+    const phase = item.phase?.toLowerCase() ?? null;
+    return phase === null || phase.startsWith('final');
+  });
 }
 
 function mapGoalNotification(raw: any): CodexThreadGoal | null {
@@ -9041,6 +11903,10 @@ function resolveScopeMessageTarget(scopeId: string): { chatId: string; chatType:
   } catch {
     return null;
   }
+}
+
+function restartPreviewRecoveryKey(preview: Pick<ActiveTurnPreviewRecord, 'scopeId' | 'turnId' | 'messageId'>): string {
+  return `${preview.scopeId}:${preview.turnId}:${preview.messageId}`;
 }
 
 function seedObservedTurnCursor(turn: AppTurnSnapshot): ObservedTurnCursor {
@@ -9282,6 +12148,7 @@ function codexAuthDir(explicitAuthDir: string | null = null): string {
 
 async function listCodexAuthState(
   disabledNames = new Set<string>(),
+  candidateStates = new Map<string, CodexAuthCandidateState>(),
   explicitAuthDir: string | null = null,
 ): Promise<CodexAuthState> {
   const authDir = codexAuthDir(explicitAuthDir);
@@ -9309,9 +12176,11 @@ async function listCodexAuthState(
       path: candidatePath,
       isCurrent: currentTargetPath === candidatePath,
       disabled: disabledNames.has(entry.name),
+      state: candidateStates.get(entry.name) ?? 'active',
       mtimeMs: stat.mtimeMs,
       credentialKind: 'invalid',
       credentialLastRefreshMs: null,
+      credentialExpiresAtMs: null,
       quota: null,
     });
   }
@@ -9433,7 +12302,7 @@ async function restoreCodexAuthTarget(
 }
 
 async function switchCodexAuth(targetPath: string, explicitAuthDir: string | null = null): Promise<CodexAuthSwitchResult> {
-  const state = await listCodexAuthState(new Set(), explicitAuthDir);
+  const state = await listCodexAuthState(new Set(), new Map(), explicitAuthDir);
   const candidate = state.candidates.find(entry => entry.path === targetPath);
   if (!candidate) {
     throw new Error(`Auth candidate is no longer available: ${path.basename(targetPath)}`);
@@ -9532,7 +12401,7 @@ function filterCodexAuthCandidates(
     .map((candidate, index) => ({ candidate, index }))
     .filter(({ candidate }) => !searchTerm || candidate.name.toLowerCase().includes(searchTerm))
     .filter(({ candidate }) => view.filter === 'all'
-      || (view.filter === 'enabled' && !candidate.disabled)
+      || (view.filter === 'enabled' && !candidate.disabled && candidate.state !== 'needs_repair')
       || (view.filter === 'attention' && codexAuthCandidateNeedsAttention(candidate)));
 }
 
@@ -9565,6 +12434,7 @@ function renderAuthListMessage(
         t(locale, 'weixin_copy_paste_divider'),
         t(locale, 'weixin_copy_auth_title'),
         '/login_device',
+        '/auth sync safe',
         '/auth reload',
         '/permissions',
       );
@@ -9611,6 +12481,7 @@ function renderAuthListMessage(
       '/auth filter attention',
       '/auth list <keyword>',
       '/login_device',
+      '/auth sync safe',
       '/auth reload',
       '/permissions',
     );
@@ -9622,12 +12493,12 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
   const page = codexAuthListPage(record.candidates, record);
   const rows = page.visible.map(({ candidate, index }) => [
     {
-      text: clipButtonText(`${candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaButtonPrefix(candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${candidate.disabled ? ' · off' : ''}`),
-      callback_data: `auth:${record.localId}:${index}`,
+      text: clipButtonText(`${candidate.state === 'needs_repair' ? '? ' : candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaButtonPrefix(candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${candidate.disabled ? ' · off' : ''}`),
+      callback_data: candidate.state === 'needs_repair' ? `auth:${record.localId}:repair:${index}` : `auth:${record.localId}:${index}`,
     },
     {
-      text: t(locale, candidate.disabled ? 'button_auth_disable' : 'button_auth_enable'),
-      callback_data: `auth:${record.localId}:toggle:${index}`,
+      text: candidate.state === 'needs_repair' ? '?' : t(locale, candidate.disabled ? 'button_auth_disable' : 'button_auth_enable'),
+      callback_data: candidate.state === 'needs_repair' ? `auth:${record.localId}:repair:${index}` : `auth:${record.localId}:toggle:${index}`,
     },
   ]);
   const navigationRow = [];
@@ -9648,11 +12519,8 @@ function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): A
   if (record.searchTerm) {
     rows.push([{ text: t(locale, 'button_clear_filter'), callback_data: `auth:${record.localId}:clear_search` }]);
   }
-  rows.push([
-    { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
-    { text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` },
-  ]);
-  rows.push([{ text: t(locale, 'button_auth_reload'), callback_data: `auth:${record.localId}:reload` }]);
+  rows.push([{ text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` }]);
+  rows.push([{ text: t(locale, 'button_auth_safe_sync'), callback_data: `auth:${record.localId}:safe_sync` }]);
   return rows;
 }
 
@@ -9676,6 +12544,9 @@ function authFilterButton(
 }
 
 function codexAuthCandidateHealth(candidate: CodexAuthCandidate): CodexAuthCandidateHealth {
+  if (candidate.state === 'needs_repair') {
+    return 'needs_repair';
+  }
   if (candidate.disabled) {
     return 'disabled';
   }
@@ -9713,6 +12584,7 @@ function codexAuthCandidateNeedsAttention(candidate: CodexAuthCandidate): boolea
     || health === 'unknown'
     || health === 'low'
     || health === 'exhausted'
+    || health === 'needs_repair'
     || health === 'invalid';
 }
 
@@ -9723,6 +12595,7 @@ function formatCodexAuthCandidateStatus(locale: AppLocale, candidate: CodexAuthC
   }
   details.push(t(locale, `auth_candidate_health_${codexAuthCandidateHealth(candidate)}` as
     | 'auth_candidate_health_disabled'
+    | 'auth_candidate_health_needs_repair'
     | 'auth_candidate_health_ready'
     | 'auth_candidate_health_low'
     | 'auth_candidate_health_exhausted'
@@ -9733,6 +12606,11 @@ function formatCodexAuthCandidateStatus(locale: AppLocale, candidate: CodexAuthC
   if (candidate.credentialLastRefreshMs !== null) {
     details.push(t(locale, 'auth_candidate_last_refresh', {
       value: formatCompactAge(locale, Date.now() - candidate.credentialLastRefreshMs),
+    }));
+  }
+  if (candidate.credentialExpiresAtMs !== null) {
+    details.push(t(locale, 'auth_candidate_expires_at', {
+      value: formatUtcDateTime(candidate.credentialExpiresAtMs),
     }));
   }
   return `[${details.join(' · ')}]`;
@@ -9746,6 +12624,14 @@ function authRefreshAllConfirmKeyboard(locale: AppLocale, record: PendingAuthCho
   return [
     [{ text: t(locale, 'button_auth_refresh_all_confirm'), callback_data: `auth:${record.localId}:refresh_all_confirm` }],
     [{ text: t(locale, 'button_cancel'), callback_data: `auth:${record.localId}:refresh_all_cancel` }],
+  ];
+}
+
+function authRepairKeyboard(locale: AppLocale, record: PendingAuthChoiceList, index: number): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{ text: t(locale, 'button_auth_repair_login'), callback_data: `auth:${record.localId}:repair_login:${index}` }],
+    [{ text: t(locale, 'button_auth_delete'), callback_data: `auth:${record.localId}:repair_delete:${index}` }],
+    [{ text: t(locale, 'button_cancel'), callback_data: `auth:${record.localId}:repair_cancel:${index}` }],
   ];
 }
 
@@ -9771,7 +12657,44 @@ function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshA
   return lines.join('\n');
 }
 
-function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync']): string {
+function formatAuthClusterAuditResult(locale: AppLocale, outcome: CodexAuthClusterAuditOutcome): string {
+  const { audit, refresh, push } = outcome;
+  const lines = [t(locale, 'auth_cluster_audit_summary', {
+    responded: audit.nodesResponded,
+    expected: audit.nodesExpected,
+    checked: audit.checkedCandidates,
+    valid: audit.validCandidates,
+    invalid: audit.invalidCandidates,
+  })];
+  if (audit.synchronizedCandidates.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_synced', { value: audit.synchronizedCandidates.join(', ') }));
+  }
+  if (audit.consensusInvalidCandidates.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_repair', { value: audit.consensusInvalidCandidates.join(', ') }));
+  }
+  if (audit.missingPeers.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_missing', { value: audit.missingPeers.join(', ') }));
+  }
+  if (audit.busyNodes.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_busy', { value: audit.busyNodes.join(', ') }));
+  }
+  if (audit.identityConflicts.length > 0) {
+    lines.push(t(locale, 'auth_cluster_audit_conflicts', { value: audit.identityConflicts.join(', ') }));
+  }
+  if (outcome.refreshSkippedReason) {
+    lines.push(t(locale, 'auth_cluster_audit_refresh_skipped'));
+  } else {
+    lines.push(formatAuthRefreshAllResult(locale, refresh, 'proactive'));
+  }
+  lines.push(t(locale, 'auth_cluster_audit_push', { sent: push.sent, skipped: push.skipped }));
+  return lines.join('\n');
+}
+
+function formatAuthSyncStatus(
+  locale: AppLocale,
+  status: RuntimeStatus['authSync'],
+  proactiveRefresh: AuthProactiveRefreshStatus | null = null,
+): string {
   if (!status?.enabled) {
     return t(locale, 'auth_sync_disabled');
   }
@@ -9799,6 +12722,11 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
   }
   if (status.lastError) {
     lines.push(t(locale, 'auth_sync_status_error', { value: status.lastError }));
+  }
+  if (proactiveRefresh) {
+    lines.push(t(locale, 'auth_sync_status_proactive_refresh', {
+      value: formatAuthProactiveRefreshStatus(locale, proactiveRefresh),
+    }));
   }
   if (status.peerStatuses?.length) {
     lines.push(t(locale, 'auth_sync_status_peer_activity'));
@@ -9829,6 +12757,60 @@ function formatAuthSyncStatus(locale: AppLocale, status: RuntimeStatus['authSync
     }
   }
   return lines.join('\n');
+}
+
+function formatAuthProactiveRefreshStatus(
+  locale: AppLocale,
+  status: AuthProactiveRefreshStatus,
+): string {
+  const time = status.finishedAt ?? status.startedAt;
+  const candidates = formatLimitedList(status.candidates, 3);
+  const state = formatAuthProactiveRefreshState(locale, status.state);
+  const result = locale === 'zh'
+    ? `已刷新 ${status.refreshed}，已跳过 ${status.skipped}，失败 ${status.failed}`
+    : `refreshed ${status.refreshed}, skipped ${status.skipped}, failed ${status.failed}`;
+  const parts = [
+    `${state} @ ${time}`,
+    locale === 'zh' ? `候选 ${candidates}` : `candidates ${candidates}`,
+    result,
+  ];
+  if (status.error) {
+    parts.push(locale === 'zh'
+      ? `原因 ${formatShortStatusError(status.error)}`
+      : `reason ${formatShortStatusError(status.error)}`);
+  }
+  if (status.details.length > 0) {
+    parts.push(locale === 'zh'
+      ? `明细 ${formatLimitedList(status.details.map(formatShortStatusError), 2)}`
+      : `details ${formatLimitedList(status.details.map(formatShortStatusError), 2)}`);
+  }
+  return parts.join('; ');
+}
+
+function formatAuthProactiveRefreshState(
+  locale: AppLocale,
+  state: AuthProactiveRefreshStatus['state'],
+): string {
+  if (locale === 'zh') {
+    switch (state) {
+      case 'running': return '进行中';
+      case 'completed': return '已完成';
+      case 'lease_failed': return '锁未授予';
+      case 'failed': return '失败';
+    }
+  }
+  switch (state) {
+    case 'running': return 'running';
+    case 'completed': return 'completed';
+    case 'lease_failed': return 'lease not granted';
+    case 'failed': return 'failed';
+  }
+}
+
+function formatLimitedList(values: readonly string[], limit: number): string {
+  if (values.length === 0) return '-';
+  const shown = values.slice(0, limit).join(', ');
+  return values.length > limit ? `${shown}, +${values.length - limit}` : shown;
 }
 
 type AuthSyncRuntimeStatus = NonNullable<RuntimeStatus['authSync']>;
@@ -9955,16 +12937,50 @@ function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {
   };
 }
 
-function isCodexAuthRotationError(params: any): boolean {
-  if (isChatGptBackendAccessBlocked(collectCodexErrorText(params))) {
-    return false;
+function classifyCodexAuthRotationError(params: any): CodexAuthRotationReason | null {
+  const collected = collectCodexErrorText(params);
+  if (isChatGptBackendAccessBlocked(collected)) {
+    return null;
   }
   const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
-  if (code && /usageLimitExceeded|auth|unauthorized|forbidden|login/i.test(code)) {
-    return true;
-  }
   const message = stringOrNull(params?.error?.message) ?? '';
-  return /(usage limit|rate limit|not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message);
+  const text = `${code ?? ''}\n${message}\n${collected}`;
+  if (isCodexAuthInvalidError(text)) {
+    return 'auth_invalid';
+  }
+  if (isCodexQuotaLimitError(text)) {
+    return 'quota_limited';
+  }
+  if (code && /auth|unauthorized|forbidden|login/i.test(code)) {
+    return 'auth_invalid';
+  }
+  return /(not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message)
+    ? 'auth_invalid'
+    : null;
+}
+
+function isCodexAuthInvalidError(text: string): boolean {
+  return /token[_\s-]?invalidated/i.test(text)
+    || /authentication token has been invalidated/i.test(text)
+    || /\b401\s+unauthorized\b/i.test(text)
+    || /\bunauthorized\b/i.test(text)
+    || /\bnot authenticated\b/i.test(text)
+    || /\bsign in again\b/i.test(text)
+    || /\blog in again\b/i.test(text);
+}
+
+function isCodexQuotaLimitError(text: string): boolean {
+  return /usageLimitExceeded/i.test(text)
+    || /you['’]?ve hit your usage limit/i.test(text)
+    || /\busage limit(?:s)?\b/i.test(text)
+    || /\brate limit(?:ed|s)?\b/i.test(text)
+    || /\btoo many requests\b/i.test(text)
+    || /\binsufficient[_\s-]?quota\b/i.test(text)
+    || /\bquota exceeded\b/i.test(text)
+    || /\bbilling hard limit\b/i.test(text)
+    || /\bcredits? exhausted\b/i.test(text)
+    || /\bout of credits?\b/i.test(text)
+    || /\bcredits? limit\b/i.test(text);
 }
 
 function formatCodexNotificationError(params: any): string {
@@ -10256,23 +13272,24 @@ function renderUserInputMessage(
   record.questions.forEach((question, index) => {
     lines.push('');
     const title = question.header || question.question || question.id;
-    lines.push(`${index + 1}. ${title}`);
     if (question.header && question.question) {
-      lines.push(question.question);
+      lines.push(`${index + 1}. **${title}** ${question.question}`);
+    } else {
+      lines.push(`${index + 1}. **${title}**`);
     }
     if (question.isOther) {
-      lines.push(t(locale, 'user_input_other_hint'));
+      lines.push(`   - ${t(locale, 'user_input_other_hint')}`);
     }
     if (question.isSecret) {
-      lines.push(t(locale, 'user_input_secret_warning'));
+      lines.push(`   - ${t(locale, 'user_input_secret_warning')}`);
     }
     question.options.forEach((option, optionIndex) => {
       const description = option.description ? ` - ${option.description}` : '';
-      lines.push(`${optionIndex + 1}) ${option.label}${description}`);
+      lines.push(`   ${optionIndex + 1}. ${option.label}${description}`);
     });
     const answer = record.answers.get(question.id);
     if (answer) {
-      lines.push(t(locale, 'user_input_selected', { value: answer }));
+      lines.push(`   - ${t(locale, 'user_input_selected', { value: answer })}`);
     }
   });
 
@@ -10318,6 +13335,92 @@ function userInputKeyboard(record: PendingUserInputRequest): Array<Array<{ text:
     })));
   });
   return rows;
+}
+
+function parseStoredTurnInput(inputJson: string): TurnInput[] {
+  const value = JSON.parse(inputJson) as unknown;
+  if (!Array.isArray(value)) {
+    throw new Error('Queued turn input is not an array');
+  }
+  return value as TurnInput[];
+}
+
+function parseStagedTelegramAttachments(attachmentsJson: string): StagedTelegramAttachment[] {
+  const value = JSON.parse(attachmentsJson) as unknown;
+  if (!Array.isArray(value)) {
+    throw new Error('Attachment batch payload is not an array');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      throw new Error('Attachment batch contains an invalid entry');
+    }
+    const attachment = entry as Partial<StagedTelegramAttachment>;
+    if (typeof attachment.localPath !== 'string' || typeof attachment.relativePath !== 'string') {
+      throw new Error('Attachment batch entry is missing a local path');
+    }
+    return attachment as StagedTelegramAttachment;
+  });
+}
+
+function findReusableStandaloneAttachmentBatch(
+  batch: PendingAttachmentBatchRecord | null,
+  now: number,
+): PendingAttachmentBatchRecord | null {
+  if (!batch || batch.mediaGroupId !== null) {
+    return null;
+  }
+  return now - batch.updatedAt <= ATTACHMENT_BATCH_MERGE_WINDOW_MS ? batch : null;
+}
+
+function mergeAttachmentBatchCaption(existing: string, next: string): string {
+  const normalizedNext = next.trim();
+  if (!normalizedNext) {
+    return existing;
+  }
+  const normalizedExisting = existing.trim();
+  if (!normalizedExisting) {
+    return normalizedNext;
+  }
+  return normalizedExisting === normalizedNext ? normalizedExisting : `${normalizedExisting}\n\n${normalizedNext}`;
+}
+
+function summarizeStagedAttachmentInput(
+  text: string,
+  attachments: readonly StagedTelegramAttachment[],
+): string {
+  const lines = [text.trim() || '(no text)'];
+  if (attachments.length > 0) {
+    lines.push(`[attachments: ${attachments.map((attachment) => `${attachment.kind}:${attachment.fileName}`).join(', ')}]`);
+  }
+  return lines.join('\n');
+}
+
+function renderAttachmentBatchMessage(locale: AppLocale, record: PendingAttachmentBatchRecord): string {
+  const attachments = parseStagedTelegramAttachments(record.attachmentsJson);
+  const lines = [
+    t(locale, 'attachment_batch_staged', { count: attachments.length }),
+  ];
+  if (record.caption.trim()) {
+    lines.push('', t(locale, 'attachment_batch_caption', { value: truncateInline(record.caption.trim(), 600) }));
+  }
+  lines.push('');
+  for (const [index, attachment] of attachments.entries()) {
+    const name = attachment.fileName || attachment.fileUniqueId;
+    const size = attachment.fileSize === null ? '' : `, ${attachment.fileSize} bytes`;
+    lines.push(`${index + 1}. ${attachment.kind}: ${name}${size}`);
+  }
+  return lines.join('\n');
+}
+
+function attachmentBatchKeyboard(locale: AppLocale, batchId: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: t(locale, 'attachment_batch_button_analyze'), callback_data: `attach:${batchId}:analyze` },
+    { text: t(locale, 'attachment_batch_button_clear'), callback_data: `attach:${batchId}:clear` },
+  ]];
+}
+
+function shortId(value: string): string {
+  return value.slice(0, 8);
 }
 
 function renderPlanImplementationPrompt(locale: AppLocale, record: PendingPlanImplementation): string {
@@ -10500,6 +13603,13 @@ function formatCompactAge(locale: AppLocale, ageMs: number): string {
   return locale === 'zh' ? `${roundedMinutes}分钟前` : `${roundedMinutes}m ago`;
 }
 
+function formatUtcDateTime(timestampMs: number): string {
+  if (!Number.isFinite(timestampMs)) {
+    return '-';
+  }
+  return `${new Date(timestampMs).toISOString().slice(0, 16).replace('T', ' ')}Z`;
+}
+
 function formatUsagePercent(value: number): string {
   if (!Number.isFinite(value)) {
     return '?';
@@ -10512,15 +13622,22 @@ function formatRemainingUsagePercent(usedPercent: number): string {
   return remainingPercent === null ? '?' : formatUsagePercent(remainingPercent);
 }
 
-function authQuotaSnapshotFromRateLimit(snapshot: CodexRateLimitSnapshot, accountId: string | null = null): CodexAuthQuotaSnapshot {
+function authQuotaSnapshotFromRateLimit(
+  snapshot: CodexRateLimitSnapshot,
+  accountId: string | null = null,
+  quotaIdentityId: string | null = null,
+): CodexAuthQuotaSnapshot {
   return {
     capturedAtMs: Date.now(),
     accountId,
+    quotaIdentityId,
     planType: snapshot.planType,
     primaryWindowDurationMins: snapshot.primary?.windowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
+    primaryResetsAt: snapshot.primary?.resetsAt ?? null,
     secondaryWindowDurationMins: snapshot.secondary?.windowDurationMins ?? null,
     secondaryRemainingPercent: snapshot.secondary ? remainingUsagePercent(snapshot.secondary.usedPercent) : null,
+    secondaryResetsAt: snapshot.secondary?.resetsAt ?? null,
   };
 }
 
@@ -10528,11 +13645,14 @@ function codexAuthQuotaSnapshotFromRecord(record: CodexAuthQuotaSnapshotRecord):
   return {
     capturedAtMs: record.capturedAtMs,
     accountId: record.accountId,
+    quotaIdentityId: record.quotaIdentityId,
     planType: record.planType,
     primaryWindowDurationMins: record.primaryWindowDurationMins,
     primaryRemainingPercent: record.primaryRemainingPercent,
+    primaryResetsAt: record.primaryResetsAt,
     secondaryWindowDurationMins: record.secondaryWindowDurationMins,
     secondaryRemainingPercent: record.secondaryRemainingPercent,
+    secondaryResetsAt: record.secondaryResetsAt,
   };
 }
 
@@ -10551,6 +13671,7 @@ function mergeCodexAuthQuotaSnapshots(
   return {
     ...freshest,
     accountId: freshest.accountId ?? older.accountId ?? null,
+    quotaIdentityId: freshest.quotaIdentityId ?? older.quotaIdentityId ?? null,
   };
 }
 
@@ -10559,8 +13680,10 @@ function isFiniteCodexAuthQuotaSnapshotRecord(record: CodexAuthQuotaSnapshotReco
     && isNullableString(record.planType)
     && isNullableFiniteNumber(record.primaryWindowDurationMins)
     && isNullableFiniteNumber(record.primaryRemainingPercent)
+    && isNullableFiniteNumber(record.primaryResetsAt)
     && isNullableFiniteNumber(record.secondaryWindowDurationMins)
-    && isNullableFiniteNumber(record.secondaryRemainingPercent);
+    && isNullableFiniteNumber(record.secondaryRemainingPercent)
+    && isNullableFiniteNumber(record.secondaryResetsAt);
 }
 
 function remainingUsagePercent(usedPercent: number): number | null {
@@ -10575,13 +13698,13 @@ function formatAuthQuotaPrefix(locale: AppLocale, snapshot: CodexAuthQuotaSnapsh
     return '--';
   }
   const windows = [
-    [snapshot.primaryWindowDurationMins, snapshot.primaryRemainingPercent, 'primary'],
-    [snapshot.secondaryWindowDurationMins, snapshot.secondaryRemainingPercent, 'secondary'],
+    [snapshot.primaryWindowDurationMins, snapshot.primaryRemainingPercent, snapshot.primaryResetsAt, 'primary'],
+    [snapshot.secondaryWindowDurationMins, snapshot.secondaryRemainingPercent, snapshot.secondaryResetsAt, 'secondary'],
   ] as const;
   const values = windows
-    .filter(([duration, remaining]) => duration !== null || remaining !== null)
-    .map(([duration, remaining, fallback]) => (
-      `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}`
+    .filter(([duration, remaining, resetsAt]) => duration !== null || remaining !== null || resetsAt !== null)
+    .map(([duration, remaining, resetsAt, fallback]) => (
+      `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}${resetsAt === null ? '' : `@${formatLocalTimestamp(resetsAt)}`}`
     ));
   return values.length > 0 ? values.join('|') : '--';
 }
@@ -10607,23 +13730,42 @@ function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapsh
   return typeof snapshot.capturedAtMs === 'number'
     && Number.isFinite(snapshot.capturedAtMs)
     && (snapshot.accountId === undefined || snapshot.accountId === null || typeof snapshot.accountId === 'string')
+    && (snapshot.quotaIdentityId === undefined || snapshot.quotaIdentityId === null || typeof snapshot.quotaIdentityId === 'string')
     && (snapshot.planType === undefined || isNullableString(snapshot.planType))
     && (snapshot.primaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.primaryWindowDurationMins))
     && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
+    && (snapshot.primaryResetsAt === undefined || isNullableFiniteNumber(snapshot.primaryResetsAt))
     && (snapshot.secondaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.secondaryWindowDurationMins))
-    && isNullableFiniteNumber(snapshot.secondaryRemainingPercent);
+    && isNullableFiniteNumber(snapshot.secondaryRemainingPercent)
+    && (snapshot.secondaryResetsAt === undefined || isNullableFiniteNumber(snapshot.secondaryResetsAt));
 }
 
 function normalizeCodexAuthQuotaSnapshot(snapshot: CodexAuthQuotaSnapshot): CodexAuthQuotaSnapshot {
   return {
     capturedAtMs: snapshot.capturedAtMs,
     accountId: snapshot.accountId ?? null,
+    quotaIdentityId: snapshot.quotaIdentityId ?? snapshot.accountId ?? null,
     planType: snapshot.planType ?? null,
     primaryWindowDurationMins: snapshot.primaryWindowDurationMins ?? null,
     primaryRemainingPercent: snapshot.primaryRemainingPercent,
+    primaryResetsAt: snapshot.primaryResetsAt ?? null,
     secondaryWindowDurationMins: snapshot.secondaryWindowDurationMins ?? null,
     secondaryRemainingPercent: snapshot.secondaryRemainingPercent,
+    secondaryResetsAt: snapshot.secondaryResetsAt ?? null,
   };
+}
+
+function chatGptAuthMetadataCompatible(
+  left: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+  right: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
+): boolean {
+  if (left.accountId !== right.accountId) {
+    return false;
+  }
+  if (left.quotaIdentityId === left.accountId || right.quotaIdentityId === right.accountId) {
+    return true;
+  }
+  return left.quotaIdentityId === right.quotaIdentityId;
 }
 
 function isNullableFiniteNumber(value: unknown): value is number | null {
@@ -10682,6 +13824,13 @@ function isTelegramMessageGone(error: unknown): boolean {
   return message.includes('message to delete not found')
     || message.includes('message to edit not found')
     || message.includes('message not found');
+}
+
+function isTelegramMessageTooLong(error: unknown): boolean {
+  const message = formatUserError(error).toLowerCase();
+  return message.includes('message_too_long')
+    || message.includes('message is too long')
+    || message.includes('message too long');
 }
 
 function isFileMissingError(error: unknown): boolean {

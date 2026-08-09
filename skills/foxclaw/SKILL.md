@@ -145,7 +145,7 @@ Use `--no-start` by default when preparing a second Mac before a unique bot toke
 After either bootstrap path:
 
 1. Run `node dist/main.js doctor` in the installed bridge repo.
-2. If launchd was installed, run `node dist/main.js status`.
+2. If launchd was installed, run `node dist/main.js status`, `launchctl print "gui/$(id -u)/app.foxden.foxclaw"`, and inspect `~/.foxclaw/logs/launchd.err.log` if either status check fails.
 3. Check `codex login status`. If authentication is missing, stop and tell the user exactly how to log in.
 4. If the bridge is expected to answer in a Telegram group, confirm:
    - `privacy mode` is disabled

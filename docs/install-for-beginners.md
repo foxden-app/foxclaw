@@ -263,7 +263,12 @@ If install reports that linger could not be enabled automatically, run:
 sudo loginctl enable-linger "$USER"
 ```
 
-On macOS, `foxclaw start` manages launchd and starts FoxClaw when you log in.
+On macOS, `foxclaw start` manages launchd and starts FoxClaw when you log in. Check state and startup logs with:
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
+```
 
 For foreground debugging, stop the service first and then run `foxclaw serve`.
 
@@ -275,7 +280,7 @@ Check current status:
 foxclaw status
 ```
 
-Restart Linux service after changing `.env`:
+Restart after changing `.env`:
 
 ```bash
 foxclaw restart
@@ -291,6 +296,12 @@ Uninstall Linux service:
 
 ```bash
 foxclaw uninstall-systemd
+```
+
+Uninstall macOS launchd service:
+
+```bash
+foxclaw uninstall-launchd
 ```
 
 Update FoxClaw later:

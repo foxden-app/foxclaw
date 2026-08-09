@@ -2,6 +2,740 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.5.78 - 2026-07-12
+
+### 中文
+- `/auth` 面板收敛为“设备登录”和“安全同步”两个维护入口，移除权限、重载 auth 和单独的全节点审计按钮。“安全同步”现在直接执行完整的全节点验证、最新有效副本协商、8 天临期刷新和最终分发；`/auth sync audit` 继续作为兼容别名。
+- 全节点审计现在也覆盖只存在于单个节点的旧候选：通过现有 AES-256-GCM 通道发送给其他节点做只验证、不导入的独立复核。任一节点验证有效就恢复并分发；没有有效结果且至少两个节点确认无效才标记 `?`。
+- Telegram `/status` 新增当前 bot 实际使用的 Codex Home，并与 `/auth`、`/threads` 等时效面板一样按 `TELEGRAM_PANEL_TTL_MS` 自动撤回，默认 5 分钟。
+- 完整支持 Codex 新增的 `max`、`ultra` 推理强度，包括模型能力读取、命令解析、设置持久化和下一轮请求透传，不再提示“未知推理强度”。
+
+### English
+- Simplified the `/auth` panel to Device login and Safe sync, removing the Permissions, Reload auth, and separate cluster-audit buttons. Safe sync now runs the complete all-node validation, newest-valid-copy reconciliation, 8-day stale refresh, and final distribution flow; `/auth sync audit` remains a compatibility alias.
+- All-node audits now cover legacy candidates found on only one node. The candidate is sent through the existing AES-256-GCM channel for independent validation without import. Any valid result restores and distributes it; it is marked `?` only when no valid result exists and at least two nodes reject it.
+- Telegram `/status` now shows the effective Codex Home for the current bot and expires through `TELEGRAM_PANEL_TTL_MS`, like `/auth` and `/threads`, with a five-minute default.
+- Added end-to-end support for the new Codex `max` and `ultra` reasoning efforts across model capability parsing, commands, persisted settings, and turn requests.
+
+## 0.5.77 - 2026-07-11
+
+### 中文
+- 修复跨节点升级广播触发的后台升级完成后，旧服务把内部 `cluster:*` scope 当成 Telegram scope 解析并反复记录 `Expected telegram: scope` 的问题。集群升级现在只记录完成状态并清理轮询文件，不再尝试向不存在的聊天发送回报。
+
+### English
+- Fixed cluster-broadcast updates repeatedly logging `Expected telegram: scope` after completion because the old service tried to parse the internal `cluster:*` scope as a Telegram destination. Cluster updates now record completion and clear the poll state without trying to send a chat reply to a non-chat scope.
+
+## 0.5.76 - 2026-07-11
+
+### 中文
+- `/auth` 面板新增“全节点自检并同步”按钮，命令等价入口为 `/auth sync audit`。发起节点会申请跨节点刷新锁，通知所有已配置 peer 逐个通过 Codex usage 接口验证 auth，并在同一轮中汇总节点、有效候选、无效候选、未回应、忙碌和身份冲突状态。
+- 集群审计会在同名、同 account、同 ChatGPT 用户身份范围内采用最新且验证有效的副本，并分发给所有 peer。完整审计确认较新的副本无效时，允许经过验证的较旧有效副本替换它；任一节点未回应或忙碌时仍坚持普通的只接受更新副本规则。
+- 只有所有 peer 都回应、没有任何有效副本，并且至少两个节点独立确认无效时，才会把候选统一标记为 `?` 等待人工处理；有效副本导入后会恢复 active 状态并清除旧失败记录。
+- 临期主动刷新阈值由 9 天统一为 `last_refresh` 已满 8 天。集群自检完整结束后，由主动发起的 bot 刷新符合条件的已启用 ChatGPT auth，再向所有 peer 分发；同一节点的 canonical 和各 Codex home 副本都会参与检查，避免漏掉本机仍有效的旧副本。
+
+### English
+- Added **Check all nodes and reconcile auth** to the `/auth` panel, with `/auth sync audit` as the command equivalent. The initiating node acquires the cross-node refresh lease, asks every configured peer to validate each auth through the Codex usage endpoint, and summarizes responding, missing, busy, valid, invalid, and identity-conflicting states in one run.
+- Cluster audit selects the newest validated copy among same-name candidates with matching account and ChatGPT user identity, then distributes it to every peer. A validated older copy may replace a newer invalid copy only after a complete audit; missing or busy peers keep normal newer-only import semantics.
+- A candidate is marked `?` only when every peer responds, no valid copy exists, and at least two nodes independently confirm it invalid. Importing a valid copy restores the active state and clears stale failure records.
+- Unified proactive maintenance at `last_refresh` age 8 days instead of 9. After a complete audit, the initiating bot refreshes eligible enabled ChatGPT auth and distributes the result. Audits inspect canonical and per-Codex-home copies on each node so an older but still valid local copy is not overlooked.
+
+## 0.5.74 - 2026-07-11
+
+### 中文
+- FoxClaw 现在优先保留 Node 实际调用的 `process.argv[1]` 作为自身入口，而不是使用会解析软链接的 `import.meta.url`。这样 pnpm 11 shim 中的 `global/v11/<instance>` 布局信息不会在进入更新器前丢失，自更新可以保持在 pnpm 11 隔离全局目录中完成。
+
+### English
+- FoxClaw now preserves Node's invoked `process.argv[1]` as its own entry point instead of relying on `import.meta.url`, which resolves symlinks. This retains pnpm 11's `global/v11/<instance>` layout information before self-update starts, allowing updates to remain within the pnpm 11 isolated global installation.
+
+## 0.5.73 - 2026-07-11
+
+### 中文
+- 当 pnpm 10 与 pnpm 11 全局安装同时存在时，自更新会根据 `pnpm root -g` 返回的当前布局选择对应 CLI shim：`global/5` 使用 `PNPM_HOME/foxclaw`，`global/v11` 使用 `PNPM_HOME/bin/foxclaw`，避免升级后把 systemd 服务切到另一套全局安装。
+
+### English
+- When pnpm 10 and pnpm 11 global installations coexist, self-update now selects the CLI shim that matches the current `pnpm root -g` layout: `PNPM_HOME/foxclaw` for `global/5`, and `PNPM_HOME/bin/foxclaw` for `global/v11`. This prevents the systemd service from switching to the other global installation after an update.
+
+## 0.5.72 - 2026-07-11
+
+### 中文
+- 完整适配 pnpm 11 隔离全局包布局：升级后从 pnpm 生成的 `foxclaw` shim 读取 `global/v11/<instance>/node_modules/.../dist/main.js` 真实入口，不再把 `pnpm root -g` 误当成包目录。
+- pnpm 管理的 FoxClaw 自更新现在按现有安装布局固定 pnpm major，避免 pnpm 10 安装误选 `PNPM_HOME/bin` 中的 pnpm 11；本次更新显式设置 `minimumReleaseAge=0`，确保刚发布的 `@latest` 不会被 pnpm 11 默认 24 小时发布年龄策略回退到旧版。
+
+### English
+- Fully supports pnpm 11's isolated global package layout. After installation, FoxClaw reads the real `global/v11/<instance>/node_modules/.../dist/main.js` target from pnpm's generated CLI shim instead of treating `pnpm root -g` as the package directory.
+- Self-update now pins the pnpm major to the existing installation layout, preventing a pnpm 10 installation from selecting pnpm 11 under `PNPM_HOME/bin`. The update also sets `minimumReleaseAge=0` so pnpm 11's default 24-hour release-age policy does not resolve `@latest` to an older FoxClaw release.
+
+## 0.5.71 - 2026-07-11
+
+### 中文
+- 自更新找不到当前 pnpm 可执行文件时，不再通过 `pnpm@latest` 跨 major 安装：`global/5` 旧布局固定使用 pnpm 10，`global/v11` 布局固定使用 pnpm 11，避免同一次升级同时产生两套全局目录和 CLI 入口。
+- 保留 pnpm 10 与 pnpm 11 两种全局 root 解析，确保安装后的自检和服务重启使用与当前 FoxClaw 安装布局一致的新入口。
+
+### English
+- Self-update no longer crosses pnpm major versions through `pnpm@latest` when the current pnpm executable is unavailable. The legacy `global/5` layout uses pnpm 10, while `global/v11` uses pnpm 11, preventing one update from creating duplicate global trees and CLI entry points.
+- Kept global-root resolution for both pnpm 10 and pnpm 11 so post-install checks and service restart use the new entry point from the same layout as the current FoxClaw installation.
+
+## 0.5.70 - 2026-07-11
+
+### 中文
+- `foxclaw status` 现在显示实际生效的 Codex home。单 bot 显示一条 `Codex home` 路径；多 bot 模式会按 bot 列出共享默认 runtime 和各隔离 runtime 的 home，`foxclaw status --json` 也会保留这些路径。
+
+### English
+- `foxclaw status` now shows the effective Codex home. Single-bot mode prints one `Codex home` path, while multi-bot mode lists the shared default runtime and every isolated runtime by bot. The same paths are retained in `foxclaw status --json`.
+
+## 0.5.69 - 2026-07-11
+
+### 中文
+- 修复 pnpm 11 的自更新路径解析：`pnpm root -g` 在 pnpm 11 返回全局目录本身（例如 `.../global/v11`），而不是旧版返回的 `node_modules` 目录。FoxClaw 现在同时识别两种布局，升级后可以正确执行自检和服务重启。
+
+### English
+- Fixed self-update path resolution for pnpm 11. `pnpm root -g` now returns the global directory itself (for example `.../global/v11`) rather than the `node_modules` directory returned by earlier pnpm versions. FoxClaw now recognizes both layouts and can correctly run post-update checks and restart the service.
+
+## 0.5.68 - 2026-07-01
+
+### 中文
+- 新增 `foxclaw send-media <path> [caption]`，Codex 生成图片、封面、截图、GIF、视频或其他文件后，可以直接投递到当前 Telegram 私聊；FoxClaw 会按文件类型选择 `sendPhoto`、`sendVideo`、`sendAnimation` 或 `sendDocument`。
+- 新增内置 `telegram-media-delivery` skill，并随 Telegram runtime 自动同步到 `CODEX_HOME`，让 Codex 像发送语音一样发送视觉产物；`sendVideo` 默认启用 `supports_streaming=true`，提升 MP4 在 Telegram 客户端中的在线播放体验。
+- Telegram Bot API endpoint 现在可通过 `TELEGRAM_BOT_API_BASE_URL` 配置为 Local Bot API Server，并可用 `TELEGRAM_BOT_API_TIMEOUT_MS` 调大上传超时，适合交付 25 分钟这类大视频。
+
+### English
+- Added `foxclaw send-media <path> [caption]`, allowing Codex-generated images, covers, screenshots, GIFs, videos, and other files to be delivered directly to the current Telegram private chat. FoxClaw selects `sendPhoto`, `sendVideo`, `sendAnimation`, or `sendDocument` by file type.
+- Added the bundled `telegram-media-delivery` skill and sync it into each Telegram runtime's `CODEX_HOME`, so Codex can deliver visual artifacts like it already delivers voice files. `sendVideo` enables `supports_streaming=true` for better inline MP4 playback in Telegram clients.
+- Telegram Bot API endpoint calls can now use `TELEGRAM_BOT_API_BASE_URL` for a Local Bot API Server, with `TELEGRAM_BOT_API_TIMEOUT_MS` for longer uploads, making 25-minute video delivery practical when the file size exceeds public Bot API limits.
+
+## 0.5.67 - 2026-07-01
+
+### 中文
+- 修复手动中断 Codex thread 后 Telegram 过程消息残留的问题：中断收尾现在也会折叠已有过程汇报，并按 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL` 删除已归档的工具/运行状态明细。
+- 中断时即使没有 final answer，也会被视为已有持久化收尾消息，从而复用正常完成路径的聊天清理逻辑，减少未折叠、未删除的旧消息。
+
+### English
+- Fixed stale Telegram progress messages after manually interrupting a Codex thread. Interrupted turn cleanup now also collapses existing progress updates and deletes archived tool/runtime detail messages according to `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL`.
+- Interrupted turns are now treated as having a persistent terminal message even when there is no final answer, allowing them to reuse the normal completion cleanup path.
+
+## 0.5.66 - 2026-06-29
+
+### 中文
+- 优化 Codex 需要用户确认时的 Telegram 富文本展示：问题保持顶层编号，候选项改为缩进的二级编号列表，避免多问题确认卡片看起来像一整串扁平 `1/2/3`。
+- RichMessage Markdown 渲染器现在支持嵌套有序/无序列表，类似安装选项、配置选择这类两层列表会渲染成真正的 Telegram 嵌套列表。
+
+### English
+- Improved Telegram RichMessage rendering for Codex user-input prompts. Questions stay as top-level numbered items, while choices are indented as second-level numbered lists, avoiding a flat sequence of confusing `1/2/3` items.
+- The RichMessage Markdown renderer now supports nested ordered and unordered lists, so setup and configuration prompts render as real Telegram nested lists.
+
+## 0.5.65 - 2026-06-29
+
+### 中文
+- 修复 Telegram 运行状态消息在网络/TLS 抖动下可能残留的问题：当 FoxClaw 编辑“正在运行命令”等 preview 消息失败并改发新状态消息时，旧 message id 现在会登记到最终清理列表。
+- 保持“过程汇报”折叠消息的完整内容，不做自动裁剪；用户仍可通过 Telegram 展开、查看更多或弹窗查看全部过程。
+
+### English
+- Fixed stale Telegram runtime status messages after transient network/TLS edit failures. When FoxClaw fails to edit a "running command" preview and sends a replacement status message, the old message id is now tracked for final cleanup.
+- Kept collapsed progress summaries complete rather than trimming them, preserving Telegram's expand, "show more", and full-view behavior.
+
+## 0.5.64 - 2026-06-29
+
+### 中文
+- 新增 OpenAI-compatible API provider 配置支持：`CODEX_API_PROVIDERS` 可声明 provider id、base URL、key 环境变量、默认模型，并在启动 Codex app-server 时注入原生 `model_providers.*` 配置。
+- 新增 `CODEX_API_DEFAULT_PROVIDER`，用于显式把 Codex 默认 `model_provider` 切到已配置的 API provider；未设置时只登记 provider，不会悄悄替换现有 ChatGPT/Codex 登录态。
+- `/config` 现在展示 API provider 摘要、默认 provider、key 环境变量是否存在，并对 `/v1/chat/completions` 来源提示 Codex 当前需要 Responses-compatible 端点；API key 不会出现在面板或 Codex 配置 override 中。
+
+### English
+- Added OpenAI-compatible API provider configuration. `CODEX_API_PROVIDERS` can declare provider id, base URL, API-key environment variable, and default model, then FoxClaw injects native Codex `model_providers.*` app-server config.
+- Added `CODEX_API_DEFAULT_PROVIDER` to explicitly switch Codex's default `model_provider` to a configured API provider. Without it, providers are registered but the existing ChatGPT/Codex auth flow is not silently replaced.
+- `/config` now shows API provider summaries, the default provider, whether each key env var is present, and warns when the source URL was `/v1/chat/completions` because current Codex requires a Responses-compatible endpoint. API keys are not printed in panels or Codex config overrides.
+
+## 0.5.63 - 2026-06-28
+
+### 中文
+- 修复 auth 切换失败分类：`failed to fetch codex rate limits` 中如果同时包含 `401 Unauthorized` / `token_invalidated`，现在按登录失效处理并标记候选为 `needs_repair`，不再误判为额度耗尽。
+- 自动轮转遇到这类失效候选时会把它标为需登录修复，然后继续尝试下一个可用候选。
+
+### English
+- Fixed auth switch failure classification. `failed to fetch codex rate limits` errors that also contain `401 Unauthorized` / `token_invalidated` are now treated as invalid auth and mark the candidate `needs_repair`, instead of being mistaken for quota exhaustion.
+- Auto-rotation now marks these invalid candidates for login repair and continues trying the next usable candidate.
+
+## 0.5.62 - 2026-06-22
+
+### 中文
+- 修复超长工具操作明细无法折叠或最终删除的问题：当 Telegram 拒绝编辑超长归档消息时，FoxClaw 会降级为短摘要，并仍登记原消息用于最终回复后的清理。
+- 工具归档 details 现在会截短单条命令行，避免长 shell 命令触发 `MESSAGE_TOO_LONG` 后反复重试。
+- 归档操作明细的 message id 会在登记时同步持久化，降低网络切换或重启窗口中丢失最终清理目标的概率。
+
+### English
+- Fixed oversized tool activity details failing to collapse or delete after the final reply. If Telegram rejects an oversized archive edit, FoxClaw now falls back to a short summary while still tracking the message for final cleanup.
+- Tool archive details now truncate individual command lines to avoid repeated `MESSAGE_TOO_LONG` retries for long shell commands.
+- Archived tool-detail message ids are persisted as soon as they are registered, reducing cleanup loss during network changes or restarts.
+
+## 0.5.61 - 2026-06-21
+
+### 中文
+- 将 `/auth`、`/setup`、`/threads` 等交互面板的默认自动清理时间从 30 分钟改为 5 分钟，并把 `/where`、旧 model/access 设置面板和 `/config` 面板纳入同一类时效清理。
+- `/config` 现在明确定位为 FoxClaw 自身设置面板，新增“最终回复后删除操作明细”开关；可通过按钮或 `/config delete_tool_details <on|off>` 修改，并写回 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL`。
+- `/config` 展示当前 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL` 和 `TELEGRAM_PANEL_TTL_MS`，方便确认聊天清理策略是否生效。
+
+### English
+- Changed the default cleanup timeout for interactive panels such as `/auth`, `/setup`, and `/threads` from 30 minutes to 5 minutes, and applied the same stale-panel cleanup to `/where`, legacy model/access settings panels, and `/config`.
+- `/config` is now the FoxClaw runtime settings panel and includes a "delete operation details after final reply" toggle. It can be changed via the button or `/config delete_tool_details <on|off>`, writing `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL`.
+- `/config` shows the current `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL` and `TELEGRAM_PANEL_TTL_MS` values so cleanup behavior is visible.
+
+## 0.5.60 - 2026-06-21
+
+### 中文
+- 修复 `/auth` 刷新时间测试对 Asia/Shanghai 时区的硬编码，使 Linux、macOS 和 UTC CI runner 都按各自本地时区验证；功能内容与 0.5.59 一并发布。
+
+### English
+- Fixed the `/auth` reset-time test to respect the runner's local timezone across Linux, macOS, and UTC CI environments. This release publishes the feature set introduced in 0.5.59.
+
+## 0.5.59 - 2026-06-21
+
+### 中文
+- `/auth` 富文本表格新增 Quota A、Quota B 的下次刷新时间；精确时间随额度快照持久化并可在节点间共享，旧快照安全显示 `-`。
+- 修复 `/auth` 按钮回调后退化为普通消息的问题：切换、启停、筛选、翻页、修复、刷新和安全同步现在始终使用 RichMessage 编辑。
+- 新增时效面板自动清理：`/auth`、`/threads` 和统一 `/setup` 面板默认空闲 30 分钟后删除，每次交互重新计时；可用 `TELEGRAM_PANEL_TTL_MS` 调整，设为 `0` 可关闭。
+
+### English
+- Added next-reset columns for Quota A and Quota B in the `/auth` RichMessage table. Exact reset timestamps now persist with quota snapshots and can be shared across nodes; legacy snapshots safely show `-`.
+- Fixed `/auth` callback refreshes degrading to plain messages. Switch, toggle, filter, pagination, repair, refresh, and safe-sync actions now consistently edit the panel as a RichMessage.
+- Added automatic cleanup for time-sensitive panels. `/auth`, `/threads`, and unified `/setup` panels are deleted after 30 minutes of inactivity by default, with interaction resetting the timer. Configure `TELEGRAM_PANEL_TTL_MS`, or set it to `0` to disable cleanup.
+
+## 0.5.58 - 2026-06-21
+
+### 中文
+- 修复重启恢复中的操作明细清理：FoxClaw 现在会把已折叠工具明细的 Telegram message id 持久化到 active turn preview，重启后最终答复完成时仍能按配置删除这些明细消息。
+- 将 `VOICE_TTS_TIMEOUT_MS` 默认值和示例配置改为 300000ms，适配 SoulX 等较慢语音后端；本机配置也已同步为 5 分钟。
+
+### English
+- Fixed operation-detail cleanup after restart recovery. FoxClaw now persists archived tool-detail Telegram message ids with active turn previews, so final-answer cleanup can still delete them after a service restart.
+- Changed the default and example `VOICE_TTS_TIMEOUT_MS` to 300000ms for slower voice backends such as SoulX; the local deployment config has been updated to five minutes as well.
+
+## 0.5.57 - 2026-06-21
+
+### 中文
+- 修复 SoulX SSH 语音后端 URL 构造错误：远端脚本现在正确展开 `$BASE_URL`，不再把 `${BASE_URL}` 字面量传给 curl 导致 `URL rejected: Bad hostname`。
+- SoulX SSH 语音请求现在也会把 `VOICE_TTS_TIMEOUT_MS` 下发给远端 curl，远端 `/health` 和 `/v1/tts` 请求会自行按超时退出，避免 SSH 被中断后留下长时间运行的 curl。
+
+### English
+- Fixed SoulX SSH voice backend URL construction. The remote script now expands `$BASE_URL` correctly instead of passing a literal `${BASE_URL}` to curl and failing with `URL rejected: Bad hostname`.
+- SoulX SSH voice requests now pass `VOICE_TTS_TIMEOUT_MS` down to remote curl for both `/health` and `/v1/tts`, preventing long-running remote curl processes after a timed-out SSH call.
+
+## 0.5.56 - 2026-06-21
+
+### 中文
+- 修正 `foxclaw status` 和 Telegram `/status` 的升级状态摘要：旧的成功 self-update 记录如果不是当前 FoxClaw 版本，不再显示为 “Last update/Last service update”，避免误导当前运行版本判断。
+- 多 runtime 状态聚合现在携带当前 FoxClaw 版本，用于判断升级记录是否仍然相关；失败、运行中等需要处理的升级状态仍会展示。
+
+### English
+- Fixed `foxclaw status` and Telegram `/status` update summaries so stale successful self-update records are no longer shown as the current "Last update/Last service update" when they do not match the running FoxClaw version.
+- Multi-runtime status aggregation now carries the current FoxClaw version for this relevance check; failed or in-progress update states are still shown.
+
+## 0.5.55 - 2026-06-21
+
+### 中文
+- 最终答复发出后，默认删除已折叠的工具操作明细消息，让 Telegram 回顾时更接近“一问一答”；新增 `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=false` 可保留这些明细。
+- “听总结”新增 `VOICE_TTS_ENGINE=soulx`，SSH 模式会先检查 SoulX `/health`，再调用 `/v1/tts` 并转成 Telegram voice；语音 TTS 默认超时缩短到 60 秒。
+- 降噪内部状态通知：不再向 Telegram 展示“目标已清除”“线程 active/running”“MCP ready/starting”等低价值生命周期消息，错误和需要处理的状态仍会提示。
+
+### English
+- After a final answer is sent, FoxClaw now deletes archived tool-detail messages by default so Telegram history reads closer to one user turn and one final reply. Set `TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=false` to keep them.
+- Added `VOICE_TTS_ENGINE=soulx` for voice summaries. SSH mode checks the SoulX `/health` endpoint, calls `/v1/tts`, and converts the result to Telegram voice; the default TTS timeout is now 60 seconds.
+- Reduced noisy internal lifecycle notifications: Telegram no longer shows low-value "goal cleared", active/running thread status, or MCP ready/starting messages, while errors and actionable states are still reported.
+
+## 0.5.54 - 2026-06-20
+
+### 中文
+- 修复升级到 Codex CLI `0.141.0` 后 Telegram 看不到工具执行明细的问题；FoxClaw 现在支持现代 app-server 的 `item/started` / `item/completed` 工具生命周期。
+- 命令执行、文件修改、网页搜索、MCP/动态工具、图片查看和生成、协作 Agent 操作会重新实时显示；阶段结束后仍压缩为可展开明细，最终过程汇报继续独立折叠。
+- 保留旧版 `codex/event/exec_command_begin/end` 兼容，避免旧节点或旧 Codex CLI 失去过程状态。
+
+### English
+- Fixed Telegram tool activity details disappearing after upgrading to Codex CLI `0.141.0`; FoxClaw now supports the modern app-server `item/started` and `item/completed` tool lifecycle.
+- Command execution, file changes, web search, MCP/dynamic tools, image activity, and collaborative agent operations are visible in real time again, then archived into expandable stage details.
+- Kept compatibility with legacy `codex/event/exec_command_begin/end` notifications for older Codex CLI installations.
+
+## 0.5.53 - 2026-06-20
+
+### 中文
+- 修复单 bot 默认 runtime 的 `telegram-voice-delivery` 无法找到私聊的问题：当 `CODEX_HOME` 不含 bot ID 时，`send-voice` 现在会从唯一配置的 Telegram token 安全补全 bot ID，再读取已经记录的私聊目标。
+- 将内置 `telegram-voice-delivery` Skill 的触发说明、工作流和 UI 元数据改为中文，并明确只有确实没有私聊记录时才要求用户发送 `/status`。
+
+### English
+- Fixed `telegram-voice-delivery` failing to find the private chat in a single-bot default runtime. When `CODEX_HOME` has no bot ID, `send-voice` now safely derives it from the only configured Telegram token before reading the remembered chat target.
+- Localized the bundled `telegram-voice-delivery` skill instructions and UI metadata into Chinese, and clarified that users should only be asked to send `/status` when no private chat is actually remembered.
+
+## 0.5.52 - 2026-06-20
+
+### 中文
+- 新增 `telegram-voice-delivery` Codex Skill；FoxClaw 启动时会把它同步到每个 Telegram runtime 的 `CODEX_HOME`，Codex 生成音频后可自动投递到当前 Telegram 私聊，不再要求用户输入 `/voice file`。
+- 新增 `foxclaw send-voice <path> [caption]` CLI；它会从当前 `CODEX_HOME` 识别 bot，并从 FoxClaw 本地数据库读取该 bot 最近记录的私聊目标。
+- CLI 支持 `--bot-id`、`--chat-id` 显式覆盖，复用 Telegram voice 的格式和 50MB 限制，并且不会输出或暴露 bot token。
+
+### English
+- Added the `telegram-voice-delivery` Codex skill. FoxClaw syncs it into every Telegram runtime's `CODEX_HOME` at startup, allowing Codex to automatically deliver generated audio to the current Telegram private chat without asking the user to enter `/voice file`.
+- Added `foxclaw send-voice <path> [caption]`; it infers the bot from the current `CODEX_HOME` and reads that bot's most recently remembered private chat from the FoxClaw store.
+- The CLI supports explicit `--bot-id` and `--chat-id` overrides, reuses Telegram voice format and 50MB limits, and never prints bot tokens.
+
+## 0.5.51 - 2026-06-20
+
+### 中文
+- 新增 `/voice file <path> [caption]`，可以把 Codex 已经生成好的本地音频文件直接作为 Telegram voice 发出去，不再重复 TTS。
+- 支持 `.ogg`、`.opus`、`.oga`、`.mp3`、`.m4a`，相对路径按 `DEFAULT_CWD` 解析，并限制 50MB 以内。
+- Telegram voice multipart 现在会按文件类型设置 content type，避免所有语音文件都被当成 `audio/ogg`。
+
+### English
+- Added `/voice file <path> [caption]` for sending an already-generated local audio file as a Telegram voice message without re-running TTS.
+- Supports `.ogg`, `.opus`, `.oga`, `.mp3`, and `.m4a`; relative paths resolve from `DEFAULT_CWD` and files are capped at 50MB.
+- Telegram voice multipart uploads now set content type by file type instead of treating every voice file as `audio/ogg`.
+
+## 0.5.50 - 2026-06-20
+
+### 中文
+- 给 Telegram “听总结”按钮增加独立的 `VOICE_SUMMARY_TEXT_LIMIT`，默认只朗读短摘要，避免把完整最终回复交给慢速 TTS 后端导致长时间排队或超时。
+- 新增 `VOICE_TTS_TIMEOUT_MS`，HTTP/SSH 语音后端共用该超时配置；SSH 超时会终止远端调用，HTTP 超时会中止请求。
+- `/voice <文本>` 仍使用 `VOICE_TEXT_LIMIT`，方便手动朗读较长文本；最终总结按钮走更短的摘要上限，优先保证可听、及时返回。
+
+### English
+- Added a separate `VOICE_SUMMARY_TEXT_LIMIT` for Telegram "Listen" buttons, so final-answer voice summaries read a short digest instead of sending the entire final response to slow TTS backends.
+- Added `VOICE_TTS_TIMEOUT_MS` for both HTTP and SSH voice backends; SSH calls are terminated on timeout and HTTP requests are aborted.
+- `/voice <text>` still uses `VOICE_TEXT_LIMIT` for manual longer reads, while final-answer buttons use the shorter summary limit for timely playback.
+
+## 0.5.49 - 2026-06-20
+
+### 中文
+- 将 Telegram 总结语音后端彻底改为用户自配：默认不再内置 `thinkbook16p`、`tts.foxden.app` 或任何私有 TTS 服务地址。
+- 启用语音后如果缺少 `VOICE_TTS_URL` 或 `VOICE_TTS_SSH_HOST`/`VOICE_TTS_SSH_DIR`，会明确提示配置缺失，而不是尝试连接开发者私有服务。
+- 更新 `.env.example`，把 HTTP/SSH 语音后端写成通用占位示例，明确 FoxClaw 不随包提供公共 TTS 后端。
+
+### English
+- Made the Telegram voice-summary backend fully user-configured: FoxClaw no longer embeds `thinkbook16p`, `tts.foxden.app`, or any private TTS service endpoint as a product default.
+- When voice is enabled without `VOICE_TTS_URL` or `VOICE_TTS_SSH_HOST`/`VOICE_TTS_SSH_DIR`, FoxClaw now reports the missing configuration instead of trying a developer-private service.
+- Updated `.env.example` to show generic HTTP/SSH backend placeholders and state that FoxClaw does not ship with a public TTS backend.
+
+## 0.5.48 - 2026-06-20
+
+### 中文
+- 新增 Telegram 总结语音能力：最终答复完成后可附带“听总结”按钮，点击后由 FoxClaw 调用语音服务生成 OGG/OPUS 并通过 Telegram `sendVoice` 发回聊天。
+- 新增 `/voice <文本>` 和 `/voice last`，便于直接测试任意文本或最近一次最终总结的朗读效果；微信通道会明确提示当前不支持语音消息。
+- 支持 SSH 语音后端和 HTTP 语音后端两种模式；SSH 模式可直接使用 16p 上的 Qwen TTS 服务和远端 `ffmpeg` 转码，并在 custom speaker 不可用时自动降级到 VoiceDesign endpoint。
+
+### English
+- Added Telegram voice summaries: completed final answers can include a "Listen" button that asks FoxClaw to synthesize OGG/OPUS audio and return it through Telegram `sendVoice`.
+- Added `/voice <text>` and `/voice last` for quick manual checks against arbitrary text or the latest final answer; Weixin scopes now get an explicit unsupported-channel message.
+- Supports both SSH and HTTP speech backends. SSH mode can use the Qwen TTS service and remote `ffmpeg` on the 16p host, and automatically falls back to the VoiceDesign endpoint when custom speakers are unavailable.
+
+## 0.5.47 - 2026-06-20
+
+### 中文
+- 修复远端 auth 候选已成功导入后，`/auth` 面板仍保留旧的 `needs_repair`/禁用状态，导致候选显示问号且无法切换的问题。
+- 远端导入成功现在会恢复该候选的全局状态和各 Telegram runtime 覆盖状态为 active/enabled，确保“确认可用后文件和 UI 状态一致”。
+- 增加 mirror 远端导入 hook 回归测试，避免后续同步链路再次只更新 auth 文件、不恢复健康标记。
+
+### English
+- Fixed `/auth` keeping stale `needs_repair`/disabled state after a remote auth candidate was successfully imported, which left the candidate shown with a question mark and blocked switching.
+- Successful remote imports now restore the candidate's global state and each Telegram runtime override to active/enabled, keeping the UI state aligned with validated auth files.
+- Added a regression test for the mirror remote-import hook so future sync changes do not update auth files without clearing health markers.
+
+## 0.5.46 - 2026-06-20
+
+### 中文
+- 修复跨节点 pull 回来的较新 auth 候选在本机 runtime 忙碌时被立即判定失败的问题；现在会先接受并进入远端导入队列，等 runtime 空闲后再验证和导入，避免 RT/WSL 节点已有更新却同步不到本机。
+- 调整主动刷新租约策略：如果 peer 明确拒绝仍会停止，但 peer 慢回包或暂时无响应时不再让刷新一直失败；FoxClaw 会记录 `granted_partial` 事件并优先保持授权可用性和连续性。
+- 增加回归测试覆盖忙碌期间的 pull recovery 排队导入，以及 peer 超时但无明确拒绝时的刷新租约继续执行。
+
+### English
+- Fixed cross-node pull recovery dropping newer auth candidates when the local runtime is busy; pulled bundles are now accepted into the remote import queue and validated/imported once the runtime becomes idle, so updates from RT/WSL peers are not lost.
+- Relaxed proactive refresh leases for availability: explicit peer denials still stop the refresh, but slow or temporarily silent peers no longer make the refresh fail indefinitely. FoxClaw records `granted_partial` events and prioritizes auth continuity.
+- Added regression tests for queued pull recovery while busy and refresh lease continuation when peers time out without an explicit denial.
+
+## 0.5.45 - 2026-06-18
+
+### 中文
+- 将 `/update` 完成通知升级为 RichMessage 表格，分别展示 FoxClaw 版本与重启结果、Codex CLI 版本与升级状态、集群广播目标及真实发送 peer。
+- 发布说明改为默认收起的 details，避免较长更新内容挤占聊天页面；RichMessage 不可用时仍保留清晰的 HTML 降级文本。
+- 升级完成后会短暂等待 auth sync 广播事件，只展示本次升级对应的广播结果；未启用跨节点同步、无 peer 或广播仍在等待时会给出明确状态。
+
+### English
+- Upgraded `/update` completion notifications to a RichMessage table with separate FoxClaw version/restart, Codex CLI version/state, and cluster broadcast target/peer results.
+- Release notes now live in a collapsed details block to keep update notifications compact, with a clear HTML fallback when RichMessage is unavailable.
+- The completion report briefly waits for the matching auth sync broadcast event and only shows results from the current update; disabled sync, no peers, and pending broadcasts are reported explicitly.
+
+## 0.5.44 - 2026-06-18
+
+### 中文
+- 修复 Codex 真实 `final_answer` phase 在标准化后变成 `finalanswer`、却未被识别为最终答复的问题；该错误会导致 `0.5.43` 的过程汇报折叠逻辑误判“本轮没有最终答复”并直接跳过。
+- 增加真实 phase 分类回归测试，确保最终答复与 commentary 过程汇报正确分离。
+
+### English
+- Fixed classification of Codex's real `final_answer` phase, which normalizes to `finalanswer` but was not recognized as a final response; this caused the `0.5.43` progress-collapse path to incorrectly skip turns as having no final answer.
+- Added a regression test for the real phase value so final responses remain distinct from commentary updates.
+
+## 0.5.43 - 2026-06-18
+
+### 中文
+- Codex 最终答复出现后，FoxClaw 会把本轮所有过程汇报合并到第一条过程消息，并编辑为默认收起的 Telegram RichMessage `details`；最终答复继续独立展示，使历史记录保持清晰的一问一答结构。
+- 折叠摘要显示过程条数和整体起止时间，展开后每段过程汇报保留精确到秒的起止时间及原有 Markdown 富文本效果；普通 Telegram 回合和 CLI 观察回合统一生效。
+- 如果 RichMessage 编辑失败，原过程消息全部保留且不执行删除；超出 Telegram 单条富消息上限时会明确标注未收入归档的条数。
+
+### English
+- After a Codex final answer arrives, FoxClaw consolidates all progress updates from the turn into the first progress message and edits it into a collapsed Telegram RichMessage `details` block; the final answer remains separate for a clean question-and-answer history.
+- The collapsed summary shows the update count and overall time range, while each expanded update preserves second-level start/end timestamps and Markdown-rich rendering; this applies to both normal Telegram turns and CLI-observed turns.
+- If RichMessage editing fails, every original progress message is preserved and no deletion is attempted; updates exceeding Telegram's single-rich-message limit are reported explicitly.
+
+## 0.5.42 - 2026-06-18
+
+### 中文
+- 新增跨节点升级广播：一个节点升级成功后会通过现有 auth sync 加密通道广播目标版本，其他节点收到后会在 runtime/auth sync 空闲时自动执行本机 self-update；终端 `foxclaw update` 成功后也会在服务重启时触发广播。
+- 为避免升级风暴，收到广播的节点如果已经是目标版本会跳过；远端请求会记录到 auth sync recent events，并可在 `/auth sync status/events` 中排查。
+- 精简终端 `foxclaw status` 默认输出，集中展示运行状态、Codex/app-server、工作队列、bot 概况、auth sync backlog、最近升级和错误；完整原始 JSON 可通过 `foxclaw status --json` 查看。
+
+### English
+- Added cross-node update broadcasting: after one node updates successfully, it broadcasts the target version over the existing encrypted auth sync channel, and peers schedule their own self-update when runtime/auth sync work is idle; terminal `foxclaw update` also broadcasts after the restarted service comes back.
+- To avoid update storms, peers skip broadcasts that target their current version; remote update requests are recorded in auth sync recent events for `/auth sync status/events` diagnostics.
+- Condensed terminal `foxclaw status` by default, focusing on runtime health, Codex/app-server, work queues, bot overview, auth sync backlog, recent update, and errors; full raw JSON remains available via `foxclaw status --json`.
+
+## 0.5.41 - 2026-06-18
+
+### 中文
+- 将 FoxClaw 的普通 Telegram 回复统一升级为 RichMessage Markdown 优先发送，覆盖短提示、usage、操作结果、升级开始/完成、错误通知和大多数诊断文本。
+- 保持稳定降级：Telegram rich markdown 失败时自动回普通文本；`/status`、`/auth`、`/update` 阻塞诊断等结构化面板继续使用已验证的 RichMessage HTML 表格/列表/details。
+
+### English
+- Upgraded FoxClaw's normal Telegram replies to prefer RichMessage Markdown, covering short notices, usage text, action results, update start/completion messages, error notifications, and most diagnostic text.
+- Stable fallback is preserved: Telegram rich markdown failures automatically return to plain text, while structured panels such as `/status`, `/auth`, and blocked `/update` diagnostics continue using the verified RichMessage HTML tables/lists/details path.
+
+## 0.5.40 - 2026-06-18
+
+### 中文
+- Codex 普通输出完成后优先使用 Telegram 原生 RichMessage Markdown 发送/编辑，保留原始 Markdown 给 Telegram 解析，用于观察编号列表、复制文本和更多 Markdown 语法的真实客户端表现。
+- 如果 Telegram 拒绝原生 Rich Markdown，FoxClaw 会自动退回现有 Markdown -> Rich HTML 转换；若 rich 编辑仍失败，则保留已经发送的普通文本，避免影响输出稳定性。Rich draft 也采用同样的 markdown 优先、HTML/纯文本降级路径。
+
+### English
+- Normal Codex output now prefers Telegram's native RichMessage Markdown when finalizing sent segments, preserving the original Markdown for Telegram to parse so ordered lists, copied text, and broader Markdown syntax can be observed in real clients.
+- If Telegram rejects native Rich Markdown, FoxClaw automatically falls back to the existing Markdown-to-Rich-HTML renderer; if rich editing still fails, the already-sent plain text remains intact. Rich drafts use the same markdown-first path with HTML/plain fallback.
+
+## 0.5.39 - 2026-06-17
+
+### 中文
+- `/update` 被运行时活动或 auth 同步挡住时，Telegram 现在会用 RichMessage 展示具体阻塞清单，包括活跃 runtime、远端 auth 候选导入队列、最近收到时间、最近失败候选和失败原因。
+- 阻塞提示明确说明“远端 auth 候选导入队列”不等于本机 auth 文件数量，方便识别其他节点残留旧 team 账号或删除广播未同步的问题。
+
+### English
+- `/update` now reports concrete blockers as a Telegram RichMessage when runtime work or auth sync prevents a chat-driven update, including active runtimes, remote auth import backlog, last receive time, recent failed candidate, and failure reason.
+- The blocked-update message clarifies that remote auth candidate imports are not the same as local auth file count, making stale team accounts or missed delete broadcasts on another node easier to diagnose.
+
+## 0.5.38 - 2026-06-17
+
+### 中文
+- `/auth` RichMessage 候选表新增可点击的命令链接试验：auth 名称链接到 `/auth use N`，并新增 `Command` 列展示 `use` 与 enable/disable 命令链接。
+- 为避免动作能力倒退，原 inline callback 按钮仍保留；这版用于观察 Telegram 客户端对 rich command links 的真实体验。
+
+### English
+- Added an experimental command-link layer to the `/auth` RichMessage candidate table: auth names link to `/auth use N`, and a new `Command` column exposes `use` plus enable/disable command links.
+- The existing inline callback buttons remain in place to avoid losing reliable actions; this release is for observing the real Telegram client behavior of rich command links.
+
+## 0.5.37 - 2026-06-17
+
+### 中文
+- 精简 `/auth` RichMessage 表格的 `Quota A` / `Quota B` 单元格：只显示剩余额度百分比，例如 `26%`，窗口含义交给列和后续套餐/状态信息理解。
+- 保持原始文本 fallback 和按钮文本不变，避免影响旧命令、微信复制路径和 auth 切换回调。
+
+### English
+- Simplified the `/auth` RichMessage `Quota A` / `Quota B` cells to show only the remaining percentage, such as `26%`, leaving the window context to the columns and following plan/status fields.
+- Kept the plain-text fallback and button labels unchanged so legacy commands, Weixin copy-paste flows, and auth switching callbacks remain stable.
+
+## 0.5.36 - 2026-06-17
+
+### 中文
+- `/auth` 的 Telegram RichMessage 候选区从旧的竖线分隔文本整理为横向表格，拆出额度窗口、auth 名称、当前标记、套餐、健康状态、最近刷新、过期时间和风险提示列。
+- ChatGPT auth 候选会从 access token `exp` 读取过期时间，并以 UTC `YYYY-MM-DD HH:mmZ` 展示；拿不到过期字段时保持 `-`，原始文本 fallback 仍可展开查看。
+
+### English
+- Refined the Telegram RichMessage `/auth` candidate area from pipe-delimited text into a horizontally scrollable table with quota windows, auth name, current marker, plan, health, last refresh, expiry, and risk columns.
+- ChatGPT auth candidates now read the access token `exp` value and display expiry as UTC `YYYY-MM-DD HH:mmZ`; candidates without an expiry field show `-`, with the expandable plain-text fallback preserved.
+
+## 0.5.35 - 2026-06-17
+
+### 中文
+- `/status`、`/auth`、`/auth sync status/events/trace` 在 Telegram 上优先使用 RichMessage 展示，内部状态会自动整理成标题、表格、列表和可展开原文。
+- 保留微信和 RichMessage 失败 fallback：微信继续走原文本通道，Telegram rich 发送失败时退回原 HTML/plain 内容，不影响按钮和回调。
+
+### English
+- `/status`, `/auth`, and `/auth sync status/events/trace` now prefer RichMessage on Telegram, rendering internal diagnostics as headings, tables, lists, and expandable plain-text details.
+- Weixin and RichMessage failure fallbacks are preserved: Weixin keeps the previous text path, and Telegram falls back without breaking buttons or callbacks.
+
+## 0.5.34 - 2026-06-17
+
+### 中文
+- 普通 Codex 输出接入 Telegram RichMessage：流式阶段继续稳定发送纯文本，segment 完成后自动把已发消息编辑为富文本，支持标题、列表、引用、代码块、行内 code、粗体和安全链接。
+- draft 流式路径优先使用官方 `sendRichMessageDraft`，发送失败时对当前 turn 自动熔断回原纯文本 draft，避免影响实时输出。
+- 新增 Markdown 到 RichMessage HTML 的安全转换与回归测试，保留 Telegram/微信 fallback：RichMessage 失败时不会破坏原纯文本输出，微信继续使用原 HTML/plain 降级通道。
+
+### English
+- Wired normal Codex output into Telegram RichMessage: live streaming still sends stable plain text, then completed segments are edited into rich text with headings, lists, quotes, fenced code, inline code, bold text, and safe links.
+- Draft streaming now prefers the official `sendRichMessageDraft` API and automatically disables rich drafts for the current turn if it fails, preserving the previous plain draft behavior.
+- Added a safe Markdown-to-RichMessage HTML renderer with regression coverage while preserving Telegram/Weixin fallbacks so RichMessage failures do not break existing output.
+
+## 0.5.33 - 2026-06-16
+
+### 中文
+- 新增 Telegram Rich Message 适配专项盘点，明确现有 HTML 通道、Bot API 10.1 rich message 能力、FoxClaw 可用功能面和分阶段接入路线。
+- 接入 `sendRichMessage` / rich HTML 发送链路，新增 `/rich` 诊断命令用于在 Telegram 客户端直接查看 heading、table、details、pre/code、list 的 RichMessage 渲染效果。
+- 集中 Telegram HTML 转义与常用标签 helper，并把 `/diff` 改为优先使用 RichMessage details + diff code block；发送失败时回退到原 Telegram HTML 折叠展示。
+
+### English
+- Added a Telegram Rich Message adaptation check covering the current HTML path, Bot API 10.1 rich message capabilities, FoxClaw candidate surfaces, and a phased rollout plan.
+- Wired the `sendRichMessage` / rich HTML send path and added `/rich` as a diagnostic command for checking heading, table, details, pre/code, and list rendering in Telegram clients.
+- Centralized Telegram HTML escaping/tag helpers and changed `/diff` to prefer RichMessage details plus a diff code block, falling back to the previous Telegram HTML collapsible rendering if rich sending fails.
+
+## 0.5.32 - 2026-06-11
+
+### 中文
+- 补齐 macOS launchd 适配检查：`doctor` 现在会检查已安装 plist 中记录的 Node 路径是否存在且为 Node 24+，并新增 `uninstall-launchd` 命令。
+- 新增 launchd plist 生成/解析的单元测试，并补充 macOS 服务状态、日志、代理和 Node 路径排障文档。
+
+### English
+- Filled macOS launchd adaptation gaps: `doctor` now checks that the Node path recorded in the installed plist exists and is Node 24+, and `uninstall-launchd` is available.
+- Added unit coverage for launchd plist generation/parsing and expanded macOS service status, log, proxy, and Node-path troubleshooting docs.
+
+## 0.5.31 - 2026-06-09
+
+### 中文
+- 修复自动 auth 轮转：目标候选切换后如果在 account/usage 验证阶段失败，会把该候选加入本次失败集合并继续轮询后续候选，而不是恢复原 auth 后停止。
+- 新增回归测试覆盖候选池中间账号验证失败时继续切到下一个可用账号并重试原请求。
+
+### English
+- Fixed automatic auth rotation so a candidate that fails account/usage validation after switching is added to the current failure set and FoxClaw keeps polling later candidates instead of stopping after restoring the previous auth.
+- Added regression coverage for continuing to the next usable account and retrying the original request when a middle candidate fails validation.
+
+## 0.5.30 - 2026-06-09
+
+### 中文
+- 修正重启自动续接路径：自动恢复现在会先像用户手动发送“继续”一样 `resumeThread` 原 Codex thread，再在原 thread 上启动续接 turn。
+- 如果原 thread 暂时无法恢复，FoxClaw 会保留状态卡并重试；不会静默切到 replacement thread，避免丢失原线程上下文。
+
+### English
+- Fixed restart auto-resume to match the manual "continue" path: FoxClaw now resumes the original Codex thread first, then starts the continuation turn on that same thread.
+- If the original thread cannot be resumed yet, FoxClaw keeps the status card and retries instead of silently switching to a replacement thread and losing context.
+
+## 0.5.29 - 2026-06-09
+
+### 中文
+- 重启自动续接遇到旧 Codex thread 永久 `thread not found` 时，会静默创建 replacement thread 并复用原 Telegram 状态卡继续跑，不再只反复等待旧 thread 恢复。
+- 自动续接提示补充了无上下文兜底指令：如果旧线程上下文不可用，会检查当前工作目录、git 状态、服务日志和运行状态后完成收尾总结。
+
+### English
+- Restart auto-resume now silently creates a replacement thread when the old Codex thread remains `thread not found`, reusing the original Telegram status card instead of only waiting for the old thread to recover.
+- The auto-resume prompt now includes a no-context fallback: inspect the current working directory, git status, service logs, and runtime state before finishing the user-facing summary.
+
+## 0.5.28 - 2026-06-09
+
+### 中文
+- 重启续接恢复失败时不再立刻把 Telegram 状态卡改成“桥接重启、请手动继续”；FoxClaw 会保留 active preview 并在后台短间隔重试几分钟。
+- 这修复了 Codex app-server 刚重启时线程短暂 `thread not found`，导致自动续跑错过窗口、没有最终总结消息的问题。
+
+### English
+- Restart recovery no longer immediately retires the Telegram status card as "bridge restarted, continue manually" when the first recovery attempt fails. FoxClaw keeps the active preview and retries in the background for several minutes.
+- This fixes cases where the Codex app-server briefly reports `thread not found` right after restart, causing auto-resume to miss its window and never send the final summary.
+
+## 0.5.27 - 2026-06-09
+
+### 中文
+- 重启续接的完成判定进一步收窄：只有 final/final_answer 类 assistant 输出、plan 输出或明确错误才算已有完成结果。
+- 如果旧 turn 只有 commentary 进度消息，例如“正在升级本机服务”，重启后仍会自动续跑，避免状态卡显示“已完成”但没有真正收尾回复。
+
+### English
+- Tightened restart recovery completion detection: only final/final_answer assistant output, plan output, or an explicit error now counts as a completed result.
+- If the previous turn only had commentary progress such as "upgrading the local service", FoxClaw still auto-resumes it after restart instead of retiring the status card as completed without a real final reply.
+
+## 0.5.26 - 2026-06-09
+
+### 中文
+- 修正重启续接判定：如果 Codex app-server 把被重启打断的旧 turn 标成 completed，但没有任何可转发的 assistant/plan 输出或错误内容，FoxClaw 会把它当作中断任务自动续跑，而不是把 Telegram 状态卡误改成“已完成”。
+- 已经有明确输出或错误结果的 completed turn 仍按完成处理，避免对真实完成的任务重复续跑。
+
+### English
+- Fixed restart recovery detection: if the Codex app-server marks a restart-interrupted turn as completed but it has no relayable assistant/plan output or error, FoxClaw now treats it as interrupted and auto-resumes it instead of retiring the Telegram status card as completed.
+- Completed turns that do have output or an error are still treated as finished, avoiding duplicate resume runs for truly completed work.
+
+## 0.5.25 - 2026-06-09
+
+### 中文
+- FoxClaw 重启后会优先重新接管 Codex app-server 中仍在运行的 live turn，包括 turn id 已变化但线程仍有 live turn 的情况，避免误开第二个续跑任务。
+- 如果重启前记录的活动 turn 已被 app-server 中断且没有完成结果，FoxClaw 会自动在同一线程启动一个“继续中断工作”的新 turn，并复用原 Telegram 状态卡继续更新，不再要求用户手动发送“继续”。
+- 如果旧 turn 已经完成，FoxClaw 只收尾旧状态卡，不会误触发自动续跑。
+
+### English
+- After a FoxClaw restart, live Codex app-server turns are reattached first, including cases where the live turn id changed but the thread still has an active turn, avoiding a duplicate resume turn.
+- If the previously tracked active turn was interrupted by the app-server restart and has no completed result, FoxClaw automatically starts a continuation turn in the same thread and reuses the existing Telegram status card.
+- If the old turn already completed, FoxClaw only retires the old status card and does not auto-resume it.
+
+## 0.5.24 - 2026-06-09
+
+### 中文
+- 后台主动 auth 刷新不再向私聊推送开始、跳过、完成或失败消息；最近一次刷新状态会写入 runtime status，并可在 `/status` 和 `/auth sync status` 主动查看。
+- 本机 auth mirror 和跨节点 auth sync 的刷新/导入/同步摘要也默认静默，不再推送 `auth 刷新/同步汇总` 或候选已同步提示，减少后台维护对注意力的打扰。
+
+### English
+- Background proactive auth refresh no longer pushes private start, skipped, completed, or failed messages. The latest refresh state is stored in runtime status and can be checked with `/status` and `/auth sync status`.
+- Same-node auth mirroring and cross-node auth sync refresh/import/sync summaries are quiet by default, so background maintenance no longer pushes auth refresh/sync summaries or per-candidate synced notices.
+
+## 0.5.23 - 2026-06-09
+
+### 中文
+- 补齐切换后验证路径：如果目标候选在验证 rate-limit usage 时返回 usage/rate/quota/billing/credits limit，FoxClaw 会恢复到原 auth，但不会把目标候选标记为 `?`，也不会触发自动剔除。
+- 这让额度耗尽在自动轮换、手动切换和验证失败提示里都保持同一语义：它只是暂时没额度，不是凭据失效。
+
+### English
+- Completed the post-switch validation path: if the selected candidate returns a usage/rate/quota/billing/credits limit while validating rate-limit usage, FoxClaw restores the previous auth but does not mark the selected candidate `?` or auto-delete it.
+- Quota exhaustion now has the same meaning across automatic rotation, manual switching, and validation failure messages: temporarily out of quota, not an invalid credential.
+
+## 0.5.22 - 2026-06-09
+
+### 中文
+- Codex 报 `usageLimitExceeded`、`You've hit your usage limit`、usage/rate/quota/billing/credits limit 这类额度耗尽时，不再把当前 auth 候选标记为需要修复，也不会触发 `AUTH_AUTO_DELETE_NEEDS_REPAIR` 的自动剔除和跨节点删除。
+- 额度耗尽仍会临时避开当前候选，切到另一个维护中的候选重试；提示文案改为“Codex 额度限制”，不再误写成 “Codex auth 问题”。
+
+### English
+- Codex quota exhaustion such as `usageLimitExceeded`, `You've hit your usage limit`, usage/rate/quota/billing/credits limit is no longer treated as an invalid auth candidate, so it does not mark `needs_repair` or trigger `AUTH_AUTO_DELETE_NEEDS_REPAIR` auto-delete / cross-node delete.
+- Quota exhaustion still temporarily skips the current candidate and retries with another maintained candidate; notifications now call this a Codex usage limit instead of an auth problem.
+
+## 0.5.21 - 2026-06-09
+
+### 中文
+- 新增资源富裕 auth 池模式：`AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 或 `/config auth_auto_delete on` 会把原本要标记为 `?`/需要登录修复、且无法恢复的候选自动剔除。
+- 自动剔除会通过跨节点 auth sync 发送删除 tombstone，peer 收到后删除同名候选，并优先处理删除，避免待导入队列把坏候选复活。
+- `/status` 和 `/config` 现在显示 auth 池摘要：历史见过的候选数、当前存活数、因失效自动剔除数；`/config` 的开关会写回当前 FoxClaw `.env`。
+- 开启自动剔除后，auth mirror / auth sync 的候选级同步、导入、删除和恢复通知会静默或汇总为池子摘要；同步发送/导入失败、删除失败和系统级 `sync_error` 仍会明确提示。
+
+### English
+- Added a resource-rich auth pool mode: `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` or `/config auth_auto_delete on` automatically deletes unrecoverable candidates that would otherwise be marked `?` / needs login repair.
+- Auto-delete now publishes a cross-node auth-sync delete tombstone, so peers delete the same candidate and process deletes before pending imports to avoid resurrecting bad candidates.
+- `/status` and `/config` now show an auth-pool summary: total candidates seen, currently alive, and invalid-deleted count. The `/config` toggle writes back to the active FoxClaw `.env`.
+- When auto-delete is enabled, candidate-level auth mirror / auth sync publish, import, delete, and recovery chatter is silenced or collapsed into pool summaries; sync send/import failures, delete failures, and system-level `sync_error` still notify explicitly.
+
+## 0.5.20 - 2026-06-08
+
+### 中文
+- 修复跨节点 auth 同步远端导入验证和普通消息并发时的竞态：验证远端候选会临时重启 Codex app-server，现在这段窗口会标记为非空闲。
+- 如果普通消息刚好在远端验证重启期间进入，FoxClaw 会提示稍后重发，不再把这条消息送进正在重启的 bridge 并报 `Codex app bridge stopped`。
+- 普通对话启动过程现在也计入非空闲状态，避免 auth 同步验证插入到新 turn 建立中的窗口。
+
+### English
+- Fixed a race between cross-node auth remote-import validation and ordinary messages. Remote candidate validation temporarily restarts Codex app-server, and that window is now marked non-idle.
+- If an ordinary message arrives during the validation restart window, FoxClaw asks the user to resend it shortly instead of sending it into a restarting bridge and reporting `Codex app bridge stopped`.
+- Starting an ordinary turn now also counts as non-idle, preventing auth sync validation from entering the small window while a new turn is being established.
+
+## 0.5.19 - 2026-06-08
+
+### 中文
+- 主动后台 auth 刷新现在只保留一条私聊状态消息：开始时发送，完成或拿不到刷新锁时编辑为最终结果，减少开始/完成两条消息的打扰。
+- 本机 auth 镜像和跨节点 auth 同步的刷新 burst 现在会短窗口汇总，把候选镜像、跨节点发送、收到远端包、导入/跳过/失败合成摘要；恢复失败和人工介入提示仍会明确发出。
+
+### English
+- Background proactive auth refresh now keeps one private status message: it sends the starting state and edits that message to the final result or lease failure, reducing separate start/done notifications.
+- Same-node auth mirroring and cross-node auth sync now group refresh bursts into short summaries covering mirror writes, peer sends, received remote bundles, import/skip/failure results, while recovery failures and manual-intervention notices remain explicit.
+
+## 0.5.18 - 2026-06-08
+
+### 中文
+- `/auth` 面板按钮和 `/auth use <n>` 手动切换后会立即通过 Codex app-server 验证新 auth：ChatGPT 候选必须能返回 account 和 rate-limit usage，成功后马上写入该候选的额度快照，所以列表不再继续显示旧额度。
+- 如果切换后的 auth 无法读取、身份不匹配，或 Codex 没有返回有效 account/usage，FoxClaw 会把该候选标记为“需要登录修复”（`?`），恢复到切换前的 auth，并再次重启 Codex app-server，让当前 runtime 不停留在坏 auth 上。
+- 自动 auth 轮换也复用同一套切换后验证；验证失败的候选不会继续重试请求或参与后续轮询。
+
+### English
+- Manual auth switches from the `/auth` panel buttons and `/auth use <n>` now validate the newly selected auth through Codex app-server immediately. ChatGPT candidates must return account and rate-limit usage, and successful switches record a fresh quota snapshot so the list no longer keeps showing stale usage.
+- If the selected auth cannot be parsed, has an identity mismatch, or Codex does not return valid account/usage data, FoxClaw marks that candidate as “needs login repair” (`?`), restores the previous auth, and restarts Codex app-server again so the runtime does not remain on a bad auth.
+- Automatic auth rotation now uses the same post-switch validation; failed candidates are not used for retrying the request or for later polling.
+
+## 0.5.17 - 2026-06-08
+
+### 中文
+- `foxclaw <subcommand> --help` / `-h` 现在只打印帮助，不再继续执行 `install-systemd`、`start`、`restart` 等带副作用的子命令，避免一次查帮助意外触发服务重启。
+
+### English
+- `foxclaw <subcommand> --help` / `-h` now prints usage and stops before running side-effecting subcommands such as `install-systemd`, `start`, or `restart`, preventing an accidental service restart while checking help.
+
+## 0.5.16 - 2026-06-08
+
+### 中文
+- FoxClaw 重启后会把仍在运行的桥接自有 Codex turn 恢复为可继续操作的活动态，状态卡继续刷新，后续 Telegram 输入会继续 steer 或按聊天设置排队，不再退化成需要用户重新发消息的只读观察态。
+- `/watch` 产生的观察态 turn 会在状态卡中持久化只读标记，重启恢复后仍保持只读，避免把旁观线程误恢复成可操作任务。
+
+### English
+- After a FoxClaw restart, bridge-owned live Codex turns are restored as actionable active turns: their status cards keep updating, and later Telegram messages keep steering or queueing according to the chat setting instead of degrading into read-only watch mode.
+- `/watch`-created observed turns now persist their read-only marker, so restart recovery keeps watched threads read-only and does not accidentally promote them into actionable tasks.
+
+## 0.5.15 - 2026-06-08
+
+### 中文
+- `/auth` 现在会把已确认不可用、并且本机/跨节点同步恢复失败的候选标记为“需要登录修复”，用 `?` 按钮显示，并从自动轮换、主动刷新和 enabled 视图中排除。
+- 点击 `?` 会进入修复菜单，可选择“登录修复”对该候选执行设备码登录，成功后清除修复状态并重新参与轮换；也可选择“删除”，从 canonical 和所有本机 bot runtime 中删除该候选并清理额度缓存。
+- 删除 auth 候选现在走 auth mirror 统一删除，避免只删一个 runtime 后又被其他 runtime 或 canonical 副本恢复。
+
+### English
+- `/auth` now marks candidates that have been proven unusable and could not be recovered through local/cross-node sync as “needs login repair”, shows a `?` action, and excludes them from auto-rotation, proactive refresh, and the enabled filter.
+- Tapping `?` opens a repair menu: Login repair runs device-code login for that candidate and clears the repair state on success; Delete removes the candidate from canonical storage and all local bot runtimes while clearing quota cache.
+- Auth candidate deletion now flows through the auth mirror so deleting a candidate from one runtime is not undone by another runtime or canonical copy.
+
+## 0.5.14 - 2026-06-08
+
+### 中文
+- Linux `foxclaw start` / `foxclaw restart` / `install-systemd` 现在如果检测到自己正运行在 `foxclaw.service` cgroup 内，会通过一次性的 `systemd-run --user` helper 在服务外执行重启，避免命令执行者被自己重启时杀掉导致半截输出或不确定状态。
+- 继续保留 systemd 作为稳定守护层：主 service 仍由 `Restart=always`、`KillMode=control-group` 和 user linger 保活；重启编排则交给短生命周期 helper，避免再引入一个更脆弱的常驻 Node 守护进程。
+
+### English
+- On Linux, `foxclaw start`, `foxclaw restart`, and `install-systemd` now detect when they are running inside the `foxclaw.service` cgroup and delegate the actual restart to a one-shot `systemd-run --user` helper outside that cgroup, avoiding half-written output or uncertain state when the caller would otherwise kill itself.
+- systemd remains the stable supervisor with `Restart=always`, `KillMode=control-group`, and user linger; restart orchestration moves to a short-lived helper instead of adding another long-running Node watchdog.
+
+## 0.5.13 - 2026-06-08
+
+### 中文
+- `auth.json_team_<localpart>` 候选现在会校验文件内 ChatGPT email localpart 是否匹配候选名；不匹配时 `/auth` 标为无效，避免继续显示另一位 seat 的额度。
+- 本机 auth mirror 不再传播 team 候选名与文件身份不一致的 auth，并会在启动 reconcile 时用仍然匹配候选名的 runtime 副本修复错误副本。
+- `/auth refresh all` 和当前候选额度刷新会跳过身份与 `team_` 候选名不匹配的文件，避免脏额度快照再次写入。
+
+### English
+- `auth.json_team_<localpart>` candidates now verify that the ChatGPT email local part inside the auth file matches the candidate name; mismatches are marked invalid in `/auth` instead of displaying another seat's quota.
+- The local auth mirror no longer propagates team candidates whose filename identity and auth payload disagree, and startup reconciliation can repair bad copies from a runtime copy that still matches the candidate name.
+- `/auth refresh all` and current-candidate quota refresh now skip files whose identity does not match the `team_` candidate name, preventing dirty quota snapshots from being recorded again.
+
+## 0.5.12 - 2026-06-08
+
+### 中文
+- `/auth` 额度快照现在按 ChatGPT 额度身份合并，优先区分 `chatgpt_user_id`，其次区分 email，避免同一个 Team account 下不同 seat 显示成同一份额度。
+- 本机 auth mirror、跨节点 auth sync 和 `/auth refresh all` 会拒绝可识别为不同 ChatGPT 用户/邮箱的同名候选互相覆盖，即使它们共享同一个 account id。
+- 额度快照数据库新增 `quota_identity_id` 并自动兼容旧数据；文档同步说明 account id 与额度身份的区别。
+
+### English
+- `/auth` quota snapshots now merge by ChatGPT quota identity, preferring `chatgpt_user_id` and then email, so different seats under the same Team account do not display as one shared quota.
+- Same-node auth mirroring, cross-node auth sync, and `/auth refresh all` now refuse to overwrite same-name candidates when they are identifiable as different ChatGPT users/emails, even if they share the same account id.
+- Added a `quota_identity_id` quota-snapshot migration with backward compatibility for old data, and updated docs to distinguish account id from quota identity.
+
+## 0.5.11 - 2026-06-08
+
+### 中文
+- `/auth` 面板的 `Bot runtime` 现在显示 Telegram bot id，例如 `@WuguiAI2_Bot (bot8949529424)`，便于和 `~/.foxclaw/codex/telegram/<botid>/home` 对应。
+- `/auth` 面板新增“安全同步”按钮，并支持 `/auth sync safe`，可在全局空闲时安全打平本机多 bot auth，并把已校验的候选推送到跨节点 peer。
+- 本机 auth mirror 新增全量安全同步路径：只传播通过既有在线校验的刷新候选，同时补齐 canonical 中已知、同账号且更新的 runtime 副本。
+
+### English
+- The `/auth` panel now shows the Telegram bot id in `Bot runtime`, for example `@WuguiAI2_Bot (bot8949529424)`, making it easy to match the runtime with `~/.foxclaw/codex/telegram/<botid>/home`.
+- Added a Safe sync button to the `/auth` panel, plus `/auth sync safe`, to flatten same-node multi-bot auth while globally idle and push validated candidates to cross-node peers.
+- Added a full safe-sync path for the local auth mirror: it only propagates candidates that pass the existing online validation and fills runtime copies from newer same-account canonical candidates.
+
+## 0.5.10 - 2026-06-08
+
+### 中文
+- Telegram 输入队列改为 SQLite 持久化 FIFO，FoxClaw 重启后不再丢失排队中的 Codex 请求，并在 `/status` 中显示排队数量。
+- Telegram 图片和文件会先进入附件暂存区，支持媒体组归并、下一条文字自动带附件发给 Codex，以及“分析 / 清空”按钮操作。
+- 引导式 Plan 会话现在会持久化并在重启后恢复，减少长任务或确认流程被服务重启打断的风险。
+- `/update` 完成回报会从已安装包的 `CHANGELOG.md` 读取当前版本更新内容，让 Telegram 里直接看到这次升级改了什么。
+
+### English
+- Replaced the in-memory Telegram prompt queue with a persisted SQLite FIFO so queued Codex requests survive FoxClaw restarts, and `/status` now reports queued turn count.
+- Telegram photos and files are staged before dispatch, with media-group merging, next-message attachment consumption, and Analyze/Clear buttons.
+- Guided Plan sessions are persisted and restored after restart, reducing interruption risk for long-running or confirmation-based flows.
+- `/update` completion reports now read the installed package `CHANGELOG.md` entry for the target version so Telegram shows what changed in the upgrade.
+
 ## 0.5.9 - 2026-06-07
 
 ### 中文

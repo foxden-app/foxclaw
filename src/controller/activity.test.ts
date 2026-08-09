@@ -137,9 +137,98 @@ test('normalizes raw tool command events into activity states', () => {
   });
 });
 
+test('normalizes modern command execution item lifecycle events', () => {
+  const started = normalizeTurnActivityEvent({
+    method: 'item/started',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: {
+        type: 'commandExecution',
+        id: 'item-1',
+        command: 'rg hello src',
+        cwd: '/tmp/demo',
+        commandActions: [{ type: 'search', command: 'rg hello src', query: 'hello', path: 'src' }],
+      },
+    },
+  });
+  assert.deepEqual(started, {
+    kind: 'tool_started',
+    turnId: 'turn-1',
+    exec: {
+      callId: 'item-1',
+      turnId: 'turn-1',
+      command: ['rg hello src'],
+      cwd: '/tmp/demo',
+      parsedCmd: [{ type: 'search', command: 'rg hello src', query: 'hello', path: 'src' }],
+    },
+    state: 'searching',
+  });
+
+  const completed = normalizeTurnActivityEvent({
+    method: 'item/completed',
+    params: {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      item: {
+        type: 'commandExecution',
+        id: 'item-1',
+        command: 'rg hello src',
+        cwd: '/tmp/demo',
+        commandActions: [{ type: 'search', command: 'rg hello src', query: 'hello', path: 'src' }],
+      },
+    },
+  });
+  assert.equal(completed?.kind, 'tool_completed');
+});
+
+test('normalizes modern file change and MCP tool items', () => {
+  const fileChange = normalizeTurnActivityEvent({
+    method: 'item/started',
+    params: {
+      turnId: 'turn-1',
+      item: {
+        type: 'fileChange',
+        id: 'patch-1',
+        changes: [{ path: 'src/main.ts', kind: { type: 'update', move_path: null }, diff: '@@' }],
+      },
+    },
+  });
+  assert.deepEqual(fileChange, {
+    kind: 'tool_started',
+    turnId: 'turn-1',
+    exec: {
+      callId: 'patch-1',
+      turnId: 'turn-1',
+      command: [],
+      cwd: null,
+      parsedCmd: [{ type: 'apply_patch', path: 'src/main.ts' }],
+    },
+    state: 'editing',
+  });
+
+  const mcp = normalizeTurnActivityEvent({
+    method: 'item/started',
+    params: {
+      turnId: 'turn-1',
+      item: {
+        type: 'mcpToolCall',
+        id: 'mcp-1',
+        server: 'github',
+        tool: 'issue_search',
+      },
+    },
+  });
+  assert.equal(mcp?.kind, 'tool_started');
+  if (mcp?.kind === 'tool_started') {
+    assert.deepEqual(mcp.exec.command, ['MCP github/issue_search']);
+  }
+});
+
 test('utility classifiers keep renderer-facing categories stable', () => {
   assert.equal(classifyAgentOutput('final', true), 'final_answer');
   assert.equal(classifyAgentOutput('commentary', false), 'commentary');
+  assert.equal(classifyAgentOutput('final_answer', true), 'final_answer');
   assert.equal(inferToolActivityState({
     callId: 'call-1',
     turnId: 'turn-1',

@@ -8,6 +8,7 @@ import { toTelegramBridgeScopeId } from '../core/bridge_scope.js';
 import { createTelegramScopeId } from './scope.js';
 import type { TelegramMessageEntity } from './addressing.js';
 import type { TelegramInboundAttachment } from './media.js';
+import type { TelegramInputRichMessage } from './rich.js';
 
 interface TelegramUser {
   id: number;
@@ -28,6 +29,7 @@ interface TelegramMessage {
   message_id: number;
   chat: TelegramChat;
   message_thread_id?: number;
+  media_group_id?: string;
   is_topic_message?: boolean;
   from?: TelegramUser;
   text?: string;
@@ -75,6 +77,7 @@ export interface TelegramTextEvent {
   userId: string;
   text: string;
   messageId: number;
+  mediaGroupId?: string | null;
   attachments: TelegramInboundAttachment[];
   entities: TelegramMessageEntity[];
   replyToBot: boolean;
@@ -165,6 +168,24 @@ export class TelegramGateway extends EventEmitter {
     return this.sendMessageWithOptions(chatId, text, inlineKeyboard, 'HTML', messageThreadId);
   }
 
+  async sendRichMessage(
+    chatId: string,
+    richMessage: TelegramInputRichMessage,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+    messageThreadId?: number | null,
+  ): Promise<number> {
+    const result = await callTelegramApi<SendMessageResult>(this.botToken, 'sendRichMessage', {
+      chat_id: chatId,
+      rich_message: richMessage,
+      ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      ...(inlineKeyboard ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {}),
+    });
+    if (!result.ok || !result.result) {
+      throw new Error(result.description || 'Failed to send Telegram rich message');
+    }
+    return result.result.message_id;
+  }
+
   async sendDocument(chatId: string, filename: string, contents: Buffer, caption?: string): Promise<number> {
     const result = await callTelegramMultipartApi<SendMessageResult>(
       this.botToken,
@@ -182,6 +203,35 @@ export class TelegramGateway extends EventEmitter {
     );
     if (!result.ok || !result.result) {
       throw new Error(result.description || 'Failed to send Telegram document');
+    }
+    return result.result.message_id;
+  }
+
+  async sendVoice(
+    chatId: string,
+    filename: string,
+    contents: Buffer,
+    caption?: string,
+    messageThreadId?: number | null,
+    contentType = 'audio/ogg',
+  ): Promise<number> {
+    const result = await callTelegramMultipartApi<SendMessageResult>(
+      this.botToken,
+      'sendVoice',
+      {
+        chat_id: chatId,
+        ...(caption ? { caption } : {}),
+        ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: String(messageThreadId) } : {}),
+      },
+      [{
+        fieldName: 'voice',
+        filename,
+        contents,
+        contentType,
+      }],
+    );
+    if (!result.ok || !result.result) {
+      throw new Error(result.description || 'Failed to send Telegram voice message');
     }
     return result.result.message_id;
   }
@@ -204,12 +254,46 @@ export class TelegramGateway extends EventEmitter {
     }
   }
 
+  async sendRichMessageDraft(
+    chatId: string,
+    draftId: number,
+    richMessage: TelegramInputRichMessage,
+    messageThreadId?: number | null,
+  ): Promise<void> {
+    const result = await callTelegramApi<boolean>(this.botToken, 'sendRichMessageDraft', {
+      chat_id: chatId,
+      draft_id: draftId,
+      rich_message: richMessage,
+      ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+    });
+    if (!result.ok) {
+      throw new Error(result.description || 'Failed to send Telegram rich draft message');
+    }
+  }
+
   async editMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
     return this.editMessageWithOptions(chatId, messageId, text, inlineKeyboard);
   }
 
   async editHtmlMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
     return this.editMessageWithOptions(chatId, messageId, text, inlineKeyboard, 'HTML');
+  }
+
+  async editRichMessage(
+    chatId: string,
+    messageId: number,
+    richMessage: TelegramInputRichMessage,
+    inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<void> {
+    const result = await callTelegramApi(this.botToken, 'editMessageText', {
+      chat_id: chatId,
+      message_id: messageId,
+      rich_message: richMessage,
+      ...(inlineKeyboard ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {}),
+    });
+    if (!result.ok && !String(result.description || '').includes('message is not modified')) {
+      throw new Error(result.description || 'Failed to edit Telegram rich message');
+    }
   }
 
   async clearMessageInlineKeyboard(chatId: string, messageId: number): Promise<void> {
@@ -394,6 +478,7 @@ export class TelegramGateway extends EventEmitter {
           userId: String(update.message.from.id),
           text,
           messageId: update.message.message_id,
+          mediaGroupId: update.message.media_group_id ?? null,
           attachments,
           entities,
           replyToBot,

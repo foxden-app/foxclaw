@@ -16,6 +16,12 @@ export interface FoxclawSystemdUnitTextOptions {
   execStart: string;
 }
 
+export interface SystemdRestartHelperOptions {
+  unitName: string;
+  helperUnitName: string;
+  delaySeconds: number;
+}
+
 const FOXCLAW_MAIN_PATH_RE =
   /\S*(?:\.pnpm\/@foxden-app\+foxclaw@[^/\s]+\/node_modules\/@foxden-app\/foxclaw|node_modules\/@foxden-app\/foxclaw)\/dist\/main\.js/g;
 
@@ -46,6 +52,25 @@ KillMode=control-group
 [Install]
 WantedBy=default.target
 `;
+}
+
+export function cgroupContainsSystemdUnit(cgroupText: string, unitName: string): boolean {
+  const escapedUnitName = unitName.replace(/-/g, '\\x2d');
+  return cgroupText
+    .split(/\r?\n/)
+    .some((line) => line.includes(`/${unitName}`) || line.includes(`/${escapedUnitName}`));
+}
+
+export function buildSystemdRestartHelperArgs(options: SystemdRestartHelperOptions): string[] {
+  return [
+    '--user',
+    '--collect',
+    `--unit=${options.helperUnitName}`,
+    '--description=Restart FoxClaw service outside foxclaw.service cgroup',
+    '/bin/sh',
+    '-lc',
+    `sleep ${Math.max(0, options.delaySeconds)}; exec systemctl --user restart ${options.unitName}`,
+  ];
 }
 
 export function refreshFoxclawExecStartDropIns(

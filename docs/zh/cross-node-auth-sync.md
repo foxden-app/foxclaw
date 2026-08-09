@@ -10,7 +10,7 @@
 
 - 这些 ChatGPT 账号和 auth 文件都由你合法拥有和维护。
 - 多台机器都运行 FoxClaw，并且每台机器至少有一个 Telegram bot。
-- 你希望 auth 文件在节点间自动保持较新，并允许 FoxClaw 在已启用 ChatGPT 候选 `last_refresh` 超过 9 天时，持有跨节点刷新锁后主动刷新。
+- 你希望 auth 文件在节点间自动保持较新，并允许 FoxClaw 在已启用 ChatGPT 候选 `last_refresh` 已满 8 天时，持有跨节点刷新锁后主动刷新。
 - 默认推荐每台机器只选择一个“联系人 bot”参与跨节点同步；同一节点内其他 bot 继续使用原本的本机 auth 镜像。
 
 不适合：
@@ -25,7 +25,7 @@
 
 - **Push**：本节点登录、Codex 自动刷新或 `/auth refresh all confirm` 成功并通过本机 usage 验证后，把较新的候选加密发送给 peer。
 - **Pull**：本节点切换或重载 auth 前，如果本机其他 runtime 没有更新副本，会向 peer 请求同名、同账号的较新候选。
-- **Lease**：执行会旋转 refresh token 的 `/auth refresh all confirm` 或后台 9 天主动刷新前，先向 peer 申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止刷新。
+- **Lease**：执行会旋转 refresh token 的 `/auth refresh all confirm`、后台 8 天主动刷新或 `/auth` 集群自检前，先向 peer 申请跨节点刷新锁；任一 peer 忙碌、拒绝或无响应都会阻止刷新。
 
 安全边界：
 
@@ -33,7 +33,7 @@
 - 只接收 `AUTH_SYNC_PEERS` 中列出的 peer bot 发来的同步文件。
 - `AUTH_SYNC_KEY`、cluster、nonce 或 payload 校验失败时不会写盘。
 - 远端导入必须等本机全局空闲，再临时验证 usage；验证成功后才写入候选。
-- 同名候选如果已知属于不同 account id，永远拒绝覆盖。
+- 同名候选如果已知属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱，永远拒绝覆盖。
 - 同步包不会触发自动回复链路；FoxClaw 对包类型、nonce 和 peer allowlist 做过滤，避免 bot-to-bot 循环。
 
 Telegram 官方 Bot Features 文档说明：私聊 bot-to-bot 需要发送方和接收方都启用 Bot-to-Bot Communication Mode，并提醒开发者处理 loop prevention。参考：https://core.telegram.org/bots/features#bot-to-bot-communication
@@ -92,6 +92,7 @@ AUTH_SYNC_KEY=<至少32字节的共享密钥>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 AUTH_SYNC_NODE_ID=workstation-a
 AUTH_SYNC_PEERS=@foxclaw_node_b_bot
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 节点 B：
@@ -103,6 +104,7 @@ AUTH_SYNC_KEY=<至少32字节的共享密钥>
 AUTH_SYNC_CLUSTER_ID=my-codex-auth-pool
 AUTH_SYNC_NODE_ID=workstation-b
 AUTH_SYNC_PEERS=@foxclaw_node_a_bot
+AUTH_AUTO_DELETE_NEEDS_REPAIR=false
 ```
 
 多节点时，`AUTH_SYNC_PEERS` 用英文逗号分隔：
@@ -110,6 +112,8 @@ AUTH_SYNC_PEERS=@foxclaw_node_a_bot
 ```dotenv
 AUTH_SYNC_PEERS=@foxclaw_node_a_bot,@foxclaw_node_b_bot,@foxclaw_node_c_bot
 ```
+
+远端导入的 auth 不会再次自动转发给本节点的其他 peer，以避免同步环路。因此星形拓扑只保证每个叶子与中心节点直接互通；如果任意叶子节点产生的新 auth 都要到达所有节点，每个联系人 bot 都必须把其他联系人 bot 列入 `AUTH_SYNC_PEERS`，并在对端做对称 allowlist 配置。
 
 建议用密码管理器或 `openssl` 生成共享密钥：
 
@@ -149,6 +153,16 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 如果显示 `未回应：@peer_bot`，说明 Telegram 发送可能成功，但对方没有成功接收、解密、通过 allowlist，或没有运行同一组 auth sync 配置。
 
+`/auth` 面板的 **安全同步**（命令等价入口是 `/auth sync safe`，旧的 `/auth sync audit` 仍兼容）会执行完整的全节点自检与同步。它会让所有已配置 peer 用 usage 接口逐个验证本机候选，然后：
+
+- 对同名、同 account、同 ChatGPT 用户身份的候选，选择最新且验证有效的副本并分发给所有 peer；
+- 只有显式审计已经证明时间戳更晚的副本无效时，才允许经过验证的较旧有效副本替换它；
+- 对只存在于单个节点的无效候选，会通过加密通道交给其他节点做只验证、不导入的复核；没有任何有效结果且至少两个节点独立判定无效时，才把候选标为 `?`；
+- 任一 peer 未回应、忙碌或账号/用户身份冲突时，不做无效裁决；
+- 由发起节点刷新 `last_refresh` 已满 8 天的已启用 ChatGPT 候选，再把刷新结果分发给所有 peer。
+
+一次审计覆盖发起节点 `AUTH_SYNC_PEERS` 中的全部联系人。要让每个节点都参与同一次操作，请使用相互 allowlist 的全互联 peer 配置。
+
 3. 用低风险候选做第一次广播。先确认所有 bot runtime 空闲，然后在节点 A 执行：
 
 ```text
@@ -164,9 +178,11 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 确认待导入清单被处理，或候选已经出现/更新时间变新。
 
-注意：`/auth sync push all` 的“已发送”只代表本节点把加密包发给 Telegram 成功，不代表对端已经写盘。对端只有在全局空闲、usage 验证通过、同名候选 account id 一致，并且远端 `last_refresh` 比本地更新时才会覆盖文件。如果本地已经是相同或更新版本，文件不会变化，`最近导入` 也可能保持为空。
+注意：`/auth sync push all` 的“已发送”只代表本节点把加密包发给 Telegram 成功，不代表对端已经写盘。对端只有在全局空闲、usage 验证通过、同名候选 account id 一致且 ChatGPT 用户/邮箱身份兼容，并且远端 `last_refresh` 比本地更新时才会覆盖文件。如果本地已经是相同或更新版本，文件不会变化，`最近导入` 也可能保持为空。
 
-启用跨节点同步后，联系人 bot 的私聊会收到节点级通知：本机 auth 更新并开始发往哪些 peer、收到远端包后是排队还是立即验证、导入成功/跳过/失败原因、auth 恢复时正在查询哪些 peer、peer 回应了什么，以及所有 peer 都无法提供可用副本时的人工介入提示。通知不会包含 auth 内容、token 或同步密文。
+启用跨节点同步后，联系人 bot 的私聊会收到节点级通知：本机 auth 更新并开始发往哪些 peer、收到远端包后是排队还是立即验证、导入成功/跳过/失败原因、auth 恢复时正在查询哪些 peer、peer 回应了什么，以及所有 peer 都无法提供可用副本时的人工介入提示。刷新、发送、导入密集发生时会合并成简短汇总，避免一个候选更新拆成开始、收到、镜像写入和完成多条消息；恢复和人工介入提示仍会明确发出。远端导入验证会临时重启本机 Codex app-server；这段窗口里 FoxClaw 会把 runtime 视为非空闲，并让普通消息稍后重发，而不是送进正在重启的 bridge。通知不会包含 auth 内容、token 或同步密文。
+
+如果这是资源富裕的账号池、不关心单个候选如何维护，可以启用 `AUTH_AUTO_DELETE_NEEDS_REPAIR=true`，或用 `/config auth_auto_delete on` 运行时打开。无法恢复、原本会标记为需要修复的候选会直接本地删除，并向 peer 发送删除 tombstone；候选级同步/删除消息会压缩成 auth 池摘要。
 
 从 0.5.2 起，`/auth sync status` 会把同步系统级 `最近错误` 和单个 auth 的 `候选失败` 分开显示。比如某个远端候选返回 `token_invalidated` 或 access token 过期时，只会记录到该候选名下面；当前 `auth.json` 是否健康仍以当前 auth 的 usage 验证为准。`local candidate is already newer or equal` 属于正常跳过，不会记为错误。
 
@@ -198,9 +214,9 @@ auth sync 测试完成：已发送 1，收到回应 1。
 
 - 本机可能不是全局空闲；有 turn、审批、待输入、登录流程或镜像写入时会排队。
 - usage 验证失败会拒绝写盘。
-- 同名候选属于不同 account id 时会拒绝覆盖。
+- 同名候选属于不同 account id，或属于同一 account 下不同的可识别 ChatGPT 用户/邮箱时会拒绝覆盖。
 - 执行 `/auth sync events <候选名>` 或 `/auth sync trace <requestId>`，查看 FoxClaw 记录的接收、验证、跳过或失败流水。
 
 **要不要定期 `/auth refresh all confirm` 保活**
 
-不要手动定期强刷。Codex 会按 access token 到期自动刷新；FoxClaw 也会在已启用 ChatGPT 候选 `last_refresh` 超过 9 天时，等全局空闲并拿到跨节点刷新锁后主动刷新。`/auth refresh all confirm` 仍然是人工维护命令，用于你明确接受 refresh token 轮换风险的场景。
+不要手动定期强刷。Codex 会按 access token 到期自动刷新；FoxClaw 也会在已启用 ChatGPT 候选 `last_refresh` 已满 8 天时，等全局空闲并拿到跨节点刷新锁后主动刷新。`/auth refresh all confirm` 仍然是人工维护命令，用于你明确接受 refresh token 轮换风险的场景。

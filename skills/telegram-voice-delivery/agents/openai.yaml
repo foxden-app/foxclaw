@@ -1,0 +1,4 @@
+interface:
+  display_name: "Telegram 语音投递"
+  short_description: "把 Codex 已生成的音频直接发送到当前 Telegram 会话"
+  default_prompt: "使用 $telegram-voice-delivery，把已完成的音频文件发送到当前 Telegram 会话。"

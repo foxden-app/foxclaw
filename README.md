@@ -39,6 +39,7 @@ FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex，�
 - 已经装好，想系统了解 `/help`、`/setup`、`/threads`、`/watch`、`/auth` 和账号轮转？看 [用户手册](./docs/zh/user-manual.md)。
 - 想把同一组合法 ChatGPT auth 候选同步到多台机器？看 [跨节点 auth 同步配置指南](./docs/zh/cross-node-auth-sync.md)。
 - 想了解每个版本改了什么？看 [更新日志](./CHANGELOG.md)。
+- 维护者准备发版？看 [发布 runbook](./docs/zh/release.md)。
 - Git、Node、`.env` 都玩得转？直接往下看快速设置。
 - 卡住了？看 [故障排查](./docs/zh/troubleshooting.md)。
 
@@ -104,7 +105,7 @@ FoxClaw 只响应 `TG_ALLOWED_USER_ID` 的消息——把机器人拉进群不�
 **多账号管理：**
 - Codex 账户管理：`/account`、`/quota`、`/login_device`、`/auth add <name>`
 - 触发用量限制时自动在本地 `auth.json_*` 之间切换认证
-- `/auth` 面板分页查看、筛选、启用、禁用、搜索和切换候选账号；额度按真实窗口展示，多 bot 模式下会按账号 ID 汇总各 runtime 最近掌握的额度快照
+- `/auth` 面板分页查看、筛选、启用、禁用、搜索和切换候选账号；额度按真实窗口展示，多 bot 模式下会按 ChatGPT 额度身份汇总各 runtime 最近掌握的额度快照
 
 **线程与会话：**
 - `/threads`、`/open`、`/new`、`/where`、`/interrupt`——稳定的聊天-线程绑定
@@ -147,11 +148,18 @@ FoxClaw 的一大特色是自动多账号切换。当一个账号触发用量限
 foxclaw start
 ```
 
-Linux 上会安装/重启用户级 systemd 服务，macOS 上安装/重载 launchd。查看状态：
+Linux 上会安装/重启用户级 systemd 服务，macOS 上安装/重载 launchd。Linux 查看状态：
 
 ```bash
 systemctl --user status foxclaw.service
 journalctl --user -u foxclaw.service -f
+```
+
+macOS 查看状态和启动日志：
+
+```bash
+launchctl print "gui/$(id -u)/app.foxden.foxclaw"
+tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
 ```
 
 也可以直接用包装命令：
@@ -215,7 +223,7 @@ TG_BOT_TOKEN=123456:token_a
 
 FoxClaw 仍然只运行一个系统服务。默认情况下，它会为每个 bot 启动独立 `codex app-server` 和独立 `CODEX_HOME`。因此 A 私聊运行 turn 时，B 私聊仍可独立切换自己的 `/auth`。候选凭据由 FoxClaw 在登录或刷新在线验证后镜像同步；切换或重载前还会从其他 Codex home 恢复同账号较新凭据。各 bot 的当前选择互不影响。每个 bot 首次私聊发送 `/help` 和 `/status`；`/auth` 会标明正在操作的 bot runtime，`/status` 会列出全部 bot 的连接、runtime 类型、当前 auth 和活动 turn 摘要。
 
-多台机器共享同一合法账号池时，可以启用可选跨节点 auth 同步：`AUTH_SYNC_ENABLED=true`、`AUTH_SYNC_KEY` 和 `AUTH_SYNC_PEERS=@peer_contact_bot`。推荐每台机器只选一个联系人 bot；同一节点内的其他 bot 继续走本机 auth 镜像。多 bot 模式下，默认用 `TG_BOT_TOKENS` 的第一个 token 作为联系人 bot。FoxClaw 会通过 Telegram Bot-to-Bot 私聊传输加密 auth 包；本机验证刷新后主动 push，发现本机候选失效时主动 pull peer 已持有的有效副本，并在联系人 bot 私聊里报告发送、接收、排队、导入、失败和人工介入提示。`/auth sync events [过滤]` 和 `/auth sync trace <requestId>` 可查看最近通讯流水。跨节点恢复不会自动刷新 token，`/auth refresh all confirm` 会先申请跨节点刷新锁。完整配置、`@BotFather` 操作和验证步骤见 [跨节点 auth 同步配置指南](./docs/zh/cross-node-auth-sync.md)。
+多台机器共享同一合法账号池时，可以启用可选跨节点 auth 同步：`AUTH_SYNC_ENABLED=true`、`AUTH_SYNC_KEY` 和 `AUTH_SYNC_PEERS=@peer_contact_bot`。推荐每台机器只选一个联系人 bot；同一节点内的其他 bot 继续走本机 auth 镜像。多 bot 模式下，默认用 `TG_BOT_TOKENS` 的第一个 token 作为联系人 bot。FoxClaw 会通过 Telegram Bot-to-Bot 私聊传输加密 auth 包；本机验证刷新后主动 push，发现本机候选失效时主动 pull peer 已持有的有效副本，并在联系人 bot 私聊里汇总报告发送、接收、排队、导入、失败和人工介入提示。资源富裕、只关心池子数量时，可用 `/config auth_auto_delete on` 或 `AUTH_AUTO_DELETE_NEEDS_REPAIR=true` 让无法恢复的候选自动跨节点剔除，并把通知压缩为池子摘要。`/auth sync events [过滤]` 和 `/auth sync trace <requestId>` 可查看最近通讯流水。跨节点恢复不会自动刷新 token，`/auth refresh all confirm` 会先申请跨节点刷新锁。完整配置、`@BotFather` 操作和验证步骤见 [跨节点 auth 同步配置指南](./docs/zh/cross-node-auth-sync.md)。
 
 如果你需要一路 Telegram 与终端互通 session，把同一个 token 同时填入 `TG_BOT_TOKENS` 和 `TG_BOT_TOKEN`。这个 bot 使用默认 `CODEX_HOME`（未设置时通常是 `~/.codex`）和默认 auth，因此能看到终端 Codex 的本地线程；它不再享有隔离 runtime 的“互不影响”保证，切换 auth 会影响终端和其他默认 runtime。
 
@@ -302,7 +310,7 @@ foxclaw weixin-login
 
 ## Codex Skill
 
-仓库自带一个 Codex skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。它可以让 Codex 通过 SSH 在本机或远程 Mac 上 bootstrap FoxClaw——写 `.env`、构建、跑 doctor、装 launchd、引导首次消息验证，一条龙。
+仓库自带 FoxClaw 安装维护 Skill、`telegram-voice-delivery` 语音投递 Skill 和 `telegram-media-delivery` 媒体投递 Skill。用法看 [FoxClaw Skill 中文说明](./docs/zh/foxclaw-skill.md)。FoxClaw 启动时会把投递 Skill 自动同步到每个 Telegram runtime 的 `CODEX_HOME`；Codex 生成音频、图片、封面、截图或视频后可直接执行 `foxclaw send-voice` / `foxclaw send-media`，自动把文件送回当前 Telegram 私聊。
 
 ## 故障排查
 
@@ -318,6 +326,7 @@ foxclaw restart
 foxclaw update
 foxclaw stop
 foxclaw uninstall-systemd
+foxclaw uninstall-launchd
 ```
 
 ## 贡献
