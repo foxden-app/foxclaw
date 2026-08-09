@@ -4,7 +4,7 @@
 
 **狸爪：一个更适配编程需求的移动端 Codex 控制器。**
 
-FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，`codex app-server` 负责本地执行；你发任务、看进度、批审批、切线程，Codex 在电脑上继续写代码。
+FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex 或 OpenCode，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，`codex app-server` / `opencode serve` 负责本地执行；你发任务、看进度、批审批、切线程，Agent 在电脑上继续写代码。
 
 这适合你离开办公桌去吃饭、在旅途中、在跑步机上，或者陪小孩逛公园的时候继续工作。人可以离开电脑，Codex 不必停；它会把关键进展、错误、审批请求和最终结果同步回手机。
 
@@ -119,6 +119,22 @@ FoxClaw 只响应 `TG_ALLOWED_USER_ID` 的消息——把机器人拉进群不�
 - 如果同时设置 `TG_BOT_TOKEN`，且它的值也出现在 `TG_BOT_TOKENS` 中，匹配的那个 bot 会共享终端默认 `CODEX_HOME` 和 auth，其他 bot 继续隔离
 
 </details>
+
+## OpenCode 独立 Bot（0.6.1+）
+
+现有 Codex Bot 不需要改。再向 `@BotFather` 创建一个独立机器人，把 token 写入：
+
+```dotenv
+OPENCODE_BOT_TOKEN=234567:different-opencode-bot-token
+# 可选；默认从 PATH 查找
+OPENCODE_CLI_BIN=/absolute/path/to/opencode
+```
+
+重启 FoxClaw 后，这个 Bot 会连接本机受 Basic Auth 保护、仅监听 `127.0.0.1` 的 `opencode serve`。未设置 `OPENCODE_SERVER_PASSWORD` 时，FoxClaw 自动生成密码并以 `0600` 保存到托管状态文件。`OPENCODE_BOT_TOKEN` 不能与 `TG_BOT_TOKENS` / `TG_BOT_TOKEN` 复用，否则两个 long-poll runtime 会争抢同一个 Telegram update。
+
+OpenCode Bot 保留与 Codex Bot 相同的主要操作习惯：直接发消息或附件、`/new`、`/threads` + `/open <编号>`、`/watch`、`/setup`、模型与 variant、Agent/单次 Plan、三档权限、运行中 steer/queue、流式合并、工具进度、审批按钮、问题选项、`/history`、`/fork`、`/diff`、`/compact`、`/skills`、`/mcp` 和 `/interrupt`。`/undo` 与 `/rollback` 会明确提示不支持，不会用 OpenCode 的文件 revert 做近似映射。
+
+OpenCode 自身的 Provider 登录仍在本机终端完成，例如 `opencode auth`。运行 `foxclaw doctor` 会在配置了 OpenCode Bot 时额外检查 OpenCode CLI 和 token 隔离。
 
 ## 多账号切换
 

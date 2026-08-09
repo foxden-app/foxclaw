@@ -1518,3 +1518,22 @@ export function getTelegramCommands(locale: AppLocale): Array<{ command: string;
     { command: 'interrupt', description: t(locale, 'cmd_desc_interrupt') },
   ];
 }
+
+export function getOpencodeTelegramCommands(locale: AppLocale): Array<{ command: string; description: string }> {
+  const descriptions = locale === 'zh' ? {
+    help: '查看命令', setup: 'OpenCode 设置', status: '桥接状态', threads: '最近会话', open: '打开会话',
+    watch: '观察会话', unwatch: '停止观察', new: '新建会话', models: '模型列表', model: '选择模型',
+    effort: '推理档位', mode: 'Agent 或 Plan', plan: '下一轮 Plan', agent: '选择 Agent', permissions: '权限设置',
+    active: '运行中新消息', history: '最近消息', files: '查找文件', fork: 'Fork 会话', rename: '重命名会话',
+    diff: '会话文件变更', where: '当前会话信息', compact: '压缩上下文', loaded: '已加载会话', skills: 'OpenCode Skills',
+    mcp: 'MCP 状态', provider: '模型 Provider', config: '配置摘要', approve: '待审批', answer: '待回答', interrupt: '中断回复',
+  } : {
+    help: 'Show commands', setup: 'OpenCode settings', status: 'Bridge status', threads: 'Recent sessions', open: 'Open a session',
+    watch: 'Watch a session', unwatch: 'Stop watching', new: 'New session', models: 'Model list', model: 'Select model',
+    effort: 'Reasoning variant', mode: 'Agent or Plan', plan: 'Plan next turn', agent: 'Select agent', permissions: 'Access settings',
+    active: 'Active-turn messages', history: 'Recent messages', files: 'Find files', fork: 'Fork session', rename: 'Rename session',
+    diff: 'Session file changes', where: 'Current session', compact: 'Compact context', loaded: 'Loaded sessions', skills: 'OpenCode skills',
+    mcp: 'MCP status', provider: 'Model providers', config: 'Config summary', approve: 'Pending approvals', answer: 'Pending questions', interrupt: 'Stop active turn',
+  };
+  return Object.entries(descriptions).map(([command, description]) => ({ command, description }));
+}

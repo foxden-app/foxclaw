@@ -1,7 +1,7 @@
 {
   "name": "@foxden-app/foxclaw",
-  "version": "0.5.78",
-  "description": "Foxden local execution claw for controlling Codex from trusted chat interfaces.",
+  "version": "0.6.1",
+  "description": "Foxden local execution claw for controlling Codex and OpenCode from trusted chat interfaces.",
   "type": "module",
   "main": "dist/main.js",
   "bin": {
@@ -55,6 +55,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@opencode-ai/sdk": "1.18.15",
     "dotenv": "^16.6.1",
     "qrcode-terminal": "^0.12.0"
   },

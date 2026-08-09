@@ -10,6 +10,8 @@ import type { TelegramMessageEntity } from './addressing.js';
 import type { TelegramInboundAttachment } from './media.js';
 import type { TelegramInputRichMessage } from './rich.js';
 
+export type TelegramCommandProvider = (locale: 'en' | 'zh') => Array<{ command: string; description: string }>;
+
 interface TelegramUser {
   id: number;
   is_bot?: boolean;
@@ -118,6 +120,7 @@ export class TelegramGateway extends EventEmitter {
     private readonly store: BridgeStore,
     private readonly logger: Logger,
     private readonly namespacedScopes = false,
+    private readonly commandProvider: TelegramCommandProvider = getTelegramCommands,
   ) {
     super();
     this.botKey = `telegram:${crypto.createHash('sha256').update(this.botToken).digest('hex').slice(0, 8)}`;
@@ -403,14 +406,14 @@ export class TelegramGateway extends EventEmitter {
 
   private async registerCommands(): Promise<void> {
     await callTelegramApi(this.botToken, 'setMyCommands', {
-      commands: getTelegramCommands('zh'),
+      commands: this.commandProvider('zh'),
     });
     await callTelegramApi(this.botToken, 'setMyCommands', {
-      commands: getTelegramCommands('en'),
+      commands: this.commandProvider('en'),
       language_code: 'en',
     });
     await callTelegramApi(this.botToken, 'setMyCommands', {
-      commands: getTelegramCommands('zh'),
+      commands: this.commandProvider('zh'),
       language_code: 'zh',
     });
   }

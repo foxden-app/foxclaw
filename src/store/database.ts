@@ -369,6 +369,16 @@ export class BridgeStore {
     `).run(chatId, threadId, cwd, Date.now());
   }
 
+  listBindings(): ThreadBinding[] {
+    const rows = this.db.prepare('SELECT chat_id, thread_id, cwd, updated_at FROM chat_bindings ORDER BY updated_at DESC').all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      chatId: String(row.chat_id),
+      threadId: String(row.thread_id),
+      cwd: row.cwd === null ? null : String(row.cwd),
+      updatedAt: Number(row.updated_at),
+    }));
+  }
+
   clearBinding(chatId: string): void {
     this.db.prepare('DELETE FROM chat_bindings WHERE chat_id = ?').run(chatId);
   }

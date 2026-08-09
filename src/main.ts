@@ -681,6 +681,7 @@ async function runServeCli(): Promise<void> {
     { TelegramChannelAdapter },
     { AuthCandidateMirror },
     { CrossNodeAuthSync },
+    { OpencodeTelegramRuntime },
   ] = await Promise.all([
     import('./channels/bridge_messaging_router.js'),
     import('./channels/telegram/telegram_messaging_port.js'),
@@ -696,6 +697,7 @@ async function runServeCli(): Promise<void> {
     import('./channels/telegram/telegram_channel_adapter.js'),
     import('./auth/mirror.js'),
     import('./auth/cross_node_sync.js'),
+    import('./opencode/runtime.js'),
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
@@ -713,8 +715,14 @@ async function runServeCli(): Promise<void> {
   let managedApps: Array<InstanceType<typeof CodexAppClient>> = [];
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
+  let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    if (config.opencodeBotToken) {
+      activeOpencodeRuntime = new OpencodeTelegramRuntime(config, store, logger);
+      await activeOpencodeRuntime.start();
+      logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
+    }
     if (config.tgMultiBotMode) {
       type RuntimeSeed = {
         id: string;
@@ -1093,6 +1101,7 @@ async function runServeCli(): Promise<void> {
         await weixinAdapter?.stop();
         await activeWeixinCore?.stop();
         await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
+        await activeOpencodeRuntime?.stop();
         writeAggregateStatus(false);
         await Promise.all(managedApps.map((app) => app.stop({ terminateServer: true }).catch((error) => {
           logger.warn('codex.app-server.stop_failed', { error: serializeError(error) });
@@ -1315,6 +1324,7 @@ async function runServeCli(): Promise<void> {
       singleMirror?.stop();
       await weixinAdapter?.stop();
       await telegram.stop();
+      await activeOpencodeRuntime?.stop();
       writeRuntimeStatus(config.statusPath, {
         running: false,
         connected: false,
@@ -1348,6 +1358,7 @@ async function runServeCli(): Promise<void> {
     await weixinAdapter?.stop().catch(() => {});
     await activeWeixinCore?.stop().catch(() => {});
     await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
+    await activeOpencodeRuntime?.stop().catch(() => {});
     await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
     store?.close();
     processLock.release();
@@ -2169,6 +2180,15 @@ function runDoctorChecks(): boolean {
     ['telegram bot token(s) configured', Boolean(process.env.TG_BOT_TOKENS?.trim() || process.env.TG_BOT_TOKEN?.trim())],
     ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
   ];
+  if (process.env.OPENCODE_BOT_TOKEN?.trim()) {
+    const configuredOpencodeBin = process.env.OPENCODE_CLI_BIN;
+    checks.push(['opencode cli available', hasConfiguredCodexBin(configuredOpencodeBin) || hasCommand('opencode')]);
+    const codexTokens = [
+      ...(process.env.TG_BOT_TOKENS ?? '').split(','),
+      process.env.TG_BOT_TOKEN ?? '',
+    ].map((value) => value.trim()).filter(Boolean);
+    checks.push(['OpenCode uses an independent Telegram bot', !codexTokens.includes(process.env.OPENCODE_BOT_TOKEN.trim())]);
+  }
   if (process.env.WX_ENABLED === 'true' || process.env.WX_ENABLED === '1') {
     const accountsDir = process.env.WEIXIN_ACCOUNTS_DIR || path.join(APP_HOME, 'weixin', 'accounts');
     let hasAccounts = false;

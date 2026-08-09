@@ -2,6 +2,22 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.1 - 2026-08-09
+
+### 中文
+- 新增独立 `OPENCODE_BOT_TOKEN` runtime，在不替换、不降级现有 Codex Bot 的前提下，由 Telegram 驱动本机 `opencode serve` 会话。支持全局会话列表、编号打开、观察、历史、Fork、Diff、压缩、文件搜索、Skills、MCP、Provider 与安全配置摘要。
+- 对齐 OpenCode 1.18.15 当前 HTTP/SSE 契约：使用 `/global/health`、跨目录 `/global/event`、`permission.asked`、`question.asked` 以及当前 reply API；加入 SSE 重连、漏事件轮询兜底、崩溃后托管进程重连和跨目录待审批/提问恢复。
+- Telegram 体验覆盖流式消息合并、最终 Rich Markdown、工具进度清理、图片/文件附件、模型与 variant、Agent/单次 Plan、read-only/default/full-access、运行中 steer/queue、审批按钮和多问题回答。`/undo`、`/rollback` 明确不做语义近似。
+- `opencode serve` 只绑定 `127.0.0.1` 并强制 Basic Auth；未配置密码时自动生成，以 `0600` 写入状态文件。OpenCode 必须使用不同的 Telegram Bot token，`doctor` 会做 CLI 与 token 隔离检查。
+- `v0.6.0` 保留为被回退的干扰提交快照，因此实际新实现使用 `0.6.1`，不复用同一版本号。
+
+### English
+- Added an independent `OPENCODE_BOT_TOKEN` runtime that drives local `opencode serve` sessions from Telegram without replacing or reducing existing Codex bots. It covers global session listing, numbered open, watch, history, fork, diff, compaction, file search, skills, MCP, providers, and a redacted config summary.
+- Aligned with the current OpenCode 1.18.15 HTTP/SSE contract: `/global/health`, cross-directory `/global/event`, `permission.asked`, `question.asked`, and current reply endpoints. Added SSE reconnects, polling fallback, managed-process reattachment after crashes, and cross-directory pending-request recovery.
+- Added merged streaming, final Rich Markdown, transient tool progress, image/file attachments, models and variants, Agent/one-shot Plan, three access presets, active-turn steer/queue, approval buttons, and multi-question answers. `/undo` and `/rollback` explicitly avoid semantic approximation.
+- `opencode serve` binds only to `127.0.0.1` and always uses Basic Auth. FoxClaw generates a password when omitted and writes state with mode `0600`. OpenCode requires a separate Telegram bot token, and `doctor` checks both CLI availability and token isolation.
+- `v0.6.0` remains the tagged snapshot of the reverted interference commit, so the corrected implementation is versioned `0.6.1` instead of reusing the same release number.
+
 ## 0.5.78 - 2026-07-12
 
 ### 中文

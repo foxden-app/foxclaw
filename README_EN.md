@@ -4,7 +4,7 @@
 
 **A mobile Codex controller built for real programming workflows.**
 
-FoxClaw turns your phone into a practical web coding cockpit for your local Codex. Telegram or Weixin handles the chat interface, `codex app-server` handles local execution, and you can send tasks, inspect progress, approve actions, switch threads, and keep working without opening a laptop.
+FoxClaw turns your phone into a practical web coding cockpit for local Codex or OpenCode. Telegram or Weixin handles the chat interface, `codex app-server` / `opencode serve` handles local execution, and you can send tasks, inspect progress, approve actions, switch sessions, and keep working without opening a laptop.
 
 It is built for the moments when you leave your desk for lunch, commute, travel, use a treadmill, or take the kids to the park. You can step away from the keyboard while Codex keeps coding and sends progress, errors, approval requests, and final results back to your phone.
 
@@ -119,6 +119,22 @@ FoxClaw accepts messages only from `TG_ALLOWED_USER_ID`. Putting the bot in a gr
 - If `TG_BOT_TOKEN` is also set and exactly matches one token in `TG_BOT_TOKENS`, that bot shares the terminal/default `CODEX_HOME` and auth while the other bots stay isolated
 
 </details>
+
+## Independent OpenCode Bot (0.6.1+)
+
+Your existing Codex bots remain unchanged. Create one more independent bot with `@BotFather` and configure:
+
+```dotenv
+OPENCODE_BOT_TOKEN=234567:different-opencode-bot-token
+# Optional; defaults to PATH lookup
+OPENCODE_CLI_BIN=/absolute/path/to/opencode
+```
+
+After FoxClaw restarts, this bot uses a managed `opencode serve` protected by Basic Auth and bound only to `127.0.0.1`. When `OPENCODE_SERVER_PASSWORD` is unset, FoxClaw generates one and saves it in the managed state file with mode `0600`. Never reuse a token from `TG_BOT_TOKENS` / `TG_BOT_TOKEN`, because two long-poll runtimes would compete for the same Telegram updates.
+
+The OpenCode bot preserves the main Codex-bot habits: plain messages and attachments, `/new`, `/threads` plus numbered `/open`, `/watch`, `/setup`, models and variants, Agent/one-shot Plan, three access presets, active-turn steer/queue, merged streaming, tool progress, approval buttons, question options, `/history`, `/fork`, `/diff`, `/compact`, `/skills`, `/mcp`, and `/interrupt`. `/undo` and `/rollback` explicitly remain unsupported rather than approximating them with OpenCode file-revert semantics.
+
+Provider authentication remains an OpenCode terminal operation, such as `opencode auth`. When an OpenCode bot is configured, `foxclaw doctor` also checks the OpenCode CLI and token isolation.
 
 ## Multi-Account Rotation
 

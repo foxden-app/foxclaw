@@ -5,6 +5,7 @@ import {
   buildCodexApiProviderOverrides,
   parseCodexApiProviders,
   selectDefaultRuntimeBotToken,
+  validateOpencodeBotToken,
 } from './config.js';
 
 test('selectDefaultRuntimeBotToken marks a token already present in TG_BOT_TOKENS', () => {
@@ -17,6 +18,15 @@ test('selectDefaultRuntimeBotToken ignores legacy token outside TG_BOT_TOKENS', 
 
 test('selectDefaultRuntimeBotToken keeps pure legacy single-bot mode unchanged', () => {
   assert.equal(selectDefaultRuntimeBotToken([], 'legacy'), null);
+});
+
+test('validateOpencodeBotToken requires an independent Telegram bot', () => {
+  assert.doesNotThrow(() => validateOpencodeBotToken('opencode', ['codex-a', 'codex-b']));
+  assert.doesNotThrow(() => validateOpencodeBotToken(null, ['codex-a']));
+  assert.throws(
+    () => validateOpencodeBotToken('codex-b', ['codex-a', 'codex-b']),
+    /must use a different bot/,
+  );
 });
 
 test('parseCodexApiProviders accepts compact OpenAI-compatible provider specs', () => {

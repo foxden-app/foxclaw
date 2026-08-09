@@ -13,6 +13,8 @@ export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
 export const DEFAULT_LOCK_PATH = path.join(APP_HOME, 'runtime', 'bridge.lock');
 export const DEFAULT_CODEX_APP_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'codex-app-server.json');
 export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'codex-app-server.log');
+export const DEFAULT_OPENCODE_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'opencode-server.json');
+export const DEFAULT_OPENCODE_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'opencode-server.log');
 export const DEFAULT_CODEX_TELEGRAM_HOME = path.join(APP_HOME, 'codex', 'telegram');
 export const DEFAULT_AUTH_SYNC_STATE_PATH = path.join(APP_HOME, 'runtime', 'auth-sync.json');
 export const DEFAULT_AUTH_SYNC_TEMP_DIR = path.join(APP_HOME, 'runtime', 'auth-sync');
@@ -66,6 +68,11 @@ export interface AppConfig {
   codexApiDefaultProvider: string | null;
   codexAppSyncOnOpen: boolean;
   codexAppSyncOnTurnComplete: boolean;
+  opencodeBotToken: string | null;
+  opencodeCliBin: string;
+  opencodeServerPassword: string | null;
+  opencodeServerStatePath: string;
+  opencodeServerLogPath: string;
   storePath: string;
   logLevel: LogLevel;
   defaultCwd: string;
@@ -137,6 +144,8 @@ export function loadConfig(): AppConfig {
   if (tgBotTokens.length === 0) {
     throw new Error('TG_BOT_TOKENS or TG_BOT_TOKEN is required');
   }
+  const opencodeBotToken = optional('OPENCODE_BOT_TOKEN');
+  validateOpencodeBotToken(opencodeBotToken, tgBotTokens);
   const config: AppConfig = {
     tgBotToken: tgBotTokens[0]!,
     tgBotTokens,
@@ -158,6 +167,11 @@ export function loadConfig(): AppConfig {
     codexApiDefaultProvider: optionalSanitizedProviderId(process.env.CODEX_API_DEFAULT_PROVIDER),
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
     codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
+    opencodeBotToken,
+    opencodeCliBin: process.env.OPENCODE_CLI_BIN || resolveCommand('opencode') || 'opencode',
+    opencodeServerPassword: optional('OPENCODE_SERVER_PASSWORD'),
+    opencodeServerStatePath: process.env.OPENCODE_SERVER_STATE_PATH || DEFAULT_OPENCODE_SERVER_STATE_PATH,
+    opencodeServerLogPath: process.env.OPENCODE_SERVER_LOG_PATH || DEFAULT_OPENCODE_SERVER_LOG_PATH,
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
     logLevel: parseLogLevel(process.env.LOG_LEVEL || 'info'),
     defaultCwd: process.env.DEFAULT_CWD || process.cwd(),
@@ -229,6 +243,13 @@ export function buildCodexApiProviderOverrides(
     }
   }
   return overrides;
+}
+
+export function validateOpencodeBotToken(token: string | null, codexTokens: readonly string[]): void {
+  if (!token) return;
+  if (codexTokens.includes(token)) {
+    throw new Error('OPENCODE_BOT_TOKEN must use a different bot from TG_BOT_TOKENS/TG_BOT_TOKEN');
+  }
 }
 
 export function parseCodexApiProviders(raw: string | undefined): CodexApiProviderConfig[] {
@@ -347,6 +368,8 @@ export function ensureAppDirs(config: AppConfig): void {
     path.dirname(config.lockPath),
     path.dirname(config.codexAppServerStatePath),
     path.dirname(config.codexAppServerLogPath),
+    path.dirname(config.opencodeServerStatePath),
+    path.dirname(config.opencodeServerLogPath),
     path.dirname(config.authSyncStatePath),
   ];
   if (config.authSyncEnabled) {
