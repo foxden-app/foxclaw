@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getTelegramCommands, normalizeLocale, t } from './i18n.js';
+import { getOpencodeTelegramCommands, getTelegramCommands, normalizeLocale, t } from './i18n.js';
 
 test('normalizeLocale maps telegram language codes', () => {
   assert.equal(normalizeLocale('zh-CN'), 'zh');
@@ -20,6 +20,14 @@ test('getTelegramCommands returns localized descriptions', () => {
   assert.equal(getTelegramCommands('zh').find((entry) => entry.command === 'update')?.description, '升级并重启 FoxClaw');
   assert.equal(getTelegramCommands('en').find((entry) => entry.command === 'rich')?.description, 'Telegram RichMessage demo');
   assert.equal(getTelegramCommands('zh').find((entry) => entry.command === 'rich')?.description, 'Telegram RichMessage 演示');
+});
+
+test('OpenCode Telegram menu preserves every Codex command entry point', () => {
+  const codex = getTelegramCommands('zh').map((entry) => entry.command);
+  const opencode = getOpencodeTelegramCommands('zh').map((entry) => entry.command);
+  assert.deepEqual(opencode.slice(0, codex.length), codex);
+  assert.equal(getOpencodeTelegramCommands('zh').find((entry) => entry.command === 'models')?.description, '模型列表');
+  assert.equal(getOpencodeTelegramCommands('zh').find((entry) => entry.command === 'update')?.description, '请改用 Codex Bot');
 });
 
 test('t interpolates localized templates', () => {

@@ -1521,19 +1521,38 @@ export function getTelegramCommands(locale: AppLocale): Array<{ command: string;
 
 export function getOpencodeTelegramCommands(locale: AppLocale): Array<{ command: string; description: string }> {
   const descriptions = locale === 'zh' ? {
-    help: '查看命令', setup: 'OpenCode 设置', status: '桥接状态', threads: '最近会话', open: '打开会话',
+    help: '查看命令', setup: 'OpenCode 设置', status: '桥接状态', update: '请改用 Codex Bot', threads: '最近会话', open: '打开会话',
     watch: '观察会话', unwatch: '停止观察', new: '新建会话', models: '模型列表', model: '选择模型',
-    effort: '推理档位', mode: 'Agent 或 Plan', plan: '下一轮 Plan', agent: '选择 Agent', permissions: '权限设置',
-    active: '运行中新消息', history: '最近消息', files: '查找文件', fork: 'Fork 会话', rename: '重命名会话',
-    diff: '会话文件变更', where: '当前会话信息', compact: '压缩上下文', loaded: '已加载会话', skills: 'OpenCode Skills',
-    mcp: 'MCP 状态', provider: '模型 Provider', config: '配置摘要', approve: '待审批', answer: '待回答', interrupt: '中断回复',
+    effort: '推理档位', fast: 'Fast 能力说明', mode: 'Agent 或 Plan', plan: '下一轮 Plan', agent: '选择 Agent', permissions: '权限设置',
+    active: '运行中新消息', steer: '引导当前回复', queue: '排队下一轮', takeover: '中断并接管',
+    history: '最近消息', files: '查找文件', fork: 'Fork 会话', undo: '原生回退', redo: '原生重做', rename: '重命名会话',
+    review: '原生代码审查', archive: '归档当前会话', unarchive: '恢复归档会话', rich: '富文本测试', voice: '朗读文本或发送语音',
+    diff: '会话文件变更', where: '当前会话信息', reveal: '当前会话信息', compact: '压缩上下文', loaded: '已加载会话', skills: 'OpenCode Skills',
+    mcp: 'MCP 状态', apps: 'MCP 应用', provider: '模型 Provider', auth: 'Provider 认证状态', auth_reload: '无 OpenCode 等价 API',
+    account: '无 OpenCode 账户 API', quota: '无 OpenCode 配额 API', login_device: '请用终端 opencode auth', goal: '无 OpenCode Goal 原语', remote: 'Codex Remote 专用',
+    plugins: 'OpenCode Plugins', hooks: 'Plugin hooks', features: '实验能力', config: '配置摘要', approve: '待审批', answer: '待回答', interrupt: '中断回复',
   } : {
-    help: 'Show commands', setup: 'OpenCode settings', status: 'Bridge status', threads: 'Recent sessions', open: 'Open a session',
+    help: 'Show commands', setup: 'OpenCode settings', status: 'Bridge status', update: 'Use the Codex bot', threads: 'Recent sessions', open: 'Open a session',
     watch: 'Watch a session', unwatch: 'Stop watching', new: 'New session', models: 'Model list', model: 'Select model',
-    effort: 'Reasoning variant', mode: 'Agent or Plan', plan: 'Plan next turn', agent: 'Select agent', permissions: 'Access settings',
-    active: 'Active-turn messages', history: 'Recent messages', files: 'Find files', fork: 'Fork session', rename: 'Rename session',
-    diff: 'Session file changes', where: 'Current session', compact: 'Compact context', loaded: 'Loaded sessions', skills: 'OpenCode skills',
-    mcp: 'MCP status', provider: 'Model providers', config: 'Config summary', approve: 'Pending approvals', answer: 'Pending questions', interrupt: 'Stop active turn',
+    effort: 'Reasoning variant', fast: 'Fast capability note', mode: 'Agent or Plan', plan: 'Plan next turn', agent: 'Select agent', permissions: 'Access settings',
+    active: 'Active-turn messages', steer: 'Steer active turn', queue: 'Queue next turn', takeover: 'Interrupt and take over',
+    history: 'Recent messages', files: 'Find files', fork: 'Fork session', undo: 'Native undo', redo: 'Native redo', rename: 'Rename session',
+    review: 'Native code review', archive: 'Archive current session', unarchive: 'Restore archived session', rich: 'Rich-text test', voice: 'Read text or send voice',
+    diff: 'Session file changes', where: 'Current session', reveal: 'Current session', compact: 'Compact context', loaded: 'Loaded sessions', skills: 'OpenCode skills',
+    mcp: 'MCP status', apps: 'MCP apps', provider: 'Model providers', auth: 'Provider auth status', auth_reload: 'No OpenCode equivalent',
+    account: 'No OpenCode account API', quota: 'No OpenCode quota API', login_device: 'Use opencode auth terminal', goal: 'No OpenCode Goal primitive', remote: 'Codex Remote only',
+    plugins: 'OpenCode plugins', hooks: 'Plugin hooks', features: 'Experimental capabilities', config: 'Config summary', approve: 'Pending approvals', answer: 'Pending questions', interrupt: 'Stop active turn',
   };
-  return Object.entries(descriptions).map(([command, description]) => ({ command, description }));
+  const localized = descriptions as Record<string, string>;
+  const codexMenu = getTelegramCommands(locale).map((entry) => ({
+    command: entry.command,
+    description: localized[entry.command] ?? entry.description,
+  }));
+  const shared = new Set(codexMenu.map((entry) => entry.command));
+  return [
+    ...codexMenu,
+    ...Object.entries(localized)
+      .filter(([command]) => !shared.has(command))
+      .map(([command, description]) => ({ command, description })),
+  ];
 }

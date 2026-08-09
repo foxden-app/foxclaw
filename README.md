@@ -132,7 +132,7 @@ OPENCODE_CLI_BIN=/absolute/path/to/opencode
 
 重启 FoxClaw 后，这个 Bot 会连接本机受 Basic Auth 保护、仅监听 `127.0.0.1` 的 `opencode serve`。未设置 `OPENCODE_SERVER_PASSWORD` 时，FoxClaw 自动生成密码并以 `0600` 保存到托管状态文件。`OPENCODE_BOT_TOKEN` 不能与 `TG_BOT_TOKENS` / `TG_BOT_TOKEN` 复用，否则两个 long-poll runtime 会争抢同一个 Telegram update。
 
-OpenCode Bot 保留与 Codex Bot 相同的主要操作习惯：直接发消息或附件、`/new`、`/threads` + `/open <编号>`、`/watch`、`/setup`、模型与 variant、Agent/单次 Plan、三档权限、运行中 steer/queue、流式合并、工具进度、审批按钮、问题选项、`/history`、`/fork`、`/diff`、`/compact`、`/skills`、`/mcp` 和 `/interrupt`。`/undo` 与 `/rollback` 会明确提示不支持，不会用 OpenCode 的文件 revert 做近似映射。
+OpenCode Bot 保留与 Codex Bot 相同的主要操作习惯：直接发消息或附件、`/new`、`/threads` + `/open <编号>`、`/watch`、同消息内刷新的 `/setup`、Provider → Model 两层模型选择、variant、Agent/单次 Plan、三档权限、运行中 `/steer`/`/queue`/`/takeover`、流式合并、工具进度、审批按钮和问题选项。`/undo`/`/redo`、`/review` 与归档使用 OpenCode 原生 API；`/apps` 对应 MCP，Plugins、Hooks、Features 和语音入口也保持可用。Codex 账户、配额、Goal、Remote 和 Fast service tier 没有 OpenCode serve 等价 API，保留菜单入口并明确说明替代操作。
 
 OpenCode 自身的 Provider 登录仍在本机终端完成，例如 `opencode auth`。运行 `foxclaw doctor` 会在配置了 OpenCode Bot 时额外检查 OpenCode CLI 和 token 隔离。
 

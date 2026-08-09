@@ -14,6 +14,12 @@ import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AppLocale, ChatSessionSettings } from '../types.js';
+import {
+  TELEGRAM_VOICE_MAX_BYTES,
+  TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
+  telegramVoiceContentType,
+} from '../voice/files.js';
+import { synthesizeTelegramVoice } from '../voice/tts.js';
 import { parseCommand } from '../controller/commands.js';
 import { normalizeLocale } from '../i18n.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
@@ -45,10 +51,12 @@ interface ActiveTurn {
   messageIds: number[];
   renderedChunks: string[];
   flushTimer: ReturnType<typeof setTimeout> | null;
+  flushPromise: Promise<void>;
   lastFlush: number;
   toolMessageId: number | null;
   toolLines: Map<string, string>;
   toolTimer: ReturnType<typeof setTimeout> | null;
+  toolPromise: Promise<void>;
 }
 
 interface WatchState {
@@ -58,6 +66,7 @@ interface WatchState {
   messageIds: number[];
   renderedChunks: string[];
   flushTimer: ReturnType<typeof setTimeout> | null;
+  flushPromise: Promise<void>;
   lastFlush: number;
 }
 
@@ -86,8 +95,9 @@ interface PendingQuestionUi {
 
 interface SetupAction {
   scopeId: string;
-  kind: 'model' | 'access' | 'mode' | 'open' | 'watch';
+  kind: 'setup' | 'models' | 'provider' | 'model' | 'variant' | 'access' | 'mode' | 'agent' | 'active' | 'notice' | 'open' | 'watch';
   value: string;
+  origin?: 'models' | 'setup';
 }
 
 interface ModelChoice {
@@ -97,17 +107,23 @@ interface ModelChoice {
   variants: string[];
 }
 
+interface ProviderChoice {
+  providerId: string;
+  name: string;
+  defaultModelId: string | null;
+  models: ModelChoice[];
+}
+
 interface OpencodePrefs {
   agent: string | null;
   variant: string | null;
 }
 
 const UNSUPPORTED_COMMANDS = new Set([
-  'account', 'apps', 'archive', 'auth', 'auth_reload', 'codex_restart', 'fast', 'features',
-  'goal', 'goal_clear', 'goal_done', 'goal_pause', 'goal_resume', 'hooks', 'login',
-  'login_cancel', 'login_device', 'logout', 'plugin', 'plugin_skill', 'plugins', 'quota',
-  'remote', 'requirements', 'review', 'rollback', 'service_tier', 'thread_archive',
-  'thread_unarchive', 'undo', 'unarchive', 'update',
+  'account', 'auth_reload', 'codex_restart',
+  'goal', 'goal_clear', 'goal_done', 'goal_pause', 'goal_resume', 'login',
+  'login_cancel', 'login_device', 'logout', 'plugin', 'plugin_skill', 'quota',
+  'remote', 'requirements', 'service_tier', 'update',
 ]);
 
 /** Telegram-facing OpenCode runtime. It shares FoxClaw's gateway/store/rendering primitives. */
@@ -118,6 +134,7 @@ export class OpencodeBridgeCore {
   private readonly permissions = new Map<string, PendingPermissionUi>();
   private readonly questions = new Map<string, PendingQuestionUi>();
   private readonly setupActions = new Map<string, SetupAction>();
+  private readonly latestVoiceText = new Map<string, string>();
   private readonly locks = new Map<string, Promise<void>>();
   private readonly finishingSessions = new Map<string, Promise<void>>();
   private readonly handlingPermissionIds = new Set<string>();
@@ -181,6 +198,8 @@ export class OpencodeBridgeCore {
     this.activeTurns.clear();
     this.watchers.clear();
     this.queuedPrompts.clear();
+    this.setupActions.clear();
+    this.latestVoiceText.clear();
     this.finishingSessions.clear();
     this.handlingPermissionIds.clear();
     this.handlingQuestionIds.clear();
@@ -224,6 +243,26 @@ export class OpencodeBridgeCore {
     if (scopeId) await this.send(scopeId, `⚠️ ${message}`).catch(() => {});
   }
 
+  private unsupportedCommandMessage(name: string, locale: AppLocale): string {
+    if (name === 'update') return localize(locale,
+      '/update 当前只由 Codex runtime 的升级协调器执行，避免双 Bot 同时重启服务。请在 Codex Bot 使用 /update，或在终端运行 foxclaw update。',
+      '/update is currently owned by the Codex runtime update coordinator to prevent both bots restarting the service. Use /update in the Codex bot or run foxclaw update in a terminal.');
+    if (['account', 'quota', 'login', 'login_cancel', 'login_device', 'logout', 'auth_reload', 'codex_restart'].includes(name)) {
+      return localize(locale,
+        `/${name} 依赖 Codex 账户、配额或设备登录协议；OpenCode serve 没有对应 API。Provider 状态可用 /auth 查看，登录与切换请在终端运行 opencode auth。`,
+        `/${name} depends on Codex account, quota, or device-login protocols, which OpenCode serve does not expose. Use /auth for provider status and opencode auth in a terminal to sign in or switch.`);
+    }
+    if (name.startsWith('goal')) return localize(locale,
+      `/${name} 依赖 Codex 的持久 Goal 原语；OpenCode session 没有等价状态机。`,
+      `/${name} depends on Codex's persistent Goal primitive; OpenCode sessions have no equivalent state machine.`);
+    if (name === 'remote') return localize(locale,
+      '/remote 是 Codex Remote 会话协议，OpenCode serve 没有等价端点。',
+      '/remote is a Codex Remote session protocol; OpenCode serve has no equivalent endpoint.');
+    return localize(locale,
+      `/${name} 在 OpenCode serve 上没有可保持语义的等价 API。`,
+      `/${name} has no semantics-preserving equivalent in OpenCode serve.`);
+  }
+
   private localeForScope(scopeId: string, languageCode?: string): AppLocale {
     const detected = normalizeLocale(languageCode);
     const current = this.store.getChatSettings(scopeId)?.locale;
@@ -260,9 +299,7 @@ export class OpencodeBridgeCore {
   private async handleCommand(event: TelegramTextEvent, name: string, args: string[], locale: AppLocale): Promise<void> {
     const scopeId = event.scopeId;
     if (UNSUPPORTED_COMMANDS.has(name)) {
-      await this.send(scopeId, localize(locale,
-        `/${name} 在 OpenCode runtime 上不可用。`,
-        `/${name} is not available on the OpenCode runtime.`));
+      await this.send(scopeId, this.unsupportedCommandMessage(name, locale));
       return;
     }
     switch (name) {
@@ -275,7 +312,7 @@ export class OpencodeBridgeCore {
       case 'unwatch': await this.unwatchSession(scopeId, locale); return;
       case 'status': await this.showStatus(scopeId, locale); return;
       case 'setup': await this.showSetup(scopeId, locale); return;
-      case 'models': await this.showModels(scopeId, locale); return;
+      case 'models': await this.showModels(scopeId, args.join(' ').trim(), locale); return;
       case 'model': await this.setModel(scopeId, args.join(' ').trim(), locale); return;
       case 'effort': await this.setVariant(scopeId, args.join(' ').trim(), locale); return;
       case 'mode': await this.setMode(scopeId, args[0] ?? '', locale); return;
@@ -284,18 +321,38 @@ export class OpencodeBridgeCore {
       case 'permissions':
       case 'access': await this.setAccess(scopeId, args.join(' ').trim(), locale); return;
       case 'active': await this.setActiveMode(scopeId, args[0] ?? '', locale); return;
+      case 'steer': await this.sendWithBehavior(event, args.join(' ').trim(), locale, 'steer'); return;
+      case 'queue': await this.sendWithBehavior(event, args.join(' ').trim(), locale, 'queue'); return;
+      case 'takeover': await this.takeOver(event, args.join(' ').trim(), locale); return;
       case 'history': await this.showHistory(scopeId, args[0] ?? '', locale); return;
       case 'rename': await this.renameSession(scopeId, args.join(' ').trim(), locale); return;
       case 'fork': await this.forkSession(scopeId, args.join(' ').trim(), locale); return;
+      case 'undo':
+      case 'rollback': await this.undoSession(scopeId, args[0] ?? '', locale); return;
+      case 'redo': await this.redoSession(scopeId, locale); return;
       case 'diff': await this.showDiff(scopeId, locale); return;
       case 'where': await this.showWhere(scopeId, locale); return;
+      case 'reveal': await this.showWhere(scopeId, locale); return;
       case 'files': await this.findFiles(scopeId, args.join(' ').trim(), locale); return;
       case 'compact': await this.compactSession(scopeId, locale); return;
       case 'loaded': await this.showLoaded(scopeId, locale); return;
       case 'skills': await this.showSkills(scopeId, locale); return;
       case 'mcp': await this.showMcp(scopeId, locale); return;
+      case 'apps': await this.showMcp(scopeId, locale, true); return;
       case 'provider': await this.showProviders(scopeId, locale); return;
+      case 'auth': await this.showAuth(scopeId, locale); return;
+      case 'plugins': await this.showPlugins(scopeId, locale, false); return;
+      case 'hooks': await this.showPlugins(scopeId, locale, true); return;
+      case 'features': await this.showFeatures(scopeId, locale); return;
       case 'config': await this.showConfig(scopeId, locale); return;
+      case 'archive': await this.archiveBoundSession(scopeId, locale); return;
+      case 'unarchive':
+      case 'thread_unarchive': await this.unarchiveSession(scopeId, args[0] ?? '', locale); return;
+      case 'thread_archive': await this.archiveCachedSession(scopeId, args[0] ?? '', locale); return;
+      case 'review': await this.runReview(event, args.join(' ').trim(), locale); return;
+      case 'rich': await this.showRichDemo(scopeId, locale); return;
+      case 'voice': await this.handleVoiceCommand(scopeId, args, locale); return;
+      case 'fast': await this.showFastUnsupported(scopeId, locale); return;
       case 'approve': await this.approveFromCommand(scopeId, args, locale); return;
       case 'answer': await this.answerFromCommand(scopeId, args, locale); return;
       case 'abort':
@@ -309,31 +366,37 @@ export class OpencodeBridgeCore {
   private async showHelp(scopeId: string, locale: AppLocale): Promise<void> {
     const zh = [
       '⚡ OpenCode 桥接命令', '',
-      '/new [目录] · 新建会话', '/threads [关键词] · 最近会话', '/open <编号|ID> · 打开会话',
+      '/new [目录] · 新建会话', '/threads [关键词|archived] · 最近或归档会话', '/open <编号|ID> · 打开会话',
       '/watch [编号|ID] · 观察会话', '/unwatch · 停止观察', '/setup · 设置面板',
-      '/models · 模型列表', '/model <编号|provider/model|default> · 选择模型', '/effort <variant|default> · 推理档位',
-      '/mode <default|plan> · 模式', '/plan · 下一轮 Plan', '/agent [名称] · Agent',
+      '/models [provider] · Provider → Model 两层选择', '/model <provider/model|default> · 选择模型', '/effort <variant|default> · 推理档位',
+      '/fast · 说明 OpenCode 与 Codex Fast 的能力差异', '/mode <default|plan> · 模式', '/plan · 下一轮 Plan', '/agent [名称] · Agent',
       '/permissions <read-only|default|full-access> · 权限', '/active <steer|queue> · 运行中新消息',
-      '/history [数量] · 历史', '/rename <名称> · 重命名', '/fork [名称] · 分叉', '/diff · 变更',
+      '/steer <消息> · 引导当前回复', '/queue <消息> · 排队下一轮', '/takeover <消息> · 中断并接管',
+      '/history [数量] · 历史', '/rename <名称> · 重命名', '/fork [名称] · 分叉', '/undo [数量] · 原生回退', '/redo · 原生重做',
+      '/review [commit|branch|pr] · 原生代码审查', '/archive · 归档当前会话', '/unarchive <编号> · 恢复归档会话', '/diff · 变更',
       '/where · 当前目录', '/files <关键词> · 文件搜索', '/compact · 压缩上下文', '/loaded · 活跃会话',
-      '/skills · Skills', '/mcp · MCP 状态', '/provider · Provider', '/config · 配置摘要',
-      '/approve · 待审批', '/answer · 待回答', '/interrupt · 中断', '/status · 状态', '',
+      '/skills · Skills', '/mcp · MCP 状态', '/apps · MCP 应用', '/provider · Provider', '/auth · Provider 认证状态',
+      '/plugins · Plugins', '/hooks · Plugin hooks', '/features · 实验能力', '/config · 配置摘要',
+      '/approve · 待审批', '/answer · 待回答', '/rich · 富文本测试', '/voice <文本|last|file> · 语音', '/interrupt · 中断', '/status · 状态', '',
       '直接发送文本、图片或文件会继续当前会话；没有绑定时会自动新建。',
-      '/undo 与 /rollback 不会近似映射，避免误回滚文件。',
+      'Codex 账户、配额、Goal、Remote 没有 OpenCode serve 等价 API；Provider 登录请在终端运行 opencode auth。',
     ].join('\n');
     const en = [
       '⚡ OpenCode bridge commands', '',
-      '/new [dir] · new session', '/threads [query] · recent sessions', '/open <number|ID> · bind session',
+      '/new [dir] · new session', '/threads [query|archived] · recent or archived sessions', '/open <number|ID> · bind session',
       '/watch [number|ID] · watch session', '/unwatch · stop watching', '/setup · settings panel',
-      '/models · models', '/model <number|provider/model|default> · select model', '/effort <variant|default> · reasoning variant',
-      '/mode <default|plan> · mode', '/plan · Plan next turn', '/agent [name] · agent',
+      '/models [provider] · Provider → Model selector', '/model <provider/model|default> · select model', '/effort <variant|default> · reasoning variant',
+      '/fast · explain the OpenCode/Codex Fast capability difference', '/mode <default|plan> · mode', '/plan · Plan next turn', '/agent [name] · agent',
       '/permissions <read-only|default|full-access> · access', '/active <steer|queue> · messages during a turn',
-      '/history [n] · history', '/rename <name> · rename', '/fork [name] · fork', '/diff · changes',
+      '/steer <message> · steer active turn', '/queue <message> · queue next turn', '/takeover <message> · interrupt and take over',
+      '/history [n] · history', '/rename <name> · rename', '/fork [name] · fork', '/undo [n] · native undo', '/redo · native redo',
+      '/review [commit|branch|pr] · native review', '/archive · archive current session', '/unarchive <number> · restore archive', '/diff · changes',
       '/where · directory', '/files <query> · find files', '/compact · compact context', '/loaded · active sessions',
-      '/skills · skills', '/mcp · MCP status', '/provider · providers', '/config · config summary',
-      '/approve · approvals', '/answer · questions', '/interrupt · abort', '/status · status', '',
+      '/skills · skills', '/mcp · MCP status', '/apps · MCP apps', '/provider · providers', '/auth · provider auth status',
+      '/plugins · plugins', '/hooks · plugin hooks', '/features · experimental capabilities', '/config · config summary',
+      '/approve · approvals', '/answer · questions', '/rich · rich-text test', '/voice <text|last|file> · voice', '/interrupt · abort', '/status · status', '',
       'Plain text, images, and files continue the bound session, creating one when needed.',
-      '/undo and /rollback stay unsupported to avoid approximating file rollback semantics.',
+      'Codex account, quota, Goal, and Remote have no OpenCode serve API equivalents; run opencode auth in a terminal for provider login.',
     ].join('\n');
     await this.send(scopeId, localize(locale, zh, en));
   }
@@ -361,11 +424,14 @@ export class OpencodeBridgeCore {
   }
 
   private async showThreads(scopeId: string, search: string, locale: AppLocale): Promise<void> {
+    const archived = /^archived(?:\s|$)/i.test(search);
+    const query = archived ? search.replace(/^archived\s*/i, '').trim() : search;
     const response = await this.app.getClient().experimental.session.list({
-      ...(search ? { search } : {}),
+      ...(query ? { search: query } : {}),
+      ...(archived ? { archived: true } : {}),
       limit: Math.max(THREAD_LIST_LIMIT, this.config.threadListLimit),
     });
-    const sessions = unwrap(response, 'session.list').filter((session) => !session.time.archived);
+    const sessions = unwrap(response, 'session.list').filter((session) => archived ? Boolean(session.time.archived) : !session.time.archived);
     if (sessions.length === 0) {
       await this.send(scopeId, localize(locale, '没有匹配的 OpenCode 会话。', 'No matching OpenCode sessions.'));
       return;
@@ -378,17 +444,20 @@ export class OpencodeBridgeCore {
       cwd: session.directory,
       modelProvider: session.model ? `${session.model.providerID}/${session.model.id}` : null,
       status: statuses[session.id]?.type === 'busy' ? 'active' : 'idle',
+      archived,
       updatedAt: session.time.updated,
     })));
     const bound = this.store.getBinding(scopeId)?.threadId;
-    const lines = [localize(locale, 'OpenCode 会话：', 'OpenCode sessions:'), ''];
+    const lines = [archived ? localize(locale, 'OpenCode 已归档会话：', 'Archived OpenCode sessions:') : localize(locale, 'OpenCode 会话：', 'OpenCode sessions:'), ''];
     sessions.forEach((session, index) => {
       const marker = session.id === bound ? '●' : statuses[session.id]?.type === 'busy' ? '◐' : '○';
       lines.push(`${marker} ${index + 1}. ${session.title || session.slug}`);
       lines.push(`   \`${shortId(session.id)}\` · \`${session.directory}\` · ${formatAge(session.time.updated, locale)}`);
     });
-    lines.push('', localize(locale, '使用 /open <编号> 打开。', 'Use /open <number> to bind.'));
-    const keyboard = this.setupKeyboard(sessions.slice(0, 10).map((session, index) => [
+    lines.push('', archived
+      ? localize(locale, '使用 /unarchive <编号> 恢复。', 'Use /unarchive <number> to restore.')
+      : localize(locale, '使用 /open <编号> 打开；/threads archived 查看归档。', 'Use /open <number> to bind; /threads archived lists archives.'));
+    const keyboard = archived ? undefined : this.setupKeyboard(sessions.slice(0, 10).map((session, index) => [
       { label: `${index + 1}. ${clip(session.title || session.slug, 30)}`, action: { scopeId, kind: 'open' as const, value: session.id } },
       { label: '👁', action: { scopeId, kind: 'watch' as const, value: session.id } },
     ]));
@@ -429,6 +498,9 @@ export class OpencodeBridgeCore {
     }
     const session = await this.resolveSessionTarget(scopeId, raw);
     if (!session) throw new Error(localize(locale, `找不到唯一会话：${raw}`, `Could not resolve one session: ${raw}`));
+    if (session.time.archived) throw new Error(localize(locale,
+      '该会话已归档。先用 /threads archived，再用 /unarchive <编号>。',
+      'That session is archived. Use /threads archived, then /unarchive <number>.'));
     const access = this.store.getChatSettings(scopeId)?.accessPreset ?? 'default';
     unwrap(await this.app.getClient().session.update({
       sessionID: session.id,
@@ -456,6 +528,7 @@ export class OpencodeBridgeCore {
       messageIds: [],
       renderedChunks: [],
       flushTimer: null,
+      flushPromise: Promise.resolve(),
       lastFlush: 0,
     });
     await this.send(scopeId, localize(locale, `👁 正在观察：${session.title}\n\`${session.id}\``, `👁 Watching: ${session.title}\n\`${session.id}\``));
@@ -479,7 +552,7 @@ export class OpencodeBridgeCore {
       `${localize(locale, '进程', 'Process')}: ${status.pid ?? '—'} · ${status.url ?? '—'}`,
       `${localize(locale, '会话', 'Session')}: ${binding ? `\`${binding.threadId}\`` : localize(locale, '无', 'none')}`,
       `${localize(locale, '目录', 'Directory')}: ${binding?.cwd ? `\`${binding.cwd}\`` : '—'}`,
-      `${localize(locale, '模型', 'Model')}: ${settings?.model ?? localize(locale, '服务端默认', 'server default')}`,
+      `${localize(locale, '模型', 'Model')}: ${formatStoredModel(settings?.model, locale)}`,
       `${localize(locale, '档位', 'Variant')}: ${prefs.variant ?? localize(locale, '默认', 'default')}`,
       `${localize(locale, 'Agent', 'Agent')}: ${settings?.collaborationMode === 'plan' ? 'plan' : prefs.agent ?? 'build'}`,
       `${localize(locale, '权限', 'Access')}: ${settings?.accessPreset ?? 'default'}`,
@@ -489,68 +562,177 @@ export class OpencodeBridgeCore {
     await this.send(scopeId, lines.join('\n'));
   }
 
-  private async showSetup(scopeId: string, locale: AppLocale): Promise<void> {
+  private async showSetup(scopeId: string, locale: AppLocale, messageId?: number): Promise<void> {
     const settings = this.store.getChatSettings(scopeId);
     const prefs = readPrefs(settings);
-    const actions: Array<Array<{ label: string; action: SetupAction }>> = [
-      [
-        { label: '🔒 read-only', action: { scopeId, kind: 'access', value: 'read-only' } },
-        { label: '🛂 default', action: { scopeId, kind: 'access', value: 'default' } },
-        { label: '🔓 full-access', action: { scopeId, kind: 'access', value: 'full-access' } },
-      ],
-      [
-        { label: '🤖 Agent', action: { scopeId, kind: 'mode', value: 'default' } },
-        { label: '📝 Plan', action: { scopeId, kind: 'mode', value: 'plan' } },
-      ],
-    ];
-    const keyboard = this.setupKeyboard(actions);
+    const [providers, agentsResponse] = await Promise.all([
+      this.listProviders(this.store.getBinding(scopeId)?.cwd),
+      this.app.getClient().app.agents({ directory: this.store.getBinding(scopeId)?.cwd ?? this.config.defaultCwd }),
+    ]);
+    const models = providers.flatMap((provider) => provider.models);
+    const selectedModel = settings?.model ? parseStoredModel(settings.model) : null;
+    const model = selectedModel
+      ? models.find((item) => item.providerId === selectedModel.providerId && item.modelId === selectedModel.modelId)
+      : providers.map((provider) => provider.models.find((item) => item.modelId === provider.defaultModelId)).find(Boolean) ?? null;
+    const variants = model?.variants ?? [];
+    const agents = unwrap(agentsResponse, 'agent.list').filter((agent) => !agent.hidden && agent.mode !== 'subagent');
+    const access = settings?.accessPreset ?? 'default';
+    const activeMode = settings?.activeTurnMessageMode ?? 'steer';
+    const collaborationMode = settings?.collaborationMode ?? 'default';
+    const currentAgent = collaborationMode === 'plan' ? 'plan' : prefs.agent ?? 'build';
+    const displayModel = formatStoredModel(settings?.model, locale);
+    const displayVariant = prefs.variant ?? localize(locale, '自动', 'Auto');
     const text = localize(locale,
-      `⚙️ OpenCode 设置\n\n模型：${settings?.model ?? '服务端默认'}\nVariant：${prefs.variant ?? 'default'}\nAgent：${prefs.agent ?? 'build'}\n权限：${settings?.accessPreset ?? 'default'}\n模式：${settings?.collaborationMode ?? 'default'}\n\n模型选择：/models\n推理档位：/effort`,
-      `⚙️ OpenCode settings\n\nModel: ${settings?.model ?? 'server default'}\nVariant: ${prefs.variant ?? 'default'}\nAgent: ${prefs.agent ?? 'build'}\nAccess: ${settings?.accessPreset ?? 'default'}\nMode: ${settings?.collaborationMode ?? 'default'}\n\nModels: /models\nReasoning variant: /effort`);
-    await this.messaging.sendPlain(scopeId, text, keyboard);
+      `⚙️ OpenCode 设置\n当前：${displayModel} · ${displayVariant} · ${currentAgent} · ${access}\n\n模型：${displayModel}\n推理档位：${displayVariant}\nFast：OpenCode serve 没有 Codex service tier 等价项\nAgent：${currentAgent}\n权限：${access}\n运行中新消息：${activeMode}`,
+      `⚙️ OpenCode settings\nCurrent: ${displayModel} · ${displayVariant} · ${currentAgent} · ${access}\n\nModel: ${displayModel}\nReasoning variant: ${displayVariant}\nFast: OpenCode serve has no Codex service-tier equivalent\nAgent: ${currentAgent}\nAccess: ${access}\nActive messages: ${activeMode}`);
+
+    const actions: Array<Array<{ label: string; action: SetupAction }>> = [
+      [{
+        label: `🧠 ${localize(locale, '模型', 'Model')} · ${clip(displayModel, 24)}`,
+        action: { scopeId, kind: 'models', value: '', origin: 'setup' },
+      }],
+    ];
+    if (variants.length > 0) {
+      const variantActions = [
+        { label: selectedLabel(prefs.variant === null, localize(locale, '自动', 'Auto')), action: { scopeId, kind: 'variant' as const, value: 'default', origin: 'setup' as const } },
+        ...variants.map((variant) => ({
+          label: selectedLabel(prefs.variant === variant, variant),
+          action: { scopeId, kind: 'variant' as const, value: variant, origin: 'setup' as const },
+        })),
+      ];
+      for (let index = 0; index < variantActions.length; index += 3) actions.push(variantActions.slice(index, index + 3));
+    } else {
+      actions.push([{
+        label: localize(locale, '推理档位：先选择模型', 'Reasoning: choose a model'),
+        action: { scopeId, kind: 'models', value: '', origin: 'setup' },
+      }]);
+    }
+    actions.push([
+      { label: selectedLabel(access === 'read-only', '🔒 read-only'), action: { scopeId, kind: 'access', value: 'read-only', origin: 'setup' } },
+      { label: selectedLabel(access === 'default', '🛂 default'), action: { scopeId, kind: 'access', value: 'default', origin: 'setup' } },
+      { label: selectedLabel(access === 'full-access', '🔓 full-access'), action: { scopeId, kind: 'access', value: 'full-access', origin: 'setup' } },
+    ]);
+    const agentActions = agents.map((agent) => ({
+      label: selectedLabel(currentAgent === agent.name, agent.name === 'plan' ? '📝 Plan' : `🤖 ${agent.name}`),
+      action: {
+        scopeId,
+        kind: agent.name === 'plan' ? 'mode' as const : 'agent' as const,
+        value: agent.name === 'plan' ? 'plan' : agent.name,
+        origin: 'setup' as const,
+      },
+    }));
+    for (let index = 0; index < agentActions.length; index += 3) actions.push(agentActions.slice(index, index + 3));
+    actions.push([
+      { label: selectedLabel(activeMode === 'steer', localize(locale, '引导当前回复', 'Steer current turn')), action: { scopeId, kind: 'active', value: 'steer', origin: 'setup' } },
+      { label: selectedLabel(activeMode === 'queue', localize(locale, '排队到下一轮', 'Queue next turn')), action: { scopeId, kind: 'active', value: 'queue', origin: 'setup' } },
+    ]);
+    actions.push([{
+      label: localize(locale, 'Fast 无等价项', 'Fast unsupported'),
+      action: { scopeId, kind: 'notice', value: 'fast', origin: 'setup' },
+    }]);
+    await this.sendOrEditPanel(scopeId, text, this.setupKeyboard(actions), messageId);
   }
 
   private setupKeyboard(rows: Array<Array<{ label: string; action: SetupAction }>>): InlineKeyboard {
-    return rows.map((row) => row.map((entry) => {
+    const keyboard = rows.map((row) => row.map((entry) => {
       const key = randomKey();
       this.setupActions.set(key, entry.action);
       return { text: entry.label, callback_data: `${SETUP_CALLBACK_PREFIX}${key}` };
     }));
+    while (this.setupActions.size > 2_000) {
+      const oldest = this.setupActions.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.setupActions.delete(oldest);
+    }
+    return keyboard;
   }
 
-  private async listModels(cwd?: string | null): Promise<ModelChoice[]> {
+  private async sendOrEditPanel(scopeId: string, text: string, keyboard: InlineKeyboard, messageId?: number): Promise<void> {
+    if (messageId === undefined) await this.messaging.sendPlain(scopeId, text, keyboard);
+    else await this.messaging.editPlain(scopeId, messageId, text, keyboard);
+  }
+
+  private async listProviders(cwd?: string | null): Promise<ProviderChoice[]> {
     const response = await this.app.getClient().provider.list({ ...(cwd ? { directory: cwd } : {}) });
     const data = unwrap(response, 'provider.list');
-    const connected = new Set(data.connected);
-    return data.all
-      .filter((provider) => connected.has(provider.id))
-      .flatMap((provider) => Object.values(provider.models).map((model) => ({
+    return data.connected.flatMap((providerId) => {
+      const provider = data.all.find((item) => item.id === providerId);
+      if (!provider) return [];
+      const models = Object.values(provider.models).map((model) => ({
         providerId: provider.id,
         modelId: model.id,
         name: model.name,
         variants: Object.entries(model.variants ?? {}).filter(([, value]) => value.disabled !== true).map(([key]) => key),
-      })))
-      .sort((a, b) => `${a.providerId}/${a.name}`.localeCompare(`${b.providerId}/${b.name}`));
+      })).sort((a, b) => a.name.localeCompare(b.name));
+      return [{ providerId: provider.id, name: provider.name, defaultModelId: data.default[provider.id] ?? null, models }];
+    });
   }
 
-  private async showModels(scopeId: string, locale: AppLocale): Promise<void> {
-    const models = await this.listModels(this.store.getBinding(scopeId)?.cwd);
-    if (models.length === 0) {
+  private async listModels(cwd?: string | null): Promise<ModelChoice[]> {
+    return (await this.listProviders(cwd)).flatMap((provider) => provider.models);
+  }
+
+  private async showModels(
+    scopeId: string,
+    rawProvider: string,
+    locale: AppLocale,
+    messageId?: number,
+    origin: 'models' | 'setup' = 'models',
+  ): Promise<void> {
+    const providers = await this.listProviders(this.store.getBinding(scopeId)?.cwd);
+    if (providers.length === 0) {
       await this.send(scopeId, localize(locale, '没有已连接 Provider 的模型。请先在终端运行 opencode auth。', 'No models from connected providers. Run opencode auth in a terminal.'));
       return;
     }
-    const rows = models.slice(0, 18).map((model, index) => `${index + 1}. ${model.name} · \`${model.providerId}/${model.modelId}\``);
-    const buttonRows = models.slice(0, 12).map((model, index) => [{
-      label: `${index + 1}. ${clip(model.name, 28)}`,
-      action: { scopeId, kind: 'model' as const, value: storeModel(model.providerId, model.modelId) },
+    if (!rawProvider) {
+      const current = formatStoredModel(this.store.getChatSettings(scopeId)?.model, locale);
+      const actions: Array<Array<{ label: string; action: SetupAction }>> = [[{
+        label: selectedLabel(!this.store.getChatSettings(scopeId)?.model, localize(locale, '自动 / 服务端默认', 'Auto / server default')),
+        action: { scopeId, kind: 'model', value: 'default', origin },
+      }]];
+      for (const provider of providers) {
+        actions.push([{
+          label: `${provider.name} · ${provider.models.length}`,
+          action: { scopeId, kind: 'provider', value: provider.providerId, origin },
+        }]);
+      }
+      if (origin === 'setup') actions.push([{ label: localize(locale, '← 返回设置', '← Back to settings'), action: { scopeId, kind: 'setup', value: '' } }]);
+      const text = [
+        localize(locale, '🧠 选择模型 Provider', '🧠 Choose a model provider'),
+        `${localize(locale, '当前模型', 'Current model')}：${current}`,
+        '',
+        ...providers.map((provider, index) => `${index + 1}. ${provider.name} · \`${provider.providerId}\` · ${provider.models.length} models`),
+      ].join('\n');
+      await this.sendOrEditPanel(scopeId, text, this.setupKeyboard(actions), messageId);
+      return;
+    }
+    const normalized = rawProvider.toLowerCase();
+    const provider = providers.find((item) => item.providerId.toLowerCase() === normalized || item.name.toLowerCase() === normalized);
+    if (!provider) throw new Error(localize(locale, `未知 Provider：${rawProvider}`, `Unknown provider: ${rawProvider}`));
+    const stored = this.store.getChatSettings(scopeId)?.model;
+    const selected = stored ? parseStoredModel(stored) : null;
+    const entries = provider.models.map((model) => ({
+      label: selectedLabel(selected?.providerId === model.providerId && selected.modelId === model.modelId, clip(model.name, 26)),
+      action: { scopeId, kind: 'model' as const, value: storeModel(model.providerId, model.modelId), origin },
+    }));
+    const actions: Array<Array<{ label: string; action: SetupAction }>> = [];
+    for (let index = 0; index < entries.length; index += 2) actions.push(entries.slice(index, index + 2));
+    actions.push([{
+      label: localize(locale, '← Provider', '← Providers'),
+      action: { scopeId, kind: 'models', value: '', origin },
     }]);
-    await this.messaging.sendPlain(scopeId, [localize(locale, '可用模型：', 'Available models:'), '', ...rows,
-      ...(models.length > 18 ? [localize(locale, `…其余 ${models.length - 18} 个可用 /model provider/model 选择。`, `…${models.length - 18} more; use /model provider/model.`)] : []),
-    ].join('\n'), this.setupKeyboard(buttonRows));
+    const text = [
+      `🧠 ${provider.name}`,
+      `\`${provider.providerId}\` · ${provider.models.length} models`,
+      `${localize(locale, '当前模型', 'Current model')}：${formatStoredModel(stored, locale)}`,
+      '',
+      localize(locale, '选择一个模型：', 'Choose a model:'),
+    ].join('\n');
+    await this.sendOrEditPanel(scopeId, text, this.setupKeyboard(actions), messageId);
   }
 
   private async setModel(scopeId: string, raw: string, locale: AppLocale): Promise<void> {
-    if (!raw) { await this.showModels(scopeId, locale); return; }
+    if (!raw) { await this.showModels(scopeId, '', locale); return; }
     if (raw === 'default' || raw === 'reset') {
       const settings = this.store.getChatSettings(scopeId);
       this.store.setChatSettings(scopeId, null, settings?.reasoningEffort ?? null);
@@ -575,15 +757,7 @@ export class OpencodeBridgeCore {
     const prefs = readPrefs(settings);
     const model = settings?.model ? parseStoredModel(settings.model) : null;
     if (!raw) {
-      if (!model) {
-        await this.send(scopeId, localize(locale, '先用 /model 选择模型，再查看 variant。', 'Choose a model with /model before listing variants.'));
-        return;
-      }
-      const choices = await this.listModels(this.store.getBinding(scopeId)?.cwd);
-      const selected = choices.find((item) => item.providerId === model.providerId && item.modelId === model.modelId);
-      await this.send(scopeId, selected?.variants.length
-        ? localize(locale, `可用 variant：${selected.variants.map((item) => `\`${item}\``).join('、')}\n当前：${prefs.variant ?? 'default'}`, `Variants: ${selected.variants.map((item) => `\`${item}\``).join(', ')}\nCurrent: ${prefs.variant ?? 'default'}`)
-        : localize(locale, '当前模型没有可选 variant。', 'The selected model has no variants.'));
+      await this.showSetup(scopeId, locale);
       return;
     }
     if (raw === 'default' || raw === 'reset' || raw === 'none') {
@@ -601,8 +775,7 @@ export class OpencodeBridgeCore {
 
   private async setMode(scopeId: string, raw: string, locale: AppLocale): Promise<void> {
     if (!raw) {
-      const current = this.store.getChatSettings(scopeId)?.collaborationMode ?? 'default';
-      await this.send(scopeId, localize(locale, `当前模式：${current}\n用法：/mode <default|plan>`, `Current mode: ${current}\nUsage: /mode <default|plan>`));
+      await this.showSetup(scopeId, locale);
       return;
     }
     if (raw !== 'default' && raw !== 'plan') throw new Error(localize(locale, '用法：/mode <default|plan>', 'Usage: /mode <default|plan>'));
@@ -616,15 +789,8 @@ export class OpencodeBridgeCore {
     const settings = this.store.getChatSettings(scopeId);
     const prefs = readPrefs(settings);
     if (!raw) {
-      const response = await this.app.getClient().app.agents({ directory: this.store.getBinding(scopeId)?.cwd ?? this.config.defaultCwd });
-      const agents = unwrap(response, 'agent.list').filter((agent) => !agent.hidden && agent.mode !== 'subagent');
-      await this.send(scopeId, [
-        localize(locale, `当前 Agent：${prefs.agent ?? 'build'}`, `Current agent: ${prefs.agent ?? 'build'}`),
-        '',
-        ...agents.map((agent) => `• \`${agent.name}\`${agent.description ? ` — ${clip(agent.description, 100)}` : ''}`),
-        '',
-        localize(locale, '使用 /agent <名称> 选择。', 'Use /agent <name> to select.'),
-      ].join('\n'));
+      this.store.setChatCollaborationMode(scopeId, 'default');
+      await this.send(scopeId, localize(locale, `🤖 已切回 Agent：${prefs.agent ?? 'build'}`, `🤖 Switched back to Agent: ${prefs.agent ?? 'build'}`));
       return;
     }
     if (raw === 'default' || raw === 'build') {
@@ -655,24 +821,26 @@ export class OpencodeBridgeCore {
     if (raw !== 'read-only' && raw !== 'default' && raw !== 'full-access') {
       throw new Error(localize(locale, '用法：/permissions <read-only|default|full-access>', 'Usage: /permissions <read-only|default|full-access>'));
     }
-    this.store.setChatAccessPreset(scopeId, raw);
+    await this.applyAccess(scopeId, raw);
+    await this.send(scopeId, localize(locale, `权限 → ${raw}`, `Access → ${raw}`));
+  }
+
+  private async applyAccess(scopeId: string, access: 'read-only' | 'default' | 'full-access'): Promise<void> {
+    this.store.setChatAccessPreset(scopeId, access);
     const binding = this.store.getBinding(scopeId);
     if (binding) {
       const response = await this.app.getClient().session.update({
         sessionID: binding.threadId,
         ...(binding.cwd ? { directory: binding.cwd } : {}),
-        permission: permissionRules(raw),
+        permission: permissionRules(access),
       });
       if (response.error) throw new Error(formatSdkError(response.error));
     }
-    await this.send(scopeId, localize(locale, `权限 → ${raw}`, `Access → ${raw}`));
   }
 
   private async setActiveMode(scopeId: string, raw: string, locale: AppLocale): Promise<void> {
     if (!raw) {
-      await this.send(scopeId, localize(locale,
-        `当前：${this.store.getChatSettings(scopeId)?.activeTurnMessageMode ?? 'steer'}\n用法：/active <steer|queue>`,
-        `Current: ${this.store.getChatSettings(scopeId)?.activeTurnMessageMode ?? 'steer'}\nUsage: /active <steer|queue>`));
+      await this.showSetup(scopeId, locale);
       return;
     }
     if (raw !== 'steer' && raw !== 'queue') throw new Error(localize(locale, '用法：/active <steer|queue>', 'Usage: /active <steer|queue>'));
@@ -684,9 +852,44 @@ export class OpencodeBridgeCore {
     this.store.setChatServiceTier(scopeId, `opencode:${JSON.stringify(prefs)}`);
   }
 
-  private async dispatchPrompt(event: TelegramTextEvent, text: string, locale: AppLocale): Promise<void> {
+  private async sendWithBehavior(
+    event: TelegramTextEvent,
+    text: string,
+    locale: AppLocale,
+    behavior: 'steer' | 'queue',
+  ): Promise<void> {
+    if (!text) throw new Error(localize(locale, `用法：/${behavior} <消息>`, `Usage: /${behavior} <message>`));
+    await this.dispatchPrompt(event, text, locale, behavior);
+  }
+
+  private async takeOver(event: TelegramTextEvent, text: string, locale: AppLocale): Promise<void> {
+    if (!text) throw new Error(localize(locale, '用法：/takeover <消息>', 'Usage: /takeover <message>'));
     const active = this.activeTurns.get(event.scopeId);
-    const activeMode = this.store.getChatSettings(event.scopeId)?.activeTurnMessageMode ?? 'steer';
+    if (!active) {
+      await this.dispatchPrompt(event, text, locale, 'steer');
+      return;
+    }
+    const queue = this.queuedPrompts.get(event.scopeId) ?? [];
+    queue.unshift({ event, text, locale });
+    this.queuedPrompts.set(event.scopeId, queue);
+    const response = await this.app.getClient().session.abort({ sessionID: active.sessionId, directory: active.cwd });
+    if (response.error) {
+      queue.shift();
+      if (queue.length === 0) this.queuedPrompts.delete(event.scopeId);
+      throw new Error(formatSdkError(response.error));
+    }
+    await this.finishSession(active.sessionId);
+    await this.send(event.scopeId, localize(locale, '↪️ 已中断并接管当前会话。', '↪️ Interrupted and took over the current session.'));
+  }
+
+  private async dispatchPrompt(
+    event: TelegramTextEvent,
+    text: string,
+    locale: AppLocale,
+    behavior?: 'steer' | 'queue',
+  ): Promise<void> {
+    const active = this.activeTurns.get(event.scopeId);
+    const activeMode = behavior ?? this.store.getChatSettings(event.scopeId)?.activeTurnMessageMode ?? 'steer';
     if (active && activeMode === 'queue') {
       const queue = this.queuedPrompts.get(event.scopeId) ?? [];
       queue.push({ event, text, locale });
@@ -703,20 +906,7 @@ export class OpencodeBridgeCore {
     const prefs = readPrefs(settings);
     const model = settings?.model ? parseStoredModel(settings.model) : null;
     const agent = settings?.collaborationMode === 'plan' ? 'plan' : prefs.agent ?? undefined;
-    if (!active) {
-      this.activeTurns.set(event.scopeId, {
-        sessionId: session.id,
-        cwd,
-        parts: new Map(),
-        messageIds: [],
-        renderedChunks: [],
-        flushTimer: null,
-        lastFlush: 0,
-        toolMessageId: null,
-        toolLines: new Map(),
-        toolTimer: null,
-      });
-    }
+    if (!active) this.startTrackedTurn(event.scopeId, session.id, cwd);
     await this.messaging.sendTypingInScope(event.scopeId);
     const response = await this.app.getClient().session.promptAsync({
       sessionID: session.id,
@@ -733,6 +923,25 @@ export class OpencodeBridgeCore {
     if (settings?.collaborationMode === 'plan') this.store.setChatCollaborationMode(event.scopeId, 'default');
     this.app.watchSessionUntilIdle(session.id, cwd);
     if (active) await this.send(event.scopeId, localize(locale, '↪️ 已追加到当前 OpenCode 回复。', '↪️ Steered the active OpenCode turn.'));
+  }
+
+  private startTrackedTurn(scopeId: string, sessionId: string, cwd: string): ActiveTurn {
+    const turn: ActiveTurn = {
+      sessionId,
+      cwd,
+      parts: new Map(),
+      messageIds: [],
+      renderedChunks: [],
+      flushTimer: null,
+      flushPromise: Promise.resolve(),
+      lastFlush: 0,
+      toolMessageId: null,
+      toolLines: new Map(),
+      toolTimer: null,
+      toolPromise: Promise.resolve(),
+    };
+    this.activeTurns.set(scopeId, turn);
+    return turn;
   }
 
   private async buildPromptParts(
@@ -815,6 +1024,107 @@ export class OpencodeBridgeCore {
     await this.send(scopeId, localize(locale, `🍴 已 Fork 并打开：${title || fork.title}\n\`${fork.id}\``, `🍴 Forked and bound: ${title || fork.title}\n\`${fork.id}\``));
   }
 
+  private async undoSession(scopeId: string, rawCount: string, locale: AppLocale): Promise<void> {
+    if (this.activeTurns.has(scopeId)) throw new Error(localize(locale, '当前回复仍在运行，请先 /interrupt。', 'A turn is running; use /interrupt first.'));
+    const session = await this.requireBoundSession(scopeId, locale);
+    const count = clampInt(rawCount, 1, 1, 20);
+    const rows = unwrap(await this.app.getClient().session.messages({
+      sessionID: session.id,
+      directory: session.directory,
+      limit: 200,
+    }), 'session.messages');
+    const boundary = session.revert?.messageID
+      ? rows.findIndex((row) => row.info.id === session.revert?.messageID)
+      : rows.length;
+    const visible = boundary >= 0 ? rows.slice(0, boundary) : rows;
+    const users = visible.filter((row) => row.info.role === 'user');
+    const target = users.at(-count);
+    if (!target) throw new Error(localize(locale, `没有可回退的 ${count} 轮消息。`, `There are not ${count} user turns to undo.`));
+    unwrap(await this.app.getClient().session.revert({
+      sessionID: session.id,
+      directory: session.directory,
+      messageID: target.info.id,
+    }), 'session.revert');
+    await this.send(scopeId, localize(locale,
+      `↩️ 已按 OpenCode 原生语义回退 ${count} 轮；文件快照与会话消息已一起恢复。使用 /redo 可重做。`,
+      `↩️ Undid ${count} turn(s) with OpenCode's native revert, including file snapshots and messages. Use /redo to restore.`));
+  }
+
+  private async redoSession(scopeId: string, locale: AppLocale): Promise<void> {
+    if (this.activeTurns.has(scopeId)) throw new Error(localize(locale, '当前回复仍在运行，请先 /interrupt。', 'A turn is running; use /interrupt first.'));
+    const session = await this.requireBoundSession(scopeId, locale);
+    const revertedMessageId = session.revert?.messageID;
+    if (!revertedMessageId) throw new Error(localize(locale, '当前没有可重做的回退。', 'There is no reverted turn to redo.'));
+    const rows = unwrap(await this.app.getClient().session.messages({
+      sessionID: session.id,
+      directory: session.directory,
+      limit: 200,
+    }), 'session.messages');
+    const boundary = rows.findIndex((row) => row.info.id === revertedMessageId);
+    const next = boundary >= 0 ? rows.slice(boundary + 1).find((row) => row.info.role === 'user') : undefined;
+    if (next) {
+      unwrap(await this.app.getClient().session.revert({
+        sessionID: session.id,
+        directory: session.directory,
+        messageID: next.info.id,
+      }), 'session.revert');
+    } else {
+      unwrap(await this.app.getClient().session.unrevert({ sessionID: session.id, directory: session.directory }), 'session.unrevert');
+    }
+    await this.send(scopeId, localize(locale, '↪️ 已重做一轮。', '↪️ Redid one turn.'));
+  }
+
+  private async archiveBoundSession(scopeId: string, locale: AppLocale): Promise<void> {
+    if (this.activeTurns.has(scopeId)) throw new Error(localize(locale, '当前回复仍在运行，请先 /interrupt。', 'A turn is running; use /interrupt first.'));
+    const session = await this.requireBoundSession(scopeId, locale);
+    await this.archiveSession(scopeId, session, locale);
+  }
+
+  private async archiveCachedSession(scopeId: string, rawIndex: string, locale: AppLocale): Promise<void> {
+    const index = Number.parseInt(rawIndex, 10);
+    const cached = Number.isFinite(index) ? this.store.getCachedThread(scopeId, index) : null;
+    if (!cached || cached.archived) throw new Error(localize(locale, '用法：先 /threads，再 /thread_archive <编号>。', 'Use /threads, then /thread_archive <number>.'));
+    const session = await this.resolveSessionTarget(scopeId, rawIndex);
+    if (!session) throw new Error(localize(locale, '找不到该会话。', 'Session not found.'));
+    if ([...this.activeTurns.values()].some((turn) => turn.sessionId === session.id)) {
+      throw new Error(localize(locale, '该会话仍在运行，请先中断。', 'That session is still running; interrupt it first.'));
+    }
+    await this.archiveSession(scopeId, session, locale);
+  }
+
+  private async archiveSession(scopeId: string, session: Session, locale: AppLocale): Promise<void> {
+    unwrap(await this.app.getClient().session.update({
+      sessionID: session.id,
+      directory: session.directory,
+      time: { archived: Date.now() },
+    }), 'session.update');
+    if (this.store.getBinding(scopeId)?.threadId === session.id) this.store.clearBinding(scopeId);
+    const watch = this.watchers.get(scopeId);
+    if (watch?.sessionId === session.id) {
+      if (watch.flushTimer) clearTimeout(watch.flushTimer);
+      this.watchers.delete(scopeId);
+    }
+    await this.send(scopeId, localize(locale, `📦 已归档 \`${session.id}\`。`, `📦 Archived \`${session.id}\`.`));
+  }
+
+  private async unarchiveSession(scopeId: string, rawIndex: string, locale: AppLocale): Promise<void> {
+    const index = Number.parseInt(rawIndex, 10);
+    const cached = Number.isFinite(index) ? this.store.getCachedThread(scopeId, index) : null;
+    if (!cached?.archived) throw new Error(localize(locale, '用法：先 /threads archived，再 /unarchive <编号>。', 'Use /threads archived, then /unarchive <number>.'));
+    const response = await this.app.getClient().session.get({
+      sessionID: cached.threadId,
+      ...(cached.cwd ? { directory: cached.cwd } : {}),
+    });
+    const session = unwrap(response, 'session.get');
+    const restored = unwrap(await this.app.getClient().session.update({
+      sessionID: session.id,
+      directory: session.directory,
+      time: { archived: 0 },
+    }), 'session.update');
+    this.store.setBinding(scopeId, restored.id, restored.directory);
+    await this.send(scopeId, localize(locale, `📤 已恢复并打开：${restored.title}\n\`${restored.id}\``, `📤 Restored and bound: ${restored.title}\n\`${restored.id}\``));
+  }
+
   private async showDiff(scopeId: string, locale: AppLocale): Promise<void> {
     const session = await this.requireBoundSession(scopeId, locale);
     const diffs = unwrap(await this.app.getClient().session.diff({ sessionID: session.id, directory: session.directory }), 'session.diff');
@@ -879,13 +1189,20 @@ export class OpencodeBridgeCore {
     await this.send(scopeId, lines.join('\n'));
   }
 
-  private async showMcp(scopeId: string, locale: AppLocale): Promise<void> {
+  private async showMcp(scopeId: string, locale: AppLocale, appsAlias = false): Promise<void> {
     const cwd = this.store.getBinding(scopeId)?.cwd ?? this.config.defaultCwd;
     const servers = unwrap(await this.app.getClient().mcp.status({ directory: cwd }), 'mcp.status');
     const entries = Object.entries(servers);
-    if (entries.length === 0) { await this.send(scopeId, localize(locale, '没有配置 MCP server。', 'No MCP servers configured.')); return; }
+    if (entries.length === 0) {
+      await this.send(scopeId, appsAlias
+        ? localize(locale, 'OpenCode 用 MCP server 提供外部应用能力；当前没有配置 MCP server。', 'OpenCode exposes external app capabilities through MCP servers; none are configured.')
+        : localize(locale, '没有配置 MCP server。', 'No MCP servers configured.'));
+      return;
+    }
     const icon = (status: string): string => status === 'connected' ? '✅' : status === 'failed' ? '❌' : status === 'needs_auth' ? '🔑' : '⚪';
-    await this.send(scopeId, [localize(locale, 'MCP 状态：', 'MCP status:'), '', ...entries.map(([name, value]) => `${icon(value.status)} \`${name}\` · ${value.status}${'error' in value ? ` · ${value.error}` : ''}`)].join('\n'));
+    await this.send(scopeId, [appsAlias
+      ? localize(locale, 'OpenCode Apps（MCP server）：', 'OpenCode apps (MCP servers):')
+      : localize(locale, 'MCP 状态：', 'MCP status:'), '', ...entries.map(([name, value]) => `${icon(value.status)} \`${name}\` · ${value.status}${'error' in value ? ` · ${value.error}` : ''}`)].join('\n'));
   }
 
   private async showProviders(scopeId: string, locale: AppLocale): Promise<void> {
@@ -895,6 +1212,50 @@ export class OpencodeBridgeCore {
     const lines = [localize(locale, '模型 Provider：', 'Model providers:'), ''];
     for (const provider of data.all) lines.push(`${connected.has(provider.id) ? '✅' : '○'} \`${provider.id}\` · ${provider.name} · ${Object.keys(provider.models).length} models`);
     await this.send(scopeId, lines.join('\n'));
+  }
+
+  private async showAuth(scopeId: string, locale: AppLocale): Promise<void> {
+    const cwd = this.store.getBinding(scopeId)?.cwd ?? this.config.defaultCwd;
+    const [providerData, authMethods] = await Promise.all([
+      this.app.getClient().provider.list({ directory: cwd }),
+      this.app.getClient().provider.auth({ directory: cwd }),
+    ]);
+    const providers = unwrap(providerData, 'provider.list');
+    const methods = unwrap(authMethods, 'provider.auth');
+    const connected = new Set(providers.connected);
+    const lines = [localize(locale, '🔐 OpenCode Provider 认证：', '🔐 OpenCode provider authentication:'), ''];
+    for (const provider of providers.all.filter((item) => connected.has(item.id))) {
+      const available = methods[provider.id] ?? [];
+      lines.push(`✅ ${provider.name} · \`${provider.id}\`${available.length ? ` · ${available.map((method) => method.label).join(' / ')}` : ''}`);
+    }
+    if (providers.connected.length === 0) lines.push(localize(locale, '当前没有已连接 Provider。', 'No providers are connected.'));
+    lines.push('', localize(locale,
+      'OpenCode serve 只公开认证方法和 OAuth 端点，没有 Codex 设备登录/账号切换面板。登录或切换请在终端运行：opencode auth',
+      'OpenCode serve exposes auth methods and OAuth endpoints, but no Codex-style device-login/account-switch panel. Run opencode auth in a terminal to sign in or switch.'));
+    await this.send(scopeId, lines.join('\n'));
+  }
+
+  private async showPlugins(scopeId: string, locale: AppLocale, hooksAlias: boolean): Promise<void> {
+    const cwd = this.store.getBinding(scopeId)?.cwd ?? this.config.defaultCwd;
+    const config = unwrap(await this.app.getClient().config.get({ directory: cwd }), 'config.get');
+    const plugins = (config.plugin ?? []).map((entry) => Array.isArray(entry) ? entry[0] : entry);
+    const title = hooksAlias
+      ? localize(locale, '🪝 OpenCode Hooks（由 Plugins 提供）：', '🪝 OpenCode hooks (provided by plugins):')
+      : localize(locale, '🧩 OpenCode Plugins：', '🧩 OpenCode plugins:');
+    await this.send(scopeId, plugins.length > 0
+      ? [title, '', ...plugins.map((plugin) => `• \`${plugin}\``), '', hooksAlias
+        ? localize(locale, 'OpenCode 没有独立 hooks 注册表；hook 生命周期由这些 plugin 管理。', 'OpenCode has no separate hooks registry; these plugins own hook lifecycles.')
+        : localize(locale, 'Plugin 配置来自当前目录的有效 OpenCode config。', 'Plugin entries come from the effective OpenCode config for this directory.')].join('\n')
+      : [title, '', localize(locale, '当前有效配置没有 plugin。', 'No plugins are present in the effective config.')].join('\n'));
+  }
+
+  private async showFeatures(scopeId: string, locale: AppLocale): Promise<void> {
+    const cwd = this.store.getBinding(scopeId)?.cwd ?? this.config.defaultCwd;
+    const capabilities = unwrap(await this.app.getClient().experimental.capabilities.get({ directory: cwd }), 'experimental.capabilities.get');
+    const entries = Object.entries(capabilities);
+    await this.send(scopeId, [localize(locale, '🧪 OpenCode 实验能力：', '🧪 OpenCode experimental capabilities:'), '',
+      ...(entries.length ? entries.map(([name, value]) => `${value ? '✅' : '○'} \`${name}\` · ${String(value)}`) : [localize(locale, '服务端没有报告实验能力。', 'The server reported no experimental capabilities.')]),
+    ].join('\n'));
   }
 
   private async showConfig(scopeId: string, locale: AppLocale): Promise<void> {
@@ -908,6 +1269,84 @@ export class OpencodeBridgeCore {
     }
     lines.push(`\`mcp\`: ${Object.keys(config.mcp ?? {}).length}`, `\`agent\`: ${Object.keys(config.agent ?? {}).length}`);
     await this.send(scopeId, lines.join('\n'));
+  }
+
+  private async runReview(event: TelegramTextEvent, argumentsText: string, locale: AppLocale): Promise<void> {
+    if (this.activeTurns.has(event.scopeId)) {
+      throw new Error(localize(locale, '当前回复仍在运行；请等待、/queue，或先 /interrupt。', 'A turn is already running; wait, use /queue, or /interrupt first.'));
+    }
+    const session = await this.requireBoundSession(event.scopeId, locale);
+    const settings = this.store.getChatSettings(event.scopeId);
+    const prefs = readPrefs(settings);
+    const model = await this.effectiveModel(event.scopeId, session);
+    const agent = settings?.collaborationMode === 'plan' ? 'plan' : prefs.agent ?? 'build';
+    const tracked = this.startTrackedTurn(event.scopeId, session.id, session.directory);
+    await this.messaging.sendTypingInScope(event.scopeId);
+    const request = this.app.getClient().session.command({
+      sessionID: session.id,
+      directory: session.directory,
+      command: 'review',
+      arguments: argumentsText,
+      agent,
+      ...(model ? { model: `${model.providerId}/${model.modelId}` } : {}),
+      ...(prefs.variant ? { variant: prefs.variant } : {}),
+    });
+    void request.then(async (response) => {
+      if (!response.error) return;
+      if (this.activeTurns.get(event.scopeId) === tracked) this.activeTurns.delete(event.scopeId);
+      await this.reportError(event.scopeId, new Error(formatSdkError(response.error)));
+    }, async (error: unknown) => {
+      if (this.activeTurns.get(event.scopeId) === tracked) this.activeTurns.delete(event.scopeId);
+      await this.reportError(event.scopeId, error);
+    });
+    if (settings?.collaborationMode === 'plan') this.store.setChatCollaborationMode(event.scopeId, 'default');
+    this.app.watchSessionUntilIdle(session.id, session.directory);
+  }
+
+  private async showRichDemo(scopeId: string, locale: AppLocale): Promise<void> {
+    const markdown = localize(locale,
+      '## FoxClaw 富文本测试\n\n- **粗体**、`代码` 与 [链接](https://opencode.ai)\n- OpenCode 流式回复完成后也会使用同一套富文本渲染。',
+      '## FoxClaw rich-text test\n\n- **Bold**, `code`, and a [link](https://opencode.ai)\n- Completed OpenCode streams use the same rich renderer.');
+    await this.sendFinalChunk(scopeId, markdown);
+  }
+
+  private async handleVoiceCommand(scopeId: string, args: string[], locale: AppLocale): Promise<void> {
+    if (args[0]?.toLowerCase() === 'file' || args[0]?.toLowerCase() === 'send') {
+      const fileArg = args[1]?.trim();
+      if (!fileArg) throw new Error(localize(locale,
+        '用法：/voice file /path/to/audio.ogg [说明]',
+        'Usage: /voice file /path/to/audio.ogg [caption]'));
+      const filePath = path.resolve(this.config.defaultCwd, fileArg);
+      const contentType = telegramVoiceContentType(filePath);
+      if (!contentType) throw new Error(localize(locale,
+        `只支持 Telegram voice 音频格式：${TELEGRAM_VOICE_SUPPORTED_EXTENSIONS}。`,
+        `Supported Telegram voice formats: ${TELEGRAM_VOICE_SUPPORTED_EXTENSIONS}.`));
+      const stat = await fs.stat(filePath).catch(() => null);
+      if (!stat?.isFile()) throw new Error(localize(locale, `找不到音频文件：${filePath}`, `Audio file not found: ${filePath}`));
+      if (stat.size > TELEGRAM_VOICE_MAX_BYTES) throw new Error(localize(locale, 'Telegram voice 文件不能超过 50MB。', 'Telegram voice files must be 50MB or smaller.'));
+      const contents = await fs.readFile(filePath);
+      const caption = args.slice(2).join(' ').trim() || localize(locale, 'FoxClaw 语音文件', 'FoxClaw voice file');
+      await this.messaging.sendVoice(scopeId, path.basename(filePath), contents, caption, contentType);
+      return;
+    }
+    const raw = args.join(' ').trim();
+    const text = raw.toLowerCase() === 'last' ? this.latestVoiceText.get(scopeId) ?? '' : raw;
+    if (!text) throw new Error(localize(locale, '用法：/voice <文本>、/voice last 或 /voice file <路径>。', 'Usage: /voice <text>, /voice last, or /voice file <path>.'));
+    if (!this.config.voiceTtsEnabled) throw new Error(localize(locale, '语音服务未启用。', 'Voice TTS is not enabled.'));
+    try {
+      const voice = await synthesizeTelegramVoice(text, this.config);
+      await this.messaging.sendVoice(scopeId, voice.filename, voice.contents, localize(locale, 'FoxClaw 总结语音', 'FoxClaw voice summary'), voice.contentType);
+    } catch (error) {
+      throw new Error(localize(locale,
+        `语音生成失败：${error instanceof Error ? error.message : String(error)}`,
+        `Voice generation failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  }
+
+  private async showFastUnsupported(scopeId: string, locale: AppLocale): Promise<void> {
+    await this.send(scopeId, localize(locale,
+      '⚡ OpenCode serve 没有 Codex Fast service tier 的等价 API。可在 /setup 中选择当前模型提供的 variant；FoxClaw 不会把某个 variant 冒充 Fast。',
+      '⚡ OpenCode serve has no API equivalent to the Codex Fast service tier. Use /setup for model variants; FoxClaw will not relabel a variant as Fast.'));
   }
 
   private async abort(scopeId: string, locale: AppLocale): Promise<void> {
@@ -1054,6 +1493,12 @@ export class OpencodeBridgeCore {
   }
 
   private async flushTurn(scopeId: string, turn: ActiveTurn, final: boolean): Promise<void> {
+    const task = turn.flushPromise.then(() => this.flushTurnNow(scopeId, turn, final));
+    turn.flushPromise = task.catch(() => {});
+    return task;
+  }
+
+  private async flushTurnNow(scopeId: string, turn: ActiveTurn, final: boolean): Promise<void> {
     const text = [...turn.parts.values()].join('');
     if (!text.trim()) return;
     const chunks = chunkTelegramStreamMessage(text);
@@ -1084,6 +1529,12 @@ export class OpencodeBridgeCore {
   }
 
   private async flushTools(scopeId: string, turn: ActiveTurn): Promise<void> {
+    const task = turn.toolPromise.then(() => this.flushToolsNow(scopeId, turn));
+    turn.toolPromise = task.catch(() => {});
+    return task;
+  }
+
+  private async flushToolsNow(scopeId: string, turn: ActiveTurn): Promise<void> {
     const lines = [...turn.toolLines.values()].slice(-8);
     if (lines.length === 0) return;
     const text = `${lines.join('\n')}\n\n⏳ OpenCode…`;
@@ -1100,6 +1551,12 @@ export class OpencodeBridgeCore {
   }
 
   private async flushWatch(scopeId: string, watch: WatchState, final: boolean): Promise<void> {
+    const task = watch.flushPromise.then(() => this.flushWatchNow(scopeId, watch, final));
+    watch.flushPromise = task.catch(() => {});
+    return task;
+  }
+
+  private async flushWatchNow(scopeId: string, watch: WatchState, final: boolean): Promise<void> {
     const text = [...watch.parts.values()].join('');
     if (!text.trim()) return;
     const chunks = chunkTelegramStreamMessage(text);
@@ -1132,6 +1589,8 @@ export class OpencodeBridgeCore {
       if (turn.sessionId !== sessionId) continue;
       this.clearTurnTimers(turn);
       await this.flushTurn(scopeId, turn, true);
+      const finalText = [...turn.parts.values()].join('').trim();
+      if (finalText) this.latestVoiceText.set(scopeId, finalText);
       if (turn.toolMessageId !== null) {
         if (this.config.telegramDeleteToolDetailsAfterFinal) await this.messaging.deleteMessage(scopeId, turn.toolMessageId).catch(() => {});
         else await this.messaging.editPlain(scopeId, turn.toolMessageId, [...turn.toolLines.values()].join('\n') || '✅ done').catch(() => {});
@@ -1305,17 +1764,63 @@ export class OpencodeBridgeCore {
       const key = event.data.slice(SETUP_CALLBACK_PREFIX.length);
       const action = this.setupActions.get(key);
       if (!action || action.scopeId !== event.scopeId) { await this.messaging.answerCallback(event.callbackQueryId, localize(locale, '已过期', 'Expired')); return; }
-      if (action.kind === 'model') {
-        const parsed = parseStoredModel(action.value)!;
-        this.store.setChatSettings(event.scopeId, action.value, null);
-        this.writePrefs(event.scopeId, { ...readPrefs(this.store.getChatSettings(event.scopeId)), variant: null });
-        await this.messaging.answerCallback(event.callbackQueryId, `${parsed.providerId}/${parsed.modelId}`);
+      this.setupActions.delete(key);
+      if (action.kind === 'setup') {
+        await this.messaging.answerCallback(event.callbackQueryId, localize(locale, '设置', 'Settings'));
+        await this.showSetup(event.scopeId, locale, event.messageId);
+      } else if (action.kind === 'models') {
+        await this.messaging.answerCallback(event.callbackQueryId, localize(locale, 'Provider', 'Providers'));
+        await this.showModels(event.scopeId, '', locale, event.messageId, action.origin ?? 'models');
+      } else if (action.kind === 'provider') {
+        await this.messaging.answerCallback(event.callbackQueryId, action.value);
+        await this.showModels(event.scopeId, action.value, locale, event.messageId, action.origin ?? 'models');
+      } else if (action.kind === 'model') {
+        let answer: string;
+        if (action.value === 'default') {
+          const settings = this.store.getChatSettings(event.scopeId);
+          this.store.setChatSettings(event.scopeId, null, settings?.reasoningEffort ?? null);
+          this.writePrefs(event.scopeId, { ...readPrefs(settings), variant: null });
+          answer = localize(locale, '服务端默认', 'Server default');
+        } else {
+          const parsed = parseStoredModel(action.value)!;
+          this.store.setChatSettings(event.scopeId, action.value, null);
+          this.writePrefs(event.scopeId, { ...readPrefs(this.store.getChatSettings(event.scopeId)), variant: null });
+          answer = `${parsed.providerId}/${parsed.modelId}`;
+        }
+        await this.messaging.answerCallback(event.callbackQueryId, answer);
+        if (action.origin === 'setup') await this.showSetup(event.scopeId, locale, event.messageId);
+        else {
+          const parsed = action.value === 'default' ? null : parseStoredModel(action.value);
+          await this.showModels(event.scopeId, parsed?.providerId ?? '', locale, event.messageId, 'models');
+        }
+      } else if (action.kind === 'variant') {
+        const prefs = readPrefs(this.store.getChatSettings(event.scopeId));
+        this.writePrefs(event.scopeId, { ...prefs, variant: action.value === 'default' ? null : action.value });
+        await this.messaging.answerCallback(event.callbackQueryId, action.value);
+        await this.showSetup(event.scopeId, locale, event.messageId);
       } else if (action.kind === 'access') {
-        await this.setAccess(event.scopeId, action.value, locale);
+        if (action.value !== 'read-only' && action.value !== 'default' && action.value !== 'full-access') {
+          throw new Error(`Invalid access preset: ${action.value}`);
+        }
+        await this.applyAccess(event.scopeId, action.value);
         await this.messaging.answerCallback(event.callbackQueryId, action.value);
+        await this.showSetup(event.scopeId, locale, event.messageId);
       } else if (action.kind === 'mode') {
-        await this.setMode(event.scopeId, action.value, locale);
+        this.store.setChatCollaborationMode(event.scopeId, action.value === 'plan' ? 'plan' : 'default');
         await this.messaging.answerCallback(event.callbackQueryId, action.value);
+        await this.showSetup(event.scopeId, locale, event.messageId);
+      } else if (action.kind === 'agent') {
+        const prefs = readPrefs(this.store.getChatSettings(event.scopeId));
+        this.writePrefs(event.scopeId, { ...prefs, agent: action.value === 'build' ? 'build' : action.value });
+        this.store.setChatCollaborationMode(event.scopeId, 'default');
+        await this.messaging.answerCallback(event.callbackQueryId, action.value);
+        await this.showSetup(event.scopeId, locale, event.messageId);
+      } else if (action.kind === 'active') {
+        this.store.setChatActiveTurnMessageMode(event.scopeId, action.value === 'queue' ? 'queue' : 'steer');
+        await this.messaging.answerCallback(event.callbackQueryId, action.value);
+        await this.showSetup(event.scopeId, locale, event.messageId);
+      } else if (action.kind === 'notice') {
+        await this.messaging.answerCallback(event.callbackQueryId, localize(locale, 'OpenCode 没有 Codex Fast 服务层等价项', 'OpenCode has no Codex Fast service-tier equivalent'));
       } else if (action.kind === 'open') {
         await this.openSession(event.scopeId, action.value, locale);
         await this.messaging.answerCallback(event.callbackQueryId, localize(locale, '已打开', 'Opened'));
@@ -1323,7 +1828,6 @@ export class OpencodeBridgeCore {
         await this.watchSession(event.scopeId, action.value, locale);
         await this.messaging.answerCallback(event.callbackQueryId, localize(locale, '正在观察', 'Watching'));
       }
-      this.setupActions.delete(key);
       return;
     }
     if (event.data.startsWith(PERMISSION_CALLBACK_PREFIX)) {
@@ -1407,6 +1911,16 @@ function shortId(value: string): string {
 function clip(value: string, max: number): string {
   const normalized = value.replace(/\s+/g, ' ').trim();
   return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
+}
+
+function selectedLabel(selected: boolean, label: string): string {
+  return selected ? `• ${label}` : label;
+}
+
+function formatStoredModel(value: string | null | undefined, locale: AppLocale): string {
+  if (!value) return localize(locale, '服务端默认', 'server default');
+  const parsed = parseStoredModel(value);
+  return parsed ? `${parsed.providerId}/${parsed.modelId}` : value;
 }
 
 function randomKey(): string {

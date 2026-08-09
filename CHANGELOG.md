@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.2 - 2026-08-09
+
+### 中文
+- 修复 OpenCode 流式刷新并发竞态：Telegram 首次发送尚未返回时，后续增量与结束事件会排队复用同一消息，不再把 `/home`、半截路径和最终路径拆成多条或重复发送；观察流和工具状态也使用同一串行保证。
+- `/models` 改为 OpenCode 原生习惯的 Provider → Model 两层选择；`/setup` 对齐 Codex Bot 的同消息交互，集中显示并切换模型、variant、Agent/单次 Plan、权限和运行中新消息策略。
+- 补齐可保持语义的菜单：原生 `/undo`/`redo`、`/review`、归档恢复，显式 `/steer`/`queue`/`takeover`，以及 Rich、Voice、MCP Apps、Plugins、Hooks、Features 和 Provider auth 状态。Codex 专属账户、配额、Goal、Remote、设备登录与升级协调入口保留在菜单中，并说明不可等价支持的原因和替代操作。
+
+### English
+- Fixed an OpenCode streaming race. When the first Telegram send is still pending, later deltas and completion now serialize onto the same message instead of emitting `/home`, partial paths, and duplicated final output. Watch streams and tool status use the same serialization guarantee.
+- Changed `/models` to a native-style two-level Provider → Model selector. `/setup` now matches the Codex bot's in-place interaction and centralizes model, variant, Agent/one-shot Plan, access, and active-message behavior.
+- Added every semantics-preserving menu path: native `/undo`/`redo`, `/review`, archive restore, explicit `/steer`/`queue`/`takeover`, Rich, Voice, MCP Apps, Plugins, Hooks, Features, and provider-auth status. Codex-only account, quota, Goal, Remote, device-login, and update-coordinator entries remain visible with precise limitations and replacement workflows.
+
 ## 0.6.1 - 2026-08-09
 
 ### 中文
