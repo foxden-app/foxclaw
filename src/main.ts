@@ -231,6 +231,8 @@ async function runServeCli(): Promise<void> {
     { BridgeStore },
     { TelegramGateway },
     { CodexAppClient },
+    { OpencodeAppClient },
+    { OpencodeBridgeCore },
     { BridgeSessionCore },
     { TelegramChannelAdapter },
     { AuthCandidateMirror },
@@ -246,6 +248,8 @@ async function runServeCli(): Promise<void> {
     import('./store/database.js'),
     import('./telegram/gateway.js'),
     import('./codex_app/client.js'),
+    import('./opencode/client.js'),
+    import('./opencode/controller.js'),
     import('./controller/controller.js'),
     import('./channels/telegram/telegram_channel_adapter.js'),
     import('./auth/mirror.js'),
@@ -582,7 +586,7 @@ async function runServeCli(): Promise<void> {
         process.exit(0);
       };
 
-      process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
       process.on('SIGTERM', () => void shutdown('SIGTERM'));
       return;
     }
@@ -594,6 +598,71 @@ async function runServeCli(): Promise<void> {
       store,
       logger,
     );
+    if (config.opencodeEnabled) {
+      const opencodeMessaging = new TelegramMessagingPort(bot);
+      const opencodeBridge = new OpencodeBridgeCore(
+        config,
+        store,
+        logger,
+        bot,
+        new OpencodeAppClient(
+          config.opencodeCliBin,
+          config.opencodeServerPassword,
+          config.opencodeServerStatePath,
+          config.opencodeServerLogPath,
+          logger,
+        ),
+        opencodeMessaging,
+      );
+      opencodeBridge.registerInboundHandlers();
+
+      process.on('unhandledRejection', (error) => {
+        logger.error('process.unhandled_rejection', { error: serializeError(error) });
+      });
+      process.on('uncaughtException', (error) => {
+        logger.error('process.uncaught_exception', { error: serializeError(error) });
+      });
+
+      await opencodeBridge.start();
+      writeRuntimeStatus(config.statusPath, {
+        running: true,
+        connected: opencodeBridge.isSocketConnected(),
+        userAgent: 'opencode',
+        botUsername: bot.username,
+        currentBindings: store.countBindings(),
+        pendingApprovals: 0,
+        pendingUserInputs: 0,
+        activeTurns: 0,
+        lastError: null,
+        updatedAt: new Date().toISOString(),
+        channels: { telegram: true, weixin: false },
+      });
+      logger.info('opencode.bridge.started');
+
+      const opencodeShutdown = async (signal: string): Promise<void> => {
+        logger.info('bridge.shutting_down', { signal });
+        await opencodeBridge.stop();
+        writeRuntimeStatus(config.statusPath, {
+          running: false,
+          connected: false,
+          userAgent: 'opencode',
+          botUsername: bot.username,
+          currentBindings: 0,
+          pendingApprovals: 0,
+          pendingUserInputs: 0,
+          activeTurns: 0,
+          lastError: null,
+          updatedAt: new Date().toISOString(),
+          channels: { telegram: false, weixin: false },
+        });
+        store?.close();
+        processLock.release();
+        process.exit(0);
+      };
+      process.on('SIGINT', () => void opencodeShutdown('SIGINT'));
+      process.on('SIGTERM', () => void opencodeShutdown('SIGTERM'));
+      return;
+    }
     const app = new CodexAppClient(
       config.codexCliBin,
       config.codexAppLaunchCmd,

@@ -16,6 +16,8 @@ export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'co
 export const DEFAULT_CODEX_TELEGRAM_HOME = path.join(APP_HOME, 'codex', 'telegram');
 export const DEFAULT_AUTH_SYNC_STATE_PATH = path.join(APP_HOME, 'runtime', 'auth-sync.json');
 export const DEFAULT_AUTH_SYNC_TEMP_DIR = path.join(APP_HOME, 'runtime', 'auth-sync');
+export const DEFAULT_OPENCODE_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'opencode-server.json');
+export const DEFAULT_OPENCODE_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'opencode-server.log');
 export const DEFAULT_ENV_PATH = path.join(APP_HOME, '.env');
 
 let envLoaded = false;
@@ -64,6 +66,12 @@ export interface AppConfig {
   codexHome: string | null;
   codexAppSyncOnOpen: boolean;
   codexAppSyncOnTurnComplete: boolean;
+  /** When true, start an `opencode serve` process and bridge it to Telegram. */
+  opencodeEnabled: boolean;
+  opencodeCliBin: string;
+  opencodeServerPassword: string | null;
+  opencodeServerStatePath: string;
+  opencodeServerLogPath: string;
   storePath: string;
   logLevel: LogLevel;
   defaultCwd: string;
@@ -126,6 +134,11 @@ export function loadConfig(): AppConfig {
     codexHome: process.env.CODEX_HOME?.trim() || null,
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
     codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
+    opencodeEnabled: boolEnv('OPENCODE_ENABLED', false),
+    opencodeCliBin: process.env.OPENCODE_CLI_BIN || resolveCommand('opencode') || 'opencode',
+    opencodeServerPassword: process.env.OPENCODE_SERVER_PASSWORD?.trim() || null,
+    opencodeServerStatePath: process.env.OPENCODE_SERVER_STATE_PATH || DEFAULT_OPENCODE_SERVER_STATE_PATH,
+    opencodeServerLogPath: process.env.OPENCODE_SERVER_LOG_PATH || DEFAULT_OPENCODE_SERVER_LOG_PATH,
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
     logLevel: parseLogLevel(process.env.LOG_LEVEL || 'info'),
     defaultCwd: process.env.DEFAULT_CWD || process.cwd(),
@@ -169,6 +182,8 @@ export function ensureAppDirs(config: AppConfig): void {
     path.dirname(config.lockPath),
     path.dirname(config.codexAppServerStatePath),
     path.dirname(config.codexAppServerLogPath),
+    path.dirname(config.opencodeServerStatePath),
+    path.dirname(config.opencodeServerLogPath),
     path.dirname(config.authSyncStatePath),
   ];
   if (config.authSyncEnabled) {
