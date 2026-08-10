@@ -123,7 +123,10 @@ export class TelegramGateway extends EventEmitter {
     private readonly commandProvider: TelegramCommandProvider = getTelegramCommands,
   ) {
     super();
-    this.botKey = `telegram:${crypto.createHash('sha256').update(this.botToken).digest('hex').slice(0, 8)}`;
+    const tokenHash = crypto.createHash('sha256').update(this.botToken).digest('hex').slice(0, 8);
+    const tokenBotId = parseTelegramBotId(this.botToken);
+    this.botUserId = tokenBotId;
+    this.botKey = tokenBotId === null ? `telegram:${tokenHash}` : `telegram:bot${tokenBotId}`;
   }
 
   get username(): string | null {
@@ -135,6 +138,7 @@ export class TelegramGateway extends EventEmitter {
   }
 
   async initializeIdentity(): Promise<string> {
+    if (this.identity) return this.identity;
     await this.resolveBotIdentity(true);
     return this.identity!;
   }
@@ -142,10 +146,6 @@ export class TelegramGateway extends EventEmitter {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
-    if (this.botUserId === null) {
-      await this.resolveBotIdentity(this.namespacedScopes);
-    }
-    await this.registerCommands();
     void this.pollLoop();
   }
 
@@ -419,8 +419,14 @@ export class TelegramGateway extends EventEmitter {
   }
 
   private async pollLoop(): Promise<void> {
+    let remoteInitialized = false;
     while (this.running) {
       try {
+        if (!remoteInitialized) {
+          await this.resolveBotIdentity(true);
+          await this.registerCommands();
+          remoteInitialized = true;
+        }
         const offset = this.store.getTelegramOffset(this.botKey) + 1;
         const result = await callTelegramApi<TelegramUpdate[]>(this.botToken, 'getUpdates', {
           timeout: Math.max(1, Math.floor(this.pollIntervalMs / 1000)),
@@ -600,6 +606,13 @@ interface TelegramVideoNote {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export function parseTelegramBotId(botToken: string): number | null {
+  const match = /^(\d+):/.exec(botToken.trim());
+  if (!match) return null;
+  const botId = Number(match[1]);
+  return Number.isSafeInteger(botId) && botId > 0 ? botId : null;
 }
 
 function extractAttachments(message: TelegramMessage): TelegramInboundAttachment[] {

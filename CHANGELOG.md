@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.5 - 2026-08-10
+
+### 中文
+- Telegram bot 身份现在直接从标准 token 的数字前缀获得，FoxClaw 启动不再依赖远端 `getMe` 成功；断网重启时服务会保持运行，也不会因 systemd 连续重试而进入 `Start request repeated too quickly`。
+- `getMe`、命令菜单注册和消息轮询统一在后台恢复循环中执行。Telegram 恢复后会自动完成初始化并继续收发消息，无需人工重启；Telegram 可用而 Codex 上游不可用时，既有桥接错误仍会正常发回聊天。
+
+### English
+- Telegram bot identity is now derived from the numeric prefix of a standard token, so FoxClaw startup no longer depends on a successful remote `getMe` call. The service stays alive across offline restarts instead of exhausting systemd retries with `Start request repeated too quickly`.
+- `getMe`, command registration, and update polling now recover through the same background loop. Telegram automatically resumes without a manual restart, while existing bridge errors remain chat-visible when Telegram is reachable but the Codex upstream is unavailable.
+
 ## 0.6.4 - 2026-08-09
 
 ### 中文

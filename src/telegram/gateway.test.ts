@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TelegramGateway, type TelegramTextEvent } from './gateway.js';
+import { parseTelegramBotId, TelegramGateway, type TelegramTextEvent } from './gateway.js';
 
 const storeStub = {
   getTelegramOffset(): number {
@@ -16,6 +16,30 @@ const loggerStub = {
   warn(): void {},
   error(): void {},
 };
+
+test('parseTelegramBotId resolves standard Telegram token prefixes', () => {
+  assert.equal(parseTelegramBotId('1234567890:secret'), 1234567890);
+  assert.equal(parseTelegramBotId('token'), null);
+  assert.equal(parseTelegramBotId('0:secret'), null);
+});
+
+test('TelegramGateway starts offline and keeps a stable token-derived identity', async () => {
+  const gateway = new TelegramGateway('1234567890:secret', '42', null, 1000, storeStub as any, loggerStub as any, true);
+  let attempts = 0;
+  (gateway as any).resolveBotIdentity = async (): Promise<void> => {
+    attempts += 1;
+    throw new Error('network unavailable');
+  };
+
+  assert.equal(await gateway.initializeIdentity(), 'bot1234567890');
+  await gateway.start();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  gateway.stop();
+
+  assert.equal(gateway.identity, 'bot1234567890');
+  assert.equal((gateway as any).botKey, 'telegram:bot1234567890');
+  assert.equal(attempts, 1);
+});
 
 test('TelegramGateway emits media messages with caption and attachments', async () => {
   const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
