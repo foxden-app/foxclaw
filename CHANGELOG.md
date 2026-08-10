@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.6 - 2026-08-10
+
+### 中文
+- Telegram 远端初始化从断网中恢复后会立即刷新桥接状态，使 `/status` 和运行时状态继续显示 bot 用户名，而不是停留在离线启动时的空值。
+
+### English
+- Refreshes bridge status as soon as Telegram remote initialization recovers, so `/status` and runtime state show the bot username instead of retaining the empty offline-start value.
+
 ## 0.6.5 - 2026-08-10
 
 ### 中文

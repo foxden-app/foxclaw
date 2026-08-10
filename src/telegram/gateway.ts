@@ -426,6 +426,8 @@ export class TelegramGateway extends EventEmitter {
           await this.resolveBotIdentity(true);
           await this.registerCommands();
           remoteInitialized = true;
+          this.emit('remoteReady');
+          if (!this.running) return;
         }
         const offset = this.store.getTelegramOffset(this.botKey) + 1;
         const result = await callTelegramApi<TelegramUpdate[]>(this.botToken, 'getUpdates', {

@@ -41,6 +41,25 @@ test('TelegramGateway starts offline and keeps a stable token-derived identity',
   assert.equal(attempts, 1);
 });
 
+test('TelegramGateway reports when remote initialization recovers', async () => {
+  const gateway = new TelegramGateway('1234567890:secret', '42', null, 1000, storeStub as any, loggerStub as any, true);
+  (gateway as any).resolveBotIdentity = async (): Promise<void> => {
+    (gateway as any).botUsername = 'example_bot';
+  };
+  (gateway as any).registerCommands = async (): Promise<void> => {};
+  const ready = new Promise<void>((resolve) => {
+    gateway.once('remoteReady', () => {
+      gateway.stop();
+      resolve();
+    });
+  });
+
+  await gateway.start();
+  await ready;
+
+  assert.equal(gateway.username, 'example_bot');
+});
+
 test('TelegramGateway emits media messages with caption and attachments', async () => {
   const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];

@@ -655,6 +655,10 @@ export class BridgeSessionCore {
 
   /** Wire Telegram inbound events. Call before {@link startCodexApp}. */
   registerTelegramInboundHandlers(): void {
+    this.bot.on('remoteReady', () => {
+      this.botUsername = this.bot.username;
+      this.updateStatus();
+    });
     this.bot.on('text', (event: TelegramTextEvent) => {
       void this.withLock(event.scopeId, async () => this.handleText(event)).catch((error) => {
         void this.handleAsyncError('telegram.text', error, event.scopeId);
