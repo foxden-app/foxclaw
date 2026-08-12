@@ -1143,6 +1143,7 @@ export class BridgeSessionCore {
         this.store.cancelQueuedTurnInputs(scopeId);
         await this.stopWatchingScopeThread(scopeId, thread.threadId);
         let binding: ThreadBinding;
+        let readOnly = false;
         try {
           binding = await this.bindCachedThread(scopeId, thread.threadId);
         } catch (error) {
@@ -1150,7 +1151,9 @@ export class BridgeSessionCore {
             await this.sendMessage(scopeId, t(locale, 'cached_thread_unavailable'));
             return;
           }
-          throw error;
+          if (!isThreadActiveWriterError(error)) throw error;
+          binding = this.bindCachedThreadReadOnly(scopeId, thread);
+          readOnly = true;
         }
         const settings = this.store.getChatSettings(scopeId);
         const lines = [
@@ -1160,7 +1163,10 @@ export class BridgeSessionCore {
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
           t(locale, 'line_cwd', { value: binding.cwd ?? this.config.defaultCwd }),
         ];
-        if (this.config.codexAppSyncOnOpen) {
+        if (readOnly) {
+          lines.push(t(locale, 'thread_active_writer_read_only'));
+        }
+        if (!readOnly && this.config.codexAppSyncOnOpen) {
           const revealError = await this.tryRevealThread(scopeId, binding.threadId, 'open');
           lines.push(revealError ? t(locale, 'codex_sync_failed', { error: revealError }) : t(locale, 'opened_in_codex'));
         }
@@ -1488,15 +1494,7 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'thread_is_archived_use_unarchive'));
         return;
       }
-      try {
-        binding = await this.bindCachedThread(scopeId, cached.threadId);
-      } catch (error) {
-        if (isThreadNotFoundError(error)) {
-          await this.sendMessage(scopeId, t(locale, 'cached_thread_unavailable'));
-          return;
-        }
-        throw error;
-      }
+      binding = this.bindCachedThreadReadOnly(scopeId, cached);
     } else {
       binding = this.store.getBinding(scopeId);
     }
@@ -4692,6 +4690,22 @@ export class BridgeSessionCore {
   private async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
     const session = await this.resumeThreadForScope(scopeId, { threadId, cwd: null });
     return this.storeThreadSession(scopeId, session, 'replace');
+  }
+
+  private bindCachedThreadReadOnly(
+    scopeId: string,
+    thread: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+  ): ThreadBinding {
+    const binding = {
+      chatId: scopeId,
+      threadId: thread.threadId,
+      cwd: thread.cwd,
+      updatedAt: Date.now(),
+    };
+    this.store.setBinding(scopeId, binding.threadId, binding.cwd);
+    this.attachedThreads.delete(attachedThreadKey(scopeId, binding.threadId));
+    this.updateStatus();
+    return binding;
   }
 
   private async resumeThreadForScope(
@@ -8469,6 +8483,7 @@ export class BridgeSessionCore {
     }
     await this.stopWatchingScopeThread(scopeId, threadId);
     let binding: ThreadBinding;
+    let readOnly = false;
     try {
       binding = await this.bindCachedThread(scopeId, threadId);
     } catch (error) {
@@ -8476,7 +8491,9 @@ export class BridgeSessionCore {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_no_longer_available'));
         return;
       }
-      throw error;
+      if (!cached || !isThreadActiveWriterError(error)) throw error;
+      binding = this.bindCachedThreadReadOnly(scopeId, cached);
+      readOnly = true;
     }
 
     const threads = this.store.listCachedThreads(scopeId);
@@ -8509,8 +8526,8 @@ export class BridgeSessionCore {
       this.scheduleStalePanelDeletion(scopeId, event.messageId);
     }
 
-    let callbackText = t(locale, 'thread_opened');
-    if (this.config.codexAppSyncOnOpen) {
+    let callbackText = readOnly ? t(locale, 'thread_opened_read_only') : t(locale, 'thread_opened');
+    if (!readOnly && this.config.codexAppSyncOnOpen) {
       const revealError = await this.tryRevealThread(scopeId, binding.threadId, 'open');
       callbackText = revealError ? t(locale, 'opened_sync_failed_short') : t(locale, 'opened_in_codex_short');
     }
@@ -8551,16 +8568,7 @@ export class BridgeSessionCore {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_is_archived_use_unarchive'));
         return;
       }
-      let binding: ThreadBinding;
-      try {
-        binding = await this.bindCachedThread(scopeId, threadId);
-      } catch (error) {
-        if (isThreadNotFoundError(error)) {
-          await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'thread_no_longer_available'));
-          return;
-        }
-        throw error;
-      }
+      const binding = this.bindCachedThreadReadOnly(scopeId, cached);
       const target = resolveScopeMessageTarget(scopeId);
       if (!target) {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
@@ -13839,6 +13847,10 @@ function formatShortStatusError(error: unknown): string {
 
 function isThreadNotFoundError(error: unknown): boolean {
   return error instanceof Error && /(thread not found|no rollout found for thread id)/i.test(error.message);
+}
+
+function isThreadActiveWriterError(error: unknown): boolean {
+  return error instanceof Error && /thread\s+\S+\s+already has an active writer/i.test(error.message);
 }
 
 function isNoActiveTurnToSteerError(error: unknown): boolean {

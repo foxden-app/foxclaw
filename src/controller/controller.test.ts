@@ -5278,13 +5278,9 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
     updatedAt: 1,
   };
   (rig.controller as any).app.listThreads = async () => [thread];
-  (rig.controller as any).app.resumeThread = async ({ threadId }: { threadId: string }) => ({
-    thread: { ...thread, threadId },
-    model: 'gpt-5',
-    modelProvider: 'openai',
-    reasoningEffort: 'medium',
-    cwd: rig.tempDir,
-  });
+  (rig.controller as any).app.resumeThread = async () => {
+    throw new Error('thread thread-panel already has an active writer');
+  };
   (rig.controller as any).app.readThread = async () => thread;
   (rig.controller as any).app.listThreadTurns = async () => [
     {
@@ -5327,6 +5323,41 @@ test('/threads panel supports new-thread PWD prompt and watch callback', async (
   assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-panel');
   assert.match(rig.callbackAnswers.at(-1)!, /Watching thread thread-panel/);
   assert.match(rig.sentMessages.at(-1)!, /Recent context:\nUser:\nresume this thread\n\nCodex:\nready to continue/);
+});
+
+test('/open selects an active Codex CLI thread read-only instead of surfacing its writer lock', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  const thread = {
+    threadId: 'thread-cli-active',
+    name: 'CLI thread',
+    preview: 'running elsewhere',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'cli',
+    path: path.join(rig.tempDir, 'cli-session.jsonl'),
+    status: 'active' as const,
+    updatedAt: 1,
+  };
+  (rig.controller as any).app.listThreads = async () => [thread];
+  (rig.controller as any).app.resumeThread = async () => {
+    throw new Error('thread thread-cli-active already has an active writer');
+  };
+  (rig.controller as any).app.listThreadTurns = async () => [];
+
+  await (rig.controller as any).handleText(createEvent('/threads'));
+  await (rig.controller as any).handleText(createEvent('/open 1'));
+
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'thread-cli-active');
+  assert.match(rig.sentMessages.at(-1)!, /selected read-only; use \/watch/);
+
+  await (rig.controller as any).handleCallback(createCallback('thread:open:thread-cli-active', 1001));
+
+  assert.equal(rig.callbackAnswers.at(-1), 'Selected read-only; tap Watch for live output');
 });
 
 test('/new asks before creating a missing PWD and starts there after confirmation', async (t) => {

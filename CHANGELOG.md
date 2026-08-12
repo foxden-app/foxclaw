@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.7 - 2026-08-12
+
+### 中文
+- 修复从 `/threads` 观察正在由 Codex CLI 执行的线程时错误调用 `thread/resume`、抢占 writer 并报 `already has an active writer` 的问题。观察现在只读绑定线程，并直接尾随 CLI session 文件。
+- 打开被其他 Codex 客户端占用的线程时，仅对明确的 active-writer 冲突降级为只读选中并提示使用 `/watch`；其他错误仍然显式失败。
+
+### English
+- Fixed `/threads` Watch attempting `thread/resume` for a thread currently running in Codex CLI, which tried to acquire its writer and failed with `already has an active writer`. Watch now binds read-only and tails the CLI session file directly.
+- Opening a thread owned by another Codex client now falls back to an explicit read-only selection with a `/watch` hint only for the specific active-writer conflict. Other errors still fail visibly.
+
 ## 0.6.6 - 2026-08-10
 
 ### 中文
