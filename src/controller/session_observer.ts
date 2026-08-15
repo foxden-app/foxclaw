@@ -155,6 +155,27 @@ function applySessionRecord(
     return createSessionTextEvents(activeTurnId, cursor, payload.message, typeof payload.phase === 'string' ? payload.phase : null, false);
   }
 
+  if (
+    type === 'event_msg'
+    && payload?.type === 'item_completed'
+    && payload?.turn_id === activeTurnId
+    && normalizeSessionItemType(payload?.item) === 'agentmessage'
+  ) {
+    const text = extractSessionItemText(payload.item);
+    if (text === null) {
+      return { cursor, events: [], startedTurnId: null, turnCompleted: false };
+    }
+    return createSessionTextEvents(
+      activeTurnId,
+      cursor,
+      text,
+      typeof payload.item.phase === 'string' ? payload.item.phase : null,
+      false,
+      false,
+      typeof payload.item.id === 'string' ? payload.item.id : null,
+    );
+  }
+
   if (type === 'response_item' && payload?.type === 'plan' && typeof payload.text === 'string') {
     return createSessionTextEvents(activeTurnId, cursor, payload.text, 'commentary', true, true);
   }
@@ -225,6 +246,23 @@ function applySessionRecord(
     };
   }
 
+  if (
+    type === 'event_msg'
+    && (payload?.type === 'turn_aborted' || payload?.type === 'turn_interrupted')
+    && payload?.turn_id === activeTurnId
+  ) {
+    return {
+      cursor: { activeTurnId: null, nextMessageIndex: 0 },
+      events: [{
+        kind: 'turn_completed',
+        turnId: activeTurnId,
+        state: 'interrupted',
+      }],
+      startedTurnId: null,
+      turnCompleted: true,
+    };
+  }
+
   return {
     cursor,
     events: [],
@@ -244,13 +282,14 @@ function createSessionTextEvents(
   phase: string | null,
   forceCommentary: boolean,
   isPlan = false,
+  sourceItemId: string | null = null,
 ): {
   cursor: SessionLogCursor;
   events: TurnActivityEvent[];
   startedTurnId: string | null;
   turnCompleted: boolean;
 } {
-  const itemId = buildSessionItemId(activeTurnId, cursor.nextMessageIndex + 1);
+  const itemId = sourceItemId ?? buildSessionItemId(activeTurnId, cursor.nextMessageIndex + 1);
   const outputKind = forceCommentary ? 'commentary' : classifyAgentOutput(phase, true);
   const streamOutputKind = forceCommentary ? 'commentary' : classifyAgentOutput(phase, false);
   return {
@@ -288,6 +327,26 @@ function createSessionTextEvents(
     startedTurnId: null,
     turnCompleted: false,
   };
+}
+
+function normalizeSessionItemType(item: any): string | null {
+  if (typeof item?.type !== 'string') {
+    return null;
+  }
+  return item.type.replace(/[^a-z]/gi, '').toLowerCase();
+}
+
+function extractSessionItemText(item: any): string | null {
+  if (typeof item?.text === 'string') {
+    return item.text;
+  }
+  if (!Array.isArray(item?.content)) {
+    return null;
+  }
+  const parts = item.content
+    .map((entry: any) => typeof entry?.text === 'string' ? entry.text : '')
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join('') : null;
 }
 
 function createExecStartEvent(turnId: string, payload: any): RawExecCommandEvent | null {

@@ -112,6 +112,78 @@ test('applySessionLog relays plan response items as commentary', () => {
   ]);
 });
 
+test('applySessionLog relays Codex 0.147 completed agent items once', () => {
+  const diff = applySessionLog([
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'item_completed',
+        turn_id: 'turn-2',
+        item: {
+          type: 'AgentMessage',
+          id: 'message-1',
+          content: [{ type: 'Text', text: 'Current Codex output.' }],
+          phase: 'final_answer',
+        },
+      },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        id: 'message-1',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Current Codex output.' }],
+        phase: 'final_answer',
+      },
+    }),
+  ], {
+    activeTurnId: 'turn-2',
+    nextMessageIndex: 0,
+  });
+
+  assert.deepEqual(diff.events.map(event => event.kind), [
+    'agent_message_started',
+    'agent_message_delta',
+    'agent_message_completed',
+  ]);
+  assert.deepEqual(diff.events.map(event => 'itemId' in event ? event.itemId : null), [
+    'message-1',
+    'message-1',
+    'message-1',
+  ]);
+  assert.equal(diff.cursor.nextMessageIndex, 1);
+  const completed = diff.events.find(event => event.kind === 'agent_message_completed');
+  assert.equal(completed?.text, 'Current Codex output.');
+  assert.equal(completed?.outputKind, 'final_answer');
+});
+
+test('applySessionLog completes current Codex aborted turns as interrupted', () => {
+  const diff = applySessionLog([
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'turn_aborted',
+        turn_id: 'turn-2',
+        reason: 'interrupted',
+      },
+    }),
+  ], {
+    activeTurnId: 'turn-2',
+    nextMessageIndex: 1,
+  });
+
+  assert.deepEqual(diff.events, [{
+    kind: 'turn_completed',
+    turnId: 'turn-2',
+    state: 'interrupted',
+  }]);
+  assert.deepEqual(diff.cursor, {
+    activeTurnId: null,
+    nextMessageIndex: 0,
+  });
+});
+
 test('splitJsonlChunk preserves incomplete trailing lines', () => {
   const split = splitJsonlChunk('', '{"a":1}\n{"b":2}');
   assert.deepEqual(split.lines, ['{"a":1}']);

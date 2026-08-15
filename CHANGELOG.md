@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.8 - 2026-08-15
+
+### 中文
+- 修复只读观察 Codex CLI 0.147.0 会话时只显示“正在思考...”和“已完成。”、遗漏实际回复的问题。会话日志观察器现在识别新的 `item_completed` / `AgentMessage` 结构，并沿用 Codex 消息 ID，避免同一正文与 `response_item` 镜像重复发送。
+- 识别新日志中的 `turn_aborted` 和 `turn_interrupted`，让被中断的外部 CLI 轮次明确结束为“已中断”，不再残留为进行中状态。
+
+### English
+- Fixed read-only observation of Codex CLI 0.147.0 sessions showing only “Thinking...” and “Completed.” while dropping the actual response. The session-log observer now recognizes the new `item_completed` / `AgentMessage` shape and preserves Codex message IDs without duplicating the mirrored `response_item`.
+- Recognizes `turn_aborted` and `turn_interrupted` in new session logs so interrupted external CLI turns finish explicitly instead of remaining active.
+
 ## 0.6.7 - 2026-08-12
 
 ### 中文
