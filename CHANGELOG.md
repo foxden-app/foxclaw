@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.9 - 2026-08-15
+
+### 中文
+- 补齐 Codex CLI 0.147.0 会话日志的其他观察兼容：新的 `item_completed` / `UserMessage` 会继续把 CLI 侧补充输入镜像到 Telegram，保持原有 `codex-cli-user` 体验。
+- 识别新的 `custom_tool_call`、`function_call` 及其 output 记录，严格按 `call_id` 跨轮询分片配对，让长时间工具调用恢复“正在运行/已运行”状态；未知或孤立 output 保持静默，不猜测配对。`Reasoning`、`ContextCompaction`、`Extension` 等内部记录仍不会污染聊天。
+
+### English
+- Completed the remaining Codex CLI 0.147.0 session-log observation compatibility. New `item_completed` / `UserMessage` records continue mirroring CLI-side follow-up input to Telegram with the existing `codex-cli-user` experience.
+- Recognizes new `custom_tool_call`, `function_call`, and matching output records across polling chunks, pairing them strictly by `call_id` so long-running tools regain Running/Completed status. Unknown or orphan outputs stay silent, while internal `Reasoning`, `ContextCompaction`, and `Extension` records remain chat-invisible.
+
 ## 0.6.8 - 2026-08-15
 
 ### 中文

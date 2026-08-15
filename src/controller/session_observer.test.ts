@@ -158,6 +158,136 @@ test('applySessionLog relays Codex 0.147 completed agent items once', () => {
   assert.equal(completed?.outputKind, 'final_answer');
 });
 
+test('applySessionLog relays Codex 0.147 user items once', () => {
+  const diff = applySessionLog([
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'item_completed',
+        turn_id: 'turn-2',
+        item: {
+          type: 'UserMessage',
+          id: 'user-message-1',
+          content: [{ type: 'Text', text: 'Continue from the CLI.' }],
+        },
+      },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Continue from the CLI.' }],
+      },
+    }),
+  ], {
+    activeTurnId: 'turn-2',
+    nextMessageIndex: 0,
+  });
+
+  assert.deepEqual(diff.events, [{
+    kind: 'user_message',
+    turnId: 'turn-2',
+    text: 'Continue from the CLI.',
+  }]);
+});
+
+test('applySessionLog tracks modern tool calls across poll chunks', () => {
+  const started = applySessionLog([
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call',
+        call_id: 'call-1',
+        name: 'exec',
+        input: 'const result = await tools.exec_command(...);',
+      },
+    }),
+  ], {
+    activeTurnId: 'turn-2',
+    nextMessageIndex: 0,
+  });
+
+  assert.equal(started.events[0]?.kind, 'tool_started');
+  assert.deepEqual(started.cursor.pendingToolCalls, [{
+    callId: 'call-1',
+    kind: 'custom',
+    name: 'exec',
+  }]);
+
+  const completed = applySessionLog([
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'custom_tool_call_output',
+        call_id: 'call-1',
+        output: [],
+      },
+    }),
+  ], started.cursor);
+
+  assert.equal(completed.events[0]?.kind, 'tool_completed');
+  assert.deepEqual(completed.cursor.pendingToolCalls, []);
+  assert.deepEqual(
+    completed.events.map(event => event.kind === 'tool_completed' ? event.exec.command : null),
+    [['Tool exec']],
+  );
+});
+
+test('bootstrapSessionLog preserves a pending modern tool call for tail completion', () => {
+  const bootstrap = bootstrapSessionLog([
+    JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'task_started', turn_id: 'turn-2' },
+    }),
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        call_id: 'call-wait',
+        name: 'wait',
+        arguments: '{}',
+      },
+    }),
+  ]);
+
+  assert.deepEqual(bootstrap.cursor.pendingToolCalls, [{
+    callId: 'call-wait',
+    kind: 'function',
+    name: 'wait',
+  }]);
+  const completed = applySessionLog([
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'function_call_output',
+        call_id: 'call-wait',
+        output: null,
+      },
+    }),
+  ], bootstrap.cursor);
+  assert.equal(completed.events[0]?.kind, 'tool_completed');
+  assert.deepEqual(completed.cursor.pendingToolCalls, []);
+});
+
+test('applySessionLog ignores unmatched modern tool outputs', () => {
+  const diff = applySessionLog([
+    JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'function_call_output',
+        call_id: 'unknown-call',
+        output: null,
+      },
+    }),
+  ], {
+    activeTurnId: 'turn-2',
+    nextMessageIndex: 0,
+  });
+
+  assert.deepEqual(diff.events, []);
+});
+
 test('applySessionLog completes current Codex aborted turns as interrupted', () => {
   const diff = applySessionLog([
     JSON.stringify({

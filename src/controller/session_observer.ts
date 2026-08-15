@@ -8,6 +8,7 @@ import {
 export interface SessionLogCursor {
   activeTurnId: string | null;
   nextMessageIndex: number;
+  pendingToolCalls?: SessionToolCall[];
 }
 
 export interface SessionLogBootstrap {
@@ -32,6 +33,12 @@ interface SessionRecord {
   payload?: any;
 }
 
+interface SessionToolCall {
+  callId: string;
+  kind: 'custom' | 'function';
+  name: string;
+}
+
 export function splitJsonlChunk(remainder: string, chunk: string): SplitJsonlChunk {
   const text = `${remainder}${chunk}`;
   if (text.length === 0) {
@@ -47,36 +54,32 @@ export function splitJsonlChunk(remainder: string, chunk: string): SplitJsonlChu
 
 export function bootstrapSessionLog(lines: string[]): SessionLogBootstrap {
   const records = parseRecords(lines);
-  let activeTurnId: string | null = null;
-  let nextMessageIndex = 0;
+  let state: SessionLogCursor = { activeTurnId: null, nextMessageIndex: 0 };
   let events: TurnActivityEvent[] = [];
 
   for (const record of records) {
-    const next = applySessionRecord(record, { activeTurnId, nextMessageIndex });
+    const next = applySessionRecord(record, state);
     if (next.startedTurnId) {
-      activeTurnId = next.startedTurnId;
-      nextMessageIndex = 0;
+      state = next.cursor;
       events = [];
       continue;
     }
-    if (!activeTurnId) {
+    if (!state.activeTurnId) {
       continue;
     }
     if (next.turnCompleted) {
-      activeTurnId = null;
-      nextMessageIndex = 0;
+      state = next.cursor;
       events = [];
       continue;
     }
     events.push(...next.events);
-    activeTurnId = next.cursor.activeTurnId;
-    nextMessageIndex = next.cursor.nextMessageIndex;
+    state = next.cursor;
   }
 
   return {
-    cursor: { activeTurnId, nextMessageIndex },
+    cursor: state,
     events,
-    startedTurnId: activeTurnId,
+    startedTurnId: state.activeTurnId,
   };
 }
 
@@ -89,10 +92,7 @@ export function applySessionLog(lines: string[], cursor: SessionLogCursor): Sess
   for (const record of records) {
     const next = applySessionRecord(record, state);
     if (next.startedTurnId) {
-      state = {
-        activeTurnId: next.startedTurnId,
-        nextMessageIndex: 0,
-      };
+      state = next.cursor;
       startedTurnIds.push(next.startedTurnId);
       continue;
     }
@@ -176,6 +176,28 @@ function applySessionRecord(
     );
   }
 
+  if (
+    type === 'event_msg'
+    && payload?.type === 'item_completed'
+    && payload?.turn_id === activeTurnId
+    && normalizeSessionItemType(payload?.item) === 'usermessage'
+  ) {
+    const text = extractSessionItemText(payload.item)?.trim() ?? '';
+    if (!text) {
+      return { cursor, events: [], startedTurnId: null, turnCompleted: false };
+    }
+    return {
+      cursor,
+      events: [{
+        kind: 'user_message',
+        turnId: activeTurnId,
+        text,
+      }],
+      startedTurnId: null,
+      turnCompleted: false,
+    };
+  }
+
   if (type === 'response_item' && payload?.type === 'plan' && typeof payload.text === 'string') {
     return createSessionTextEvents(activeTurnId, cursor, payload.text, 'commentary', true, true);
   }
@@ -213,6 +235,22 @@ function applySessionRecord(
       startedTurnId: null,
       turnCompleted: false,
     };
+  }
+
+  if (type === 'response_item' && payload?.type === 'custom_tool_call') {
+    return createSessionToolStart(activeTurnId, cursor, payload, 'custom');
+  }
+
+  if (type === 'response_item' && payload?.type === 'function_call') {
+    return createSessionToolStart(activeTurnId, cursor, payload, 'function');
+  }
+
+  if (type === 'response_item' && payload?.type === 'custom_tool_call_output') {
+    return createSessionToolEnd(activeTurnId, cursor, payload, 'custom');
+  }
+
+  if (type === 'response_item' && payload?.type === 'function_call_output') {
+    return createSessionToolEnd(activeTurnId, cursor, payload, 'function');
   }
 
   if (type === 'event_msg' && payload?.type === 'exec_command_end' && payload?.turn_id === activeTurnId) {
@@ -294,6 +332,7 @@ function createSessionTextEvents(
   const streamOutputKind = forceCommentary ? 'commentary' : classifyAgentOutput(phase, false);
   return {
     cursor: {
+      ...cursor,
       activeTurnId,
       nextMessageIndex: cursor.nextMessageIndex + 1,
     },
@@ -326,6 +365,75 @@ function createSessionTextEvents(
     ],
     startedTurnId: null,
     turnCompleted: false,
+  };
+}
+
+function createSessionToolStart(
+  turnId: string,
+  cursor: SessionLogCursor,
+  payload: any,
+  kind: SessionToolCall['kind'],
+): ReturnType<typeof applySessionRecord> {
+  const callId = typeof payload?.call_id === 'string' ? payload.call_id : null;
+  const name = typeof payload?.name === 'string' ? payload.name.trim() : '';
+  if (!callId || !name) {
+    return { cursor, events: [], startedTurnId: null, turnCompleted: false };
+  }
+  const pendingToolCalls = [
+    ...(cursor.pendingToolCalls ?? []).filter(call => call.callId !== callId),
+    { callId, kind, name },
+  ];
+  const exec = createSessionToolEvent(turnId, callId, name);
+  return {
+    cursor: { ...cursor, pendingToolCalls },
+    events: [{
+      kind: 'tool_started',
+      turnId,
+      exec,
+      state: inferToolActivityState(exec),
+    }],
+    startedTurnId: null,
+    turnCompleted: false,
+  };
+}
+
+function createSessionToolEnd(
+  turnId: string,
+  cursor: SessionLogCursor,
+  payload: any,
+  kind: SessionToolCall['kind'],
+): ReturnType<typeof applySessionRecord> {
+  const callId = typeof payload?.call_id === 'string' ? payload.call_id : null;
+  const pending = callId
+    ? (cursor.pendingToolCalls ?? []).find(call => call.callId === callId && call.kind === kind)
+    : null;
+  if (!pending) {
+    return { cursor, events: [], startedTurnId: null, turnCompleted: false };
+  }
+  const exec = createSessionToolEvent(turnId, pending.callId, pending.name);
+  return {
+    cursor: {
+      ...cursor,
+      pendingToolCalls: (cursor.pendingToolCalls ?? []).filter(call => call !== pending),
+    },
+    events: [{
+      kind: 'tool_completed',
+      turnId,
+      exec,
+      state: inferToolActivityState(exec),
+    }],
+    startedTurnId: null,
+    turnCompleted: false,
+  };
+}
+
+function createSessionToolEvent(turnId: string, callId: string, name: string): RawExecCommandEvent {
+  return {
+    callId,
+    turnId,
+    command: [`Tool ${name}`],
+    cwd: null,
+    parsedCmd: [],
   };
 }
 
