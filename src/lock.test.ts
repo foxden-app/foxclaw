@@ -22,3 +22,24 @@ test('process lock replaces stale pid files', () => {
   lock.release();
   assert.equal(fs.existsSync(lockPath), false);
 });
+
+test('process lock replaces a reused live pid from another Linux process identity', { skip: process.platform !== 'linux' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-lock-'));
+  const lockPath = path.join(dir, 'bridge.lock');
+  fs.writeFileSync(lockPath, `${JSON.stringify({ pid: process.pid, processIdentity: 'previous-boot:1' })}\n`, 'utf8');
+  const lock = acquireProcessLock(lockPath);
+  assert.equal(fs.existsSync(lockPath), true);
+  lock.release();
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test('process lock replaces a legacy live pid file left by a previous Linux boot', { skip: process.platform !== 'linux' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-lock-'));
+  const lockPath = path.join(dir, 'bridge.lock');
+  fs.writeFileSync(lockPath, `${process.pid}\n`, 'utf8');
+  fs.utimesSync(lockPath, 0, 0);
+  const lock = acquireProcessLock(lockPath);
+  assert.equal(fs.existsSync(lockPath), true);
+  lock.release();
+  assert.equal(fs.existsSync(lockPath), false);
+});

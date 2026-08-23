@@ -86,6 +86,19 @@ test('CLI unknown commands show usage instead of starting the bridge', () => {
   assert.doesNotMatch(result.stderr + result.stdout, /Lock already held/);
 });
 
+test('CLI doctor rejects an invalid explicitly configured OpenCode binary', () => {
+  const result = runFoxclawCliWithEnv({
+    CODEX_CLI_BIN: process.execPath,
+    OPENCODE_CLI_BIN: '/definitely/missing/opencode',
+    OPENCODE_BOT_TOKEN: 'opencode-test-token',
+    TG_BOT_TOKEN: 'codex-test-token',
+    TG_BOT_TOKENS: '',
+    TG_ALLOWED_USER_ID: '1',
+  }, 'doctor');
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /\[FAIL\] opencode cli available/);
+});
+
 test('CLI status prints a compact summary by default and keeps --json', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-cli-status-'));
   try {

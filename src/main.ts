@@ -2176,13 +2176,13 @@ function runDoctorChecks(): boolean {
   const configuredCodexBin = process.env.CODEX_CLI_BIN;
   const checks: Array<[string, boolean]> = [
     ['node >= 24', Number(process.versions.node.split('.')[0]) >= 24],
-    ['codex cli available', hasConfiguredCodexBin(configuredCodexBin) || hasCommand('codex')],
+    ['codex cli available', hasConfiguredCommand(configuredCodexBin, 'codex')],
     ['telegram bot token(s) configured', Boolean(process.env.TG_BOT_TOKENS?.trim() || process.env.TG_BOT_TOKEN?.trim())],
     ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
   ];
   if (process.env.OPENCODE_BOT_TOKEN?.trim()) {
     const configuredOpencodeBin = process.env.OPENCODE_CLI_BIN;
-    checks.push(['opencode cli available', hasConfiguredCodexBin(configuredOpencodeBin) || hasCommand('opencode')]);
+    checks.push(['opencode cli available', hasConfiguredCommand(configuredOpencodeBin, 'opencode')]);
     const codexTokens = [
       ...(process.env.TG_BOT_TOKENS ?? '').split(','),
       process.env.TG_BOT_TOKEN ?? '',
@@ -2753,8 +2753,8 @@ function resolveCommand(commandName: string): string | null {
   }
 }
 
-function hasConfiguredCodexBin(binPath: string | undefined): boolean {
-  if (!binPath || !binPath.trim()) return false;
+function hasConfiguredCommand(binPath: string | undefined, fallbackCommand: string): boolean {
+  if (!binPath?.trim()) return hasCommand(fallbackCommand);
   try {
     fs.accessSync(binPath, fs.constants.X_OK);
     return true;
