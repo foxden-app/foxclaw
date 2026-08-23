@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.6.10 - 2026-08-23
+
+### 中文
+- 修复 Linux 重启后旧 `bridge.lock` 中的 PID 被无关进程复用时，FoxClaw 误判已有实例并陷入 systemd 重启失败的问题。新锁记录系统启动 ID 和进程启动标识，同时兼容清理上个系统启动遗留的纯 PID 锁。
+- 修复 `doctor` 在显式配置的 `CODEX_CLI_BIN` 或 `OPENCODE_CLI_BIN` 不存在时仍因 PATH 中有同名命令而误报 `[OK]` 的问题；显式路径现在必须真实存在且可执行。
+
+### English
+- Fixed FoxClaw mistaking an unrelated process for the existing bridge when Linux reuses a PID left in an old `bridge.lock` after reboot. New locks record the boot ID and process start identity while still cleaning legacy PID-only locks from a previous boot.
+- Fixed `doctor` reporting `[OK]` when an explicitly configured `CODEX_CLI_BIN` or `OPENCODE_CLI_BIN` is missing but a same-named command exists on PATH. Explicit paths must now exist and be executable.
+
 ## 0.6.9 - 2026-08-15
 
 ### 中文
