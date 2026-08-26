@@ -2,6 +2,14 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.7.0 - 2026-08-26
+
+### 中文
+- 版本对齐发布：代码内容与 0.6.10 相同，无功能性变更。
+
+### English
+- Version alignment release: code content is identical to 0.6.10, no functional changes.
+
 ## 0.6.10 - 2026-08-23
 
 ### 中文
