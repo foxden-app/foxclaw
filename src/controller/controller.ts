@@ -633,6 +633,9 @@ export class BridgeSessionCore {
   private proactiveAuthRefreshStatus: AuthProactiveRefreshStatus | null = null;
   private stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
   private attachedThreads = new Set<string>();
+  private codexReconnectPending = false;
+  private codexReconnectRecovery: Promise<void> | null = null;
+  private stopping = false;
   private botUsername: string | null = null;
   private lastError: string | null = null;
   /** Last threads-panel pagination state per scope (Telegram inline nav + /open index alignment). */
@@ -683,6 +686,7 @@ export class BridgeSessionCore {
 
   /** Start Codex app-server transport and attach RPC listeners. */
   async startCodexApp(): Promise<void> {
+    this.stopping = false;
     this.app.on('notification', (msg: JsonRpcNotification) => {
       void this.handleNotification(msg).catch((error) => {
         void this.handleAsyncError('codex.notification', error);
@@ -698,13 +702,20 @@ export class BridgeSessionCore {
       this.lastError = null;
       this.updateStatus();
     });
+    this.app.on('ready', () => {
+      if (!this.codexReconnectPending || this.stopping) {
+        return;
+      }
+      this.codexReconnectPending = false;
+      this.scheduleCodexReconnectRecovery();
+    });
     this.app.on('disconnected', () => {
       this.attachedThreads.clear();
       this.threadTokenUsageAlerts.clear();
-      this.clearObservedThreadWatchers();
-      void this.abandonActiveTurns().catch((error) => {
-        this.logger.error('codex.disconnect_cleanup_failed', { error: toErrorMeta(error) });
-      });
+      if (!this.stopping) {
+        this.codexReconnectPending = true;
+        this.pauseAppSnapshotWatchers();
+      }
       this.updateStatus();
     });
 
@@ -739,6 +750,8 @@ export class BridgeSessionCore {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.codexReconnectPending = false;
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
     this.pendingMcpElicitations.clear();
@@ -4790,6 +4803,128 @@ export class BridgeSessionCore {
     this.observedThreadWatchers.clear();
   }
 
+  private pauseAppSnapshotWatchers(): void {
+    for (const watcher of this.observedThreadWatchers.values()) {
+      if (watcher.mode !== 'app_snapshot') {
+        continue;
+      }
+      watcher.stopped = true;
+      if (watcher.timer) {
+        clearTimeout(watcher.timer);
+        watcher.timer = null;
+      }
+    }
+  }
+
+  private scheduleCodexReconnectRecovery(): void {
+    const previous = this.codexReconnectRecovery ?? Promise.resolve();
+    const recovery = previous
+      .catch(() => undefined)
+      .then(async () => this.recoverAfterCodexReconnect());
+    const trackedRecovery = recovery.finally(() => {
+      if (this.codexReconnectRecovery === trackedRecovery) {
+        this.codexReconnectRecovery = null;
+      }
+    });
+    this.codexReconnectRecovery = trackedRecovery;
+    void this.codexReconnectRecovery.catch((error) => {
+      this.logger.error('codex.reconnect_recovery_failed', { error: toErrorMeta(error) });
+    });
+  }
+
+  private async recoverAfterCodexReconnect(): Promise<void> {
+    const recoveredScopes = new Set<string>();
+    for (const watcher of [...this.observedThreadWatchers.values()]) {
+      if (watcher.mode !== 'app_snapshot') {
+        continue;
+      }
+      try {
+        const binding = this.store.getBinding(watcher.scopeId);
+        const session = await this.resumeThreadForScope(watcher.scopeId, {
+          threadId: watcher.threadId,
+          cwd: binding?.threadId === watcher.threadId ? binding.cwd : null,
+        });
+        this.storeThreadSession(watcher.scopeId, session, 'seed');
+        watcher.stopped = false;
+        const active = watcher.activeTurnId
+          ? this.getActiveTurn(watcher.scopeId, watcher.activeTurnId)
+          : null;
+        if (active) {
+          watcher.cursor = observerCursorFromActiveTurn(active);
+        }
+        await this.pollObservedThread(watcher);
+        if (!watcher.stopped && this.observedThreadWatchers.get(watcher.scopeId) === watcher) {
+          this.scheduleObservedThreadPoll(watcher);
+        }
+        recoveredScopes.add(watcher.scopeId);
+      } catch (error) {
+        watcher.stopped = false;
+        if (this.observedThreadWatchers.get(watcher.scopeId) === watcher) {
+          this.scheduleObservedThreadPoll(watcher);
+        }
+        this.logger.warn('codex.reconnect_watcher_recovery_failed', {
+          scopeId: watcher.scopeId,
+          threadId: watcher.threadId,
+          error: toErrorMeta(error),
+        });
+      }
+    }
+
+    for (const active of [...this.activeTurns.values()]) {
+      if (recoveredScopes.has(active.scopeId) || !this.getActiveTurn(active.scopeId, active.turnId)) {
+        continue;
+      }
+      try {
+        await this.recoverActiveTurnAfterCodexReconnect(active);
+      } catch (error) {
+        this.logger.warn('codex.reconnect_turn_recovery_failed', {
+          scopeId: active.scopeId,
+          threadId: active.threadId,
+          turnId: active.turnId,
+          error: toErrorMeta(error),
+        });
+      }
+    }
+
+    await this.recoverQueuedTurns();
+    this.updateStatus();
+  }
+
+  private async recoverActiveTurnAfterCodexReconnect(active: ActiveTurn): Promise<void> {
+    const binding = this.store.getBinding(active.scopeId);
+    const session = await this.resumeThreadForScope(active.scopeId, {
+      threadId: active.threadId,
+      cwd: binding?.threadId === active.threadId ? binding.cwd : null,
+    });
+    this.storeThreadSession(active.scopeId, session, 'seed');
+    const snapshot = await this.app.readThreadSnapshot(active.threadId);
+    const turn = snapshot?.turns.find(candidate => candidate.turnId === active.turnId) ?? null;
+    if (!snapshot || !turn) {
+      throw new Error(`Active turn ${active.turnId} was not found after reconnect`);
+    }
+    const diff = diffObservedTurn(
+      observerCursorFromActiveTurn(active),
+      turn,
+      snapshot.activeFlags.includes('waitingOnApproval'),
+    );
+    for (const event of diff.events) {
+      await this.handleTurnActivityEvent(event, active.scopeId);
+    }
+    if (diff.completed && this.getActiveTurn(active.scopeId, active.turnId)) {
+      await this.handleTurnActivityEvent({
+        kind: 'turn_completed',
+        turnId: active.turnId,
+        state: turn.status === 'interrupted' ? 'interrupted' : 'completed',
+      }, active.scopeId);
+    }
+    this.logger.info('codex.reconnect_turn_recovered', {
+      scopeId: active.scopeId,
+      threadId: active.threadId,
+      turnId: active.turnId,
+      status: turn.status,
+    });
+  }
+
   private clearObservedTurnWatcher(turnId: string, scopeId?: string): void {
     for (const watcher of this.observedThreadWatchers.values()) {
       if (scopeId && watcher.scopeId !== scopeId) {
@@ -4954,6 +5089,9 @@ export class BridgeSessionCore {
     }
     const snapshot = await this.app.readThreadSnapshot(watcher.threadId);
     if (!snapshot) {
+      if (watcher.activeTurnId && this.getActiveTurn(watcher.scopeId, watcher.activeTurnId)) {
+        return 'active';
+      }
       await this.stopWatchingScopeThread(watcher.scopeId);
       return 'idle';
     }
@@ -9878,30 +10016,6 @@ export class BridgeSessionCore {
     }
   }
 
-  private async abandonActiveTurns(): Promise<void> {
-    const activeTurns = [...this.activeTurns.values()];
-    for (const active of activeTurns) {
-      this.clearToolBatchTimer(active.toolBatch);
-      this.clearRenderRetry(active);
-      if (active.previewActive) {
-        await this.retirePreviewMessage(
-          active.scopeId,
-          active.previewMessageId,
-          t(this.localeForChat(active.scopeId), 'stale_preview_expired'),
-          active.turnId,
-        );
-      }
-      if (active.queuedInputId) {
-        this.store.updateQueuedTurnInputStatus(active.queuedInputId, 'queued');
-      }
-      active.resolver();
-      this.deleteActiveTurnRecord(active);
-    }
-    if (activeTurns.length > 0) {
-      this.updateStatus();
-    }
-  }
-
   private releaseActiveTurnsForBridgeShutdown(): void {
     const activeTurns = [...this.activeTurns.values()];
     for (const active of activeTurns) {
@@ -11956,6 +12070,22 @@ function seedObservedTurnCursor(turn: AppTurnSnapshot): ObservedTurnCursor {
     turnId: turn.turnId,
     itemTexts,
     completedItemIds: agentItems.map((item) => item.itemId),
+  };
+}
+
+function observerCursorFromActiveTurn(active: ActiveTurn): ObservedTurnCursor {
+  const itemTexts: Record<string, string> = {};
+  const completedItemIds: string[] = [];
+  for (const segment of active.segments) {
+    itemTexts[segment.itemId] = segment.text;
+    if (segment.completed) {
+      completedItemIds.push(segment.itemId);
+    }
+  }
+  return {
+    turnId: active.turnId,
+    itemTexts,
+    completedItemIds,
   };
 }
 

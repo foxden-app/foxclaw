@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.7.1 - 2026-08-30
+
+### 中文
+- 修复 Codex app-server WebSocket 短暂断开时错误废弃活动轮次和实时预览、导致后续 Telegram 消息永久卡在队列中的问题。FoxClaw 现在会保留活动状态，等待 app-server 重新初始化后恢复线程订阅，并通过线程快照补齐断线期间遗漏的输出或完成事件，再继续处理队列。
+- WebSocket 关闭信息现在保留真实关闭码和原因；重连恢复已在 Codex CLI 0.151.0 上通过同一 app-server 进程断线的现场验证。
+
+### English
+- Fixed transient Codex app-server WebSocket disconnects abandoning active turns and live previews, which could leave later Telegram messages permanently queued. FoxClaw now preserves active state, restores the thread subscription after app-server initialization, reconciles output or completion events missed during the disconnect from the thread snapshot, and then continues the queue.
+- WebSocket close metadata now preserves the actual close code and reason. Reconnect recovery was live-verified against Codex CLI 0.151.0 with the same app-server process disconnecting and reattaching.
+
 ## 0.7.0 - 2026-08-26
 
 ### 中文

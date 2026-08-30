@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppConfig } from '../config.js';
@@ -403,7 +404,11 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     clearInlineKeyboard: async () => {},
     sendDraft: async () => {},
   };
+  const appEvents = new EventEmitter();
   const app = {
+    on: appEvents.on.bind(appEvents),
+    emit: appEvents.emit.bind(appEvents),
+    start: async () => {},
     isConnected: () => true,
     getUserAgent: () => 'test-agent',
     getServerStatus: () => ({ pid: null, port: null, running: false, managed: false }),
@@ -582,6 +587,7 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
     callbackAnswers,
     deletedMessageIds,
     bot,
+    app,
     tempDir,
   };
 }
@@ -5576,6 +5582,108 @@ test('completed turns automatically start a queued prompt', async (t) => {
   assert.deepEqual(started, ['continue']);
   assert.equal(rig.store.countQueuedTurnInputs('telegram:99::root'), 0);
   assert.equal((rig.controller as any).activeTurns.size, 0);
+});
+
+test('same app-server process reconnect preserves the active turn and drains its queue after reconciliation', async (t) => {
+  const rig = createControllerRig();
+  t.after(async () => {
+    await rig.controller.stop();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  await rig.controller.startCodexApp();
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  const active = (rig.controller as any).createActiveTurnState(
+    'telegram:99::root',
+    '99',
+    'private',
+    null,
+    'thread-1',
+    'turn-1',
+    123,
+  );
+  setActiveTurnForTest(rig, active);
+  rig.store.saveActiveTurnPreview({
+    turnId: 'turn-1',
+    scopeId: 'telegram:99::root',
+    threadId: 'thread-1',
+    messageId: 123,
+  });
+  saveQueuedTurnForTest(rig, 'telegram:99::root', 'continue after reconnect');
+
+  const resumedThreads: string[] = [];
+  rig.app.resumeThread = async (options: { threadId: string; cwd?: string | null }) => {
+    resumedThreads.push(options.threadId);
+    return {
+      thread: {
+        threadId: options.threadId,
+        name: null,
+        preview: 'resumed',
+        cwd: options.cwd ?? rig.tempDir,
+        modelProvider: 'openai',
+        source: 'app',
+        path: null,
+        status: 'idle',
+        updatedAt: 1,
+      },
+      model: 'gpt-5',
+      modelProvider: 'openai',
+      reasoningEffort: 'medium',
+      cwd: options.cwd ?? rig.tempDir,
+    };
+  };
+  (rig.app as any).readThreadSnapshot = async () => ({
+    threadId: 'thread-1',
+    name: null,
+    preview: 'completed while disconnected',
+    cwd: rig.tempDir,
+    modelProvider: 'openai',
+    source: 'app',
+    path: null,
+    status: 'idle',
+    activeFlags: [],
+    updatedAt: 2,
+    turns: [{
+      turnId: 'turn-1',
+      status: 'completed',
+      error: null,
+      items: [{
+        itemId: 'answer-1',
+        type: 'agentMessage',
+        phase: 'final_answer',
+        text: 'finished during reconnect',
+        command: null,
+        status: null,
+        aggregatedOutput: null,
+      }],
+    }],
+  });
+  (rig.controller as any).queueTurnRender = async () => {};
+  (rig.controller as any).completeTurn = async () => {};
+  const queuedStarts: string[] = [];
+  (rig.controller as any).startBoundTurnFromQueuedInput = async (record: any) => {
+    const input = JSON.parse(record.inputJson) as Array<{ text?: string }>;
+    queuedStarts.push(input[0]?.text ?? '');
+    rig.store.updateQueuedTurnInputStatus(record.queueId, 'completed');
+  };
+
+  rig.app.emit('disconnected', { source: 'websocket-close', pid: 12345 });
+
+  assert.ok(getActiveTurnForTest(rig));
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+  assert.equal(rig.editedMessages.length, 0);
+  assert.equal(rig.store.countQueuedTurnInputs('telegram:99::root'), 1);
+
+  rig.app.emit('ready', { pid: 12345 });
+  const recovery = (rig.controller as any).codexReconnectRecovery as Promise<void> | null;
+  assert.ok(recovery);
+  await recovery;
+
+  assert.deepEqual(resumedThreads, ['thread-1']);
+  assert.equal((rig.controller as any).activeTurns.size, 0);
+  assert.deepEqual(queuedStarts, ['continue after reconnect']);
+  assert.equal(rig.store.countQueuedTurnInputs('telegram:99::root'), 0);
 });
 
 test('startup preview cleanup recovers still-live app-server turns', async (t) => {

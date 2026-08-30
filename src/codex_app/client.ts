@@ -722,6 +722,7 @@ export class CodexAppClient extends EventEmitter {
     });
     await Promise.race([this.connectWebSocket(), spawnFailed]);
     await this.initialize();
+    this.emit('ready');
   }
 
   private async attachPersistedServer(): Promise<boolean> {
@@ -737,6 +738,7 @@ export class CodexAppClient extends EventEmitter {
     try {
       await this.connectWebSocket();
       await this.initialize();
+      this.emit('ready');
       this.logger.info('codex.app-server.attached', { pid: state.pid, port: state.port });
       return true;
     } catch (error) {
@@ -769,12 +771,16 @@ export class CodexAppClient extends EventEmitter {
             this.socket = ws;
             this.connected = true;
             ws.addEventListener('message', message => this.handleMessage(String(message.data)));
-            ws.addEventListener('close', () => {
+            ws.addEventListener('close', (event) => {
               if (this.socket !== ws) {
                 return;
               }
               this.socket = null;
-              this.handleDisconnect({ code: 'ws-close', source: 'websocket-close' });
+              this.handleDisconnect({
+                code: event.code,
+                reason: event.reason || null,
+                source: 'websocket-close',
+              });
             });
             ws.addEventListener('error', err => {
               this.logger.warn('codex.ws.error', String((err as ErrorEvent).message ?? 'unknown'));
