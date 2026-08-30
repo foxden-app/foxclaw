@@ -353,7 +353,9 @@ Usage:
 - `/watch <n>`: watch item n from the latest `/threads` list.
 - `/unwatch`: stop watching.
 
-Watch mode mirrors live turn progress and approval requests. The watching chat is read-only for normal prompts during the observed turn. Send `/unwatch` before starting a new prompt from that chat, or wait for the turn to finish.
+Watch mode mirrors live turn progress and approval requests. It still does not take ownership of the CLI writer, and `/steer` cannot modify the in-flight turn. With Codex CLI 0.151.0 or later, however, plain text and `/queue <message>` use Codex's cross-client queue for the same thread. The desktop CLI automatically continues with those messages, in order, after the current turn finishes.
+
+Older Codex versions do not expose this queue API. FoxClaw reports the required upgrade instead of falling back to writer takeover or session-file mutation. Use `/unwatch` first only when you want Telegram to start a separate turn itself.
 
 ## 6. Codex Login And Auth Rotation
 

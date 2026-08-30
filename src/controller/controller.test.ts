@@ -495,6 +495,9 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
       cwd: options.cwd ?? tempDir,
     }),
     steerTurn: async () => ({ turnId: 'turn-1' }),
+    queueThreadInput: async (_threadId: string, clientUserMessageId: string) => ({
+      queuedSubmissionId: clientUserMessageId,
+    }),
     startDeviceLogin: async () => ({
       type: 'chatgptDeviceCode',
       loginId: 'login-1',
@@ -695,6 +698,60 @@ test('queue stores the next prompt while a turn is active', async (t) => {
   await (rig.controller as any).handleCommand(createEvent('/queue second'), 'en', 'queue', ['second']);
   assert.deepEqual(queuedTextsForTest(rig, 'telegram:99::root'), ['first', 'second']);
   assert.match(rig.sentMessages[1]!, /Queued #2/);
+});
+
+test('watched CLI messages use the Codex cross-client queue without taking the writer', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => {
+    (rig.controller as any).clearObservedThreadWatchers();
+    rig.store.close();
+    fs.rmSync(rig.tempDir, { recursive: true, force: true });
+  });
+
+  (rig.controller as any).observedThreadWatchers.set('telegram:99::root', {
+    scopeId: 'telegram:99::root',
+    chatId: '99',
+    chatType: 'private',
+    topicId: null,
+    threadId: 'thread-cli',
+    mode: 'session_file',
+    timer: null,
+    cursor: null,
+    activeTurnId: null,
+    waitingOnApproval: false,
+    sessionPath: '/tmp/thread-cli.jsonl',
+    sessionOffset: 0,
+    sessionRemainder: '',
+    sessionCursor: { activeTurnId: null, nextMessageIndex: 0 },
+    stopped: false,
+  });
+  const queued: any[] = [];
+  (rig.controller as any).app.queueThreadInput = async (
+    threadId: string,
+    clientUserMessageId: string,
+    input: any[],
+  ) => {
+    queued.push({ threadId, clientUserMessageId, input });
+    return { queuedSubmissionId: `submission-${queued.length}` };
+  };
+  let starts = 0;
+  (rig.controller as any).startBoundTurnFromEvent = async () => {
+    starts += 1;
+  };
+
+  await (rig.controller as any).handleText(createEvent('continue from phone'));
+  await (rig.controller as any).handleCommand(createEvent('/queue check tests'), 'en', 'queue', ['check', 'tests']);
+
+  assert.equal(starts, 0);
+  assert.deepEqual(queued.map(entry => ({
+    threadId: entry.threadId,
+    text: entry.input[0]?.text,
+  })), [
+    { threadId: 'thread-cli', text: 'continue from phone' },
+    { threadId: 'thread-cli', text: 'check tests' },
+  ]);
+  assert.match(queued[0]?.clientUserMessageId, /^foxclaw:telegram:99::root:1$/);
+  assert.match(rig.sentMessages[0]!, /Queued for the watched Codex CLI session/);
 });
 
 test('plain messages during active turns steer by default or queue by chat setting', async (t) => {
@@ -5532,7 +5589,7 @@ test('approval requests are mirrored to watcher scopes and can be approved there
   assert.equal(rig.store.getPendingApproval(localId)?.resolvedAt !== null, true);
 });
 
-test('watcher active turns are read-only except approval commands', async (t) => {
+test('watcher active turns remain read-only while phone input is queued', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     rig.store.close();
@@ -5546,11 +5603,19 @@ test('watcher active turns are read-only except approval commands', async (t) =>
   (rig.controller as any).app.steerTurn = async () => {
     steered += 1;
   };
+  const queued: any[] = [];
+  (rig.controller as any).app.queueThreadInput = async (threadId: string, clientUserMessageId: string, input: any[]) => {
+    queued.push({ threadId, clientUserMessageId, input });
+    return { queuedSubmissionId: 'queue-weixin-1' };
+  };
 
   await (rig.controller as any).handleText(createWeixinEvent('继续写'));
 
   assert.equal(steered, 0);
-  assert.match(rig.sentMessages.at(-1)!, /只读观察/);
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0]?.threadId, 'thread-1');
+  assert.equal(queued[0]?.input[0]?.text, '继续写');
+  assert.match(rig.sentMessages.at(-1)!, /已排入正在观察/);
 });
 
 test('completed turns automatically start a queued prompt', async (t) => {
@@ -6163,7 +6228,7 @@ test('startup preview cleanup does not auto-resume completed turns with output a
   assert.equal(rig.editedMessages[0], 'Completed. See the reply below.');
 });
 
-test('startup preview cleanup keeps observed recovered turns read-only', async (t) => {
+test('startup preview cleanup keeps observed recovered turns read-only and queues phone input', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
     (rig.controller as any).clearObservedThreadWatchers();
@@ -6202,6 +6267,11 @@ test('startup preview cleanup keeps observed recovered turns read-only', async (
     steers += 1;
     return { turnId: 'turn-watch' };
   };
+  const queued: any[] = [];
+  (rig.controller as any).app.queueThreadInput = async (threadId: string, clientUserMessageId: string, input: any[]) => {
+    queued.push({ threadId, clientUserMessageId, input });
+    return { queuedSubmissionId: 'queued-watch-1' };
+  };
 
   await (rig.controller as any).cleanupStaleTurnPreviews();
 
@@ -6212,7 +6282,10 @@ test('startup preview cleanup keeps observed recovered turns read-only', async (
   await (rig.controller as any).handleText(createEvent('continue after restart'));
 
   assert.equal(steers, 0);
-  assert.match(rig.sentMessages.at(-1)!, /watching that turn read-only/);
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0]?.threadId, 'thread-1');
+  assert.equal(queued[0]?.input[0]?.text, 'continue after restart');
+  assert.match(rig.sentMessages.at(-1)!, /Queued for the watched Codex CLI session/);
 });
 
 test('startup preview cleanup interrupts orphan waiting user-input turns', async (t) => {

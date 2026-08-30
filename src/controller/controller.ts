@@ -848,6 +848,9 @@ export class BridgeSessionCore {
         await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
         return;
       }
+      if (await this.queueObservedThreadMessage(event, locale, event.text.trim())) {
+        return;
+      }
       await this.startBoundTurnFromEvent(event, locale, event.text.trim());
       return;
     }
@@ -907,6 +910,9 @@ export class BridgeSessionCore {
     }
     if (this.externalAuthValidationInProgress) {
       await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
+      return;
+    }
+    if (await this.queueObservedThreadMessage(event, locale, decision.text)) {
       return;
     }
 
@@ -5336,12 +5342,15 @@ export class BridgeSessionCore {
     }
 
     const active = this.findActiveTurn(scopeId);
-    if (!active) {
-      await this.startBoundTurnFromEvent(event, locale, nextPrompt);
+    const observedThreadId = active?.isObserved
+      ? active.threadId
+      : this.observedThreadWatchers.get(scopeId)?.threadId ?? null;
+    if (observedThreadId) {
+      await this.queueObservedThreadMessage(event, locale, nextPrompt, observedThreadId);
       return;
     }
-    if (active.isObserved) {
-      await this.sendMessage(scopeId, t(locale, 'watch_read_only_active'));
+    if (!active) {
+      await this.startBoundTurnFromEvent(event, locale, nextPrompt);
       return;
     }
 
@@ -5358,7 +5367,7 @@ export class BridgeSessionCore {
       return;
     }
     if (active.isObserved) {
-      await this.sendMessage(event.scopeId, t(locale, 'watch_read_only_active'));
+      await this.queueObservedThreadMessage(event, locale, text, active.threadId);
       return;
     }
     const settings = this.store.getChatSettings(event.scopeId);
@@ -5382,6 +5391,39 @@ export class BridgeSessionCore {
       await this.forgetStaleActiveTurn(active, locale);
       await this.startBoundTurnFromEvent(event, locale, text);
     }
+  }
+
+  private async queueObservedThreadMessage(
+    event: TelegramTextEvent,
+    locale: AppLocale,
+    text: string,
+    threadId = this.observedThreadWatchers.get(event.scopeId)?.threadId ?? null,
+  ): Promise<boolean> {
+    if (!threadId) {
+      return false;
+    }
+    const input = await this.buildTurnInput({
+      threadId,
+      cwd: this.store.getBinding(event.scopeId)?.cwd ?? this.config.defaultCwd,
+    }, { ...event, text }, locale);
+    const clientUserMessageId = `foxclaw:${event.scopeId}:${event.messageId}`;
+    try {
+      const queued = await this.app.queueThreadInput(threadId, clientUserMessageId, input);
+      await this.sendMessage(event.scopeId, t(locale, 'watch_prompt_queued', {
+        id: shortId(queued.queuedSubmissionId),
+      }));
+    } catch (error) {
+      if (!isThreadQueueUnsupportedError(error)) {
+        throw error;
+      }
+      this.logger.warn('codex.observed_thread_queue_unsupported', {
+        scopeId: event.scopeId,
+        threadId,
+        error: toErrorMeta(error),
+      });
+      await this.sendMessage(event.scopeId, t(locale, 'watch_queue_unsupported'));
+    }
+    return true;
   }
 
   private async queuePromptAfterActiveTurn(
@@ -6791,6 +6833,10 @@ export class BridgeSessionCore {
     const active = this.findActiveTurn(scopeId);
     if (!active) {
       await this.sendMessage(scopeId, t(locale, 'no_active_turn'));
+      return;
+    }
+    if (active.isObserved) {
+      await this.sendMessage(scopeId, t(locale, 'watch_read_only_active'));
       return;
     }
     await this.app.steerTurn(active.threadId, active.turnId, [{
@@ -13985,6 +14031,13 @@ function isThreadActiveWriterError(error: unknown): boolean {
 
 function isNoActiveTurnToSteerError(error: unknown): boolean {
   return error instanceof Error && /no active turn to steer/i.test(error.message);
+}
+
+function isThreadQueueUnsupportedError(error: unknown): boolean {
+  const message = formatUserError(error).toLowerCase();
+  return message.includes('method not found')
+    || message.includes('unknown method')
+    || message.includes('thread/queue/add') && message.includes('not supported');
 }
 
 function isThreadNewCwdCreateConfirmation(text: string): boolean {

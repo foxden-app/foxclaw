@@ -353,7 +353,9 @@ FoxClaw 的聊天是“绑定线程”的。你在手机上打开某个 Codex �
 - `/watch <n>`：观察最近一次 `/threads` 列表里的第 n 个线程。
 - `/unwatch`：停止观察。
 
-观察模式会同步 live turn 进展和审批请求。观察中的聊天默认是只读的，普通 prompt 不会直接插入正在观察的 turn；需要发新任务时先 `/unwatch`，或等当前 turn 完成。
+观察模式会同步 live turn 进展和审批请求。观察中的聊天仍然不接管 CLI writer，也不能用 `/steer` 修改正在执行的 turn；但从 Codex CLI 0.151.0 开始，直接发送文字或使用 `/queue <消息>` 会通过 Codex 的跨客户端队列排入同一线程，由桌面 CLI 在当前 turn 结束后自动继续执行。连续发送多条会按顺序排队。
+
+旧版 Codex 没有这个队列接口，FoxClaw 会明确提示升级，不会退回到抢占 writer 或改写 session 文件。要让 Telegram 自己另行启动 turn，仍需先 `/unwatch`。
 
 ## 6. Codex 登录和 auth 轮转
 

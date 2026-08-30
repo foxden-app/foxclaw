@@ -316,6 +316,19 @@ export class CodexAppClient extends EventEmitter {
     return { turnId: String((result as any)?.turnId ?? expectedTurnId) };
   }
 
+  async queueThreadInput(
+    threadId: string,
+    clientUserMessageId: string,
+    input: TurnInput[],
+  ): Promise<{ queuedSubmissionId: string }> {
+    const result = await this.request('thread/queue/add', { threadId, clientUserMessageId, input });
+    const queuedSubmissionId = (result as any)?.queuedSubmission?.id;
+    if (typeof queuedSubmissionId !== 'string' || !queuedSubmissionId) {
+      throw new Error('thread/queue/add returned no queued submission id');
+    }
+    return { queuedSubmissionId };
+  }
+
   async forkThread(options: {
     threadId: string;
     cwd: string | null;

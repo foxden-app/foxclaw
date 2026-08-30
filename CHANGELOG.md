@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.7.2 - 2026-08-30
+
+### 中文
+- 为 Codex CLI 0.151.0 及以上版本接入原生跨客户端线程队列。在 Telegram `/watch` 观察电脑端 CLI 会话时，直接发送文字或使用 `/queue <消息>` 会把下一轮任务排入同一线程，由桌面 CLI 在当前轮结束后继续执行。
+- 保持观察模式的 writer 安全边界：FoxClaw 不会 `resume`、中断或接管外部 CLI，`/steer` 仍明确拒绝；旧版 Codex 缺少队列接口时会提示升级，不会改写 session 文件或报告虚假成功。
+
+### English
+- Added the native cross-client thread queue available in Codex CLI 0.151.0 and later. While Telegram `/watch` observes a desktop CLI session, plain text or `/queue <message>` now queues the next task on the same thread for the desktop CLI to continue after its current turn.
+- Preserved the writer-safety boundary of watch mode: FoxClaw does not resume, interrupt, or take over the external CLI, and `/steer` remains explicitly unavailable. Older Codex versions receive an upgrade notice instead of session-file mutation or false success.
+
 ## 0.7.1 - 2026-08-30
 
 ### 中文
