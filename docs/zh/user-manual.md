@@ -365,7 +365,11 @@ FoxClaw 的聊天是“绑定线程”的。你在手机上打开某个 Codex �
 
 ### 6.1 文件格式
 
-单 bot 兼容模式的候选文件放在 Codex auth 目录，默认是 `~/.codex/`。如果你设置了 `CODEX_AUTH_DIR`，则使用那个目录。多 bot 模式以这个目录作为候选源，并在 `~/.foxclaw/codex/telegram/bot<id>/home/` 下为隔离 bot 保存副本。默认/终端共享 bot 不创建隔离副本，而是直接使用这个默认 auth 目录。
+单 bot 兼容模式的候选文件放在 Codex auth 目录，默认是 `~/.codex/`。如果你设置了 `CODEX_AUTH_DIR`，则使用那个目录。多 bot 模式以这个目录作为候选源，并在 `~/.foxclaw/codex/telegram/@Telegram用户名/home/` 下为隔离 bot 保存副本，例如 `@WuguiAI_Bot/home/`。默认/终端共享 bot 的名称目录通过链接指向原来的 Codex home，保留终端互通能力。
+
+启动时并行读取 Telegram 的真实用户名。已有 `bot<id>` 目录会迁移到名称目录，旧路径保留兼容链接；更改用户名后，下次启动会更新目录名称并保留旧名称链接。首次启动无法联网时临时使用 `bot<id>`，之后启动取到用户名再迁移；已有名称在断网重启时继续使用。迁移前请让相关会话空闲。遇到同名冲突会明确停止，不合并或覆盖目录。
+
+名称目录中的 `.foxclaw-bot.json` 只保存稳定的数字 bot ID，不保存 token，供媒体发送判断目标账号。不要删除该文件或旧路径链接。数据库绑定、运行日志及服务状态仍用稳定 bot ID 标识；项目工作目录仍由 `DEFAULT_CWD` 或 `/new <目录>` 决定。
 
 推荐命名：
 

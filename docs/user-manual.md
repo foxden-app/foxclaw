@@ -365,7 +365,9 @@ To keep one Telegram bot interoperable with terminal Codex sessions, put the sam
 
 ### 6.1 File Format
 
-In single-bot compatibility mode, candidate files live in the Codex auth directory, usually `~/.codex/`. If `CODEX_AUTH_DIR` is set, FoxClaw uses that directory. Multi-bot mode treats that directory as its candidate source and stores isolated bot copies under `~/.foxclaw/codex/telegram/bot<id>/home/`. A default/shared-terminal bot does not get an isolated copy; it uses the default auth directory directly.
+In single-bot compatibility mode, candidate files live in the Codex auth directory, usually `~/.codex/`. If `CODEX_AUTH_DIR` is set, FoxClaw uses that directory. Multi-bot mode stores isolated homes under `~/.foxclaw/codex/telegram/@TelegramUsername/home/`. Shared-terminal bots get a named home link to their existing Codex home, preserving terminal interoperability.
+
+Startup resolves usernames in parallel. Existing numeric directories move to the named location with compatibility links retained; username changes also retain old paths. Offline restarts reuse the previous name. A first offline startup uses `bot<id>` until a later startup can resolve its username. Keep sessions idle during migration. Name collisions fail explicitly without merging or overwriting data. The parent `.foxclaw-bot.json` stores only the stable bot ID for media routing, never a token. Keep it and the compatibility links. Database bindings, logs, and runtime identities still use numeric bot IDs. Project working directories remain controlled by `DEFAULT_CWD` or `/new <path>`.
 
 Recommended layout:
 

@@ -143,6 +143,16 @@ export class TelegramGateway extends EventEmitter {
     return this.identity!;
   }
 
+  async resolveUsername(): Promise<string | null> {
+    try {
+      await this.resolveBotIdentity(true);
+      return this.username;
+    } catch {
+      this.logger.warn('telegram.username_unavailable', { botId: this.identity });
+      return null;
+    }
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;

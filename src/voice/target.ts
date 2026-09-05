@@ -1,3 +1,5 @@
+import { readTelegramBotHomeIdentity } from '../telegram/bot_home.js';
+
 export type TelegramVoiceTarget = {
   botId: string;
   botToken: string;
@@ -6,7 +8,7 @@ export type TelegramVoiceTarget = {
 export function inferTelegramBotId(codexHome: string | null | undefined): string | null {
   if (!codexHome) return null;
   const match = codexHome.match(/(?:^|[\\/])(bot\d+)(?:[\\/]|$)/i);
-  return match?.[1]?.toLowerCase() ?? null;
+  return match?.[1]?.toLowerCase() ?? readTelegramBotHomeIdentity(codexHome);
 }
 
 export function resolveTelegramVoiceTarget(tokens: string[], requestedBotId: string | null): TelegramVoiceTarget {

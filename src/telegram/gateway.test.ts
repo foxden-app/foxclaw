@@ -60,6 +60,16 @@ test('TelegramGateway reports when remote initialization recovers', async () => 
   assert.equal(gateway.username, 'example_bot');
 });
 
+test('TelegramGateway resolves a verified username and tolerates offline name lookup', async () => {
+  const gateway = new TelegramGateway('1234567890:secret', '42', null, 1000, storeStub as any, loggerStub as any);
+  (gateway as any).resolveBotIdentity = async () => { (gateway as any).botUsername = 'Example_Bot'; };
+  assert.equal(await gateway.resolveUsername(), 'Example_Bot');
+  assert.equal(gateway.identity, 'bot1234567890');
+  (gateway as any).resolveBotIdentity = async () => { throw new Error('offline'); };
+  assert.equal(await gateway.resolveUsername(), null);
+  assert.equal(gateway.identity, 'bot1234567890');
+});
+
 test('TelegramGateway emits media messages with caption and attachments', async () => {
   const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];

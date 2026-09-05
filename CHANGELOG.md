@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.7.3-dev.2 - 2026-09-05 (local preview)
+
+### 中文
+- 多 bot Codex 数据目录默认使用真实 `@Telegram用户名`。迁移既有数字目录并保留兼容链接，共享终端的 bot 使用同名目录入口指向原 home。
+- 并行读取用户名，断网重启沿用已有名称；媒体发送通过稳定身份记录保持正确路由，目录冲突明确报错。
+
+### English
+- Name multi-bot Codex homes after verified Telegram usernames, migrating numeric directories with compatibility links and preserving shared terminal homes.
+- Resolve usernames in parallel, reuse stored paths offline, preserve media routing through stable identity metadata, and reject directory conflicts.
+
 ## 0.7.3-dev.1 - 2026-09-05 (local preview)
 
 ### 中文

@@ -58,6 +58,7 @@ import {
 } from './voice/files.js';
 import { inferTelegramBotId, resolveTelegramVoiceTarget } from './voice/target.js';
 import { shouldShowRuntimeLastUpdate } from './update_status.js';
+import { prepareTelegramBotHome } from './telegram/bot_home.js';
 
 const rawCommand = process.argv[2];
 const command = rawCommand || 'serve';
@@ -769,24 +770,27 @@ async function runServeCli(): Promise<void> {
       };
       const seeds: RuntimeSeed[] = [];
       const canonicalAuthDir = config.codexAuthDir ?? config.codexHome ?? path.join(os.homedir(), '.codex');
-      for (const token of config.tgBotTokens) {
+      const identities = await Promise.all(config.tgBotTokens.map(async (token) => {
         const bot = new TelegramGateway(
           token,
           config.tgAllowedUserId,
           config.tgAllowedChatId,
           config.telegramPollIntervalMs,
-          store,
+          store!,
           logger,
           true,
         );
         const id = await bot.initializeIdentity();
+        const username = await bot.resolveUsername();
+        return { token, bot, id, username };
+      }));
+      for (const { token, bot, id, username } of identities) {
         if (seeds.some((runtime) => runtime.id === id)) {
           throw new Error(`TG_BOT_TOKENS contains duplicate Telegram bot identity: ${id}`);
         }
         const sharedDefaultRuntime = config.tgDefaultRuntimeBotToken === token;
-        const home = sharedDefaultRuntime
-          ? (config.codexHome ?? path.join(os.homedir(), '.codex'))
-          : path.join(DEFAULT_CODEX_TELEGRAM_HOME, id, 'home');
+        const home = prepareTelegramBotHome(DEFAULT_CODEX_TELEGRAM_HOME, id, username,
+          sharedDefaultRuntime ? (config.codexHome ?? path.join(os.homedir(), '.codex')) : null);
         const authDir = sharedDefaultRuntime ? canonicalAuthDir : home;
         if (!sharedDefaultRuntime) {
           fs.mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -798,7 +802,7 @@ async function runServeCli(): Promise<void> {
           tgBotTokens: [token],
           tgScopeBotId: id,
           codexAuthDir: sharedDefaultRuntime ? config.codexAuthDir : home,
-          codexHome: sharedDefaultRuntime ? config.codexHome : home,
+          codexHome: home,
           codexAppAutolaunch: sharedDefaultRuntime ? config.codexAppAutolaunch : false,
           codexAppServerStatePath: sharedDefaultRuntime
             ? config.codexAppServerStatePath
@@ -807,9 +811,7 @@ async function runServeCli(): Promise<void> {
             ? config.codexAppServerLogPath
             : path.join(APP_HOME, 'logs', `codex-app-server-${id}.log`),
         };
-        const childEnv = sharedDefaultRuntime
-          ? (config.codexHome ? { CODEX_HOME: config.codexHome } : null)
-          : { CODEX_HOME: home };
+        const childEnv = { CODEX_HOME: home };
         const app = new CodexAppClient(
           runtimeConfig.codexCliBin,
           runtimeConfig.codexAppLaunchCmd,
