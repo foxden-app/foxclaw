@@ -30,7 +30,7 @@ FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex 或
 
 ![FoxClaw Telegram 功能预览](./docs/assets/telegram-preview-zh.svg)
 
-手机端不是简单转发消息，而是给 Codex 的常用工作流做了 Telegram 面板：`/setup` 调模型、推理强度、Fast tier、权限和 Agent/Plan 模式；`/auth` 管理多个 Codex 登录候选，触发限制时自动轮转；`/threads`、`/watch` 和审批按钮用于切线程、观察进度和处理权限请求。
+手机端不是简单转发消息，而是给 Codex 的常用工作流做了 Telegram 面板：`/setup` 调模型、推理强度、Fast tier、权限和 Agent/Plan 模式；`/auth` 管理多个 Codex 登录候选，触发限制时自动轮转；`/threads`、`/watch` 和审批按钮用于切线程、观察进度和处理权限请求。终端 CLI 卡住且持有 thread 时，可信用户还可用 `/takeover --force <消息>` 核对 PID、目录并二次确认，将同一 thread 安全交给桥继续执行。
 
 ## 从这里开始
 

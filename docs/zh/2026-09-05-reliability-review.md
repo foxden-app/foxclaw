@@ -29,22 +29,24 @@
 - 设备登录、auth add、auth repair 提供取消按钮；本地状态在等待取消响应前认领清理，旧按钮及其他会话无法取消当前登录。
 - 新增 `foxclaw resume [thread-id] [--bot-id <bot-id>]` 及 Telegram `/cli`，进入桥正在使用的同一 app-server，避免另起 writer。
 - 重连恢复跳过独立 CLI 的只读观察轮次。独立 CLI 的 `/watch` 不增加强抢或删锁行为。
+- 新增显式 `/takeover --force <消息>`。仅可信 Telegram 用户可在 60 秒内确认；实现按目标 thread 的真实 flock 定位同用户交互式 CLI，通过 pidfd 防 PID 复用，拒绝 app-server、远程客户端、桥祖先进程及持有多个 thread 的进程。先 SIGTERM，5 秒后仍存活才 SIGKILL；只有锁已释放且原 thread 恢复成功后才提交消息。不会删除锁、修改 session 文件或自动重试结果未知的提交。
 - 点击旧问号、登录修复或删除按钮前重读授权状态，已恢复时刷新面板。
 - 同步文案明确“已发送、远端导入未确认”；状态更新未满足身份/时间约束时记录 `skipped`。
 
 ## 验证与部署
 
-- 全量 403 项测试通过。随后补齐 Telegram 菜单及预览版本号，相关 i18n/CLI 11 项测试通过；typecheck、lint、build、diff check 通过。
+- 稳定版全量测试共 421 项：420 项通过，1 项因当前进程环境没有 OpenCode CLI 按既有条件跳过；此前带 OpenCode 环境的预览验收为 421 项全部通过。另有 8 项隔离进程测试，覆盖真实 flock、pidfd、SIGTERM/SIGKILL、PID 身份变化和不安全进程拒绝。typecheck、lint、build、diff check 通过。
 - 新增回归覆盖 RPC 超时后的迟到响应、不重发、发送失败清理、存活服务记录保护、登录取消失败/竞态/旧按钮、中断超时不延迟发送、观察轮次不获取 writer、旧授权面板刷新、审计状态跳过、Telegram 流式拖延总超时、多 bot CLI 路由。
 - 在独立临时 CODEX_HOME 中启动真实 Codex 0.153.4，两个客户端连接同一个 app-server 并 resume 同一个已有记录的 thread，验证同线程、同服务。测试不使用用户授权，不调用模型完成任务。空线程在产生记录前不能 resume。
-- 安装包为 `/tmp/foxden-app-foxclaw-0.7.3-dev.1.tgz`。16P 使用 npm 安装，T490 使用其 pnpm 安装并更新 systemd 到实际包路径。
+- 预览安装包最终为 `/tmp/foxden-app-foxclaw-0.7.3-dev.3.tgz`。16P 使用 npm 安装，T490 使用其 pnpm 安装并更新 systemd 到实际包路径。
 - 重启前确认两端桥内无活动任务，并通过只读 `thread/loaded/list` 确认所有受管 app-server 均无加载线程。
-- 16P 与 T490 实际 runtime userAgent 均包含 `foxclaw; 0.7.3-dev.1`，connected=true、activeTurns=0、lastError=null；两端 systemd active/running、NRestarts=0、ExecMainStatus=0。
+- 16P 与 T490 实际 runtime userAgent 均包含 `foxclaw; 0.7.3-dev.3`；两端 systemd active/running、NRestarts=0、ExecMainStatus=0。T490 六个 bot 均 connected=true。
+- 真实强制接管验收中，目标 thread `01a06fd3-668d-7c81-96e1-d6394c2cf782`、PID `289937`、工作目录 `/home/wuya/git/foxclaw` 经用户确认后停止；日志记录 `codex.external_writer_stopped`。随后同一 thread 由桥的 app-server 持锁并启动新 turn，未删除锁文件。
 - 调用真实 Telegram `getMyCommands`：16P 中英文菜单、T490 同步联系人与 walma10bot 中文菜单均包含 `login_cancel` 和 `cli`。
 
 ## 剩余边界
 
-- 此版本为本地预览，未发布 npm 或 GitHub Release。
+- 本报告先记录本地预览与真实接管验收；正式 npm 和 GitHub Release 状态以发布后的 registry/workflow 验证为准。
 - 没有代用户执行真实登录和 Telegram 按钮点击；按钮行为由回归测试验证，菜单已通过真实 Telegram API 验收。
 - 去重后未再次触发整个集群的安全同步；原同步导入结果和去重后的运行配置已核实。
 - 网络完全断开时无法即时发送 Telegram 错误提示，可使用本机 `foxclaw resume`。底层服务完全失联时需检查 `foxclaw status`；重启应确认其他会话空闲。

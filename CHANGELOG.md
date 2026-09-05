@@ -2,29 +2,25 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
-## 0.7.3-dev.2 - 2026-09-05 (local preview)
+## 0.7.3 - 2026-09-05
 
 ### 中文
+- 修复代理或网络不稳时 Telegram、Codex RPC 和 WebSocket 可能长期无响应的问题：请求有明确截止时间，活动会话断连、恢复失败和 writer 冲突都会给出可继续操作的错误，不重放结果未知的请求。
+- 登录、auth add 和 auth repair 流程增加取消按钮；取消失败也释放本地流程，旧按钮和其他聊天不能误取消当前登录。
+- 新增 `/cli` 与 `foxclaw resume`，可让终端连接桥的同一 Codex app-server；`/watch` 继续只读，外部 CLI 的消息可用原生线程队列安全排队。
+- 新增 `/takeover --force <消息>`：可信 Telegram 用户二次确认后，可精确停止占用目标 thread 的本机交互式 CLI，验证锁释放并恢复原 thread 后再提交消息。进程、锁或 thread 身份变化时明确拒绝，不删除锁、不改写 session 文件。
 - 多 bot Codex 数据目录默认使用真实 `@Telegram用户名`。迁移既有数字目录并保留兼容链接，共享终端的 bot 使用同名目录入口指向原 home。
 - 并行读取用户名，断网重启沿用已有名称；媒体发送通过稳定身份记录保持正确路由，目录冲突明确报错。
+- auth 问号、修复和删除操作会重新读取最新状态；安全同步文案区分“已发送”和“远端已导入”，状态更新未生效时不再报告虚假成功。
 
 ### English
+- Bound Telegram, Codex RPC, and WebSocket waits so unstable proxy or network links fail explicitly instead of hanging. Active-session disconnects, recovery failures, and writer conflicts now include actionable recovery guidance without replaying ambiguous requests.
+- Added cancel buttons to login, auth-add, and auth-repair flows. Local state is released even when cancellation fails, while stale or foreign-chat buttons cannot cancel the current login.
+- Added `/cli` and `foxclaw resume` to connect a terminal to the bridge's Codex app-server. `/watch` remains read-only and external CLI prompts use Codex's native thread queue.
+- Added `/takeover --force <message>` for a trusted Telegram user to confirm a precise local interactive-CLI handoff. FoxClaw revalidates process, lock, and thread identity, verifies lock release, resumes the original thread, and only then submits the prompt; it never deletes locks or edits session files.
 - Name multi-bot Codex homes after verified Telegram usernames, migrating numeric directories with compatibility links and preserving shared terminal homes.
 - Resolve usernames in parallel, reuse stored paths offline, preserve media routing through stable identity metadata, and reject directory conflicts.
-
-## 0.7.3-dev.1 - 2026-09-05 (local preview)
-
-### 中文
-- 为 Codex RPC、WebSocket 握手和 Telegram 请求增加有界等待；重连失败保留仍存活的服务记录，避免遗留持锁进程。断连与恢复失败会向活动会话明确提示。
-- 登录增加取消按钮；取消失败释放本地流程，处理完成通知竞态与旧按钮，接管等待超时不再堵住后续命令。
-- 新增 `foxclaw resume [thread-id] [--bot-id <bot-id>]` 和 `/cli`，从终端连接桥的同一 Codex 服务；重连恢复不再 resume 外部观察线程。
-- 旧授权问号和修复按钮重新读取最新状态；同步文案区分发送与导入，状态更新不匹配时明确记录 skipped。
-
-### English
-- Bound Codex RPC, WebSocket handshake, and Telegram request waits; preserve unreachable live server records and report active-session disconnect/recovery failures.
-- Add login cancel buttons and clean up local cancellation state, including completion races and stale buttons. Time out takeover waits without submitting a delayed replacement.
-- Add `foxclaw resume` and `/cli` to connect a terminal to the bridge's Codex server; do not resume externally observed threads during recovery.
-- Recheck stale auth repair actions and distinguish sync dispatch from remote import and skipped state changes.
+- Auth repair/question-mark/delete actions now refresh current state first. Safe-sync wording distinguishes dispatch from confirmed remote import, and unapplied state changes no longer report false success.
 
 ## 0.7.2 - 2026-08-30
 

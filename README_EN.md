@@ -30,7 +30,7 @@ No public server required. FoxClaw runs on your own computer, talks to `codex ap
 
 ![FoxClaw Telegram feature preview](./docs/assets/telegram-preview-en.svg)
 
-FoxClaw is more than message forwarding. It provides Telegram panels for Codex workflows: `/setup` adjusts model, reasoning, Fast tier, access, and Agent/Plan mode; `/auth` manages multiple Codex auth candidates and rotates them on usage limits; `/threads`, `/watch`, and approval buttons handle thread switching, progress monitoring, and permission requests.
+FoxClaw is more than message forwarding. It provides Telegram panels for Codex workflows: `/setup` adjusts model, reasoning, Fast tier, access, and Agent/Plan mode; `/auth` manages multiple Codex auth candidates and rotates them on usage limits; `/threads`, `/watch`, and approval buttons handle thread switching, progress monitoring, and permission requests. If a local interactive Codex CLI is stuck while holding a thread, the trusted Telegram user can use `/takeover --force <message>`, verify its PID and working directory, and explicitly confirm a safe handoff to the bridge.
 
 ## Start Here
 
