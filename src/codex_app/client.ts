@@ -148,6 +148,7 @@ export class CodexAppClient extends EventEmitter {
   private port: number | null = null;
   private connected = false;
   private userAgent: string | null = null;
+  private readonly requestTimeoutMs = 30_000;
 
   constructor(
     private readonly codexCliBin: string,
@@ -764,6 +765,9 @@ export class CodexAppClient extends EventEmitter {
         port: state.port,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (isProcessAlive(state.pid)) {
+        throw new Error(`Managed Codex app-server pid ${state.pid} is alive but unreachable; retry the connection or explicitly restart it.`, { cause: error });
+      }
       this.clearServerStateForPid(state.pid);
       return false;
     }
@@ -776,11 +780,18 @@ export class CodexAppClient extends EventEmitter {
       try {
         await new Promise<void>((resolve, reject) => {
           const ws = new WebSocket(url);
+          const timer = setTimeout(() => {
+            ws.close();
+            reject(new Error('WebSocket handshake timed out'));
+          }, 2000);
           const onError = (event: Event) => {
+            clearTimeout(timer);
             ws.close();
             reject(new Error(`WebSocket connect failed: ${String(event.type)}`));
           };
           ws.addEventListener('open', () => {
+            clearTimeout(timer);
+            ws.removeEventListener('error', onError);
             this.socket = ws;
             this.connected = true;
             ws.addEventListener('message', message => this.handleMessage(String(message.data)));
@@ -796,7 +807,12 @@ export class CodexAppClient extends EventEmitter {
               });
             });
             ws.addEventListener('error', err => {
-              this.logger.warn('codex.ws.error', String((err as ErrorEvent).message ?? 'unknown'));
+              this.logger.warn('codex.ws.error', { message: (err as ErrorEvent).message || 'WebSocket transport error', port: this.port });
+              if (this.socket === ws) {
+                this.socket = null;
+                ws.close();
+                this.handleDisconnect({ source: 'websocket-error', port: this.port });
+              }
             });
             resolve();
           }, { once: true });
@@ -838,8 +854,21 @@ export class CodexAppClient extends EventEmitter {
     }
     const id = String(++this.requestId);
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.send({ jsonrpc: '2.0', id, method, params });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        this.logger.warn('codex.request_timeout', { method, timeoutMs: this.requestTimeoutMs });
+        reject(new Error(`Codex request timed out: ${method}. The result is unknown; check /status or use foxclaw resume before retrying.`));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      try {
+        this.send({ jsonrpc: '2.0', id, method, params });
+      } catch (error) {
+        this.pending.get(id)?.reject(error);
+        this.pending.delete(id);
+      }
     });
   }
 
@@ -882,6 +911,7 @@ export class CodexAppClient extends EventEmitter {
   }
 
   private handleDisconnect(meta: Record<string, unknown>): void {
+    this.logger.warn('codex.disconnected', meta);
     if (this.connected) {
       this.connected = false;
     }
@@ -904,7 +934,7 @@ export class CodexAppClient extends EventEmitter {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
-        await this.startServer();
+        await this.start();
       } catch (error) {
         this.logger.error('codex.reconnect_failed', { error: String(error) });
         this.scheduleReconnect();

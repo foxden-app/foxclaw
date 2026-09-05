@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.7.3-dev.1 - 2026-09-05 (local preview)
+
+### 中文
+- 为 Codex RPC、WebSocket 握手和 Telegram 请求增加有界等待；重连失败保留仍存活的服务记录，避免遗留持锁进程。断连与恢复失败会向活动会话明确提示。
+- 登录增加取消按钮；取消失败释放本地流程，处理完成通知竞态与旧按钮，接管等待超时不再堵住后续命令。
+- 新增 `foxclaw resume [thread-id] [--bot-id <bot-id>]` 和 `/cli`，从终端连接桥的同一 Codex 服务；重连恢复不再 resume 外部观察线程。
+- 旧授权问号和修复按钮重新读取最新状态；同步文案区分发送与导入，状态更新不匹配时明确记录 skipped。
+
+### English
+- Bound Codex RPC, WebSocket handshake, and Telegram request waits; preserve unreachable live server records and report active-session disconnect/recovery failures.
+- Add login cancel buttons and clean up local cancellation state, including completion races and stale buttons. Time out takeover waits without submitting a delayed replacement.
+- Add `foxclaw resume` and `/cli` to connect a terminal to the bridge's Codex server; do not resume externally observed threads during recovery.
+- Recheck stale auth repair actions and distinguish sync dispatch from remote import and skipped state changes.
+
 ## 0.7.2 - 2026-08-30
 
 ### 中文

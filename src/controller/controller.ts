@@ -548,6 +548,8 @@ const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
   { key: 'quota', line: '/quota' },
   { key: 'update', line: '/update' },
   { key: 'login_device', line: '/login_device' },
+  { key: 'login_cancel', line: '/login_cancel' },
+  { key: 'cli', line: '/cli' },
   { key: 'threads_archived', line: '/threads archived [query]' },
   { key: 'open', line: '/open <n>' },
   { key: 'goal', line: '/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]' },
@@ -663,9 +665,7 @@ export class BridgeSessionCore {
       this.updateStatus();
     });
     this.bot.on('text', (event: TelegramTextEvent) => {
-      void this.withLock(event.scopeId, async () => this.handleText(event)).catch((error) => {
-        void this.handleAsyncError('telegram.text', error, event.scopeId);
-      });
+      this.dispatchInboundLikeTelegramText(event);
     });
     this.bot.on('callback', (event: TelegramCallbackEvent) => {
       void this.handleCallback(event).catch((error) => {
@@ -679,7 +679,14 @@ export class BridgeSessionCore {
    * (used by the Weixin adapter).
    */
   dispatchInboundLikeTelegramText(event: TelegramTextEvent): void {
-    void this.withLock(event.scopeId, async () => this.handleText(event)).catch((error) => {
+    const command = event.attachments.length === 0 ? parseCommand(event.text) : null;
+    const name = command?.name;
+    // Recovery commands must remain reachable while a normal command is waiting.
+    // handleText still performs normal addressing and authorization checks.
+    const urgent = name && (['status', 'cli', 'login_cancel', 'interrupt'].includes(name)
+      || (name === 'auth' && command?.args[0] === 'sync' && ['status', 'events', 'trace'].includes(command.args[1] ?? 'status')));
+    const task = urgent ? this.handleText(event) : this.withLock(event.scopeId, async () => this.handleText(event));
+    void task.catch((error) => {
       void this.handleAsyncError('channel.text', error, event.scopeId);
     });
   }
@@ -713,6 +720,15 @@ export class BridgeSessionCore {
       this.attachedThreads.clear();
       this.threadTokenUsageAlerts.clear();
       if (!this.stopping) {
+        if (!this.codexReconnectPending) {
+          for (const scopeId of new Set([...this.activeTurns.values()].filter(active => !active.isObserved).map(active => active.scopeId))) {
+            const locale = this.localeForChat(scopeId);
+            void this.sendMessage(scopeId, locale === 'zh'
+              ? 'Codex 连接中断，正在重连。任务结果尚未确认，请先用 /status 检查；也可用 /cli 从本机继续。'
+              : 'Codex disconnected; reconnecting. The task result is unconfirmed. Check /status or use /cli locally.')
+              .catch(error => this.logger.warn('codex.disconnect_notice_failed', { scopeId, error: toErrorMeta(error) }));
+          }
+        }
         this.codexReconnectPending = true;
         this.pauseAppSnapshotWatchers();
       }
@@ -1073,6 +1089,20 @@ export class BridgeSessionCore {
       }
       case 'login_cancel': {
         await this.handleLoginCancelCommand(scopeId, locale, args);
+        return;
+      }
+      case 'cli': {
+        const binding = this.store.getBinding(scopeId);
+        const server = this.app.getServerStatus();
+        if (!server.running || !server.port) {
+          await this.sendMessage(scopeId, locale === 'zh' ? 'Codex 服务不可用，请在本机检查 foxclaw status。' : 'Codex server unavailable. Check foxclaw status locally.');
+          return;
+        }
+        const threadArg = binding ? ` ${JSON.stringify(binding.threadId)}` : '';
+        await this.sendMessage(scopeId, (locale === 'zh'
+          ? '在运行桥的这台机器上执行，进入同一个 Codex 服务后可中断或继续会话：\n'
+          : 'Run on the bridge host to interrupt or continue in the same Codex server:\n')
+          + `codex resume --remote ws://127.0.0.1:${server.port}${threadArg}`);
         return;
       }
       case 'logout': {
@@ -1580,6 +1610,12 @@ export class BridgeSessionCore {
   private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
     const scopeId = event.scopeId;
     const locale = this.localeForChat(scopeId, event.languageCode);
+    const loginCancelMatch = /^login:cancel:(.+)$/.exec(event.data);
+    if (loginCancelMatch) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'button_cancel'));
+      await this.handleLoginCancelCommand(scopeId, locale, [loginCancelMatch[1]!]);
+      return;
+    }
     const interruptMatch = /^turn:interrupt:(.+)$/.exec(event.data);
     if (interruptMatch) {
       await this.handleTurnInterruptCallback(event, interruptMatch[1]!, locale);
@@ -4877,7 +4913,7 @@ export class BridgeSessionCore {
     }
 
     for (const active of [...this.activeTurns.values()]) {
-      if (recoveredScopes.has(active.scopeId) || !this.getActiveTurn(active.scopeId, active.turnId)) {
+      if (active.isObserved || recoveredScopes.has(active.scopeId) || !this.getActiveTurn(active.scopeId, active.turnId)) {
         continue;
       }
       try {
@@ -4889,6 +4925,10 @@ export class BridgeSessionCore {
           turnId: active.turnId,
           error: toErrorMeta(error),
         });
+        await this.sendMessage(active.scopeId, this.localeForChat(active.scopeId) === 'zh'
+          ? '连接已恢复，但无法确认原任务状态。任务未自动重发，请用 /cli 检查原会话后再继续。'
+          : 'Connected again, but the original task state could not be confirmed. It was not resent. Use /cli to inspect the session.')
+          .catch(notifyError => this.logger.warn('codex.recovery_notice_failed', { error: toErrorMeta(notifyError) }));
       }
     }
 
@@ -5327,7 +5367,19 @@ export class BridgeSessionCore {
         await this.requestInterrupt(active);
       }
       await this.sendMessage(scopeId, t(locale, 'interrupt_requested_waiting'));
-      await active.completion;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          active.completion,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(locale === 'zh'
+              ? '等待中断完成超时，尚未发送新任务。请用 /status 检查，或用 /cli 从终端恢复。'
+              : 'Interrupt confirmation timed out. No replacement task was sent. Check /status or use /cli to recover.')), 30_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
     }
 
     await this.startBoundTurnFromEvent(event, locale, nextPrompt);
@@ -6558,7 +6610,7 @@ export class BridgeSessionCore {
         t(locale, 'login_code', { value: login.userCode }),
         t(locale, 'login_id', { value: login.loginId }),
         t(locale, 'login_cancel_hint', { value: login.loginId }),
-      ].join('\n'));
+      ].join('\n'), this.loginCancelKeyboard(login.loginId, locale));
     } catch (error) {
       await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, state.currentTargetPath);
       throw error;
@@ -6606,7 +6658,7 @@ export class BridgeSessionCore {
         t(locale, 'login_code', { value: login.userCode }),
         t(locale, 'login_id', { value: login.loginId }),
         t(locale, 'login_cancel_hint', { value: login.loginId }),
-      ].join('\n'));
+      ].join('\n'), this.loginCancelKeyboard(login.loginId, locale));
     } catch (error) {
       await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, state.currentTargetPath);
       throw error;
@@ -6778,6 +6830,11 @@ export class BridgeSessionCore {
   }
 
   private async handleLoginDeviceCommand(scopeId: string, locale: AppLocale): Promise<void> {
+    const pendingLoginId = this.pendingLoginsByScope.get(scopeId);
+    if (pendingLoginId) {
+      await this.sendMessage(scopeId, t(locale, 'login_cancel_hint', { value: pendingLoginId }), this.loginCancelKeyboard(pendingLoginId, locale));
+      return;
+    }
     const login = await this.app.startDeviceLogin();
     const oldLoginId = this.pendingLoginsByScope.get(scopeId);
     if (oldLoginId) {
@@ -6792,23 +6849,40 @@ export class BridgeSessionCore {
       t(locale, 'login_code', { value: login.userCode }),
       t(locale, 'login_id', { value: login.loginId }),
       t(locale, 'login_cancel_hint', { value: login.loginId }),
-    ].join('\n'));
+    ].join('\n'), this.loginCancelKeyboard(login.loginId, locale));
+  }
+
+  private loginCancelKeyboard(loginId: string, locale: AppLocale): Array<Array<{ text: string; callback_data: string }>> {
+    return [[{ text: t(locale, 'button_cancel'), callback_data: `login:cancel:${loginId}` }]];
   }
 
   private async handleLoginCancelCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const loginId = args[0]?.trim() || this.pendingLoginsByScope.get(scopeId) || null;
-    if (!loginId) {
+    if (!loginId || this.pendingLoginsByScope.get(scopeId) !== loginId) {
       await this.sendMessage(scopeId, t(locale, 'login_cancel_no_pending'));
       return;
     }
     const pendingAuthAdd = this.pendingAuthAddsByLoginId.get(loginId) ?? null;
-    await this.app.cancelLogin(loginId);
+    // Claim cancellation before awaiting RPC: completion notifications may arrive first.
     this.pendingLoginsByScope.delete(scopeId);
     this.pendingLoginScopesById.delete(loginId);
     this.pendingAuthAddsByLoginId.delete(loginId);
+    let cancelError: unknown;
+    try {
+      await this.app.cancelLogin(loginId);
+    } catch (error) {
+      cancelError = error;
+      this.logger.warn('codex.login_cancel_failed', { error: toErrorMeta(error) });
+    }
     if (pendingAuthAdd) {
       await this.restorePendingAuthAdd(pendingAuthAdd);
       await this.sendMessage(scopeId, t(locale, 'auth_add_cancelled'));
+      return;
+    }
+    if (cancelError) {
+      await this.sendMessage(scopeId, locale === 'zh'
+        ? '已退出本地登录流程，但未能确认服务端取消。请勿继续使用旧验证码；可重新登录或用 /codex_restart 重置登录服务。'
+        : 'Local login flow cleared, but server cancellation is unconfirmed. Do not use the old code; start a new login or use /codex_restart.');
       return;
     }
     await this.sendMessage(scopeId, t(locale, 'login_cancelled'));
@@ -7474,6 +7548,27 @@ export class BridgeSessionCore {
     }
   }
 
+  private async refreshRepairedAuthChoice(
+    event: TelegramCallbackEvent,
+    record: PendingAuthChoiceList,
+    candidateName: string,
+    locale: AppLocale,
+  ): Promise<boolean> {
+    const state = await this.listCodexAuthState();
+    if (state.candidates.find(candidate => candidate.name === candidateName)?.state === 'needs_repair') return false;
+    record.candidates = state.candidates;
+    record.createdAt = Date.now();
+    clampCodexAuthListOffset(record);
+    await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh'
+      ? '授权状态已变化，已刷新面板。' : 'Auth state changed; panel refreshed.');
+    if (record.messageId !== null) {
+      await this.editAuthPanelMessage(event.scopeId, record.messageId,
+        renderAuthListMessage(locale, state, this.authDisplayBotLabel(), parseWeixinBridgeScope(event.scopeId) !== null, record),
+        authChoiceKeyboard(locale, record));
+    }
+    return true;
+  }
+
   private async handleAuthRepairMenuCallback(
     event: TelegramCallbackEvent,
     localId: string,
@@ -7494,6 +7589,7 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
+    if (await this.refreshRepairedAuthChoice(event, record, candidate.name, locale)) return;
     await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'auth_repair_actions_short'));
     if (record.messageId !== null) {
       await this.editAuthPanelMessage(
@@ -7526,6 +7622,7 @@ export class BridgeSessionCore {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
+    if (action !== 'cancel' && await this.refreshRepairedAuthChoice(event, record, candidate.name, locale)) return;
     if (action === 'cancel') {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
       const state = await this.listCodexAuthState();

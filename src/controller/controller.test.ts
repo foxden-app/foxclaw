@@ -2532,7 +2532,7 @@ test('/auth panel safe sync runs the full cluster audit', async (t) => {
   await (rig.controller as any).handleCallback(createCallback(`auth:${list.localId}:safe_sync`, 1));
 
   assert.deepEqual(events, ['audit']);
-  assert.equal(rig.callbackAnswers.at(-1), 'Auditing every node, selecting the newest valid auth, and safely synchronizing the cluster...');
+  assert.match(rig.callbackAnswers.at(-1)!, /Auditing every node.*5 minutes/);
   assert.match(rig.editedRichMessages[0]!, /Auditing every node/);
   assert.match(rig.editedRichMessages.at(-1)!, /Cluster auth check<\/td><td>nodes 2\/2/);
   assert.match(rig.editedRichMessages.at(-1)!, /Codex auth files:/);
@@ -2591,8 +2591,8 @@ test('/auth panel can run a cluster audit and keep the rich panel interactive', 
     'push',
     'release:lease-audit',
   ]);
-  assert.equal(rig.callbackAnswers.at(-1), '正在自检全部节点、选择最新有效 auth，并安全同步整个集群...');
-  assert.match(rig.editedRichMessages[0]!, /正在自检全部节点/);
+  assert.match(rig.callbackAnswers.at(-1)!, /正在自检各节点.*5 分钟/);
+  assert.match(rig.editedRichMessages[0]!, /正在自检各节点/);
   assert.match(rig.editedRichMessages.at(-1)!, /集群 auth 自检：节点 3\/3/);
   assert.match(rig.editedRichMessages.at(-1)!, /多节点确认无效，已标记问号等待人工处理：auth\.json_b/);
   assert.deepEqual(rig.editedRichKeyboards.at(-1)?.at(-1), [
@@ -3043,6 +3043,31 @@ test('/auth panel can start device login from an inline action', async (t) => {
 
   assert.deepEqual(events, ['sync:default:auth.json_a']);
   assert.match(rig.sentMessages.at(-1)!, /Login completed/);
+});
+
+test('stale auth repair buttons refresh a repaired candidate without starting login or deleting it', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  installTempAuthFiles(t, rig.tempDir);
+  rig.store.setCodexAuthCandidateState('auth.json_b', 'needs_repair');
+  const controller = rig.controller as any;
+  await controller.handleCommand(createEvent('/auth'), 'en', 'auth', []);
+  const list = [...controller.pendingAuthChoiceLists.values()][0] as any;
+  const index = list.candidates.findIndex((candidate: any) => candidate.name === 'auth.json_b');
+  const staleCandidates = list.candidates;
+  rig.store.setCodexAuthCandidateState('auth.json_b', 'active');
+  let logins = 0;
+  let deletions = 0;
+  controller.startAuthRepairLogin = async () => { logins += 1; };
+  controller.deleteCodexAuthCandidate = async () => { deletions += 1; };
+  for (const action of ['repair', 'repair_login', 'repair_delete']) {
+    list.candidates = staleCandidates;
+    await controller.handleCallback(createCallback(`auth:${list.localId}:${action}:${index}`, 1));
+    assert.match(rig.callbackAnswers.at(-1)!, /panel refreshed/);
+    assert.equal(list.candidates.find((candidate: any) => candidate.name === 'auth.json_b').state, 'active');
+  }
+  assert.equal(logins, 0);
+  assert.equal(deletions, 0);
 });
 
 test('/auth marks repair candidates with a question action and can repair login', async (t) => {
@@ -4715,6 +4740,77 @@ test('device login, cancel, and logout commands call app-server auth APIs', asyn
   assert.deepEqual(calls, ['start', 'cancel:login-1', 'logout']);
   assert.match(rig.sentMessages[0]!, /enable device code authorization for Codex/);
   assert.match(rig.sentMessages[0]!, /CODE-1/);
+});
+
+test('login cancel button clears state even when RPC fails and ignores stale or foreign buttons', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const controller = rig.controller as any;
+  await controller.handleLoginDeviceCommand('telegram:99::root', 'en');
+  const loginId = controller.pendingLoginsByScope.get('telegram:99::root');
+  assert.equal(rig.sentKeyboards.at(-1)?.[0]?.[0]?.callback_data, `login:cancel:${loginId}`);
+  let calls = 0;
+  rig.app.cancelLogin = async () => { calls += 1; throw new Error('disconnected'); };
+  await controller.handleLoginCancelCommand('telegram:other::root', 'en', [loginId]);
+  assert.equal(calls, 0);
+  await controller.handleCallback(createCallback(`login:cancel:${loginId}`));
+  assert.equal(calls, 1);
+  assert.equal(controller.pendingLoginsByScope.size, 0);
+  assert.equal(controller.pendingLoginScopesById.size, 0);
+  assert.match(rig.sentMessages.at(-1)!, /unconfirmed|未能确认/);
+  await controller.handleCallback(createCallback(`login:cancel:${loginId}`));
+  assert.equal(calls, 1);
+});
+
+test('login cancellation claims state before the server completion notification', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const controller = rig.controller as any;
+  await controller.handleLoginDeviceCommand('telegram:99::root', 'en');
+  const loginId = controller.pendingLoginsByScope.get('telegram:99::root');
+  rig.app.cancelLogin = async () => {
+    await controller.handleAccountLoginCompleted({ loginId, success: false, error: 'cancelled' });
+  };
+  await controller.handleLoginCancelCommand('telegram:99::root', 'en', []);
+  assert.equal(rig.sentMessages.length, 2);
+  assert.match(rig.sentMessages.at(-1)!, /cancelled/i);
+});
+
+test('takeover timeout releases the scope lock without starting a replacement later', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const controller = rig.controller as any;
+  const active = controller.createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0);
+  setActiveTurnForTest(rig, active);
+  controller.requestInterrupt = async () => {};
+  let starts = 0;
+  controller.startBoundTurnFromEvent = async () => { starts += 1; };
+  const task = controller.withLock('telegram:99::root', () => controller.handleTakeoverCommand(createEvent('/takeover next'), 'en', ['next']));
+  const rejected = assert.rejects(task, /Interrupt confirmation timed out/);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  t.mock.timers.tick(30_000);
+  await rejected;
+  let nextRan = false;
+  await controller.withLock('telegram:99::root', async () => { nextRan = true; });
+  active.resolver();
+  await Promise.resolve();
+  assert.equal(nextRan, true);
+  assert.equal(starts, 0);
+});
+
+test('reconnect never resumes an externally observed CLI turn', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const controller = rig.controller as any;
+  const active = controller.createActiveTurnState('telegram:99::root', '99', 'private', null, 'thread-1', 'turn-1', 0, true);
+  setActiveTurnForTest(rig, active);
+  let resumes = 0;
+  rig.app.resumeThread = async () => { resumes += 1; throw new Error('writer acquired'); };
+  controller.recoverQueuedTurns = async () => {};
+  await controller.recoverAfterCodexReconnect();
+  assert.equal(resumes, 0);
+  assert.equal(getActiveTurnForTest(rig), active);
 });
 
 test('permissions approval server request returns granted permissions', async (t) => {

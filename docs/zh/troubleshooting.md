@@ -21,6 +21,18 @@ launchctl print "gui/$(id -u)/app.foxden.foxclaw"
 tail -f ~/.foxclaw/logs/launchd.err.log ~/.foxclaw/logs/service.log
 ```
 
+## Telegram 无响应、登录取消与 CLI 恢复
+
+Codex RPC 等待上限为 30 秒；超时代表结果未确认，不会自动重发原任务。先用 `/status` 检查。`/status`、`/cli`、`/interrupt`、`/login_cancel` 和 `/auth sync status` 不会排在普通消息的等待队列后面。网络完全不可用时 Telegram 无法送达错误提示，改用本机终端。
+
+在运行桥的机器上执行 `foxclaw resume <thread-id>`，CLI 会连接桥正在使用的 Codex app-server。省略 thread-id 会打开选择器。多服务时用 `--bot-id <bot-id>` 指定 `foxclaw status --json` 中的 bot。Telegram 的 `/cli` 也能显示当前线程的直接连接命令。该入口已在 Codex 0.153.4 的 CLI 参数中确认支持。
+
+普通 `codex resume` 会启动另一个服务，可能遭遇 `already has an active writer`。同一服务连接可避免争用写入锁。`/watch` 对独立 CLI 仍是只读观察；不要删除 writer lock 文件来强抢线程。`/takeover` 等待中断确认超过 30 秒就退出，不会在稍后继续发送替换任务。
+
+设备登录、新增授权和修复登录均提供取消按钮，也可输入 `/login_cancel`。取消按钮只作用于对应会话当前的登录。服务端取消失败时会明确提示“本地流程已退出、远端取消未确认”，不要再使用旧验证码。
+
+安全同步显示“已发送”并不等于对端已导入。每个桥进程只配置一个同步联系人；同一进程里的两个 bot 不应当作两个 peer。多 bot 当前使用配置列表中的第一个 bot 回复同步请求。节点未回应时，自检和复核各自最多等待 5 分钟。查看 `/auth sync events <候选名>` 与对端 `/auth`；旧问号按钮会重新读取修复后的状态。
+
 ## Doctor 检查失败
 
 | 现象 | 含义 | 处理方式 |

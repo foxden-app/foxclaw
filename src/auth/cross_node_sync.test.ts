@@ -296,6 +296,22 @@ test('CrossNodeAuthSync testPeers waits for peer pong replies', async () => {
   }
 });
 
+test('audit state reports skipped when the local candidate no longer matches', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-audit-state-'));
+  try {
+    const service = new CrossNodeAuthSync(config(root, 'node-a', ['@botB']), loggerStub as any,
+      { send: async () => {} }, callbacks({ markCandidateState: async () => false }));
+    await service.initialize();
+    await (service as any).applyAuditState({ kind: 'audit.state', requestId: 'audit-1',
+      candidateName: 'auth.json_work', state: 'active', accountId: 'acct-1', quotaIdentityId: null, maxLastRefreshMs: 1 });
+    const event = service.getStatus().recentEvents.at(-1);
+    assert.equal(event?.stage, 'skipped');
+    assert.match(event?.detail ?? '', /did not match/);
+  } finally {
+    await removeTempTree(root);
+  }
+});
+
 test('CrossNodeAuthSync cluster audit adopts and distributes the newest valid candidate', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-auth-sync-audit-valid-'));
   try {

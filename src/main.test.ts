@@ -86,6 +86,30 @@ test('CLI unknown commands show usage instead of starting the bridge', () => {
   assert.doesNotMatch(result.stderr + result.stdout, /Lock already held/);
 });
 
+test('CLI resume uses the selected live bridge server and rejects ambiguous routing', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-resume-'));
+  try {
+    const statusPath = path.join(tempDir, 'status.json');
+    const server = { running: true, managed: true, pid: process.pid, port: 4567 };
+    fs.writeFileSync(statusPath, JSON.stringify({ codexAppServer: server, bots: [
+      { id: 'bot1', codexAppServer: server },
+      { id: 'bot2', codexAppServer: { ...server, port: 5678 } },
+    ] }));
+    const env = { STATUS_PATH: statusPath, CODEX_CLI_BIN: '/bin/echo' };
+    const ambiguous = runFoxclawCliWithEnv(env, 'resume', 'thread-1');
+    assert.equal(ambiguous.status, 1);
+    assert.match(ambiguous.stderr, /Multiple Codex servers/);
+    const resumed = runFoxclawCliWithEnv(env, 'resume', 'thread-1', '--bot-id', 'bot2');
+    assert.equal(resumed.status, 0);
+    assert.match(resumed.stdout, /resume --remote ws:\/\/127.0.0.1:5678 thread-1/);
+    const missing = runFoxclawCliWithEnv(env, 'resume', '--bot-id', 'missing');
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /No matching runtime/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test('CLI doctor rejects an invalid explicitly configured OpenCode binary', () => {
   const result = runFoxclawCliWithEnv({
     CODEX_CLI_BIN: process.execPath,

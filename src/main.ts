@@ -313,6 +313,35 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'resume') {
+    const args = process.argv.slice(3);
+    const botIndex = args.indexOf('--bot-id');
+    const botId = botIndex >= 0 ? args[botIndex + 1] : null;
+    if (botIndex >= 0) args.splice(botIndex, 2);
+    if ((botIndex >= 0 && !botId) || args.length > 1 || args[0]?.startsWith('-')) {
+      throw new Error('Usage: foxclaw resume [thread-id] [--bot-id <bot-id>]');
+    }
+    const status = readRuntimeStatus(process.env.STATUS_PATH || DEFAULT_STATUS_PATH);
+    const runtime = botId ? status?.bots?.find(bot => bot.id === botId) : status;
+    if (!runtime) throw new Error('No matching runtime status. Check foxclaw status.');
+    if (!botId && new Set(status?.bots?.map(bot => bot.codexAppServer?.port).filter(Boolean)).size > 1) {
+      throw new Error('Multiple Codex servers found. Select one with --bot-id from foxclaw status --json.');
+    }
+    const server = runtime.codexAppServer;
+    if (!server?.running || !server.pid || !server.port) {
+      throw new Error('Codex app-server is not running. Check foxclaw status.');
+    }
+    try { process.kill(server.pid, 0); } catch {
+      throw new Error('Codex app-server status is stale; the process has exited.');
+    }
+    const result = spawnSync(process.env.CODEX_CLI_BIN || 'codex', [
+      'resume', '--remote', `ws://127.0.0.1:${server.port}`, ...args,
+    ], { stdio: 'inherit' });
+    if (result.error) throw result.error;
+    process.exitCode = result.status ?? 1;
+    return;
+  }
+
   if (command === 'doctor') {
     const failed = !runDoctorChecks();
     process.exit(failed ? 1 : 0);
@@ -375,6 +404,7 @@ Usage:
   foxclaw init
   foxclaw doctor
   foxclaw status
+  foxclaw resume [thread-id] [--bot-id <bot-id>]
   foxclaw start|restart|stop
   foxclaw update
   foxclaw send-voice <path> [caption]

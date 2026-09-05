@@ -1126,11 +1126,11 @@ export class CrossNodeAuthSync {
     this.recordEvent({
       direction: 'local',
       kind: 'audit.state',
-      stage: message.state,
+      stage: applied ? message.state : 'skipped',
       peer: null,
       requestId: message.requestId,
       candidateName: message.candidateName,
-      detail: null,
+      detail: applied ? null : 'local candidate did not match the audited identity or refresh timestamp',
     });
   }
 

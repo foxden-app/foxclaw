@@ -30,7 +30,9 @@ export async function callTelegramApi<T>(botToken: string, method: string, body:
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(payload),
       },
+      signal: AbortSignal.timeout(telegramApiTimeoutMs(false)),
     }, (response) => {
+      response.on('error', reject);
       const chunks: Buffer[] = [];
       response.on('data', (chunk: Buffer | string) => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -85,7 +87,9 @@ export async function callTelegramMultipartApi<T>(
         'content-type': `multipart/form-data; boundary=${boundary}`,
         'content-length': payload.length,
       },
+      signal: AbortSignal.timeout(telegramApiTimeoutMs(true)),
     }, (response) => {
+      response.on('error', reject);
       const chunks: Buffer[] = [];
       response.on('data', (chunk: Buffer | string) => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));

@@ -2,7 +2,52 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
-import { buildCodexAppServerArgs, terminateManagedProcessGroup } from './client.js';
+import { buildCodexAppServerArgs, CodexAppClient, terminateManagedProcessGroup } from './client.js';
+
+function createRpcClient(): any {
+  const client = new CodexAppClient('codex', '', false, '', '', { warn() {} } as any) as any;
+  client.connected = true;
+  client.socket = { readyState: WebSocket.OPEN, send() {} };
+  return client;
+}
+
+test('RPC deadline frees pending requests without replay and ignores a late reply', async () => {
+  const client = createRpcClient();
+  client.requestTimeoutMs = 10;
+  let sends = 0;
+  client.socket.send = () => { sends += 1; };
+  await assert.rejects(client.request('turn/start', {}), /result is unknown/);
+  assert.equal(client.pending.size, 0);
+  client.handleMessage(JSON.stringify({ id: '1', result: { turn: { id: 'late' } } }));
+  assert.equal(sends, 1);
+  const next = client.request('thread/list', {});
+  client.handleMessage(JSON.stringify({ id: '2', result: { data: [] } }));
+  assert.deepEqual(await next, { data: [] });
+  assert.equal(client.pending.size, 0);
+});
+
+test('RPC send failure and disconnect clear all pending requests', async () => {
+  const client = createRpcClient();
+  client.socket.send = () => { throw new Error('send failed'); };
+  await assert.rejects(client.request('thread/list', {}), /send failed/);
+  assert.equal(client.pending.size, 0);
+  client.socket.send = () => {};
+  const pending = client.request('thread/list', {});
+  client.handleDisconnect({ source: 'test' });
+  await assert.rejects(pending, /disconnected/);
+  assert.equal(client.pending.size, 0);
+});
+
+test('failed attach preserves a live managed server and its writer ownership', async () => {
+  const client = createRpcClient();
+  client.readServerState = () => ({ pid: process.pid, port: 1234 });
+  client.connectWebSocket = async () => { throw new Error('offline'); };
+  client.socket.close = () => {};
+  let cleared = false;
+  client.clearServerStateForPid = () => { cleared = true; };
+  await assert.rejects(client.attachPersistedServer(), /alive but unreachable/);
+  assert.equal(cleared, false);
+});
 
 test('buildCodexAppServerArgs applies isolated auth storage override before listen address', () => {
   assert.deepEqual(
