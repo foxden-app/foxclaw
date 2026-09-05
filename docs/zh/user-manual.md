@@ -357,6 +357,14 @@ FoxClaw 的聊天是“绑定线程”的。你在手机上打开某个 Codex �
 
 旧版 Codex 没有这个队列接口，FoxClaw 会明确提示升级，不会退回到抢占 writer 或改写 session 文件。要让 Telegram 自己另行启动 turn，仍需先 `/unwatch`。
 
+### `/takeover --force <消息>`：从本机 CLI 强制交接
+
+遇到 `already has an active writer` 时，可发送 `/takeover --force 继续处理`，核对 thread、PID 和工作目录，再点击“确认强制接管”；也可点“取消”。确认仅 60 秒有效，并绑定发起用户和聊天。普通 `/watch`、`/queue` 和 `/takeover` 不会自动停止外部 CLI。
+
+仅支持 Linux/WSL，需 `python3` 3.9+ 和内核 pidfd 支持。只接受当前 bot 的 Codex home 中、同一系统用户的交互式 Codex CLI。拒绝 app-server、远程客户端、桥的祖先进程，以及同时持有其他 thread 锁的进程。确认后重新核实进程启动时间及锁身份，通过 pidfd 先发 SIGTERM，5 秒不退出再发 SIGKILL；检查锁释放后，才恢复原 thread 并提交指定消息。不会删除锁或修改 session 文件，不会自动重试提交。
+
+强停可能打断未完成任务，已启动的子命令可能继续运行，文件修改不会回滚。身份变化、锁未释放或恢复失败都会明确报错，不投递新任务。桥自己的旧待执行队列只在成功取得写入权后取消；原 CLI 的跨客户端队列不会被此功能清空。多线程 CLI 请在终端手动交接。
+
 ## 6. Codex 登录和 auth 轮转
 
 这是 FoxClaw 的特色功能。Codex 的登录状态通常保存在 `~/.codex/auth.json`。FoxClaw 把多个账号保存成候选文件，并通过切换 `auth.json` 指向哪个候选来换号。启用 `TG_BOT_TOKENS` 多 bot 模式后，默认每个 bot 使用独立 Codex home、独立 app-server 和独立当前候选，因此可以并行运行、单独切号；隔离 Telegram runtime 会强制使用文件凭据存储。已验证的登录/刷新凭据会安全镜像到其他 bot home，但不会共享 session。

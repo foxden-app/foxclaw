@@ -357,6 +357,14 @@ Watch mode mirrors live turn progress and approval requests. It still does not t
 
 Older Codex versions do not expose this queue API. FoxClaw reports the required upgrade instead of falling back to writer takeover or session-file mutation. Use `/unwatch` first only when you want Telegram to start a separate turn itself.
 
+### `/takeover --force <message>`: hand off a local CLI writer
+
+For `already has an active writer`, send `/takeover --force continue the task`, verify the thread, PID and working directory, then confirm or cancel. Confirmation is scoped to the requesting Telegram user/chat and expires after 60 seconds. Ordinary `/watch`, `/queue`, and `/takeover` never automatically stop an external CLI.
+
+Requires Linux/WSL, Python 3.9+ and kernel pidfd support. Only an interactive, same-OS-user Codex CLI holding the target bot home's thread lock is eligible. Servers, remote clients, bridge ancestors and processes holding other thread locks are refused. After revalidating process/lock identity, the helper sends SIGTERM via pidfd, escalating to SIGKILL after 5 seconds. Only after verifying lock release does the bridge resume the original thread and submit the prompt. It never deletes locks, edits session files, or retries submissions automatically.
+
+Unfinished work can be interrupted, child commands may remain running, and file edits are not rolled back. Identity changes, retained locks and resume failures are reported without submitting a new prompt. The bridge's old pending queue is cancelled only after acquiring the writer; the CLI cross-client queue is not cleared. Multi-thread CLI processes require manual handoff.
+
 ## 6. Codex Login And Auth Rotation
 
 This is a key FoxClaw feature. Codex auth is usually stored at `~/.codex/auth.json`. FoxClaw stores multiple accounts as candidate files and switches which candidate the active `auth.json` points to. In `TG_BOT_TOKENS` mode, each bot has an isolated Codex home, app-server, and current candidate by default, so bots can run and switch accounts independently; isolated Telegram runtimes force file-backed credential storage. Validated login/refresh credentials are safely mirrored between bot homes, but isolated sessions are never shared.

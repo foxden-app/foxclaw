@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { externalWriterControl, type ExternalWriterIdentity } from '../codex_app/force_takeover.js';
 import type { AppConfig } from '../config.js';
 import {
   TELEGRAM_VOICE_MAX_BYTES,
@@ -601,6 +602,12 @@ export class BridgeSessionCore {
   private pendingUserInputs = new Map<string, PendingUserInputRequest>();
   private pendingMcpElicitations = new Map<string, PendingMcpElicitation>();
   private pendingLoginsByScope = new Map<string, string>();
+  private externalWriterControl = externalWriterControl;
+  private forceTakeoversInProgress = new Set<string>();
+  private pendingForceTakeovers = new Map<string, {
+    id: string; expiresAt: number; event: TelegramTextEvent;
+    threadId: string; home: string; prompt: string; writer: ExternalWriterIdentity;
+  }>();
   private pendingLoginScopesById = new Map<string, string>();
   private pendingAuthAddsByLoginId = new Map<string, PendingAuthAdd>();
   private latestTurnDiffs = new Map<string, { scopeId: string; threadId: string; turnId: string; diff: string; updatedAt: number }>();
@@ -1610,6 +1617,15 @@ export class BridgeSessionCore {
   private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
     const scopeId = event.scopeId;
     const locale = this.localeForChat(scopeId, event.languageCode);
+    if (this.forceTakeoversInProgress.has(scopeId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'force_takeover_busy'));
+      return;
+    }
+    const forceTakeoverMatch = /^takeover:(confirm|cancel):([a-f0-9]+)$/.exec(event.data);
+    if (forceTakeoverMatch) {
+      await this.handleForceTakeoverCallback(event, locale, forceTakeoverMatch[1]!, forceTakeoverMatch[2]!);
+      return;
+    }
     const loginCancelMatch = /^login:cancel:(.+)$/.exec(event.data);
     if (loginCancelMatch) {
       await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'button_cancel'));
@@ -4660,7 +4676,9 @@ export class BridgeSessionCore {
     this.updateStatus();
     if (!scopeId) return;
     try {
-      await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'bridge_error', { error: formatUserError(error) }));
+      const locale = this.localeForChat(scopeId);
+      const hint = isThreadActiveWriterError(error) ? `\n${t(locale, 'force_takeover_hint')}` : '';
+      await this.sendMessage(scopeId, t(locale, 'bridge_error', { error: formatUserError(error) }) + hint);
     } catch (notifyError) {
       this.logger.error('telegram.error_notification_failed', { error: toErrorMeta(notifyError), scopeId });
     }
@@ -5349,6 +5367,10 @@ export class BridgeSessionCore {
   }
 
   private async handleTakeoverCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (args[0] === '--force') {
+      await this.prepareForceTakeover(event, locale, args.slice(1).join(' ').trim());
+      return;
+    }
     const scopeId = event.scopeId;
     const nextPrompt = args.join(' ').trim();
     if (!nextPrompt) {
@@ -5383,6 +5405,96 @@ export class BridgeSessionCore {
     }
 
     await this.startBoundTurnFromEvent(event, locale, nextPrompt);
+  }
+
+  private async prepareForceTakeover(event: TelegramTextEvent, locale: AppLocale, prompt: string): Promise<void> {
+    const scopeId = event.scopeId;
+    this.pendingForceTakeovers.delete(scopeId);
+    if (!prompt) {
+      await this.sendMessage(scopeId, t(locale, 'usage_takeover'));
+      return;
+    }
+    if (!scopeId.startsWith('telegram:') || event.userId !== this.config.tgAllowedUserId) {
+      await this.sendMessage(scopeId, t(locale, 'force_takeover_trusted_telegram_only'));
+      return;
+    }
+    const binding = this.store.getBinding(scopeId);
+    if (!binding) {
+      await this.sendMessage(scopeId, t(locale, 'watch_no_thread_bound'));
+      return;
+    }
+    const home = this.config.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+    try {
+      const writer = await this.externalWriterControl.inspect(home, binding.threadId);
+      const id = crypto.randomBytes(8).toString('hex');
+      this.pendingForceTakeovers.set(scopeId, {
+        id, expiresAt: Date.now() + 60_000, event, threadId: binding.threadId, home, prompt, writer,
+      });
+      await this.sendMessage(scopeId, t(locale, 'force_takeover_confirm', {
+        threadId: binding.threadId, pid: String(writer.pid), cwd: writer.cwd, prompt,
+      }), [[
+        { text: t(locale, 'button_force_takeover'), callback_data: `takeover:confirm:${id}` },
+        { text: t(locale, 'button_cancel'), callback_data: `takeover:cancel:${id}` },
+      ]]);
+    } catch (error) {
+      this.pendingForceTakeovers.delete(scopeId);
+      await this.sendMessage(scopeId, t(locale, 'force_takeover_failed', { error: formatUserError(error) }));
+    }
+  }
+
+  private async handleForceTakeoverCallback(
+    event: TelegramCallbackEvent, locale: AppLocale, action: string, id: string,
+  ): Promise<void> {
+    const scopeId = event.scopeId;
+    const pending = this.pendingForceTakeovers.get(scopeId);
+    if (!pending || pending.id !== id || pending.event.userId !== event.userId
+      || event.userId !== this.config.tgAllowedUserId || pending.expiresAt <= Date.now()) {
+      await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'force_takeover_expired'));
+      return;
+    }
+    // Claim before any await: duplicate callbacks cannot stop or submit twice.
+    this.pendingForceTakeovers.delete(scopeId);
+    await this.messaging.answerCallback(event.callbackQueryId, t(locale, action === 'cancel' ? 'button_cancel' : 'button_force_takeover'));
+    if (action === 'cancel') {
+      await this.sendMessage(scopeId, t(locale, 'force_takeover_cancelled'));
+      return;
+    }
+    await this.withLock(scopeId, async () => {
+      if (pending.expiresAt <= Date.now() || this.store.getBinding(scopeId)?.threadId !== pending.threadId) {
+        await this.sendMessage(scopeId, t(locale, 'force_takeover_expired'));
+        return;
+      }
+      if (this.externalAuthValidationInProgress) {
+        await this.sendMessage(scopeId, t(locale, 'auth_sync_validation_busy'));
+        return;
+      }
+      this.forceTakeoversInProgress.add(scopeId);
+      this.turnStartInProgress += 1;
+      try {
+        try {
+          await this.sendMessage(scopeId, t(locale, 'force_takeover_stopping', { pid: String(pending.writer.pid) }));
+          await this.externalWriterControl.stop(pending.home, pending.threadId, pending.writer);
+          this.logger.warn('codex.external_writer_stopped', { scopeId, threadId: pending.threadId, pid: pending.writer.pid });
+          await this.stopWatchingScopeThread(scopeId);
+          this.attachedThreads.delete(attachedThreadKey(scopeId, pending.threadId));
+          // Never replace a missing thread with an unrelated new conversation.
+          const binding = this.store.getBinding(scopeId);
+          if (binding?.threadId !== pending.threadId) throw new Error(t(locale, 'force_takeover_expired'));
+          await this.ensureThreadReady(scopeId, binding, { recoverMissingThread: false });
+        } catch (error) {
+          await this.sendMessage(scopeId, t(locale, 'force_takeover_failed', { error: formatUserError(error) }));
+          return;
+        }
+        this.store.cancelQueuedTurnInputs(scopeId);
+        await this.sendMessage(scopeId, t(locale, 'force_takeover_acquired', { threadId: pending.threadId }));
+        // Normal turn-start error handling preserves ambiguous submission failures;
+        // do not automatically retry a possibly accepted prompt.
+        await this.startBoundTurnFromEvent(pending.event, locale, pending.prompt);
+      } finally {
+        this.forceTakeoversInProgress.delete(scopeId);
+        this.turnStartInProgress -= 1;
+      }
+    });
   }
 
   private async handleQueueCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {

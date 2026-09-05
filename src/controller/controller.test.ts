@@ -681,6 +681,90 @@ test('takeover interrupts the active turn and starts a replacement turn after co
   assert.ok(rig.sentMessages.includes('Interrupt requested. Waiting for Codex to stop...'));
 });
 
+test('force takeover requires confirmation, stops once, then resumes the same thread before submitting', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const controller = rig.controller as any;
+  const scope = 'telegram:99::root';
+  rig.store.setBinding(scope, 'thread-1', rig.tempDir);
+  saveQueuedTurnForTest(rig, scope, 'old queued prompt');
+  const writer = { pid: 1234, startTime: '55', cwd: rig.tempDir };
+  const calls: string[] = [];
+  controller.externalWriterControl = {
+    inspect: async () => writer,
+    stop: async (_home: string, thread: string, expected: unknown) => {
+      assert.equal(expected, writer);
+      calls.push(`stop:${thread}`);
+    },
+  };
+  controller.stopWatchingScopeThread = async () => calls.push('unwatch');
+  controller.ensureThreadReady = async (_scope: string, binding: any, options: any) => {
+    assert.equal(options.recoverMissingThread, false);
+    calls.push(`resume:${binding.threadId}`);
+    return binding;
+  };
+  controller.startBoundTurnFromEvent = async (_event: unknown, _locale: string, prompt: string) => calls.push(`submit:${prompt}`);
+  await controller.handleCommand(createEvent('/takeover --force ship it'), 'en', 'takeover', ['--force', 'ship', 'it']);
+  assert.deepEqual(calls, []);
+  assert.equal(rig.store.countQueuedTurnInputs(scope), 1);
+  assert.match(rig.sentMessages.at(-1)!, /SIGTERM.*SIGKILL/);
+  const pending = controller.pendingForceTakeovers.get(scope);
+  await Promise.all([
+    controller.handleCallback(createCallback(`takeover:confirm:${pending.id}`)),
+    controller.handleCallback(createCallback(`takeover:confirm:${pending.id}`)),
+  ]);
+  assert.deepEqual(calls, ['stop:thread-1', 'unwatch', 'resume:thread-1', 'submit:ship it']);
+  assert.equal(rig.store.countQueuedTurnInputs(scope), 0);
+  assert.match(rig.sentMessages.at(-1)!, /Bridge acquired thread thread-1/);
+});
+
+for (const scenario of ['cancel', 'expired', 'changed-thread', 'wrong-user', 'wrong-scope', 'stop-failed', 'resume-failed']) {
+  test(`force takeover ${scenario} does not submit a prompt`, async (t) => {
+    const rig = createControllerRig();
+    t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+    const controller = rig.controller as any;
+    const scope = 'telegram:99::root';
+    rig.store.setBinding(scope, 'thread-1', rig.tempDir);
+    saveQueuedTurnForTest(rig, scope, 'preserve pending input');
+    let stops = 0;
+    let resumes = 0;
+    controller.externalWriterControl = {
+      inspect: async () => ({ pid: 1234, cwd: rig.tempDir }),
+      stop: async () => { stops++; if (scenario === 'stop-failed') throw new Error('Writer changed'); },
+    };
+    controller.stopWatchingScopeThread = async () => {};
+    controller.ensureThreadReady = async () => { resumes++; throw new Error('Resume failed'); };
+    controller.startBoundTurnFromEvent = async () => assert.fail('Must not submit');
+    await controller.handleCommand(createEvent('/takeover --force go'), 'en', 'takeover', ['--force', 'go']);
+    const pending = controller.pendingForceTakeovers.get(scope);
+    if (scenario === 'expired') pending.expiresAt = Date.now() - 1;
+    if (scenario === 'changed-thread') rig.store.setBinding(scope, 'thread-2', rig.tempDir);
+    const callback = createCallback(`takeover:${scenario === 'cancel' ? 'cancel' : 'confirm'}:${pending.id}`);
+    if (scenario === 'wrong-user') callback.userId = '43';
+    if (scenario === 'wrong-scope') callback.scopeId = 'telegram:100::root';
+    await controller.handleCallback(callback);
+    assert.equal(stops, ['stop-failed', 'resume-failed'].includes(scenario) ? 1 : 0);
+    assert.equal(resumes, scenario === 'resume-failed' ? 1 : 0);
+    assert.equal(rig.store.countQueuedTurnInputs(scope), 1);
+    if (scenario.endsWith('failed')) assert.match(rig.sentMessages.at(-1)!, /no new prompt was sent/);
+  });
+}
+
+test('force takeover rejects untrusted callers and inspection failure without preparing a confirmation', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const controller = rig.controller as any;
+  rig.store.setBinding('telegram:99::root', 'thread-1', rig.tempDir);
+  let inspections = 0;
+  controller.externalWriterControl = { inspect: async () => { inspections++; throw new Error('Not an interactive CLI'); } };
+  await controller.handleCommand({ ...createEvent('/takeover --force go'), userId: '43' }, 'en', 'takeover', ['--force', 'go']);
+  assert.equal(inspections, 0);
+  await controller.handleCommand(createEvent('/takeover --force go'), 'en', 'takeover', ['--force', 'go']);
+  assert.equal(inspections, 1);
+  assert.equal(controller.pendingForceTakeovers.size, 0);
+  assert.match(rig.sentMessages.at(-1)!, /Not an interactive CLI/);
+});
+
 test('queue stores the next prompt while a turn is active', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
