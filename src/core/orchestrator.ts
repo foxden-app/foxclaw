@@ -1094,9 +1094,10 @@ export class UnifiedChannelOrchestrator {
       ],
     ];
 
-    if (this.backends.size > 1) {
+    const allBackends = await this.listBackends();
+    if (allBackends.length > 1 || this.backendProvider) {
       keyboard.push([
-        { text: `🔌 切换后端 (${this.backends.size})`, callback_data: 'engine:setup:backend' },
+        { text: `🔌 切换后端 (${allBackends.length})`, callback_data: 'engine:setup:backend' },
       ]);
     }
 
@@ -1109,18 +1110,18 @@ export class UnifiedChannelOrchestrator {
     const isBoost = settings?.serviceTier === 'boost';
     const backendDesc = this.getBackendDescriptorForScope(scopeId);
     const adapter = backendDesc.adapter;
-    const hasMultipleBackends = this.backends.size > 1;
+    const allBackends = await this.listBackends();
 
     const text =
       locale === 'zh'
         ? `⚙️ **${adapter.name} 控制面板**\n\n` +
-          `• **当前引擎**: \`${backendDesc.id}\`${backendDesc.account ? ` (${backendDesc.account})` : ''}\n` +
+          `• **当前引擎**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
           `• **Boost 增强**: ${isBoost ? '🚀 已开启' : '⚪ 已关闭'}\n` +
           `• **运行中消息**: ${mode === 'steer' ? '⚡ 插话 (立即中断接管)' : '⏳ 排队 (完成后自动执行)'}\n\n` +
           `请选择要配置的项目：`
         : `⚙️ **${adapter.name} Setup Panel**\n\n` +
-          `• **Engine**: \`${backendDesc.id}\`${backendDesc.account ? ` (${backendDesc.account})` : ''}\n` +
+          `• **Engine**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
           `• **Boost**: ${isBoost ? '🚀 Enabled' : '⚪ Disabled'}\n` +
           `• **Active-Turn**: ${mode === 'steer' ? '⚡ Steer' : '⏳ Queue'}\n\n` +
@@ -1141,18 +1142,11 @@ export class UnifiedChannelOrchestrator {
         },
         { text: '✨ 新建会话', callback_data: 'engine:setup:new' },
       ],
+      [
+        { text: `🔌 切换后端运行环境 (${allBackends.length})`, callback_data: 'engine:setup:backend' },
+        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
+      ],
     ];
-
-    if (hasMultipleBackends) {
-      keyboard.push([
-        { text: `🔌 切换后端 (${this.backends.size})`, callback_data: 'engine:setup:backend' },
-        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
-      ]);
-    } else {
-      keyboard.push([
-        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
-      ]);
-    }
 
     if (this.customUi?.renderCustomSetupRows) {
       const customRows = await this.customUi.renderCustomSetupRows(scopeId, locale);

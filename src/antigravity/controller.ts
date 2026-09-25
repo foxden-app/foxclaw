@@ -358,6 +358,7 @@ export class AntigravityBridgeCore {
       ],
       [
         { text: '📁 会话历史', callback_data: `${AGY_SETUP_CALLBACK_PREFIX}threads` },
+        { text: '🔌 切换后端', callback_data: 'engine:setup:backend' },
       ],
     ];
   }
