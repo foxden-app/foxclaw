@@ -4,7 +4,7 @@
 
 **狸爪：一个更适配编程需求的移动端 Codex 控制器。**
 
-FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex 或 OpenCode，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，`codex app-server` / `opencode serve` 负责本地执行；你发任务、看进度、批审批、切线程，Agent 在电脑上继续写代码。
+FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex、OpenCode 或 Antigravity (AGY)，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，`codex app-server` / `opencode serve` / `agy` 负责本地执行；你发任务、看进度、批审批、切线程，Agent 在电脑上继续写代码。
 
 这适合你离开办公桌去吃饭、在旅途中、在跑步机上，或者陪小孩逛公园的时候继续工作。人可以离开电脑，Codex 不必停；它会把关键进展、错误、审批请求和最终结果同步回手机。
 
@@ -135,6 +135,26 @@ OPENCODE_CLI_BIN=/absolute/path/to/opencode
 OpenCode Bot 保留与 Codex Bot 相同的主要操作习惯：直接发消息或附件、`/new`、`/threads` + `/open <编号>`、`/watch`、同消息内刷新的 `/setup`、Provider → Model 两层模型选择、variant、Agent/单次 Plan、三档权限、运行中 `/steer`/`/queue`/`/takeover`、流式合并、工具进度、审批按钮和问题选项。`/undo`/`/redo`、`/review` 与归档使用 OpenCode 原生 API；`/apps` 对应 MCP，Plugins、Hooks、Features 和语音入口也保持可用。Codex 账户、配额、Goal、Remote 和 Fast service tier 没有 OpenCode serve 等价 API，保留菜单入口并明确说明替代操作。
 
 OpenCode 自身的 Provider 登录仍在本机终端完成，例如 `opencode auth`。运行 `foxclaw doctor` 会在配置了 OpenCode Bot 时额外检查 OpenCode CLI 和 token 隔离。
+
+### Antigravity (AGY) 独立 Bot
+
+如果你使用 Google Antigravity，只需在 `@BotFather` 处再创建一个独立 Bot，并在 `~/.foxclaw/.env` 中配置：
+
+```dotenv
+ANTIGRAVITY_BOT_TOKEN=8308303236:AAFZ32Pus2wrzpRq7-Bp2JQMt7lsrt5kKpo
+# 可选；默认为 PATH 中的 agy
+ANTIGRAVITY_CLI_BIN=/home/wuya/.gemini/antigravity-cli/bin/agy
+# 可选；默认 gemini-3.8-flash-high
+ANTIGRAVITY_DEFAULT_MODEL=gemini-3.8-flash-high
+```
+
+Antigravity Bot 保留与 Codex / OpenCode 对齐的高频操作习惯：
+- **消息交互与流式思考**：直接向机器人发送文本或任务，支持 700ms 节流流式输出与思考过程实时显示。
+- **消息折叠与工具进度**：执行过程中的工具调用与历史执行细节自动通过 Telegram 可折叠引用块（`<blockquote expandable>`）折叠收起，避免刷屏；输出超长文本自动按限制无损分段。
+- **`/setup` 控制面板**：在同一消息内通过内联按钮原地切换模型、思考深度（Effort）、账号与会话。
+- **`/threads` 与 `/open <编号|ID>`**：直接读取 `conversation_summaries.db` 列出近期历史会话并选定绑定，无缝继续上下文；发送 `/new [目录]` 开启全新会话。
+- **`/auth` 多账号管理与自动轮换**：自动扫描 `antigravity-oauth-token_*` 候选池并即时解码 Google 邮箱，支持手动切换；遇到 429 或配额限制自动轮换下一个账号并重试任务。
+- **`/models` 与 `/effort`**：切换 Gemini 3.8/3.7/3.1、Claude Sonnet、Claude Opus 等模型与推理深度。
 
 ## 多账号切换
 

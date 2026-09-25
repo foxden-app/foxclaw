@@ -6,6 +6,7 @@ import {
   parseCodexApiProviders,
   selectDefaultRuntimeBotToken,
   validateOpencodeBotToken,
+  validateAntigravityBotToken,
 } from './config.js';
 
 test('selectDefaultRuntimeBotToken marks a token already present in TG_BOT_TOKENS', () => {
@@ -26,6 +27,19 @@ test('validateOpencodeBotToken requires an independent Telegram bot', () => {
   assert.throws(
     () => validateOpencodeBotToken('codex-b', ['codex-a', 'codex-b']),
     /must use a different bot/,
+  );
+});
+
+test('validateAntigravityBotToken requires an independent Telegram bot from Codex and OpenCode', () => {
+  assert.doesNotThrow(() => validateAntigravityBotToken('antigravity', ['codex-a', 'codex-b'], 'opencode'));
+  assert.doesNotThrow(() => validateAntigravityBotToken(null, ['codex-a'], null));
+  assert.throws(
+    () => validateAntigravityBotToken('codex-a', ['codex-a', 'codex-b'], 'opencode'),
+    /must use a different bot from TG_BOT_TOKENS/,
+  );
+  assert.throws(
+    () => validateAntigravityBotToken('opencode', ['codex-a', 'codex-b'], 'opencode'),
+    /must use a different bot from OPENCODE_BOT_TOKEN/,
   );
 });
 

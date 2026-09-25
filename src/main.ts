@@ -713,6 +713,7 @@ async function runServeCli(): Promise<void> {
     { AuthCandidateMirror },
     { CrossNodeAuthSync },
     { OpencodeTelegramRuntime },
+    { AntigravityTelegramRuntime },
   ] = await Promise.all([
     import('./channels/bridge_messaging_router.js'),
     import('./channels/telegram/telegram_messaging_port.js'),
@@ -729,6 +730,7 @@ async function runServeCli(): Promise<void> {
     import('./auth/mirror.js'),
     import('./auth/cross_node_sync.js'),
     import('./opencode/runtime.js'),
+    import('./antigravity/runtime.js'),
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
@@ -747,12 +749,18 @@ async function runServeCli(): Promise<void> {
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
+  let activeAntigravityRuntime: InstanceType<typeof AntigravityTelegramRuntime> | null = null;
   try {
     store = new BridgeStore(config.storePath);
     if (config.opencodeBotToken) {
       activeOpencodeRuntime = new OpencodeTelegramRuntime(config, store, logger);
       await activeOpencodeRuntime.start();
       logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
+    }
+    if (config.antigravityBotToken) {
+      activeAntigravityRuntime = new AntigravityTelegramRuntime(config, store, logger);
+      await activeAntigravityRuntime.start();
+      logger.info('antigravity.bridge.started', activeAntigravityRuntime.getRuntimeStatus());
     }
     if (config.tgMultiBotMode) {
       type RuntimeSeed = {
@@ -1134,6 +1142,7 @@ async function runServeCli(): Promise<void> {
         await activeWeixinCore?.stop();
         await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
         await activeOpencodeRuntime?.stop();
+        await activeAntigravityRuntime?.stop();
         writeAggregateStatus(false);
         await Promise.all(managedApps.map((app) => app.stop({ terminateServer: true }).catch((error) => {
           logger.warn('codex.app-server.stop_failed', { error: serializeError(error) });
@@ -1357,6 +1366,7 @@ async function runServeCli(): Promise<void> {
       await weixinAdapter?.stop();
       await telegram.stop();
       await activeOpencodeRuntime?.stop();
+      await activeAntigravityRuntime?.stop();
       writeRuntimeStatus(config.statusPath, {
         running: false,
         connected: false,
@@ -1391,6 +1401,7 @@ async function runServeCli(): Promise<void> {
     await activeWeixinCore?.stop().catch(() => {});
     await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
     await activeOpencodeRuntime?.stop().catch(() => {});
+    await activeAntigravityRuntime?.stop().catch(() => {});
     await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
     store?.close();
     processLock.release();
@@ -2220,6 +2231,18 @@ function runDoctorChecks(): boolean {
       process.env.TG_BOT_TOKEN ?? '',
     ].map((value) => value.trim()).filter(Boolean);
     checks.push(['OpenCode uses an independent Telegram bot', !codexTokens.includes(process.env.OPENCODE_BOT_TOKEN.trim())]);
+  }
+  if (process.env.ANTIGRAVITY_BOT_TOKEN?.trim()) {
+    const configuredAgyBin = process.env.ANTIGRAVITY_CLI_BIN;
+    checks.push(['antigravity (agy) cli available', hasConfiguredCommand(configuredAgyBin, 'agy')]);
+    const codexTokens = [
+      ...(process.env.TG_BOT_TOKENS ?? '').split(','),
+      process.env.TG_BOT_TOKEN ?? '',
+    ].map((value) => value.trim()).filter(Boolean);
+    checks.push(['Antigravity uses an independent Telegram bot', !codexTokens.includes(process.env.ANTIGRAVITY_BOT_TOKEN.trim())]);
+    const authDir = process.env.ANTIGRAVITY_AUTH_DIR || path.join(os.homedir(), '.gemini', 'antigravity-cli');
+    const hasAuth = fs.existsSync(path.join(authDir, 'antigravity-oauth-token'));
+    checks.push(['antigravity oauth token available', hasAuth]);
   }
   if (process.env.WX_ENABLED === 'true' || process.env.WX_ENABLED === '1') {
     const accountsDir = process.env.WEIXIN_ACCOUNTS_DIR || path.join(APP_HOME, 'weixin', 'accounts');

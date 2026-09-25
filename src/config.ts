@@ -15,6 +15,7 @@ export const DEFAULT_CODEX_APP_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime'
 export const DEFAULT_CODEX_APP_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'codex-app-server.log');
 export const DEFAULT_OPENCODE_SERVER_STATE_PATH = path.join(APP_HOME, 'runtime', 'opencode-server.json');
 export const DEFAULT_OPENCODE_SERVER_LOG_PATH = path.join(APP_HOME, 'logs', 'opencode-server.log');
+export const DEFAULT_ANTIGRAVITY_AUTH_DIR = path.join(os.homedir(), '.gemini', 'antigravity-cli');
 export const DEFAULT_CODEX_TELEGRAM_HOME = path.join(APP_HOME, 'codex', 'telegram');
 export const DEFAULT_AUTH_SYNC_STATE_PATH = path.join(APP_HOME, 'runtime', 'auth-sync.json');
 export const DEFAULT_AUTH_SYNC_TEMP_DIR = path.join(APP_HOME, 'runtime', 'auth-sync');
@@ -73,6 +74,10 @@ export interface AppConfig {
   opencodeServerPassword: string | null;
   opencodeServerStatePath: string;
   opencodeServerLogPath: string;
+  antigravityBotToken: string | null;
+  antigravityCliBin: string;
+  antigravityAuthDir: string;
+  antigravityDefaultModel: string;
   storePath: string;
   logLevel: LogLevel;
   defaultCwd: string;
@@ -146,6 +151,8 @@ export function loadConfig(): AppConfig {
   }
   const opencodeBotToken = optional('OPENCODE_BOT_TOKEN');
   validateOpencodeBotToken(opencodeBotToken, tgBotTokens);
+  const antigravityBotToken = optional('ANTIGRAVITY_BOT_TOKEN');
+  validateAntigravityBotToken(antigravityBotToken, tgBotTokens, opencodeBotToken);
   const config: AppConfig = {
     tgBotToken: tgBotTokens[0]!,
     tgBotTokens,
@@ -172,6 +179,10 @@ export function loadConfig(): AppConfig {
     opencodeServerPassword: optional('OPENCODE_SERVER_PASSWORD'),
     opencodeServerStatePath: process.env.OPENCODE_SERVER_STATE_PATH || DEFAULT_OPENCODE_SERVER_STATE_PATH,
     opencodeServerLogPath: process.env.OPENCODE_SERVER_LOG_PATH || DEFAULT_OPENCODE_SERVER_LOG_PATH,
+    antigravityBotToken,
+    antigravityCliBin: process.env.ANTIGRAVITY_CLI_BIN || resolveCommand('agy') || '/home/wuya/.local/bin/agy',
+    antigravityAuthDir: process.env.ANTIGRAVITY_AUTH_DIR?.trim() || DEFAULT_ANTIGRAVITY_AUTH_DIR,
+    antigravityDefaultModel: process.env.ANTIGRAVITY_DEFAULT_MODEL?.trim() || 'gemini-3.8-flash-high',
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
     logLevel: parseLogLevel(process.env.LOG_LEVEL || 'info'),
     defaultCwd: process.env.DEFAULT_CWD || process.cwd(),
@@ -249,6 +260,20 @@ export function validateOpencodeBotToken(token: string | null, codexTokens: read
   if (!token) return;
   if (codexTokens.includes(token)) {
     throw new Error('OPENCODE_BOT_TOKEN must use a different bot from TG_BOT_TOKENS/TG_BOT_TOKEN');
+  }
+}
+
+export function validateAntigravityBotToken(
+  token: string | null,
+  codexTokens: readonly string[],
+  opencodeToken: string | null,
+): void {
+  if (!token) return;
+  if (codexTokens.includes(token)) {
+    throw new Error('ANTIGRAVITY_BOT_TOKEN must use a different bot from TG_BOT_TOKENS/TG_BOT_TOKEN');
+  }
+  if (opencodeToken && token === opencodeToken) {
+    throw new Error('ANTIGRAVITY_BOT_TOKEN must use a different bot from OPENCODE_BOT_TOKEN');
   }
 }
 

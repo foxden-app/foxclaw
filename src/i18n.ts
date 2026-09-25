@@ -1590,3 +1590,45 @@ export function getOpencodeTelegramCommands(locale: AppLocale): Array<{ command:
       .map(([command, description]) => ({ command, description })),
   ];
 }
+
+export function getAntigravityTelegramCommands(locale: AppLocale): Array<{ command: string; description: string }> {
+  return locale === 'zh'
+    ? [
+        { command: 'help', description: '查看帮助' },
+        { command: 'setup', description: '控制面板与设置' },
+        { command: 'threads', description: '查看会话列表' },
+        { command: 'open', description: '打开指定会话' },
+        { command: 'watch', description: '只读观察会话' },
+        { command: 'unwatch', description: '停止观察' },
+        { command: 'new', description: '新建会话' },
+        { command: 'boost', description: '切换 Boost 深度推理模式' },
+        { command: 'models', description: '切换模型' },
+        { command: 'auth', description: '账号管理与切换' },
+        { command: 'login', description: '网页授权登录新账号' },
+        { command: 'active', description: '设置运行中消息模式 (插话/排队)' },
+        { command: 'queue', description: '排队下一轮回复' },
+        { command: 'steer', description: '插话并中断当前回复' },
+        { command: 'effort', description: '设置思考深度' },
+        { command: 'status', description: '运行状态' },
+        { command: 'interrupt', description: '打断当前任务' },
+      ]
+    : [
+        { command: 'help', description: 'Show commands' },
+        { command: 'setup', description: 'Control panel & settings' },
+        { command: 'threads', description: 'List conversations' },
+        { command: 'open', description: 'Open conversation' },
+        { command: 'watch', description: 'Watch conversation' },
+        { command: 'unwatch', description: 'Stop watching' },
+        { command: 'new', description: 'New session' },
+        { command: 'boost', description: 'Toggle Boost reasoning mode' },
+        { command: 'models', description: 'Select model' },
+        { command: 'auth', description: 'Manage accounts' },
+        { command: 'login', description: 'Sign in new Google account' },
+        { command: 'active', description: 'Active-turn message mode' },
+        { command: 'queue', description: 'Queue next prompt' },
+        { command: 'steer', description: 'Interrupt and steer turn' },
+        { command: 'effort', description: 'Reasoning effort' },
+        { command: 'status', description: 'Bridge status' },
+        { command: 'interrupt', description: 'Stop active turn' },
+      ];
+}

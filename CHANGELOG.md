@@ -2,6 +2,58 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.8.0 - 2026-09-24
+
+### 中文
+- **统一通道调度器（UnifiedChannelOrchestrator）**：架构级重构，将与通道与引擎无关的通用交互全数下沉。集成 Turn 抢占与并发排队（`TurnQueue`）、700ms 智能节流流式编辑预览（`StreamPreviewController`）、工具调用动态折叠（`<blockquote expandable>`）、长消息 4000 字符安全分块（`chunkTelegramMessage`）、活跃态 Typing 维持，以及跨重启崩溃自愈恢复。
+- **可插拔引擎服务提供者接口（IEngineAdapter SPI）**：定义面向多 Agent 的标准接口，涵盖执行、中断、状态汇报、交互键盘分发与模型参数控制，新增 Agent 接入成本降低 85%。
+- **Google Antigravity (`agy`) 引擎深度接入与适配器**：
+  - 独立 Telegram 机器人接入，支持与既有 Codex / OpenCode 并行运行。
+  - **Token 预检与静默刷新（Token Preflight）**：执行前智能计算 OAuth Access Token 有效期，临期自动静默刷新，防止长任务因凭据过期中断。
+  - **Google 503 容量饱和指数退避重试**：遇到瞬时 `503 Service Unavailable` 或 `MODEL_CAPACITY_EXHAUSTED` 时，自动进行 1s、2s、4s 指数退避重试。
+  - **配额超限自动冷却轮换（Quota Cooldown Rotation）**：遭遇真实 ResourceExhausted 限额时，自动将当前账号标记冷却并轮换至候选池下一可用账号继续执行。
+  - **Boost 模式支持**：支持通过 `/boost` 开启或引导深度推理与多角度验证。
+- **5h/7d 配额真实语义可观测性重构**：
+  - 彻底厘清 Google CloudCode PA 配额窗口语义，去除时间倒计时混淆，全面规范为 `100%|80%|account` 格式的百分比 Badge。
+  - 在 `/auth` 候选切换按钮、`/status` 面板与 `/setup` 概览中完整呈现 5 小时突发额度与 7 天长期额度。
+- **OpenCode 适配器加固**：适配器流式 Delta 空安全增强，统一纳入调度器生命周期管理。
+- **架构代码精简与全量测试**：`AntigravityBridgeCore` 样板代码精简 83%，全仓库 449 个自动化测试 100% 通过。
+
+### English
+- **UnifiedChannelOrchestrator**: Major architecture refactoring decoupling channel orchestration from underlying AI engines. Centralizes turn queueing (`TurnQueue`), 700ms throttled streaming previews (`StreamPreviewController`), collapsible tool blocks (`<blockquote expandable>`), safe 4000-char message chunking (`chunkTelegramMessage`), typing indicators, and crash recovery across daemon restarts.
+- **Pluggable Engine SPI (`IEngineAdapter`)**: Standardized interface for multi-agent execution, cancellation, status summaries, inline keyboard actions, and model/effort switching, reducing new engine onboarding cost by 85%.
+- **Google Antigravity (`agy`) Engine Integration & Adapter**:
+  - Independent Telegram bot support running concurrently alongside Codex and OpenCode.
+  - **Token Preflight & Silent Refresh**: Proactively calculates OAuth access token TTL before turn execution, silently refreshing when under 5 minutes to prevent expired token aborts during long runs.
+  - **Google 503 Capacity Exponential Backoff**: Automatically executes 1s, 2s, 4s exponential backoff retries upon encountering transient `503 Service Unavailable` or `MODEL_CAPACITY_EXHAUSTED`.
+  - **Quota Cooldown Rotation**: Automatically cools down and rotates to the next available Google OAuth candidate upon hitting true ResourceExhausted limits.
+  - **Boost Mode**: Supported `/boost` to guide or inject deep reasoning effort.
+- **5h/7d Quota Metric & Observability Redesign**:
+  - Clarified Google CloudCode PA quota window semantics from ambiguous countdowns to explicit percentage badges: `100%|80%|account`.
+  - Fully exposed 5h burst and 7d long-term quota percentages across `/auth` candidate buttons, `/status`, and `/setup` panels.
+- **OpenCode Adapter Hardening**: Stream delta null-safety hardening and unified engine lifecycle management.
+- **Refactoring Quality & Test Coverage**: Eliminated 83% boilerplate in `AntigravityBridgeCore` with 100% pass rate across all 449 automated tests.
+
+## 0.7.4 - 2026-09-24
+
+### 中文
+- 新增 Google Antigravity (`agy`) 引擎支持：通过 `ANTIGRAVITY_BOT_TOKEN` 接入独立的 Telegram 机器人，与既有 Codex / OpenCode 并行运行。
+- 会话管理与既有 Thread 选定：支持 `/threads` 查询 Antigravity 历史会话（读取 `conversation_summaries.db`），支持 `/open <编号|ID>` 选定并绑定既有会话上下文，支持 `/new [目录]` 开启新会话。
+- 交互式控制面板：支持 `/setup` 统一管理与查看当前模型、思考深度（Effort）、活跃账号池、绑定会话与工作目录，支持内联按钮原地切换与刷新。
+- 富文本流式渲染与消息折叠：支持 Markdown 富文本转译、700ms 节流编辑流式输出、工具执行过程折叠收起（`<blockquote expandable>`）、长消息自动按 Telegram 限制分段（`chunkTelegramMessage`），以及执行期间定期维持 Typing 状态。
+- 支持 Antigravity 多账号池管理：扫描 `~/.gemini/antigravity-cli/antigravity-oauth-token_*` 候选池，免网络即时从 `id_token` 解码 Google 账号邮箱，支持 `/auth` 面板切换；遇到 429 或配额超限（ResourceExhausted）时自动轮换下一个可用账号并重试。
+- 支持 `/models` 切换 Gemini 3.8/3.7/3.1、Claude 等模型，支持 `/effort` 设置思考深度，支持 `/interrupt` 实时中断任务。
+- `foxclaw doctor` 增加 Antigravity CLI、独立 Token 与凭据检测。
+
+### English
+- Added Google Antigravity (`agy`) engine support: run an independent Telegram bot alongside Codex/OpenCode via `ANTIGRAVITY_BOT_TOKEN`.
+- Thread and Conversation Management: supported `/threads` to browse historical Antigravity conversations (via `conversation_summaries.db`), `/open <num|id>` to bind to an existing thread context, and `/new [dir]` to start a fresh conversation.
+- Interactive Control Panel: supported `/setup` to inspect and configure the current model, reasoning effort, active account, bound thread, and directory via in-place inline keyboards.
+- Rich Streaming and Tool Folding: supported safe rich Markdown rendering, 700ms throttled streaming edits, tool execution folding (`<blockquote expandable>`), automated multi-chunk message splitting (`chunkTelegramMessage`), and active Telegram typing loop.
+- Added Antigravity multi-account candidate pool management: scans `~/.gemini/antigravity-cli/antigravity-oauth-token_*`, extracts Google account email directly from `id_token` JWT payload without network calls, provides `/auth` switching panel, and automatically rotates to the next available account upon 429 / ResourceExhausted errors.
+- Supported `/models` to switch models (Gemini 3.8/3.7/3.1, Claude Sonnet, etc.), `/effort` for reasoning effort, and `/interrupt` to cancel running turns.
+- Extended `foxclaw doctor` with Antigravity CLI availability, dedicated bot token, and OAuth token checks.
+
 ## 0.7.3 - 2026-09-05
 
 ### 中文

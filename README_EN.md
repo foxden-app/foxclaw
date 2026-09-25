@@ -4,7 +4,7 @@
 
 **A mobile Codex controller built for real programming workflows.**
 
-FoxClaw turns your phone into a practical web coding cockpit for local Codex or OpenCode. Telegram or Weixin handles the chat interface, `codex app-server` / `opencode serve` handles local execution, and you can send tasks, inspect progress, approve actions, switch sessions, and keep working without opening a laptop.
+FoxClaw turns your phone into a practical web coding cockpit for local Codex, OpenCode, or Antigravity (AGY). Telegram or Weixin handles the chat interface, `codex app-server` / `opencode serve` / `agy` handles local execution, and you can send tasks, inspect progress, approve actions, switch sessions, and keep working without opening a laptop.
 
 It is built for the moments when you leave your desk for lunch, commute, travel, use a treadmill, or take the kids to the park. You can step away from the keyboard while Codex keeps coding and sends progress, errors, approval requests, and final results back to your phone.
 
@@ -135,6 +135,26 @@ After FoxClaw restarts, this bot uses a managed `opencode serve` protected by Ba
 The OpenCode bot preserves the main Codex-bot habits: plain messages and attachments, `/new`, `/threads` plus numbered `/open`, `/watch`, an in-place `/setup` panel, a two-level Provider → Model selector, variants, Agent/one-shot Plan, three access presets, active-turn `/steer`/`queue`/`takeover`, merged streaming, tool progress, approval buttons, and question options. `/undo`/`redo`, `/review`, and archive operations use native OpenCode APIs; `/apps` maps to MCP, while Plugins, Hooks, Features, and voice entry points remain available. Codex account, quota, Goal, Remote, and Fast service-tier commands have no OpenCode serve equivalent, so their menu entries explain the limitation and replacement workflow.
 
 Provider authentication remains an OpenCode terminal operation, such as `opencode auth`. When an OpenCode bot is configured, `foxclaw doctor` also checks the OpenCode CLI and token isolation.
+
+### Antigravity (AGY) Dedicated Bot
+
+If you use Google Antigravity, create an independent bot with `@BotFather` and configure:
+
+```dotenv
+ANTIGRAVITY_BOT_TOKEN=8308303236:AAFZ32Pus2wrzpRq7-Bp2JQMt7lsrt5kKpo
+# Optional; defaults to PATH lookup
+ANTIGRAVITY_CLI_BIN=/home/wuya/.gemini/antigravity-cli/bin/agy
+# Optional; default gemini-3.8-flash-high
+ANTIGRAVITY_DEFAULT_MODEL=gemini-3.8-flash-high
+```
+
+The Antigravity Bot preserves the same intuitive workflows as Codex and OpenCode:
+- **Interactive Messaging & Streaming**: Send prompts directly to the bot, with 700ms throttled streaming output and live reasoning progress.
+- **Message Folding & Progress Details**: Tool calls and execution traces are neatly folded using Telegram expandable blockquotes (`<blockquote expandable>`), keeping conversations clean; long responses are automatically split without truncation (`chunkTelegramMessage`).
+- **`/setup` Control Panel**: In-place inline keyboard to view and switch models, reasoning effort, active accounts, and bound conversation.
+- **`/threads` & `/open <number|id>`**: Directly reads `conversation_summaries.db` to list recent sessions and bind to existing thread contexts; use `/new [dir]` to start a fresh conversation.
+- **`/auth` Multi-Account Management**: Automatically scans `antigravity-oauth-token_*` candidate tokens and decodes Google emails from JWT payloads; automatically rotates to the next account on 429 or quota limit errors.
+- **`/models` & `/effort`**: Switch between Gemini 3.8/3.7/3.1, Claude Sonnet/Opus, and adjust reasoning effort.
 
 ## Multi-Account Rotation
 

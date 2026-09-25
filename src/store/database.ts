@@ -147,6 +147,11 @@ export class BridgeStore {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS watched_threads (
+        scope_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS pending_user_inputs (
         local_id TEXT PRIMARY KEY,
         server_request_id TEXT NOT NULL,
@@ -381,6 +386,28 @@ export class BridgeStore {
 
   clearBinding(chatId: string): void {
     this.db.prepare('DELETE FROM chat_bindings WHERE chat_id = ?').run(chatId);
+  }
+
+  getWatchedThread(chatId: string): string | null {
+    const row = this.db.prepare('SELECT thread_id FROM watched_threads WHERE scope_id = ?').get(chatId) as { thread_id: string } | undefined;
+    return row?.thread_id ? String(row.thread_id) : null;
+  }
+
+  setWatchedThread(chatId: string, threadId: string | null): void {
+    if (threadId) {
+      this.db.prepare(`
+        INSERT INTO watched_threads (scope_id, thread_id, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(scope_id) DO UPDATE SET thread_id = excluded.thread_id, updated_at = excluded.updated_at
+      `).run(chatId, threadId, Date.now());
+    } else {
+      this.db.prepare('DELETE FROM watched_threads WHERE scope_id = ?').run(chatId);
+    }
+  }
+
+  listWatchedThreads(): Array<{ scopeId: string; threadId: string }> {
+    const rows = this.db.prepare('SELECT scope_id, thread_id FROM watched_threads').all() as Array<{ scope_id: string; thread_id: string }>;
+    return rows.map((r) => ({ scopeId: String(r.scope_id), threadId: String(r.thread_id) }));
   }
 
   getChatSettings(chatId: string): ChatSessionSettings | null {
