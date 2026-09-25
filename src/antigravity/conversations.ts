@@ -118,6 +118,40 @@ export class AntigravityConversationManager {
     }
   }
 
+  renameConversation(conversationId: string, newTitle: string): boolean {
+    try {
+      if (!fs.existsSync(this.dbPath)) return false;
+      const db = new DatabaseSync(this.dbPath);
+      try {
+        db.exec('PRAGMA busy_timeout = 3000;');
+        db.prepare('UPDATE conversation_summaries SET title = ? WHERE conversation_id = ?').run(newTitle, conversationId);
+        return true;
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      this.logger?.warn('antigravity.conversations.rename_error', { error: String(err) });
+      return false;
+    }
+  }
+
+  archiveConversation(conversationId: string): boolean {
+    try {
+      if (!fs.existsSync(this.dbPath)) return false;
+      const db = new DatabaseSync(this.dbPath);
+      try {
+        db.exec('PRAGMA busy_timeout = 3000;');
+        db.prepare('UPDATE conversation_summaries SET killed = 1 WHERE conversation_id = ?').run(conversationId);
+        return true;
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      this.logger?.warn('antigravity.conversations.archive_error', { error: String(err) });
+      return false;
+    }
+  }
+
   getConversation(conversationId: string): AntigravityConversation | null {
     try {
       if (!fs.existsSync(this.dbPath)) return null;

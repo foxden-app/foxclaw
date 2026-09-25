@@ -19,6 +19,11 @@ import type {
   ThreadBinding,
 } from '../types.js';
 import { migrateLegacyBridgeScopeIds } from './migrate_bridge_scope.js';
+import type {
+  CumulativeTokenTotals,
+  CumulativeTokenUsageRecord,
+  TokenUsageDelta,
+} from './token_usage.js';
 
 export interface ActiveTurnPreviewRecord {
   turnId: string;
@@ -294,6 +299,15 @@ export class BridgeStore {
         delete_reason TEXT,
         invalid_delete_count INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS cumulative_token_usage (
+        backend_id TEXT PRIMARY KEY,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        turns_count INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
     `);
     this.ensureColumn('thread_cache', 'name', 'TEXT');
     this.ensureColumn('thread_cache', 'model_provider', 'TEXT');
@@ -313,12 +327,17 @@ export class BridgeStore {
     this.ensureColumn('codex_auth_candidates', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_candidate_runtime', 'state', "TEXT NOT NULL DEFAULT 'active'");
     this.ensureColumn('codex_auth_quota_snapshots', 'plan_type', 'TEXT');
+    this.ensureColumn('codex_auth_quota_snapshots', 'quota_identity_id', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'primary_resets_at', 'INTEGER');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_window_duration_mins', 'REAL');
     this.ensureColumn('codex_auth_quota_snapshots', 'secondary_resets_at', 'INTEGER');
-    this.ensureColumn('codex_auth_quota_snapshots', 'quota_identity_id', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('codex_auth_pool_history', 'invalid_delete_count', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('scope_backend_bindings', 'model', 'TEXT');
+    this.ensureColumn('scope_backend_bindings', 'reasoning_effort', 'TEXT');
+    this.ensureColumn('scope_backend_bindings', 'active_turn_message_mode', 'TEXT');
+    this.ensureColumn('scope_backend_bindings', 'service_tier', 'TEXT');
+    this.ensureColumn('scope_backend_bindings', 'access_preset', 'TEXT');
     this.db.prepare(`
       UPDATE codex_auth_quota_snapshots
       SET quota_identity_id = account_id
@@ -547,27 +566,79 @@ export class BridgeStore {
     );
   }
 
-  getScopeBackendBinding(scopeId: string, backendId: string): { threadId: string; cwd: string | null } | null {
+  getScopeBackendBinding(scopeId: string, backendId: string): {
+    threadId: string;
+    cwd: string | null;
+    model?: string | null;
+    reasoningEffort?: string | null;
+    activeTurnMessageMode?: string | null;
+    serviceTier?: string | null;
+    accessPreset?: string | null;
+  } | null {
     const row = this.db.prepare(`
-      SELECT thread_id, cwd FROM scope_backend_bindings
+      SELECT thread_id, cwd, model, reasoning_effort, active_turn_message_mode, service_tier, access_preset
+      FROM scope_backend_bindings
       WHERE scope_id = ? AND backend_id = ?
-    `).get(scopeId, backendId) as { thread_id: string; cwd: string | null } | undefined;
+    `).get(scopeId, backendId) as Record<string, unknown> | undefined;
     if (!row) return null;
     return {
       threadId: String(row.thread_id),
       cwd: row.cwd ? String(row.cwd) : null,
+      model: row.model === null || row.model === undefined ? null : String(row.model),
+      reasoningEffort: row.reasoning_effort === null || row.reasoning_effort === undefined ? null : String(row.reasoning_effort),
+      activeTurnMessageMode: row.active_turn_message_mode === null || row.active_turn_message_mode === undefined ? null : String(row.active_turn_message_mode),
+      serviceTier: row.service_tier === null || row.service_tier === undefined ? null : String(row.service_tier),
+      accessPreset: row.access_preset === null || row.access_preset === undefined ? null : String(row.access_preset),
     };
   }
 
-  setScopeBackendBinding(scopeId: string, backendId: string, threadId: string, cwd: string | null): void {
+  setScopeBackendBinding(
+    scopeId: string,
+    backendId: string,
+    threadId: string,
+    cwd: string | null,
+    settings?: {
+      model?: string | null;
+      reasoningEffort?: string | null;
+      activeTurnMessageMode?: string | null;
+      serviceTier?: string | null;
+      accessPreset?: string | null;
+    } | null,
+  ): void {
+    const current = this.getScopeBackendBinding(scopeId, backendId);
+    const model = settings && settings.model !== undefined ? settings.model : current?.model ?? null;
+    const reasoningEffort = settings && settings.reasoningEffort !== undefined ? settings.reasoningEffort : current?.reasoningEffort ?? null;
+    const activeTurnMessageMode = settings && settings.activeTurnMessageMode !== undefined ? settings.activeTurnMessageMode : current?.activeTurnMessageMode ?? null;
+    const serviceTier = settings && settings.serviceTier !== undefined ? settings.serviceTier : current?.serviceTier ?? null;
+    const accessPreset = settings && settings.accessPreset !== undefined ? settings.accessPreset : current?.accessPreset ?? null;
+
     this.db.prepare(`
-      INSERT INTO scope_backend_bindings (scope_id, backend_id, thread_id, cwd, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO scope_backend_bindings (
+        scope_id, backend_id, thread_id, cwd, model, reasoning_effort,
+        active_turn_message_mode, service_tier, access_preset, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(scope_id, backend_id) DO UPDATE SET
         thread_id = excluded.thread_id,
         cwd = excluded.cwd,
+        model = excluded.model,
+        reasoning_effort = excluded.reasoning_effort,
+        active_turn_message_mode = excluded.active_turn_message_mode,
+        service_tier = excluded.service_tier,
+        access_preset = excluded.access_preset,
         updated_at = excluded.updated_at
-    `).run(scopeId, backendId, threadId, cwd, Date.now());
+    `).run(
+      scopeId,
+      backendId,
+      threadId,
+      cwd,
+      model,
+      reasoningEffort,
+      activeTurnMessageMode,
+      serviceTier,
+      accessPreset,
+      Date.now(),
+    );
   }
 
   listScopeBackendBindings(scopeId: string): Array<{ backendId: string; threadId: string; cwd: string | null; updatedAt: number }> {
@@ -1520,6 +1591,118 @@ export class BridgeStore {
       secondaryRemainingPercent: nullableNumber(row.secondary_remaining_percent),
       secondaryResetsAt: nullableNumber(row.secondary_resets_at),
       updatedAt: Number(row.updated_at),
+    }));
+  }
+
+  recordTokenUsage(delta: TokenUsageDelta, backendId = 'default'): void {
+    const input = Math.max(0, Math.round(delta.inputTokens ?? 0));
+    const output = Math.max(0, Math.round(delta.outputTokens ?? 0));
+    const cached = Math.max(0, Math.round(delta.cachedTokens ?? 0));
+    const total = delta.totalTokens != null ? Math.max(0, Math.round(delta.totalTokens)) : input + output;
+    const now = Date.now();
+
+    this.db.prepare(`
+      INSERT INTO cumulative_token_usage (backend_id, input_tokens, output_tokens, cached_tokens, total_tokens, turns_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?)
+      ON CONFLICT(backend_id) DO UPDATE SET
+        input_tokens = cumulative_token_usage.input_tokens + excluded.input_tokens,
+        output_tokens = cumulative_token_usage.output_tokens + excluded.output_tokens,
+        cached_tokens = cumulative_token_usage.cached_tokens + excluded.cached_tokens,
+        total_tokens = cumulative_token_usage.total_tokens + excluded.total_tokens,
+        turns_count = cumulative_token_usage.turns_count + 1,
+        updated_at = excluded.updated_at
+    `).run(backendId, input, output, cached, total, now);
+  }
+
+  setBackendCumulativeTokenUsage(
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cachedTokens?: number;
+      totalTokens?: number;
+      turnsCount?: number;
+    },
+    backendId: string,
+  ): void {
+    const input = Math.max(0, Math.round(usage.inputTokens));
+    const output = Math.max(0, Math.round(usage.outputTokens));
+    const cached = Math.max(0, Math.round(usage.cachedTokens ?? 0));
+    const total = usage.totalTokens != null ? Math.max(0, Math.round(usage.totalTokens)) : input + output;
+    const turns = Math.max(0, Math.round(usage.turnsCount ?? 0));
+    const now = Date.now();
+
+    this.db.prepare(`
+      INSERT INTO cumulative_token_usage (backend_id, input_tokens, output_tokens, cached_tokens, total_tokens, turns_count, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(backend_id) DO UPDATE SET
+        input_tokens = excluded.input_tokens,
+        output_tokens = excluded.output_tokens,
+        cached_tokens = excluded.cached_tokens,
+        total_tokens = excluded.total_tokens,
+        turns_count = excluded.turns_count,
+        updated_at = excluded.updated_at
+    `).run(backendId, input, output, cached, total, turns, now);
+  }
+
+  getCumulativeTokenUsage(backendId?: string): CumulativeTokenTotals {
+    if (backendId && backendId !== 'all') {
+      const row = this.db.prepare(`
+        SELECT input_tokens, output_tokens, cached_tokens, total_tokens, turns_count
+        FROM cumulative_token_usage
+        WHERE backend_id = ?
+      `).get(backendId) as { input_tokens: number; output_tokens: number; cached_tokens: number; total_tokens: number; turns_count: number } | undefined;
+
+      return {
+        inputTokens: Number(row?.input_tokens ?? 0),
+        outputTokens: Number(row?.output_tokens ?? 0),
+        cachedTokens: Number(row?.cached_tokens ?? 0),
+        totalTokens: Number(row?.total_tokens ?? 0),
+        turnsCount: Number(row?.turns_count ?? 0),
+      };
+    }
+
+    const row = this.db.prepare(`
+      SELECT
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        COALESCE(SUM(turns_count), 0) AS turns_count
+      FROM cumulative_token_usage
+    `).get() as { input_tokens: number; output_tokens: number; cached_tokens: number; total_tokens: number; turns_count: number } | undefined;
+
+    return {
+      inputTokens: Number(row?.input_tokens ?? 0),
+      outputTokens: Number(row?.output_tokens ?? 0),
+      cachedTokens: Number(row?.cached_tokens ?? 0),
+      totalTokens: Number(row?.total_tokens ?? 0),
+      turnsCount: Number(row?.turns_count ?? 0),
+    };
+  }
+
+  getAllBackendTokenUsages(): CumulativeTokenUsageRecord[] {
+    const rows = this.db.prepare(`
+      SELECT backend_id, input_tokens, output_tokens, cached_tokens, total_tokens, turns_count, updated_at
+      FROM cumulative_token_usage
+      ORDER BY total_tokens DESC
+    `).all() as Array<{
+      backend_id: string;
+      input_tokens: number;
+      output_tokens: number;
+      cached_tokens: number;
+      total_tokens: number;
+      turns_count: number;
+      updated_at: number;
+    }>;
+
+    return rows.map((r) => ({
+      backendId: r.backend_id,
+      inputTokens: Number(r.input_tokens),
+      outputTokens: Number(r.output_tokens),
+      cachedTokens: Number(r.cached_tokens),
+      totalTokens: Number(r.total_tokens),
+      turnsCount: Number(r.turns_count),
+      updatedAt: Number(r.updated_at),
     }));
   }
 

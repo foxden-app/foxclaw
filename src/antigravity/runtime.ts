@@ -22,6 +22,8 @@ export class AntigravityTelegramRuntime {
     logger: Logger,
     options?: {
       codexApp?: CodexAppClient | undefined;
+      app?: AntigravityAppClient | undefined;
+      auth?: AntigravityAuthManager | undefined;
     },
   ) {
     if (!config.antigravityBotToken) {
@@ -37,8 +39,8 @@ export class AntigravityTelegramRuntime {
       true,
       getAntigravityTelegramCommands,
     );
-    this.auth = new AntigravityAuthManager(config.antigravityAuthDir, logger);
-    this.app = new AntigravityAppClient(config.antigravityCliBin, logger);
+    this.auth = options?.auth ?? new AntigravityAuthManager(config.antigravityAuthDir, logger);
+    this.app = options?.app ?? new AntigravityAppClient(config.antigravityCliBin, logger);
     this.core = new AntigravityBridgeCore(
       config,
       store,
@@ -47,7 +49,10 @@ export class AntigravityTelegramRuntime {
       this.app,
       this.auth,
       new TelegramMessagingPort(this.bot),
-      options,
+      {
+        ...options,
+        defaultBackendId: 'antigravity',
+      },
     );
     this.core.registerInboundHandlers();
   }
@@ -64,4 +69,13 @@ export class AntigravityTelegramRuntime {
   getRuntimeStatus(): ReturnType<AntigravityBridgeCore['getRuntimeStatus']> {
     return this.core.getRuntimeStatus();
   }
+
+  get botGateway(): TelegramGateway {
+    return this.bot;
+  }
+
+  get bridgeCore(): AntigravityBridgeCore {
+    return this.core;
+  }
 }
+

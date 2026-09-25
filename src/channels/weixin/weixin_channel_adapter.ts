@@ -77,12 +77,16 @@ function normalizeInboundBaseUrl(account: WeixinSavedAccount): string {
   return `https://${raw}`;
 }
 
+export interface IWeixinBridgeCore {
+  dispatchInboundLikeTelegramText(event: TelegramTextEvent): void;
+}
+
 export class WeixinChannelAdapter {
   private readonly abort = new AbortController();
   private loops: Promise<void>[] = [];
 
   constructor(
-    private readonly core: BridgeSessionCore,
+    private readonly core: BridgeSessionCore | IWeixinBridgeCore,
     private readonly store: BridgeStore,
     private readonly config: AppConfig,
     private readonly logger: Logger,

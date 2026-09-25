@@ -36,16 +36,16 @@ test('AntigravityEngineAdapter converts models and maps turn lifecycle events to
     },
   };
 
-  const adapter = new AntigravityEngineAdapter(mockClient as AntigravityAppClient, 'gemini-3.8-flash-high');
+  const adapter = new AntigravityEngineAdapter(mockClient as AntigravityAppClient, 'gemini-3.8-flash');
 
   assert.equal(adapter.id, 'antigravity');
   assert.equal(adapter.name, 'Google Antigravity (AGY)');
 
   const models = await adapter.listModels();
   assert.equal(models.length, 3);
-  assert.equal(models[0]?.id, 'gemini-3.8-flash-high');
+  assert.equal(models[0]?.id, 'gemini-3.8-flash');
   assert.equal(models[0]?.isDefault, true);
-  assert.equal(models[1]?.id, 'gemini-3.1-pro-high');
+  assert.equal(models[1]?.id, 'gemini-3.1-pro');
   assert.equal(models[1]?.isDefault, false);
 
   const deltas: string[] = [];
@@ -57,7 +57,7 @@ test('AntigravityEngineAdapter converts models and maps turn lifecycle events to
     prompt: 'Summarize file',
     threadId: 'conv-123',
     cwd: '/tmp',
-    model: 'gemini-3.8-flash-high',
+    model: 'gemini-3.8-flash',
     locale: 'zh',
     stagedAttachments: [
       {

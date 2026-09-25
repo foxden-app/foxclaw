@@ -152,6 +152,7 @@ import {
   type SessionLogCursor,
 } from './session_observer.js';
 import { renderActiveTurnStatus } from './status.js';
+import { formatMetricTokenCount } from '../store/token_usage.js';
 import { writeRuntimeStatus } from '../runtime.js';
 import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
@@ -698,6 +699,13 @@ export class BridgeSessionCore {
     });
   }
 
+  hasPendingInteraction(scopeId: string): boolean {
+    return this.pendingThreadRenames.has(scopeId)
+      || this.pendingThreadNewCwds.has(scopeId)
+      || this.pendingUserInputs.has(scopeId)
+      || this.pendingForceTakeovers.has(scopeId);
+  }
+
   /** Start Codex app-server transport and attach RPC listeners. */
   async startCodexApp(): Promise<void> {
     this.stopping = false;
@@ -815,12 +823,13 @@ export class BridgeSessionCore {
   }
 
   getRuntimeStatus(): RuntimeStatus {
+    const appServer = typeof this.app.getServerStatus === 'function' ? this.app.getServerStatus() : null;
     return {
       running: true,
-      connected: this.app.isConnected(),
-      userAgent: this.app.getUserAgent(),
+      connected: typeof this.app.isConnected === 'function' ? this.app.isConnected() : false,
+      userAgent: typeof this.app.getUserAgent === 'function' ? this.app.getUserAgent() : null,
       codexHome: this.config.codexHome ?? path.join(os.homedir(), '.codex'),
-      codexAppServer: this.app.getServerStatus(),
+      ...(appServer ? { codexAppServer: appServer } : {}),
       botUsername: this.botUsername,
       currentBindings: this.store.countBindings(),
       pendingApprovals: this.store.countPendingApprovals(),
@@ -1055,6 +1064,9 @@ export class BridgeSessionCore {
             const codexUpdateLine = this.formatCodexUpdateResult(lastUpdate);
             if (codexUpdateLine) {
               lines.push(t(locale, 'status_last_codex_update', { value: codexUpdateLine }));
+            }
+            if (lastUpdate.agyUpdate) {
+              lines.push(locale === 'zh' ? `Antigravity CLI：${lastUpdate.agyUpdate}` : `Antigravity CLI: ${lastUpdate.agyUpdate}`);
             }
           } else {
             lines.push(t(locale, 'status_last_update_none'));
@@ -1614,7 +1626,7 @@ export class BridgeSessionCore {
     await this.sendMessage(scopeId, t(locale, 'rename_done', { name }));
   }
 
-  private async handleCallback(event: TelegramCallbackEvent): Promise<void> {
+  async handleCallback(event: TelegramCallbackEvent): Promise<void> {
     const scopeId = event.scopeId;
     const locale = this.localeForChat(scopeId, event.languageCode);
     if (this.forceTakeoversInProgress.has(scopeId)) {
@@ -4366,7 +4378,9 @@ export class BridgeSessionCore {
       this.coordinator.statusUpdated(status);
       return;
     }
-    writeRuntimeStatus(this.config.statusPath, status);
+    if (this.config.statusPath) {
+      writeRuntimeStatus(this.config.statusPath, status);
+    }
   }
 
   private async sendMessage(
@@ -6170,6 +6184,9 @@ export class BridgeSessionCore {
       const rows = [
         ['FoxClaw', `${status.fromVersion} -> ${status.toVersion ?? t(status.locale, 'unknown')}`, status.locale === 'zh' ? '升级完成，服务已重启' : 'Updated; service restarted'],
         ['Codex CLI', formatSelfUpdateVersionTransition(status.codexFromVersion, status.codexToVersion, status.locale), formatCodexUpdateState(status)],
+        ...(status.agyFromVersion || status.agyUpdate ? [
+          ['Antigravity (AGY)', formatSelfUpdateVersionTransition(status.agyFromVersion ?? null, status.agyToVersion ?? null, status.locale), status.agyUpdate ?? (status.locale === 'zh' ? '已检查更新' : 'Checked')]
+        ] : []),
         [status.locale === 'zh' ? '集群广播' : 'Cluster broadcast', status.toVersion ?? t(status.locale, 'unknown'), broadcastLine],
       ];
       const notes = status.releaseNotes?.filter(note => note.trim()) ?? [];
@@ -6193,6 +6210,7 @@ export class BridgeSessionCore {
         telegramBold(title),
         escapeTelegramHtml(foxclawResult),
         escapeTelegramHtml(codexUpdateLine ?? (status.locale === 'zh' ? 'Codex CLI：未执行升级。' : 'Codex CLI: not updated.')),
+        ...(status.agyUpdate ? [escapeTelegramHtml(`Antigravity CLI：${status.agyUpdate}`)] : []),
         escapeTelegramHtml(broadcastLine),
         releaseNotes ? escapeTelegramHtml(releaseNotes) : '',
       ].filter(Boolean).join('\n');
@@ -6373,7 +6391,7 @@ export class BridgeSessionCore {
     this.updateStatus();
   }
 
-  private async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+  async handleAuthCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const action = args[0]?.toLowerCase() ?? 'list';
     if (action === 'sync') {
       await this.handleAuthSyncCommand(scopeId, locale, args.slice(1));
@@ -8478,11 +8496,11 @@ export class BridgeSessionCore {
           events: formatTokenCount(stats.usageEvents),
         }),
         t(locale, 'status_codex_local_tokens', {
-          total: formatTokenCount(stats.totals.totalTokens),
-          input: formatTokenCount(stats.totals.inputTokens),
+          total: formatCodexTokenCountWithMetric(stats.totals.totalTokens),
+          input: formatCodexTokenCountWithMetric(stats.totals.inputTokens),
           visible: formatTokenCount(Math.max(0, stats.totals.outputTokens - stats.totals.reasoningOutputTokens)),
-          output: formatTokenCount(stats.totals.outputTokens),
-          cached: formatTokenCount(stats.totals.cachedInputTokens),
+          output: formatCodexTokenCountWithMetric(stats.totals.outputTokens),
+          cached: formatCodexTokenCountWithMetric(stats.totals.cachedInputTokens),
           reasoning: formatTokenCount(stats.totals.reasoningOutputTokens),
         }),
         ...this.formatCodexLocalResponseThroughputStatusLines(locale, stats),
@@ -8556,6 +8574,16 @@ export class BridgeSessionCore {
     this.localUsageCache = snapshot;
     this.localUsageCacheLoaded = true;
     await writeCodexLocalUsageSnapshot(this.codexLocalUsageSnapshotPath(), snapshot);
+    this.store.setBackendCumulativeTokenUsage(
+      {
+        inputTokens: stats.totals.inputTokens,
+        outputTokens: stats.totals.outputTokens,
+        cachedTokens: stats.totals.cachedInputTokens,
+        totalTokens: stats.totals.totalTokens,
+        turnsCount: stats.turns,
+      },
+      'codex',
+    );
   }
 
   private codexLocalUsageSnapshotPath(): string {
@@ -9391,7 +9419,7 @@ export class BridgeSessionCore {
     );
   }
 
-  private async showThreadsPanel(
+  async showThreadsPanel(
     scopeId: string,
     messageId?: number,
     searchTerm?: string | null,
@@ -14212,6 +14240,13 @@ function formatTokenCount(value: number): string {
     return '?';
   }
   return Math.round(value).toLocaleString('en-US');
+}
+
+function formatCodexTokenCountWithMetric(value: number): string {
+  if (value >= 1_000_000) {
+    return `${formatMetricTokenCount(value)} (${formatTokenCount(value)})`;
+  }
+  return formatTokenCount(value);
 }
 
 function formatLocalTimestamp(seconds: number): string {

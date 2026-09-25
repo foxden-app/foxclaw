@@ -30,6 +30,7 @@ test('UnifiedChannelOrchestrator manages active turn, streaming preview, steer a
       },
       sendTypingInScope: async () => {},
       answerCallback: async () => {},
+      deleteMessage: async () => {},
     };
 
     const mockBotEmitter = new EventEmitter();
@@ -240,6 +241,7 @@ test('UnifiedChannelOrchestrator supports multi-backend registration and hot-swi
       },
       answerCallback: async () => {},
       sendTypingInScope: async () => {},
+      deleteMessage: async () => {},
     };
 
     let executedEngineId = '';
@@ -311,7 +313,7 @@ test('UnifiedChannelOrchestrator supports multi-backend registration and hot-swi
 
     // 1. Initial status and /backend list
     await orchestrator.handleText({ ...baseEvent, messageId: 1, text: '/backend' });
-    const backendListMsg = sentMessages.find((m) => m.text.includes('后端运行环境与账号'));
+    const backendListMsg = sentMessages.find((m) => m.text.includes('后端运行环境'));
     assert.ok(backendListMsg, 'Should show backend list menu');
     assert.ok(backendListMsg!.text.includes('Google Antigravity (AGY)'));
     assert.ok(backendListMsg!.text.includes('OpenAI Codex'));
@@ -377,4 +379,121 @@ test('UnifiedChannelOrchestrator supports multi-backend registration and hot-swi
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test('UnifiedChannelOrchestrator records turn token usage and displays metric token counts in sendStatus', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'orchestrator-token-test-'));
+  const dbPath = path.join(tempDir, 'test.db');
+
+  try {
+    const store = new BridgeStore(dbPath);
+    const sentMessages: Array<{ scopeId: string; text: string }> = [];
+
+    const mockMessaging: Partial<TelegramMessagingPort> = {
+      sendRichMarkdown: async (scopeId: string, text: string) => {
+        sentMessages.push({ scopeId, text });
+        return 100 + sentMessages.length;
+      },
+      editRichMarkdown: async () => {},
+      sendTypingInScope: async () => {},
+      answerCallback: async () => {},
+      deleteMessage: async () => {},
+    };
+
+    const mockBotEmitter = new EventEmitter();
+    const mockBot = {
+      username: 'TokenBot',
+      start: async () => {},
+      stop: () => {},
+      on: (event: any, listener: any) => {
+        mockBotEmitter.on(event, listener);
+        return mockBot as any;
+      },
+    } as unknown as TelegramGateway;
+
+    const turnEmitter = new EventEmitter();
+    const mockAdapter: IEngineAdapter = {
+      id: 'antigravity',
+      name: 'Google Antigravity',
+      listModels: async () => [{ id: 'gemini-pro', name: 'Gemini Pro', isDefault: true }],
+      executeTurn: () => {
+        return {
+          turnId: 'turn-tok-1',
+          cancel: () => {},
+          waitForResult: async () => null,
+          on: (event: any, listener: any) => {
+            turnEmitter.on(event, listener);
+          },
+        };
+      },
+    };
+
+    const orchestrator = new UnifiedChannelOrchestrator({
+      config: { defaultCwd: '/tmp', telegramPanelTtlMs: 300000 } as any,
+      store,
+      logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any,
+      bot: mockBot,
+      adapter: mockAdapter,
+      messaging: mockMessaging as TelegramMessagingPort,
+    });
+
+    orchestrator.registerInboundHandlers();
+    await orchestrator.start();
+
+    // 1. Initial sendStatus shows 0 tokens
+    await orchestrator.sendStatus('scope-1', 'zh');
+    const initialStatusMsg = sentMessages.find((m) => m.text.includes('Token 用量'));
+    assert.ok(initialStatusMsg);
+    assert.ok(initialStatusMsg.text.includes('总计 0 (输入 0, 输出 0, 缓存 0)'));
+
+    // 2. Run a turn that finishes with token usage
+    const event: TelegramTextEvent = {
+      scopeId: 'scope-1',
+      chatId: 'chat-1',
+      topicId: null,
+      chatType: 'private',
+      userId: 'user-1',
+      messageId: 1,
+      text: 'Hello AGY',
+      attachments: [],
+      entities: [],
+      replyToBot: false,
+    };
+    await orchestrator.handleText(event);
+
+    turnEmitter.emit('result', {
+      kind: 'result',
+      status: 'SUCCESS',
+      response: 'Hello from AGY!',
+      conversationId: 'agy-conv-1',
+      usage: {
+        inputTokens: 1250000,
+        outputTokens: 50000,
+        cachedTokens: 1000000,
+        totalTokens: 1300000,
+      },
+    });
+
+    // Verify usage recorded in store
+    const agyUsage = store.getCumulativeTokenUsage('antigravity');
+    assert.equal(agyUsage.totalTokens, 1300000);
+    assert.equal(agyUsage.inputTokens, 1250000);
+    assert.equal(agyUsage.outputTokens, 50000);
+    assert.equal(agyUsage.cachedTokens, 1000000);
+
+    // 3. sendStatus now shows metric counts (1.3M, 1.25M, 50K, 1M)
+    sentMessages.length = 0;
+    await orchestrator.sendStatus('scope-1', 'zh');
+    const updatedStatusMsg = sentMessages.find((m) => m.text.includes('Token 用量'));
+    assert.ok(updatedStatusMsg);
+    assert.ok(updatedStatusMsg.text.includes('总计 1.3M'));
+    assert.ok(updatedStatusMsg.text.includes('输入 1.25M'));
+    assert.ok(updatedStatusMsg.text.includes('输出 50K'));
+    assert.ok(updatedStatusMsg.text.includes('缓存 1M'));
+
+    await orchestrator.stop();
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 

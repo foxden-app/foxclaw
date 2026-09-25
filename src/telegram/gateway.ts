@@ -428,6 +428,17 @@ export class TelegramGateway extends EventEmitter {
     });
   }
 
+  async setChatCommands(chatId: number | string, commands: Array<{ command: string; description: string }>): Promise<void> {
+    try {
+      await callTelegramApi(this.botToken, 'setMyCommands', {
+        commands,
+        scope: { type: 'chat', chat_id: chatId },
+      });
+    } catch (err) {
+      this.logger.warn('telegram.set_chat_commands_failed', { chatId, error: String(err) });
+    }
+  }
+
   private async pollLoop(): Promise<void> {
     let remoteInitialized = false;
     while (this.running) {

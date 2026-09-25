@@ -115,7 +115,7 @@ interface CodexAppServerState {
   startedAt: string;
 }
 
-interface CodexAppServerRuntimeStatus {
+export interface CodexAppServerRuntimeStatus {
   pid: number | null;
   port: number | null;
   running: boolean;
@@ -442,6 +442,18 @@ export class CodexAppClient extends EventEmitter {
       models.push(...rows.map(mapModel));
       cursor = typeof (result as any).nextCursor === 'string' ? (result as any).nextCursor : null;
     } while (cursor);
+    if (!models.some((m) => m.id === 'gpt-6-sol' || m.model === 'gpt-6-sol')) {
+      models.push({
+        id: 'gpt-6-sol',
+        model: 'gpt-6-sol',
+        displayName: 'GPT-6-Sol',
+        description: 'Next-generation flagship model with deep reasoning',
+        isDefault: false,
+        supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [],
+      });
+    }
     return models;
   }
 

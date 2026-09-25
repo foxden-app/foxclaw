@@ -33,6 +33,12 @@ export interface AntigravityTurnExecution {
   ): void;
 }
 
+export function normalizeAgyModelId(rawId: string): string {
+  return rawId
+    .replace(/-(high|medium|low)$/, '')
+    .replace(/-thinking$/, '');
+}
+
 export class AntigravityAppClient {
   private readonly cliBin: string;
   private readonly logger: Logger | undefined;
@@ -64,13 +70,18 @@ export class AntigravityAppClient {
       });
 
       const lines = output.split('\n');
+      const seen = new Set<string>();
       const models: string[] = [];
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('⠋') || trimmed.startsWith('Fetching')) continue;
         const parts = trimmed.split(/\s+/);
         if (parts[0]) {
-          models.push(parts[0]);
+          const cleanId = normalizeAgyModelId(parts[0]);
+          if (!seen.has(cleanId)) {
+            seen.add(cleanId);
+            models.push(cleanId);
+          }
         }
       }
 
@@ -86,12 +97,13 @@ export class AntigravityAppClient {
 
     // Fallback to standard known models
     return [
-      'gemini-3.8-flash-high',
-      'gemini-3.8-flash-medium',
-      'gemini-3.7-flash-high',
-      'gemini-3.1-pro-high',
+      'gemini-3.8-flash',
+      'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.1-pro',
       'claude-sonnet-4-6',
-      'claude-opus-4-6-thinking',
+      'claude-opus-4-6',
+      'gpt-oss-120b',
     ];
   }
 
@@ -112,11 +124,28 @@ export class AntigravityAppClient {
     if (options.conversationId) {
       args.push('--conversation', options.conversationId);
     }
-    const modelToUse = (!options.model || options.model === 'default') ? 'gemini-3.8-flash-high' : options.model;
-    args.push('--model', modelToUse);
-    if (options.effort) {
-      args.push('--effort', options.effort);
+    const requestedModel = (!options.model || options.model === 'default') ? 'gemini-3.8-flash' : options.model;
+    const baseModel = normalizeAgyModelId(requestedModel);
+
+    let cliModel = baseModel;
+    if (baseModel === 'claude-opus-4-6') {
+      cliModel = 'claude-opus-4-6-thinking';
+    } else if (baseModel === 'gpt-oss-120b') {
+      cliModel = 'gpt-oss-120b-medium';
     }
+    args.push('--model', cliModel);
+
+    // Effort is only passed for models that accept it (Gemini models)
+    if (baseModel.startsWith('gemini-')) {
+      let effort = options.effort || 'high';
+      if (effort === 'xhigh' || effort === 'max' || effort === 'ultra') {
+        effort = 'high';
+      } else if (effort !== 'low' && effort !== 'medium' && effort !== 'high') {
+        effort = 'high';
+      }
+      args.push('--effort', effort);
+    }
+
     if (options.mode) {
       args.push('--mode', options.mode);
     }
@@ -126,7 +155,7 @@ export class AntigravityAppClient {
     this.logger?.info('antigravity.turn.starting', {
       cwd: workingDir,
       conversationId: options.conversationId ?? null,
-      model: modelToUse,
+      model: cliModel,
     });
 
     let child: ChildProcess | null = spawn(this.cliBin, args, {

@@ -39,12 +39,21 @@ export class CodexEngineAdapter implements IEngineAdapter {
   async listModels(): Promise<EngineModel[]> {
     try {
       const models = await this.client.listModels();
-      return models.map((m) => ({
+      const list: EngineModel[] = models.map((m) => ({
         id: m.id,
         name: m.displayName || m.id,
         description: m.description,
         isDefault: m.isDefault || m.id === this.defaultModel,
       }));
+      if (!list.some((m) => m.id === 'gpt-6-sol')) {
+        list.push({
+          id: 'gpt-6-sol',
+          name: 'GPT-6-Sol',
+          description: 'Next-generation flagship model with deep reasoning',
+          isDefault: false,
+        });
+      }
+      return list;
     } catch {
       return [];
     }
@@ -115,16 +124,31 @@ export class CodexEngineAdapter implements IEngineAdapter {
 
     this.client.on('notification', onNotification);
 
+    const effectiveModel =
+      request.model && request.model !== 'default'
+        ? request.model
+        : (this.defaultModel && this.defaultModel !== 'default' ? this.defaultModel : null);
+
     const run = async () => {
       try {
         if (!threadId) {
           const session = await this.client.startThread({
             cwd: request.cwd,
-            model: request.model || this.defaultModel || null,
+            model: effectiveModel,
             approvalPolicy: this.defaultApprovalPolicy,
             sandboxMode: this.defaultSandboxMode,
           });
           threadId = session.thread.threadId;
+        } else {
+          try {
+            await this.client.resumeThread({
+              threadId,
+              cwd: request.cwd,
+              approvalPolicy: this.defaultApprovalPolicy,
+            });
+          } catch {
+            // thread might already be active on server
+          }
         }
 
         if (cancelled) {
@@ -136,17 +160,49 @@ export class CodexEngineAdapter implements IEngineAdapter {
           throw new Error('Failed to resolve or create Codex thread for turn');
         }
 
-        const turn = await this.client.startTurn({
-          threadId,
-          input: [{ type: 'text', text: promptText, text_elements: [] }],
-          cwd: request.cwd,
-          model: request.model || this.defaultModel || null,
-          effort: (request.effort as any) ?? null,
-          serviceTier: request.serviceTier ?? undefined,
-          collaborationMode: null,
-          approvalPolicy: this.defaultApprovalPolicy,
-          sandboxMode: this.defaultSandboxMode,
-        });
+        let turn: { id: string };
+        try {
+          turn = await this.client.startTurn({
+            threadId,
+            input: [{ type: 'text', text: promptText, text_elements: [] }],
+            cwd: request.cwd,
+            model: effectiveModel,
+            effort: (request.effort as any) ?? null,
+            serviceTier: request.serviceTier ?? undefined,
+            collaborationMode: null,
+            approvalPolicy: this.defaultApprovalPolicy,
+            sandboxMode: this.defaultSandboxMode,
+          });
+        } catch (turnErr) {
+          const errMsg = String(turnErr);
+          if (
+            errMsg.includes('not found') ||
+            errMsg.includes('No thread') ||
+            errMsg.includes('stale') ||
+            errMsg.includes('invalid thread')
+          ) {
+            const session = await this.client.startThread({
+              cwd: request.cwd,
+              model: effectiveModel,
+              approvalPolicy: this.defaultApprovalPolicy,
+              sandboxMode: this.defaultSandboxMode,
+            });
+            threadId = session.thread.threadId;
+            turn = await this.client.startTurn({
+              threadId,
+              input: [{ type: 'text', text: promptText, text_elements: [] }],
+              cwd: request.cwd,
+              model: effectiveModel,
+              effort: (request.effort as any) ?? null,
+              serviceTier: request.serviceTier ?? undefined,
+              collaborationMode: null,
+              approvalPolicy: this.defaultApprovalPolicy,
+              sandboxMode: this.defaultSandboxMode,
+            });
+          } else {
+            throw turnErr;
+          }
+        }
 
         turnId = turn.id;
       } catch (err) {

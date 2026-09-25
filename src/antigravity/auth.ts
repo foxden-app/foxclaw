@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -32,6 +33,7 @@ export interface AntigravityAccount {
   expiry: number | null;
   isCooldown?: boolean;
   cooldownRemainingSec?: number;
+  isPaused?: boolean;
   quota?: AntigravityQuotaSnapshot | null;
 }
 
@@ -123,18 +125,22 @@ export function formatQuotaResetTime(isoString: string | null | undefined): stri
 export class AntigravityAuthManager {
   readonly authDir: string;
   readonly activeTokenPath: string;
+  readonly pausedAccountsPath: string;
   private readonly logger: Logger | undefined;
   private readonly fetchFn: typeof fetch;
   private readonly cooldowns = new Map<string, number>();
   private readonly pendingLogins = new Map<string, PendingLoginSession>();
   private readonly quotaCache = new Map<string, AntigravityQuotaSnapshot>();
+  private readonly pausedAccounts = new Set<string>();
   private keepAliveTimer: NodeJS.Timeout | undefined;
 
   constructor(authDir?: string, logger?: Logger, fetchFn: typeof fetch = fetch) {
     this.authDir = authDir || path.join(os.homedir(), '.gemini', 'antigravity-cli');
     this.activeTokenPath = path.join(this.authDir, 'antigravity-oauth-token');
+    this.pausedAccountsPath = path.join(this.authDir, 'paused-accounts.json');
     this.logger = logger;
     this.fetchFn = fetchFn;
+    this.loadPausedAccounts();
   }
 
   startBrowserLogin(scopeId: string): { authUrl: string; state: string } {
@@ -315,6 +321,156 @@ export class AntigravityAuthManager {
     const until = this.cooldowns.get(nameOrEmail.toLowerCase());
     if (!until || until <= Date.now()) return 0;
     return Math.ceil((until - Date.now()) / 1000);
+  }
+
+  private loadPausedAccounts(): void {
+    try {
+      if (fsSync.existsSync(this.pausedAccountsPath)) {
+        const raw = fsSync.readFileSync(this.pausedAccountsPath, 'utf8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data)) {
+          this.pausedAccounts.clear();
+          for (const item of data) {
+            if (typeof item === 'string') this.pausedAccounts.add(item.toLowerCase());
+          }
+        }
+      }
+    } catch (err) {
+      this.logger?.debug('antigravity.auth.load_paused_failed', { error: String(err) });
+    }
+  }
+
+  private savePausedAccounts(): void {
+    try {
+      fsSync.writeFileSync(this.pausedAccountsPath, JSON.stringify([...this.pausedAccounts], null, 2), 'utf8');
+    } catch (err) {
+      this.logger?.warn('antigravity.auth.save_paused_failed', { error: String(err) });
+    }
+  }
+
+  isAccountPaused(nameOrEmail: string): boolean {
+    return this.pausedAccounts.has(nameOrEmail.toLowerCase());
+  }
+
+  togglePauseAccount(targetNameOrEmail: string): boolean {
+    const key = targetNameOrEmail.toLowerCase();
+    if (this.pausedAccounts.has(key)) {
+      this.pausedAccounts.delete(key);
+      this.savePausedAccounts();
+      return false;
+    } else {
+      this.pausedAccounts.add(key);
+      this.savePausedAccounts();
+      return true;
+    }
+  }
+
+  pauseAccount(targetNameOrEmail: string): void {
+    this.pausedAccounts.add(targetNameOrEmail.toLowerCase());
+    this.savePausedAccounts();
+  }
+
+  resumeAccount(targetNameOrEmail: string): void {
+    this.pausedAccounts.delete(targetNameOrEmail.toLowerCase());
+    this.savePausedAccounts();
+  }
+
+  async diagnoseAndRepairAccount(targetNameOrEmail: string): Promise<{
+    ok: boolean;
+    accountName: string;
+    email: string | null;
+    message: string;
+    refreshed: boolean;
+  }> {
+    const accounts = await this.listCandidates(false);
+    const key = targetNameOrEmail.toLowerCase();
+    const target = accounts.find(
+      (a) =>
+        a.name.toLowerCase() === key ||
+        a.name === `antigravity-oauth-token_${targetNameOrEmail}` ||
+        (a.email && a.email.toLowerCase() === key) ||
+        (targetNameOrEmail === 'active' && a.isActive),
+    );
+
+    if (!target) {
+      return {
+        ok: false,
+        accountName: targetNameOrEmail,
+        email: null,
+        message: `Account '${targetNameOrEmail}' not found.`,
+        refreshed: false,
+      };
+    }
+
+    if (!target.hasRefreshToken) {
+      return {
+        ok: false,
+        accountName: target.name,
+        email: target.email,
+        message: 'No refresh token available. Re-authentication via device login required.',
+        refreshed: false,
+      };
+    }
+
+    const refreshRes = await this.refreshTokenForAccount(target.name);
+    if (!refreshRes.success) {
+      return {
+        ok: false,
+        accountName: target.name,
+        email: target.email,
+        message: `Token refresh failed: ${refreshRes.error || 'Unknown error'}`,
+        refreshed: false,
+      };
+    }
+
+    this.clearCooldown(target.name);
+    if (target.email) this.clearCooldown(target.email);
+
+    try {
+      await this.fetchQuotaForAccount(target.name, true);
+    } catch {}
+
+    return {
+      ok: true,
+      accountName: target.name,
+      email: target.email,
+      message: 'Token refreshed and quota synchronized successfully.',
+      refreshed: true,
+    };
+  }
+
+  async diagnoseAndRepairAll(): Promise<{
+    total: number;
+    healthy: number;
+    repaired: number;
+    failed: number;
+    summary: string[];
+  }> {
+    const accounts = await this.listCandidates(false);
+    let healthy = 0;
+    let repaired = 0;
+    let failed = 0;
+    const summary: string[] = [];
+
+    for (const acc of accounts) {
+      const res = await this.diagnoseAndRepairAccount(acc.name);
+      if (res.ok) {
+        if (res.refreshed) repaired++;
+        else healthy++;
+        summary.push(`✅ \`${res.email || res.accountName}\`: 正常/已刷新`);
+      } else {
+        failed++;
+        summary.push(`❌ \`${res.email || res.accountName}\`: ${res.message}`);
+      }
+    }
+
+    return {
+      total: accounts.length,
+      healthy,
+      repaired,
+      failed,
+      summary,
+    };
   }
 
   getCachedQuota(name: string, email?: string | null): AntigravityQuotaSnapshot | null {
@@ -515,6 +671,7 @@ export class AntigravityAuthManager {
           );
           account.isCooldown = cd > 0;
           account.cooldownRemainingSec = cd;
+          account.isPaused = this.isAccountPaused(account.name) || (account.email ? this.isAccountPaused(account.email) : false);
           account.quota = this.getCachedQuota(account.name, account.email);
           accounts.push(account);
         }
@@ -535,6 +692,7 @@ export class AntigravityAuthManager {
           );
           defaultAccount.isCooldown = cd > 0;
           defaultAccount.cooldownRemainingSec = cd;
+          defaultAccount.isPaused = this.isAccountPaused(defaultAccount.name) || (defaultAccount.email ? this.isAccountPaused(defaultAccount.email) : false);
           defaultAccount.quota = this.getCachedQuota(defaultAccount.name, defaultAccount.email);
           accounts.unshift(defaultAccount);
         }
@@ -601,9 +759,12 @@ export class AntigravityAuthManager {
       throw new Error('No alternative Antigravity accounts available for rotation.');
     }
 
-    // Filter accounts not in cooldown
-    const nonCooldown = accounts.filter((a) => !a.isCooldown);
-    const pool = nonCooldown.length > 0 ? nonCooldown : accounts;
+    // Filter accounts not in cooldown and not paused
+    const available = accounts.filter((a) => !a.isCooldown && !a.isPaused);
+    const pool = available.length > 0 ? available : accounts.filter((a) => !a.isPaused);
+    if (pool.length === 0) {
+      throw new Error('All Antigravity accounts are currently paused.');
+    }
 
     const currentIdx = pool.findIndex(
       (a) => a.isActive || (currentAccountName && a.name === currentAccountName),

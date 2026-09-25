@@ -1,17 +1,20 @@
 import type { AppConfig } from '../config.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
-import type { AppLocale } from '../types.js';
+import type { AppLocale, ReasoningEffortValue, AccessPresetValue, ActiveTurnMessageMode } from '../types.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
 import { parseCommand } from '../controller/commands.js';
-import { normalizeLocale } from '../i18n.js';
+import { normalizeLocale, getTelegramCommands, getAntigravityTelegramCommands } from '../i18n.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { chunkTelegramMessage } from '../telegram/text.js';
 import { stageInboundAttachments } from './attachments.js';
 import { buildAttachmentPrompt, type StagedTelegramAttachment } from '../telegram/media.js';
 import { TurnQueueManager, type TurnMessageMode } from './turn_queue.js';
 import { renderStreamPreviewContent } from './stream_preview.js';
+import { BRIDGE_SCOPE_TELEGRAM_PREFIX, BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope } from './bridge_scope.js';
+import { escapeTelegramHtml } from '../telegram/html.js';
+import { formatTokenUsageSummary, formatBackendTokenUsageBreakdown } from '../store/token_usage.js';
 import type {
   IEngineAdapter,
   EngineTurnRequest,
@@ -34,12 +37,16 @@ export interface UnifiedActiveTurn {
   flushTimer: NodeJS.Timeout | null;
   lastFlushTime: number;
   typingTimer: NodeJS.Timeout | null;
+  stepIndex?: number;
+  toolCount: number;
+  currentTool?: string | null;
+  startTime: number;
 }
 
 export interface EngineCustomUiHook {
   renderCustomStatus?(scopeId: string, locale: AppLocale): Promise<string | null>;
   renderCustomSetupRows?(scopeId: string, locale: AppLocale): Promise<InlineKeyboard>;
-  handleCustomCallback?(scopeId: string, data: string, locale: AppLocale, messageId?: number): Promise<boolean>;
+  handleCustomCallback?(scopeId: string, data: string, locale: AppLocale, messageId?: number, event?: TelegramCallbackEvent): Promise<boolean>;
   handleCustomCommand?(scopeId: string, command: string, args: string, locale: AppLocale, event?: TelegramTextEvent): Promise<boolean>;
   handleCustomInbound?(event: TelegramTextEvent, locale: AppLocale): Promise<boolean>;
 }
@@ -56,6 +63,7 @@ export class UnifiedChannelOrchestrator {
   private readonly backends = new Map<string, BackendDescriptor>();
   private readonly defaultBackendId: string;
   private readonly activeTurns = new Map<string, UnifiedActiveTurn>();
+  private readonly stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
   private readonly backendProvider?: (() => Promise<BackendDescriptor[]> | BackendDescriptor[]) | undefined;
 
   get adapter(): IEngineAdapter {
@@ -186,6 +194,47 @@ export class UnifiedChannelOrchestrator {
     return all.find((b) => b.id === backendId) ?? null;
   }
 
+  syncCurrentBackendSettings(scopeId: string): void {
+    const activeBackend = this.getBackendDescriptorForScope(scopeId);
+    const binding = this.store.getBinding(scopeId);
+    const settings = this.store.getChatSettings(scopeId);
+    if (!settings) return;
+    this.store.setScopeBackendBinding(
+      scopeId,
+      activeBackend.id,
+      binding?.threadId ?? '',
+      binding?.cwd ?? null,
+      {
+        model: settings.model ?? null,
+        reasoningEffort: settings.reasoningEffort ?? null,
+        activeTurnMessageMode: settings.activeTurnMessageMode ?? null,
+        serviceTier: settings.serviceTier ?? null,
+        accessPreset: settings.accessPreset ?? null,
+      },
+    );
+  }
+
+  scheduleStalePanelDeletion(scopeId: string, messageId: number): void {
+    if (this.config.telegramPanelTtlMs <= 0 || scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      return;
+    }
+    const key = `${scopeId}:${messageId}`;
+    const existing = this.stalePanelDeleteTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.stalePanelDeleteTimers.delete(key);
+      if (typeof this.messaging?.deleteMessage === 'function') {
+        void this.messaging.deleteMessage(scopeId, messageId).catch((error) => {
+          this.logger.debug('telegram.stale_panel_delete_failed', { scopeId, messageId, error: String(error) });
+        });
+      }
+    }, this.config.telegramPanelTtlMs);
+    timer.unref();
+    this.stalePanelDeleteTimers.set(key, timer);
+  }
+
   async switchBackend(
     scopeId: string,
     targetBackendId: string,
@@ -225,22 +274,90 @@ export class UnifiedChannelOrchestrator {
     }
 
     const currentBinding = this.store.getBinding(scopeId);
-    if (currentBinding) {
-      this.store.setScopeBackendBinding(
-        scopeId,
-        currentBackendId,
-        currentBinding.threadId,
-        currentBinding.cwd,
-      );
-    }
+    const currentSettings = this.store.getChatSettings(scopeId);
+    this.store.setScopeBackendBinding(
+      scopeId,
+      currentBackendId,
+      currentBinding?.threadId ?? '',
+      currentBinding?.cwd ?? null,
+      {
+        model: currentSettings?.model ?? null,
+        reasoningEffort: currentSettings?.reasoningEffort ?? null,
+        activeTurnMessageMode: currentSettings?.activeTurnMessageMode ?? null,
+        serviceTier: currentSettings?.serviceTier ?? null,
+        accessPreset: currentSettings?.accessPreset ?? null,
+      },
+    );
 
     this.store.setActiveBackend(scopeId, targetBackendId);
 
     const saved = this.store.getScopeBackendBinding(scopeId, targetBackendId);
     if (saved) {
-      this.store.setBinding(scopeId, saved.threadId, saved.cwd ?? this.config.defaultCwd);
+      if (saved.threadId) {
+        this.store.setBinding(scopeId, saved.threadId, saved.cwd ?? this.config.defaultCwd);
+      } else {
+        this.store.clearBinding(scopeId);
+      }
+      this.store.setChatSettings(
+        scopeId,
+        saved.model ?? null,
+        (saved.reasoningEffort as ReasoningEffortValue) ?? null,
+      );
+      if (saved.activeTurnMessageMode !== undefined && saved.activeTurnMessageMode !== null) {
+        this.store.setChatActiveTurnMessageMode(
+          scopeId,
+          (saved.activeTurnMessageMode as ActiveTurnMessageMode) ?? null,
+        );
+      }
+      if (saved.serviceTier !== undefined) {
+        this.store.setChatServiceTier(scopeId, saved.serviceTier ?? null);
+      }
+      if (saved.accessPreset !== undefined) {
+        this.store.setChatAccessPreset(scopeId, (saved.accessPreset as AccessPresetValue) ?? null);
+      }
     } else {
       this.store.clearBinding(scopeId);
+      const defaultEffort: ReasoningEffortValue = targetDesc.engineType === 'antigravity' ? 'high' : 'medium';
+      this.store.setChatSettings(scopeId, null, defaultEffort);
+      this.store.setChatServiceTier(scopeId, null);
+    }
+
+    const isCodex = targetDesc.engineType === 'codex';
+    const activeSettings = this.store.getChatSettings(scopeId);
+    const modelText = activeSettings?.model ? `\`${activeSettings.model}\`` : (locale === 'zh' ? '引擎默认' : 'default');
+    const effortText = activeSettings?.reasoningEffort ?? (isCodex ? 'medium' : 'high');
+    const modeText = activeSettings?.activeTurnMessageMode ?? 'queue';
+
+    const switchMsg =
+      locale === 'zh'
+        ? `🔄 **已切换至后端: ${targetDesc.name}** (\`${targetDesc.id}\`)\n\n` +
+          `• **引擎类型**: ${isCodex ? 'OpenAI Codex (App Server)' : 'Google Antigravity (AGY)'}\n` +
+          `• **绑定账号**: \`${targetDesc.account || '默认账号'}\`${targetDesc.details ? ` (${targetDesc.details})` : ''}\n` +
+          `• **会话状态**: ${saved?.threadId ? `已恢复历史会话 (\`${saved.threadId.slice(0, 16)}…\`)\n• **工作目录**: \`${saved.cwd ?? this.config.defaultCwd}\`` : '新会话就绪 (发送消息将开启新会话)'}\n` +
+          `• **记忆配置**: 模型 ${modelText} | 思考深度 \`${effortText}\` | 插话模式 \`${modeText}\`\n` +
+          `• **专属指令**: \`/models\` (${isCodex ? 'Codex模型' : 'Gemini模型'}), \`/auth\` (${isCodex ? 'OpenAI账号池' : 'Google授权'}), \`/threads\` (${isCodex ? 'Codex历史' : 'AGY历史'})\n\n` +
+          `⚡ **当前 Telegram Bot 已完全切换为 ${isCodex ? 'OpenAI Codex' : 'Google Antigravity'} 交互人格与执行引擎！**`
+        : `🔄 **Switched to Backend: ${targetDesc.name}** (\`${targetDesc.id}\`)\n\n` +
+          `• **Engine**: ${isCodex ? 'OpenAI Codex (App Server)' : 'Google Antigravity (AGY)'}\n` +
+          `• **Account**: \`${targetDesc.account || 'default'}\`${targetDesc.details ? ` (${targetDesc.details})` : ''}\n` +
+          `• **Thread**: ${saved?.threadId ? `Restored (\`${saved.threadId.slice(0, 16)}…\`)\n• **Directory**: \`${saved.cwd ?? this.config.defaultCwd}\`` : 'Ready (next prompt starts new thread)'}\n` +
+          `• **Restored Settings**: Model ${modelText} | Effort \`${effortText}\` | Message Mode \`${modeText}\`\n\n` +
+          `⚡ **Telegram Bot is now fully operated by ${isCodex ? 'OpenAI Codex' : 'Google Antigravity'}!**`;
+
+    try {
+      await this.sendMessage(scopeId, switchMsg);
+    } catch (err) {
+      this.logger.warn('orchestrator.switch_announce_failed', { error: String(err) });
+    }
+
+    try {
+      if (scopeId.startsWith(BRIDGE_SCOPE_TELEGRAM_PREFIX)) {
+        const target = parseTelegramTargetFromBridgeScope(scopeId);
+        const cmds = isCodex ? getTelegramCommands(locale) : getAntigravityTelegramCommands(locale);
+        await this.bot.setChatCommands(target.chatId, cmds);
+      }
+    } catch (err) {
+      this.logger.warn('orchestrator.set_chat_commands_failed', { error: String(err) });
     }
 
     this.logger.info('orchestrator.backend_switched', {
@@ -272,6 +389,14 @@ export class UnifiedChannelOrchestrator {
         this.logger.error('orchestrator.inbound_callback_error', {
           error: err instanceof Error ? err.message : String(err),
         });
+      });
+    });
+  }
+
+  dispatchInboundLikeTelegramText(event: TelegramTextEvent): void {
+    this.handleText(event).catch((err) => {
+      this.logger.error('orchestrator.inbound_text_error', {
+        error: err instanceof Error ? err.message : String(err),
       });
     });
   }
@@ -418,6 +543,7 @@ export class UnifiedChannelOrchestrator {
         case 'model':
           if (argsString) {
             this.store.setChatSettings(scopeId, argsString, null);
+            this.syncCurrentBackendSettings(scopeId);
             await this.sendMessage(
               scopeId,
               locale === 'zh' ? `✅ 模型已切换为: \`${argsString}\`` : `✅ Model switched to: \`${argsString}\``,
@@ -471,7 +597,7 @@ export class UnifiedChannelOrchestrator {
     const messageId = event.messageId;
 
     if (this.customUi?.handleCustomCallback) {
-      const handled = await this.customUi.handleCustomCallback(scopeId, data, locale, messageId);
+      const handled = await this.customUi.handleCustomCallback(scopeId, data, locale, messageId, event);
       if (handled) return;
     }
 
@@ -497,15 +623,35 @@ export class UnifiedChannelOrchestrator {
           locale === 'zh' ? `切换失败: ${String(err)}` : `Switch failed: ${String(err)}`,
         );
       }
-      await this.sendBackendMenu(scopeId, locale, messageId);
+      await this.sendSetupMenu(scopeId, locale, messageId);
       return;
     }
 
-    if (data.startsWith('engine:m:')) {
-      const model = data.slice('engine:m:'.length);
+    if (data.startsWith('engine:m:') || data.startsWith('setup:model:')) {
+      const rawModel = data.startsWith('engine:m:')
+        ? data.slice('engine:m:'.length)
+        : decodeURIComponent(data.slice('setup:model:'.length));
+      const model = rawModel === 'default' ? null : rawModel;
       this.store.setChatSettings(scopeId, model, null);
-      await this.messaging.answerCallback(event.callbackQueryId, `Model: ${model}`);
-      await this.sendModelsMenu(scopeId, locale, messageId);
+      this.syncCurrentBackendSettings(scopeId);
+      await this.messaging.answerCallback(event.callbackQueryId, `Model: ${rawModel}`);
+      await this.sendSetupMenu(scopeId, locale, messageId);
+      return;
+    }
+
+    if (data.startsWith('engine:effort:') || data.startsWith('setup:effort:')) {
+      const rawEffort = data.startsWith('engine:effort:')
+        ? data.slice('engine:effort:'.length)
+        : data.slice('setup:effort:'.length);
+      const targetEffort = rawEffort === 'default' ? null : (rawEffort as ReasoningEffortValue);
+      const settings = this.store.getChatSettings(scopeId);
+      if (targetEffort !== 'high' && settings?.serviceTier === 'boost') {
+        this.store.setChatServiceTier(scopeId, null);
+      }
+      this.store.setChatSettings(scopeId, null, targetEffort);
+      this.syncCurrentBackendSettings(scopeId);
+      await this.messaging.answerCallback(event.callbackQueryId, `Effort: ${rawEffort}`);
+      await this.sendSetupMenu(scopeId, locale, messageId);
       return;
     }
 
@@ -523,6 +669,7 @@ export class UnifiedChannelOrchestrator {
         if (nextBoost) {
           this.store.setChatSettings(scopeId, null, 'high');
         }
+        this.syncCurrentBackendSettings(scopeId);
         await this.messaging.answerCallback(
           event.callbackQueryId,
           nextBoost ? (locale === 'zh' ? '🚀 Boost 模式已开启 (深度 High)' : '🚀 Boost Mode enabled (High)') : (locale === 'zh' ? '⚪ Boost 模式已关闭' : '⚪ Boost Mode disabled'),
@@ -540,6 +687,7 @@ export class UnifiedChannelOrchestrator {
         const current = settings?.activeTurnMessageMode ?? 'queue';
         const next: TurnMessageMode = current === 'steer' ? 'queue' : 'steer';
         this.store.setChatActiveTurnMessageMode(scopeId, next);
+        this.syncCurrentBackendSettings(scopeId);
         await this.messaging.answerCallback(
           event.callbackQueryId,
           next === 'steer' ? '已切换为：⚡ 插话模式' : '已切换为：⏳ 排队模式',
@@ -762,12 +910,17 @@ export class UnifiedChannelOrchestrator {
       flushTimer: null,
       lastFlushTime: Date.now(),
       typingTimer: null,
+      stepIndex: 1,
+      toolCount: 0,
+      currentTool: null,
+      startTime: Date.now(),
     };
 
     this.activeTurns.set(scopeId, activeTurn);
 
     activeTurn.typingTimer = setInterval(() => {
       this.messaging.sendTypingInScope(scopeId).catch(() => {});
+      scheduleFlush();
     }, TYPING_INTERVAL_MS);
     activeTurn.typingTimer?.unref?.();
 
@@ -778,11 +931,16 @@ export class UnifiedChannelOrchestrator {
       activeTurn.flushTimer = setTimeout(() => {
         activeTurn.flushTimer = null;
         activeTurn.lastFlushTime = Date.now();
+        const elapsedSeconds = Math.max(1, Math.floor((Date.now() - activeTurn.startTime) / 1000));
         const content = renderStreamPreviewContent({
           toolLines: activeTurn.toolLines,
           accumulatedText: activeTurn.accumulatedText,
           isBoost,
           engineName: adapter.name,
+          stepIndex: activeTurn.stepIndex,
+          toolCount: activeTurn.toolCount,
+          currentTool: activeTurn.currentTool,
+          elapsedSeconds,
         });
         this.editMessage(activeTurn.scopeId, activeTurn.messageId, content).catch(() => {});
       }, delay);
@@ -795,10 +953,27 @@ export class UnifiedChannelOrchestrator {
     });
 
     execution.on('tool', (tool) => {
-      const statusIcon = tool.status === 'running' ? '⚙️' : tool.status === 'failed' ? '❌' : '✅';
-      const line = `${statusIcon} \`${tool.name}\``;
-      if (!activeTurn.toolLines.includes(line)) {
+      if (tool.stepIndex && tool.stepIndex > 0) {
+        activeTurn.stepIndex = tool.stepIndex;
+      }
+      const icon = tool.status === 'running' ? '⚙️' : tool.status === 'failed' ? '❌' : '✅';
+      const summaryText = tool.summary ? ` · ${escapeTelegramHtml(tool.summary)}` : '';
+      const line = `${icon} <code>${escapeTelegramHtml(tool.name)}</code>${summaryText}`;
+
+      if (tool.status === 'running') {
+        activeTurn.toolCount += 1;
+        activeTurn.currentTool = tool.summary ? `${tool.name} (${tool.summary})` : tool.name;
         activeTurn.toolLines.push(line);
+      } else {
+        if (activeTurn.currentTool && activeTurn.currentTool.startsWith(tool.name)) {
+          activeTurn.currentTool = null;
+        }
+        const lastIdx = activeTurn.toolLines.findLastIndex((l) => l.includes(`<code>${escapeTelegramHtml(tool.name)}</code>`));
+        if (lastIdx !== -1) {
+          activeTurn.toolLines[lastIdx] = line;
+        } else {
+          activeTurn.toolLines.push(line);
+        }
       }
       scheduleFlush();
     });
@@ -817,6 +992,18 @@ export class UnifiedChannelOrchestrator {
         this.store.setBinding(scopeId, res.conversationId, cwd);
       }
 
+      if (res.usage) {
+        this.store.recordTokenUsage(
+          {
+            inputTokens: res.usage.inputTokens,
+            outputTokens: res.usage.outputTokens,
+            cachedTokens: res.usage.cachedTokens,
+            totalTokens: res.usage.totalTokens,
+          },
+          adapter.id,
+        );
+      }
+
       if (res.status === 'SUCCESS') {
         let finalText = (res.response || '').trim();
         if (!finalText && activeTurn.accumulatedText) {
@@ -825,7 +1012,8 @@ export class UnifiedChannelOrchestrator {
 
         let foldedTools = '';
         if (activeTurn.toolLines.length > 0) {
-          foldedTools = `<blockquote expandable>🛠️ <b>已调用工具 (${activeTurn.toolLines.length} 项)</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
+          const roundText = activeTurn.stepIndex && activeTurn.stepIndex > 1 ? ` · 共 ${activeTurn.stepIndex} 轮` : '';
+          foldedTools = `<blockquote expandable>🛠️ <b>执行小结${roundText} · 累计执行 ${activeTurn.toolLines.length} 次工具</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
         }
 
         const fullText = foldedTools + (finalText || '(无输出 / No output)');
@@ -908,6 +1096,7 @@ export class UnifiedChannelOrchestrator {
         this.store.setChatServiceTier(scopeId, null);
       }
       this.store.setChatSettings(scopeId, null, target as 'low' | 'medium' | 'high');
+      this.syncCurrentBackendSettings(scopeId);
       await this.sendMessage(
         scopeId,
         locale === 'zh' ? `✅ 思考深度已设置为: \`${target}\`` : `✅ Reasoning effort set to: \`${target}\``,
@@ -934,6 +1123,7 @@ export class UnifiedChannelOrchestrator {
     if (nextBoost) {
       this.store.setChatSettings(scopeId, null, 'high');
     }
+    this.syncCurrentBackendSettings(scopeId);
     const msg = locale === 'zh'
       ? (nextBoost
           ? '🚀 已开启 **Boost 增强模式**！\n• 思考深度锁定为 `high`\n• 注入深度规划、多视角审视与交叉验证指令\n• 适用于复杂编程、长推理任务与疑难排错'
@@ -948,6 +1138,7 @@ export class UnifiedChannelOrchestrator {
     const target = args.trim().toLowerCase();
     if (target === 'steer' || target === 'queue') {
       this.store.setChatActiveTurnMessageMode(scopeId, target);
+      this.syncCurrentBackendSettings(scopeId);
       await this.sendMessage(
         scopeId,
         locale === 'zh'
@@ -1070,12 +1261,18 @@ export class UnifiedChannelOrchestrator {
     const adapter = backendDesc.adapter;
     const customStatus = this.customUi?.renderCustomStatus ? await this.customUi.renderCustomStatus(scopeId, locale) : '';
 
+    const totalUsage = this.store.getCumulativeTokenUsage();
+    const tokenLine = formatTokenUsageSummary(totalUsage, locale);
+    const allUsages = this.store.getAllBackendTokenUsages();
+    const breakdown = formatBackendTokenUsageBreakdown(allUsages);
+
     const text =
       locale === 'zh'
         ? `📊 **${adapter.name} 运行状态**\n\n` +
           `• **当前引擎**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **状态**: ${isBusy ? '⚡ 正在执行任务' : '💤 空闲'}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
+          `${tokenLine}${breakdown}\n` +
           `• **绑定会话**: \`${binding?.threadId || '(新会话)'}\`\n` +
           `• **工作目录**: \`${binding?.cwd || this.config.defaultCwd}\`` +
           (customStatus ? `\n${customStatus}` : '')
@@ -1083,6 +1280,7 @@ export class UnifiedChannelOrchestrator {
           `• **Engine**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **State**: ${isBusy ? '⚡ Executing' : '💤 Idle'}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
+          `${tokenLine}${breakdown}\n` +
           `• **Thread**: \`${binding?.threadId || '(new)'}\`\n` +
           `• **Directory**: \`${binding?.cwd || this.config.defaultCwd}\`` +
           (customStatus ? `\n${customStatus}` : '');
@@ -1101,7 +1299,8 @@ export class UnifiedChannelOrchestrator {
       ]);
     }
 
-    await this.sendMessage(scopeId, text, keyboard);
+    const msgId = await this.sendMessage(scopeId, text, keyboard);
+    this.scheduleStalePanelDeletion(scopeId, msgId);
   }
 
   async sendSetupMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
@@ -1112,51 +1311,106 @@ export class UnifiedChannelOrchestrator {
     const adapter = backendDesc.adapter;
     const allBackends = await this.listBackends();
 
+    const currentModel = settings?.model;
+    const currentEffort = isBoost ? 'high' : (settings?.reasoningEffort ?? null);
+
     const text =
       locale === 'zh'
         ? `⚙️ **${adapter.name} 控制面板**\n\n` +
           `• **当前引擎**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
+          `• **思考深度**: \`${currentEffort || '默认'}\`\n` +
           `• **Boost 增强**: ${isBoost ? '🚀 已开启' : '⚪ 已关闭'}\n` +
           `• **运行中消息**: ${mode === 'steer' ? '⚡ 插话 (立即中断接管)' : '⏳ 排队 (完成后自动执行)'}\n\n` +
           `请选择要配置的项目：`
         : `⚙️ **${adapter.name} Setup Panel**\n\n` +
           `• **Engine**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
+          `• **Effort**: \`${currentEffort || 'default'}\`\n` +
           `• **Boost**: ${isBoost ? '🚀 Enabled' : '⚪ Disabled'}\n` +
           `• **Active-Turn**: ${mode === 'steer' ? '⚡ Steer' : '⏳ Queue'}\n\n` +
           `Select setting to configure:`;
 
-    const keyboard: InlineKeyboard = [
-      [
-        {
-          text: isBoost ? (locale === 'zh' ? '🚀 Boost: 开启' : '🚀 Boost: On') : (locale === 'zh' ? '⚪ Boost: 关闭' : '⚪ Boost: Off'),
-          callback_data: 'engine:setup:boost',
-        },
-        { text: '🧠 切换模型', callback_data: 'engine:setup:models' },
-      ],
-      [
-        {
-          text: mode === 'steer' ? '⚡ 运行中: 插话' : '⏳ 运行中: 排队',
-          callback_data: 'engine:setup:active_mode',
-        },
-        { text: '✨ 新建会话', callback_data: 'engine:setup:new' },
-      ],
-      [
-        { text: `🔌 切换后端运行环境 (${allBackends.length})`, callback_data: 'engine:setup:backend' },
-        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
-      ],
-    ];
+    const keyboard: InlineKeyboard = [];
 
+    // 1. Model choices (Codex style)
+    const models = await adapter.listModels();
+    const modelButtons: InlineKeyboard[0] = [
+      {
+        text: `${!currentModel || currentModel === 'default' ? '• ' : ''}${locale === 'zh' ? '默认模型' : 'Default'}`,
+        callback_data: 'engine:m:default',
+      },
+    ];
+    for (const m of models.slice(0, 5)) {
+      const isAct = currentModel === m.id || (!currentModel && m.isDefault);
+      const label = m.name.length > 14 ? `${m.name.slice(0, 13)}…` : m.name;
+      modelButtons.push({
+        text: `${isAct ? '• ' : ''}${label}`,
+        callback_data: `engine:m:${m.id}`,
+      });
+    }
+    for (let i = 0; i < modelButtons.length; i += 2) {
+      keyboard.push(modelButtons.slice(i, i + 2));
+    }
+
+    // 2. Reasoning effort choices (Codex style)
+    const isAgy = backendDesc.engineType === 'antigravity' || backendDesc.id === 'antigravity';
+    const isCodex = backendDesc.engineType === 'codex' || backendDesc.id === 'codex';
+    const supportedEfforts: string[] = isAgy
+      ? ['low', 'medium', 'high']
+      : isCodex
+        ? ['low', 'medium', 'high', 'xhigh', 'max']
+        : ['low', 'medium', 'high'];
+
+    const effortButtons: InlineKeyboard[0] = [
+      {
+        text: `${!currentEffort || (currentEffort as string) === 'default' ? '• ' : ''}${locale === 'zh' ? '默认深度' : 'Default'}`,
+        callback_data: 'engine:effort:default',
+      },
+      ...supportedEfforts.map((eff) => ({
+        text: `${currentEffort === eff ? '• ' : ''}${eff}`,
+        callback_data: `engine:effort:${eff}`,
+      })),
+    ];
+    for (let i = 0; i < effortButtons.length; i += 3) {
+      keyboard.push(effortButtons.slice(i, i + 3));
+    }
+
+    // 3. Boost & Active Mode row
+    keyboard.push([
+      {
+        text: isBoost ? (locale === 'zh' ? '🚀 Boost: 开启' : '🚀 Boost: On') : (locale === 'zh' ? '⚪ Boost: 关闭' : '⚪ Boost: Off'),
+        callback_data: 'engine:setup:boost',
+      },
+      {
+        text: mode === 'steer' ? (locale === 'zh' ? '⚡ 插话模式' : '⚡ Steer') : (locale === 'zh' ? '⏳ 排队模式' : '⏳ Queue'),
+        callback_data: 'engine:setup:active_mode',
+      },
+    ]);
+
+    // 4. Custom rows (Account & History)
     if (this.customUi?.renderCustomSetupRows) {
       const customRows = await this.customUi.renderCustomSetupRows(scopeId, locale);
-      keyboard.unshift(...customRows);
+      keyboard.push(...customRows);
     }
+
+    // 5. Session & Backend switcher row
+    keyboard.push([
+      { text: '✨ 新建会话', callback_data: 'engine:setup:new' },
+      { text: `🔌 切换后端运行环境 (${allBackends.length})`, callback_data: 'engine:setup:backend' },
+    ]);
+
+    // 6. Refresh row
+    keyboard.push([
+      { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
+    ]);
 
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
     } else {
-      await this.sendMessage(scopeId, text, keyboard);
+      const msgId = await this.sendMessage(scopeId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
     }
   }
 
@@ -1195,8 +1449,10 @@ export class UnifiedChannelOrchestrator {
 
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, title, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
     } else {
-      await this.sendMessage(scopeId, title, keyboard);
+      const msgId = await this.sendMessage(scopeId, title, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
     }
   }
 
@@ -1229,7 +1485,8 @@ export class UnifiedChannelOrchestrator {
           `/new — Start fresh session\n` +
           `/help — Show this help\n`;
 
-    await this.sendMessage(scopeId, text);
+    const msgId = await this.sendMessage(scopeId, text);
+    this.scheduleStalePanelDeletion(scopeId, msgId);
   }
 
   async sendBackendMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
@@ -1238,7 +1495,7 @@ export class UnifiedChannelOrchestrator {
     const binding = this.store.getBinding(scopeId);
 
     const lines: string[] = [
-      locale === 'zh' ? '🔌 **后端运行环境与账号 (Backends & Engines)**' : '🔌 **Backends & Engines**',
+      locale === 'zh' ? '🔌 **后端运行环境 (Backends & Engines)**' : '🔌 **Backends & Engines**',
       '',
       locale === 'zh'
         ? `• **当前活跃**: ● **${activeBackend.name}** (\`${activeBackend.id}\`)`
@@ -1265,7 +1522,7 @@ export class UnifiedChannelOrchestrator {
       );
     }
 
-    lines.push('', '───────────────────', locale === 'zh' ? '**可用后端与账号列表**：' : '**Available Backends & Accounts**:');
+    lines.push('', '───────────────────', locale === 'zh' ? '**可用后端列表**：' : '**Available Backends**:');
 
     const keyboard: InlineKeyboard = [];
 
@@ -1293,8 +1550,10 @@ export class UnifiedChannelOrchestrator {
     const text = lines.join('\n');
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
     } else {
-      await this.sendMessage(scopeId, text, keyboard);
+      const msgId = await this.sendMessage(scopeId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
     }
   }
 
@@ -1332,33 +1591,7 @@ export class UnifiedChannelOrchestrator {
       return;
     }
 
-    const result = await this.switchBackend(scopeId, targetId, locale);
-    const restoredNote = result.restoredThreadId
-      ? (locale === 'zh'
-          ? `• **已恢复该后端既有会话**: \`${result.restoredThreadId.slice(0, 12)}…\`\n• **工作目录**: \`${result.cwd ?? this.config.defaultCwd}\``
-          : `• **Restored Thread**: \`${result.restoredThreadId.slice(0, 12)}…\`\n• **Directory**: \`${result.cwd ?? this.config.defaultCwd}\``)
-      : (locale === 'zh'
-          ? `• **会话状态**: 就绪 (发送任意新消息将在此后端创建新会话)`
-          : `• **Session**: Ready (send a message to start a new thread)`);
-
-    const text =
-      locale === 'zh'
-        ? `✅ **已切换至后端: ${targetDesc.name}**\n\n` +
-          `• **后端引擎**: \`${targetDesc.id}\`\n` +
-          restoredNote +
-          `\n\n后续所有消息和指令将直接路由至该后端执行。发送 /threads 可查看此后端的会话列表。`
-        : `✅ **Switched to Backend: ${targetDesc.name}**\n\n` +
-          `• **Engine**: \`${targetDesc.id}\`\n` +
-          restoredNote +
-          `\n\nAll subsequent turns will run on this backend. Run /threads to list sessions.`;
-
-    const keyboard: InlineKeyboard = [
-      [
-        { text: '🔌 切换其他后端', callback_data: 'engine:setup:backend' },
-        { text: '⚙️ 控制面板', callback_data: 'engine:setup:main' },
-      ],
-    ];
-
-    await this.sendMessage(scopeId, text, keyboard);
+    await this.switchBackend(scopeId, targetId, locale);
+    await this.sendSetupMenu(scopeId, locale);
   }
 }

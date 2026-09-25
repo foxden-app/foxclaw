@@ -26,4 +26,17 @@ test('renderStreamPreviewContent formats thinking state, tools, and text preview
   assert.ok(withToolsAndText.includes('<blockquote'));
   assert.ok(withToolsAndText.includes('正在调用工具 (2 项)'));
   assert.ok(withToolsAndText.includes('Hello world response'));
+
+  const withLiveMeta = renderStreamPreviewContent({
+    toolLines: ['✅ `run_command`'],
+    accumulatedText: 'Building project...',
+    engineName: 'Antigravity',
+    stepIndex: 3,
+    toolCount: 5,
+    currentTool: 'run_command ($ npm run build)',
+    elapsedSeconds: 12,
+  });
+  assert.ok(withLiveMeta.includes('第 3 轮 · 累计执行 5 次工具 · 已耗时 12s'));
+  assert.ok(withLiveMeta.includes('当前正在运行'));
+  assert.ok(withLiveMeta.includes('run_command ($ npm run build)'));
 });

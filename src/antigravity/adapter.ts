@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 import type {
   IEngineAdapter,
   EngineModel,
@@ -8,11 +9,40 @@ import type {
   EngineToolEvent,
   EngineTurnErrorContext,
 } from '../core/engine_spi.js';
-import type { AntigravityAppClient, AntigravityTurnExecution } from './client.js';
+import { normalizeAgyModelId, type AntigravityAppClient, type AntigravityTurnExecution } from './client.js';
 import type { AntigravityAuthManager } from './auth.js';
 import { isCapacityOrUnavailableError } from './events.js';
 import { buildAttachmentPrompt } from '../telegram/media.js';
 import type { Logger } from '../logger.js';
+
+function extractToolSummary(name: string, parameters?: Record<string, unknown>): string | undefined {
+  if (!parameters) return undefined;
+  if (typeof parameters.CommandLine === 'string') {
+    return `$ ${parameters.CommandLine.slice(0, 70)}`;
+  }
+  if (typeof parameters.TargetFile === 'string') {
+    return path.basename(parameters.TargetFile);
+  }
+  if (typeof parameters.AbsolutePath === 'string') {
+    return path.basename(parameters.AbsolutePath);
+  }
+  if (typeof parameters.path === 'string') {
+    return path.basename(parameters.path);
+  }
+  if (typeof parameters.query === 'string') {
+    return parameters.query.slice(0, 60);
+  }
+  if (typeof parameters.Url === 'string') {
+    return parameters.Url.slice(0, 60);
+  }
+  if (typeof parameters.toolSummary === 'string') {
+    return parameters.toolSummary.slice(0, 60);
+  }
+  if (typeof parameters.toolAction === 'string') {
+    return parameters.toolAction.slice(0, 60);
+  }
+  return undefined;
+}
 
 export class AntigravityEngineAdapter implements IEngineAdapter {
   readonly id = 'antigravity';
@@ -25,7 +55,7 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
 
   constructor(
     client: AntigravityAppClient,
-    defaultModel = 'gemini-3.8-flash-high',
+    defaultModel = 'gemini-3.8-flash',
     auth?: AntigravityAuthManager,
     logger?: Logger,
   ) {
@@ -37,16 +67,37 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
 
   async listModels(): Promise<EngineModel[]> {
     const rawModels = await this.client.listModels();
-    return rawModels.map((m) => ({
-      id: m,
-      name: m.replace(/^gemini-/, '').replace(/^claude-/, 'Claude '),
-      description: m.includes('flash')
-        ? 'Fast, high-throughput model'
-        : m.includes('pro')
-          ? 'Deep reasoning & complex tasks'
-          : undefined,
-      isDefault: m === this.defaultModel,
-    }));
+    const seen = new Set<string>();
+    const result: EngineModel[] = [];
+
+    for (const raw of rawModels) {
+      const m = normalizeAgyModelId(raw);
+      if (seen.has(m)) continue;
+      seen.add(m);
+
+      let displayName = m;
+      if (m === 'gemini-3.8-flash') displayName = 'Gemini 3.8 Flash';
+      else if (m === 'gemini-3.7-flash') displayName = 'Gemini 3.7 Flash';
+      else if (m === 'gemini-3.6-flash') displayName = 'Gemini 3.6 Flash';
+      else if (m === 'gemini-3.1-pro') displayName = 'Gemini 3.1 Pro';
+      else if (m === 'claude-sonnet-4-6') displayName = 'Claude Sonnet 4.6';
+      else if (m === 'claude-opus-4-6') displayName = 'Claude Opus 4.6';
+      else if (m === 'gpt-oss-120b') displayName = 'GPT-OSS 120B';
+      else displayName = m.replace(/^gemini-/, 'Gemini ').replace(/^claude-/, 'Claude ');
+
+      result.push({
+        id: m,
+        name: displayName,
+        description: m.includes('flash')
+          ? 'Fast, high-throughput model'
+          : m.includes('pro')
+            ? 'Deep reasoning & complex tasks'
+            : undefined,
+        isDefault: m === this.defaultModel || (this.defaultModel.startsWith(m) && !m.includes('-')),
+      });
+    }
+
+    return result;
   }
 
   executeTurn(request: EngineTurnRequest): EngineTurnExecution {
@@ -78,6 +129,8 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
             args: ev.parameters,
             output: ev.output,
             status: ev.state === 'ACTIVE' ? 'running' : ev.state === 'ERROR' ? 'failed' : 'completed',
+            stepIndex: ev.stepIndex,
+            summary: extractToolSummary(ev.toolName, ev.parameters),
           } satisfies EngineToolEvent);
           break;
         case 'result': {
@@ -86,6 +139,14 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
             status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
             response: ev.response || ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : ''),
             conversationId: ev.conversationId,
+            usage: ev.usage
+              ? {
+                  inputTokens: ev.usage.input_tokens,
+                  outputTokens: ev.usage.output_tokens,
+                  cachedTokens: ev.usage.cache_read_tokens,
+                  totalTokens: ev.usage.total_tokens,
+                }
+              : undefined,
           };
           emitter.emit('result', res);
           break;
@@ -112,6 +173,14 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
           status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
           response: ev.response || ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : ''),
           conversationId: ev.conversationId,
+          usage: ev.usage
+            ? {
+                inputTokens: ev.usage.input_tokens,
+                outputTokens: ev.usage.output_tokens,
+                cachedTokens: ev.usage.cache_read_tokens,
+                totalTokens: ev.usage.total_tokens,
+              }
+            : undefined,
         };
       },
       on: (event: string, listener: (...args: any[]) => void) => {

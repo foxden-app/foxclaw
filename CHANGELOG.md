@@ -2,6 +2,39 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.9.0 - 2026-09-26
+
+### 中文
+- **统一多后端运行环境热切换**：
+  - 前端控制面板支持 `Codex`、`Google Antigravity (AGY)`、`OpenCode` 无缝平滑热切换，会话状态与配置自动记忆绑定。
+  - 支持多 Bot 隔离实例下各 Bot 独立选择和切换后端，互不干扰。
+- **全端功能体验对齐原版 Codex 标准**：
+  - `/auth` 面板向原版 Codex 规范完全看齐，支持设备登录、授权检测、自动轮换与暂停/修复功能。
+  - `/threads` 会话面板对齐原版 Codex 功能按钮（会话切换、历史归档、工作目录配置等）。
+- **交互面板智能收拢与过期自动清理**：
+  - 设置类与状态类面板展示超过 5 分钟自动静默清理，保持聊天面板干净整洁。
+  - 任务执行过程实时动态刷新（轮次、工具调用次数、耗时），完成后自动收拢折叠为小结引用块。
+- **自更新体系全面支持 Antigravity CLI 同步升级**：
+  - `/update` 命令与集群自动更新联动同步执行 `agy update`，确保 FoxClaw、Codex 与 Antigravity CLI 全技术栈同步保持最新。
+- **全局 Token 统计与即时观测（常态化持久化）**：
+  - `/status` 状态面板常态化显示全后端累积 Token 用量，格式化为人类友好单位（`总计 X.XXG (输入 X.XXG, 输出 XX.XXM, 缓存 X.XXG)`）。
+  - 底层基于 SQLite 持久化记录，无需每次耗时扫盘，日常实时累加，想看直接秒出。
+
+### English
+- **Unified Multi-Backend Hot-Switching**:
+  - Seamlessly switch between `Codex`, `Google Antigravity (AGY)`, and `OpenCode` from the Telegram UI with per-backend state and setting persistence.
+  - Multi-bot isolated setups support independent backend switching for each bot instance.
+- **Full UX Alignment with Codex Conventions**:
+  - `/auth` and `/threads` menus redesigned to match the established Codex interaction standards (device login, candidate repair, session archival).
+- **Auto-Cleanup & Expired Panel Pruning**:
+  - Transient setup and status panels are automatically removed after 5 minutes to keep chat history clean.
+  - Live execution displays dynamic progress counters and collapses into expandable summaries upon completion.
+- **Synchronous Antigravity CLI Self-Updates**:
+  - `/update` seamlessly upgrades the `agy` CLI alongside FoxClaw and Codex.
+- **Persistent Global Token Usage Metrics in `/status`**:
+  - Displays cumulative token metrics formatted in metric units (`Total X.XXG (Input X.XXG, Output XX.XXM, Cached X.XXG)`).
+  - Persisted continuously in SQLite for instant on-demand status reporting without filesystem latency.
+
 ## 0.8.0 - 2026-09-24
 
 ### 中文

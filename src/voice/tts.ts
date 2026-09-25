@@ -110,6 +110,8 @@ async function convertToOggOpus(input: Buffer, ffmpegBin: string): Promise<Buffe
       '-y',
       '-i',
       inputPath,
+      '-filter:a',
+      'atempo=1.18',
       '-ac',
       '1',
       '-c:a',
@@ -180,7 +182,7 @@ sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())
 PY
   exit 22
 fi
-ffmpeg -nostdin -hide_banner -loglevel error -y -i "$tmp/tts.wav" -ac 1 -c:a libopus -b:a 32k "$tmp/voice.ogg"
+ffmpeg -nostdin -hide_banner -loglevel error -y -i "$tmp/tts.wav" -filter:a "atempo=1.18" -ac 1 -c:a libopus -b:a 32k "$tmp/voice.ogg"
 python3 - "$tmp/voice.ogg" <<'PY'
 import pathlib
 import sys
@@ -240,7 +242,7 @@ sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())
 PY
   exit 22
 fi
-ffmpeg -nostdin -hide_banner -loglevel error -y -i "$tmp/tts.wav" -ac 1 -c:a libopus -b:a 32k "$tmp/voice.ogg"
+ffmpeg -nostdin -hide_banner -loglevel error -y -i "$tmp/tts.wav" -filter:a "atempo=1.18" -ac 1 -c:a libopus -b:a 32k "$tmp/voice.ogg"
 python3 - "$tmp/voice.ogg" <<'PY'
 import pathlib
 import sys

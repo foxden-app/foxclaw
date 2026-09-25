@@ -3,21 +3,39 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import type { AppConfig } from '../config.js';
-import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
+import { TelegramMessagingPort, type InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
-import type { AppLocale } from '../types.js';
+import type { AppLocale, RuntimeStatus } from '../types.js';
 import { chunkTelegramMessage } from '../telegram/text.js';
-import type { TelegramGateway, TelegramTextEvent } from '../telegram/gateway.js';
+import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import { escapeTelegramHtml } from '../telegram/html.js';
-import type { AntigravityAppClient } from './client.js';
-import { formatQuotaResetTime, type AntigravityAccount, type AntigravityAuthManager } from './auth.js';
+import { AntigravityAppClient } from './client.js';
+import { formatQuotaResetTime, AntigravityAuthManager, type AntigravityAccount } from './auth.js';
 import { AntigravityConversationManager, formatAge, type AntigravityConversation } from './conversations.js';
 import { UnifiedChannelOrchestrator } from '../core/orchestrator.js';
 import { AntigravityEngineAdapter } from './adapter.js';
 import { CodexEngineAdapter } from '../codex_app/adapter.js';
-import type { CodexAppClient } from '../codex_app/client.js';
-import type { BackendDescriptor } from '../core/engine_spi.js';
+import type { CodexAppClient, CodexAppServerRuntimeStatus } from '../codex_app/client.js';
+import { OpencodeEngineAdapter } from '../opencode/adapter.js';
+import type { OpencodeAppClient } from '../opencode/client.js';
+import type { BackendDescriptor, IEngineAdapter } from '../core/engine_spi.js';
+import { BridgeSessionCore } from '../controller/controller.js';
+import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
+import { BRIDGE_SCOPE_WEIXIN_PREFIX } from '../core/bridge_scope.js';
+import { syncCodexLocalUsageToStore } from '../store/token_usage.js';
+
+export interface UnifiedBridgeRuntimeStatus {
+  running: boolean;
+  connected: boolean;
+  activeTurns: number;
+  botUsername: string | null;
+  codexHome: string;
+  codexAppServer?: CodexAppServerRuntimeStatus | undefined;
+  userAgent: string | null;
+  authProactiveRefresh?: RuntimeStatus['authProactiveRefresh'];
+  lastError?: string | null | undefined;
+}
 
 function formatCandidateButtonPrefix(c: AntigravityAccount): string {
   const p5h = typeof c.quota?.fiveHourPercent === 'number' ? `${c.quota.fiveHourPercent}%` : '—';
@@ -68,7 +86,19 @@ interface AntigravityWatcher {
   lastContentPreview: string;
 }
 
-export class AntigravityBridgeCore {
+export interface UnifiedBridgeCoreOptions {
+  codexApp?: CodexAppClient | undefined;
+  codexAdapter?: CodexEngineAdapter | undefined;
+  codexCore?: BridgeSessionCore | undefined;
+  antigravityApp?: AntigravityAppClient | undefined;
+  antigravityAuth?: AntigravityAuthManager | undefined;
+  antigravityAdapter?: AntigravityEngineAdapter | undefined;
+  opencodeApp?: OpencodeAppClient | undefined;
+  opencodeAdapter?: OpencodeEngineAdapter | undefined;
+  defaultBackendId?: 'antigravity' | 'codex' | 'opencode' | string | undefined;
+}
+
+export class UnifiedBridgeCore {
   private readonly config: AppConfig;
   private readonly store: BridgeStore;
   private readonly logger: Logger;
@@ -78,57 +108,149 @@ export class AntigravityBridgeCore {
   private readonly conversations: AntigravityConversationManager;
   private readonly messaging: TelegramMessagingPort;
   private readonly adapter: AntigravityEngineAdapter;
-  private readonly codexAdapter?: CodexEngineAdapter;
+  private readonly codexAdapter?: CodexEngineAdapter | undefined;
+  private readonly codexApp?: CodexAppClient | undefined;
+  readonly codexCore?: BridgeSessionCore | undefined;
+  private readonly opencodeAdapter?: OpencodeEngineAdapter | undefined;
+  private readonly defaultBackendId: string;
   private readonly orchestrator: UnifiedChannelOrchestrator;
   private readonly watchers = new Map<string, AntigravityWatcher>();
+  private readonly pendingAgyRenames = new Map<string, { conversationId: string }>();
+  private readonly stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     config: AppConfig,
     store: BridgeStore,
     logger: Logger,
     bot: TelegramGateway,
-    app: AntigravityAppClient,
-    auth: AntigravityAuthManager,
-    messaging: TelegramMessagingPort,
-    options?: {
-      codexApp?: CodexAppClient | undefined;
-    },
+    app?: AntigravityAppClient | undefined,
+    auth?: AntigravityAuthManager | undefined,
+    messaging?: TelegramMessagingPort | undefined,
+    options?: UnifiedBridgeCoreOptions,
   ) {
     this.config = config;
     this.store = store;
     this.logger = logger;
     this.bot = bot;
-    this.app = app;
-    this.auth = auth;
+    this.auth = options?.antigravityAuth ?? auth ?? new AntigravityAuthManager(config.antigravityAuthDir, logger);
+    this.app = options?.antigravityApp ?? app ?? new AntigravityAppClient(config.antigravityCliBin, logger);
     this.conversations = new AntigravityConversationManager(config.antigravityAuthDir, logger);
-    this.messaging = messaging;
+    this.messaging = messaging ?? new TelegramMessagingPort(bot);
+    this.codexApp = options?.codexApp;
+    this.defaultBackendId = options?.defaultBackendId ?? 'antigravity';
 
-    this.adapter = new AntigravityEngineAdapter(
-      app,
+    this.codexCore = options?.codexCore;
+    if (!this.codexCore && options?.codexApp) {
+      try {
+        this.codexCore = new BridgeSessionCore(
+          this.config,
+          this.store,
+          this.logger,
+          this.bot,
+          options.codexApp,
+          new BridgeMessagingRouter(this.messaging, null),
+          null,
+          null,
+          false,
+        );
+      } catch (err) {
+        this.logger.warn('unified.codex_core_init_failed', { error: String(err) });
+      }
+    }
+
+    this.adapter = options?.antigravityAdapter ?? new AntigravityEngineAdapter(
+      this.app,
       config.antigravityDefaultModel,
-      auth,
+      this.auth,
       logger,
     );
 
-    if (options?.codexApp) {
+    if (options?.codexAdapter) {
+      this.codexAdapter = options.codexAdapter;
+    } else if (options?.codexApp) {
       this.codexAdapter = new CodexEngineAdapter(options.codexApp, {
         defaultModel: 'gpt-4o',
       });
     }
+
+    if (options?.opencodeAdapter) {
+      this.opencodeAdapter = options.opencodeAdapter;
+    } else if (options?.opencodeApp) {
+      this.opencodeAdapter = new OpencodeEngineAdapter(options.opencodeApp);
+    }
+
+    const isCodexDefault = this.defaultBackendId === 'codex';
+    const isOpencodeDefault = this.defaultBackendId === 'opencode';
+    const primaryAdapter = isCodexDefault && this.codexAdapter
+      ? this.codexAdapter
+      : isOpencodeDefault && this.opencodeAdapter
+        ? this.opencodeAdapter
+        : this.adapter;
+
+    const initialBackends: BackendDescriptor[] = [];
+    if (isCodexDefault && this.codexAdapter) {
+      initialBackends.push({
+        id: 'codex',
+        name: 'OpenAI Codex (App Server)',
+        engineType: 'codex',
+        adapter: this.codexAdapter,
+        isDefault: true,
+      });
+      initialBackends.push({
+        id: 'antigravity',
+        name: 'Google Antigravity (AGY)',
+        engineType: 'antigravity',
+        adapter: this.adapter,
+        isDefault: false,
+      });
+    } else {
+      initialBackends.push({
+        id: 'antigravity',
+        name: 'Google Antigravity (AGY)',
+        engineType: 'antigravity',
+        adapter: this.adapter,
+        isDefault: !isOpencodeDefault,
+      });
+      if (this.codexAdapter) {
+        initialBackends.push({
+          id: 'codex',
+          name: 'OpenAI Codex (App Server)',
+          engineType: 'codex',
+          adapter: this.codexAdapter,
+          isDefault: false,
+        });
+      }
+    }
+    if (this.opencodeAdapter) {
+      initialBackends.push({
+        id: 'opencode',
+        name: 'OpenCode (SDK)',
+        engineType: 'opencode',
+        adapter: this.opencodeAdapter,
+        isDefault: isOpencodeDefault,
+      });
+    }
+
+    const allAdapters: IEngineAdapter[] = [this.adapter];
+    if (this.codexAdapter) allAdapters.push(this.codexAdapter);
+    if (this.opencodeAdapter) allAdapters.push(this.opencodeAdapter);
 
     this.orchestrator = new UnifiedChannelOrchestrator({
       config,
       store,
       logger,
       bot,
-      adapter: this.adapter,
+      adapter: primaryAdapter,
+      adapters: allAdapters,
+      backends: initialBackends,
+      defaultBackendId: this.defaultBackendId,
       backendProvider: () => this.getBackendDescriptors(),
-      messaging,
+      messaging: this.messaging,
       customUi: {
         renderCustomStatus: (scopeId, locale) => this.renderCustomStatus(scopeId, locale),
         renderCustomSetupRows: (scopeId, locale) => this.renderCustomSetupRows(scopeId, locale),
-        handleCustomCallback: (scopeId, data, locale, messageId) =>
-          this.handleCustomCallback(scopeId, data, locale, messageId),
+        handleCustomCallback: (scopeId, data, locale, messageId, event) =>
+          this.handleCustomCallback(scopeId, data, locale, messageId, event),
         handleCustomCommand: (scopeId, command, args, locale, event) =>
           this.handleCustomCommand(scopeId, command, args, locale, event),
         handleCustomInbound: (event, locale) => this.handleCustomInbound(event, locale),
@@ -138,46 +260,24 @@ export class AntigravityBridgeCore {
 
   private async getBackendDescriptors(): Promise<BackendDescriptor[]> {
     const list: BackendDescriptor[] = [];
+    const isCodexDefault = this.defaultBackendId === 'codex';
+
     const active = await this.auth.getActiveAccount();
     const activeQuota = active?.quota
       ? `${formatCandidateButtonPrefix(active)} · ${formatAccountExpiry(active.expiry, 'zh', true)}`
       : undefined;
 
-    // 1. Antigravity primary engine
-    list.push({
+    const agyPrimary: BackendDescriptor = {
       id: 'antigravity',
       name: 'Google Antigravity (AGY)',
       engineType: 'antigravity',
       adapter: this.adapter,
       account: active?.email || active?.name || 'default',
       details: activeQuota,
-      isDefault: true,
-    });
+      isDefault: !isCodexDefault,
+    };
 
-    // 2. Antigravity candidate accounts
-    try {
-      const candidates = await this.auth.listCandidates();
-      for (const c of candidates) {
-        const isAct = c.isActive;
-        const qPrefix = formatCandidateButtonPrefix(c);
-        const name = formatCandidateDisplayName(c);
-        list.push({
-          id: `antigravity:${c.name}`,
-          name: `AGY: ${name}`,
-          engineType: 'antigravity',
-          adapter: this.adapter,
-          account: c.email || c.name,
-          details: `${qPrefix} · ${isAct ? '当前活跃' : '待命中'}`,
-          onSelect: async () => {
-            await this.auth.switchAccount(c.name);
-          },
-        });
-      }
-    } catch (err) {
-      this.logger.warn('antigravity.list_backend_candidates_failed', { error: String(err) });
-    }
-
-    // 3. Codex engine (if adapter exists)
+    let codexPrimary: BackendDescriptor | null = null;
     if (this.codexAdapter) {
       const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
       let currentCodexAccount = 'default';
@@ -192,47 +292,38 @@ export class AntigravityBridgeCore {
         // ignore
       }
 
-      list.push({
+      codexPrimary = {
         id: 'codex',
         name: 'OpenAI Codex (App Server)',
         engineType: 'codex',
         adapter: this.codexAdapter,
         account: currentCodexAccount,
         details: 'Official Codex App runtime',
-      });
+        isDefault: isCodexDefault,
+      };
+    }
 
-      // 4. Codex candidate accounts in codexAuthDir
-      try {
-        const files = await fsPromises.readdir(codexHome);
-        const authCandidates = files
-          .filter((f) => f.startsWith('auth.json_') && !f.endsWith('.bak') && !f.endsWith('.tmp'))
-          .sort();
-        for (const candFile of authCandidates) {
-          const candName = candFile.replace(/^auth\.json_/, '');
-          const isAct = candName === currentCodexAccount;
-          list.push({
-            id: `codex:${candName}`,
-            name: `Codex: ${candName}`,
-            engineType: 'codex',
-            adapter: this.codexAdapter,
-            account: candName,
-            details: isAct ? '当前活跃' : '待命中',
-            onSelect: async () => {
-              const authPath = path.join(codexHome, 'auth.json');
-              const targetPath = path.join(codexHome, candFile);
-              try {
-                await fsPromises.unlink(authPath).catch(() => {});
-                await fsPromises.symlink(targetPath, authPath);
-                this.logger.info('codex.auth_switched_via_backend', { candidate: candFile });
-              } catch (e) {
-                this.logger.warn('codex.auth_switch_failed', { candidate: candFile, error: String(e) });
-              }
-            },
-          });
-        }
-      } catch (err) {
-        this.logger.warn('antigravity.list_codex_candidates_failed', { error: String(err) });
-      }
+    let opencodePrimary: BackendDescriptor | null = null;
+    if (this.opencodeAdapter) {
+      opencodePrimary = {
+        id: 'opencode',
+        name: 'OpenCode (SDK)',
+        engineType: 'opencode',
+        adapter: this.opencodeAdapter,
+        account: 'default',
+        details: 'OpenCode CLI / Server',
+        isDefault: false,
+      };
+    }
+
+    if (isCodexDefault) {
+      if (codexPrimary) list.push(codexPrimary);
+      list.push(agyPrimary);
+      if (opencodePrimary) list.push(opencodePrimary);
+    } else {
+      list.push(agyPrimary);
+      if (codexPrimary) list.push(codexPrimary);
+      if (opencodePrimary) list.push(opencodePrimary);
     }
 
     return list;
@@ -242,10 +333,34 @@ export class AntigravityBridgeCore {
     this.orchestrator.registerInboundHandlers();
   }
 
+  registerTelegramInboundHandlers(): void {
+    this.registerInboundHandlers();
+  }
+
+  dispatchInboundLikeTelegramText(event: TelegramTextEvent): void {
+    this.orchestrator.dispatchInboundLikeTelegramText(event);
+  }
+
+  async startCodexApp(): Promise<void> {
+    if (this.codexApp && typeof this.codexApp.isConnected === 'function' && !this.codexApp.isConnected()) {
+      if (typeof this.codexApp.start === 'function') {
+        await this.codexApp.start().catch((err) => {
+          this.logger.warn('codex.app.start_failed', { error: String(err) });
+        });
+      }
+    }
+  }
+
+  async startTelegramPolling(): Promise<void> {
+    await this.start();
+  }
+
   async start(): Promise<void> {
+    await this.startCodexApp();
     await this.orchestrator.start();
     this.auth.startKeepAlive();
-    this.logger.info('antigravity.bridge.started');
+    this.logger.info('bridge.started', { defaultBackendId: this.defaultBackendId });
+    void syncCodexLocalUsageToStore(this.store, this.config.codexHome ?? undefined);
 
     // Restore persisted watchers on startup
     try {
@@ -270,10 +385,55 @@ export class AntigravityBridgeCore {
     }
   }
 
-  getRuntimeStatus() {
+  getRuntimeStatus(): UnifiedBridgeRuntimeStatus {
+    const isConnected = this.codexApp && typeof this.codexApp.isConnected === 'function'
+      ? this.codexApp.isConnected()
+      : true;
     return {
+      running: true,
+      connected: isConnected,
       activeTurns: this.orchestrator.getActiveTurnsCount(),
+      botUsername: this.bot.username,
+      codexHome: this.config.codexHome ?? this.config.codexAuthDir ?? path.join(os.homedir(), '.codex'),
+      ...(this.codexApp && typeof this.codexApp.getServerStatus === 'function' && this.codexApp.getServerStatus()
+        ? { codexAppServer: this.codexApp.getServerStatus() }
+        : {}),
+      userAgent: this.codexApp && typeof this.codexApp.getUserAgent === 'function'
+        ? this.codexApp.getUserAgent()
+        : null,
     };
+  }
+
+  isIdleForServiceUpdate(): boolean {
+    return this.orchestrator.getActiveTurnsCount() === 0;
+  }
+
+  async getCurrentAuthLabel(): Promise<string | null> {
+    const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+    try {
+      const authPath = path.join(codexHome, 'auth.json');
+      const stat = await fsPromises.lstat(authPath).catch(() => null);
+      if (stat?.isSymbolicLink()) {
+        const target = await fsPromises.readlink(authPath);
+        return path.basename(target).replace(/^auth\.json_/, '');
+      }
+    } catch {}
+    return 'default';
+  }
+
+  async handleExternalCodexAuthCandidateDeleted(candidateName: string, _reason: string | null = null): Promise<void> {
+    this.store.deleteCodexAuthCandidate(candidateName);
+    if (this.codexApp) {
+      await this.codexApp.restart().catch(() => {});
+    }
+  }
+
+  async validateExternalCodexAuthCandidate(
+    _candidateName: string,
+    _rawAuth: string,
+    _expectedAccountId: string,
+  ): Promise<{ ok: boolean; reason?: string | null }> {
+    return { ok: true };
   }
 
   private async sendMessage(scopeId: string, text: string, inlineKeyboard?: InlineKeyboard): Promise<number> {
@@ -297,7 +457,56 @@ export class AntigravityBridgeCore {
     }
   }
 
+  scheduleStalePanelDeletion(scopeId: string, messageId: number): void {
+    if (this.config.telegramPanelTtlMs <= 0 || scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+      return;
+    }
+    const key = `${scopeId}:${messageId}`;
+    const existing = this.stalePanelDeleteTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.stalePanelDeleteTimers.delete(key);
+      if (typeof this.messaging?.deleteMessage === 'function') {
+        void this.messaging.deleteMessage(scopeId, messageId).catch((error) => {
+          this.logger.debug('telegram.stale_panel_delete_failed', { scopeId, messageId, error: String(error) });
+        });
+      }
+    }, this.config.telegramPanelTtlMs);
+    timer.unref();
+    this.stalePanelDeleteTimers.set(key, timer);
+  }
+
   private async renderCustomStatus(scopeId: string, locale: AppLocale): Promise<string> {
+    const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
+    if (activeBackend.engineType === 'codex') {
+      const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+      let currentCodexAccount = 'default';
+      try {
+        const authPath = path.join(codexHome, 'auth.json');
+        const stat = await fsPromises.lstat(authPath).catch(() => null);
+        if (stat?.isSymbolicLink()) {
+          const target = await fsPromises.readlink(authPath);
+          currentCodexAccount = path.basename(target).replace(/^auth\.json_/, '');
+        }
+      } catch {}
+
+      const binding = this.store.getBinding(scopeId);
+      const threadLine = binding?.threadId
+        ? (locale === 'zh' ? `\n• **当前会话**: \`${binding.threadId.slice(0, 16)}…\`` : `\n• **Thread**: \`${binding.threadId.slice(0, 16)}…\``)
+        : (locale === 'zh' ? `\n• **当前会话**: \`新会话就绪 (发送消息开启)\`` : `\n• **Thread**: \`Ready (new)\``);
+      const cwdLine = `\n• **工作目录**: \`${binding?.cwd || this.config.defaultCwd}\``;
+
+      return (
+        (locale === 'zh'
+          ? `• **Codex 账号**: \`${currentCodexAccount}\` (软链接管理)\n• **执行引擎**: \`OpenAI Codex App Server\``
+          : `• **Codex Account**: \`${currentCodexAccount}\`\n• **Engine**: \`OpenAI Codex App Server\``) +
+        threadLine +
+        cwdLine
+      );
+    }
+
     const activeAccount = await this.auth.getActiveAccount();
     const candidates = await this.auth.listCandidates();
 
@@ -338,11 +547,38 @@ export class AntigravityBridgeCore {
   }
 
   private async renderCustomSetupRows(scopeId: string, _locale: AppLocale): Promise<InlineKeyboard> {
+    const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
+
+    if (activeBackend.engineType === 'codex') {
+      const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+      let currentCodexAccount = 'default';
+      try {
+        const authPath = path.join(codexHome, 'auth.json');
+        const stat = await fsPromises.lstat(authPath).catch(() => null);
+        if (stat?.isSymbolicLink()) {
+          const target = await fsPromises.readlink(authPath);
+          currentCodexAccount = path.basename(target).replace(/^auth\.json_/, '');
+        }
+      } catch {}
+
+      return [
+        [
+          { text: `👤 Codex 账号 (${currentCodexAccount})`, callback_data: 'codex:setup:auth' },
+          { text: '📁 Codex 会话历史', callback_data: 'codex:setup:threads' },
+        ],
+      ];
+    }
+
+    if (activeBackend.engineType === 'opencode') {
+      return [
+        [
+          { text: '📁 OpenCode 会话历史', callback_data: 'opencode:setup:threads' },
+        ],
+      ];
+    }
+
     const candidates = await this.auth.listCandidates();
     const active = candidates.find((c) => c.isActive) || candidates[0];
-    const settings = this.store.getChatSettings(scopeId);
-    const isBoost = settings?.serviceTier === 'boost';
-    const currentEffort = isBoost ? 'high' : (settings?.reasoningEffort ?? 'high');
 
     let quotaBadge = '';
     if (active?.quota) {
@@ -353,12 +589,8 @@ export class AntigravityBridgeCore {
 
     return [
       [
-        { text: `⚡ 深度 (${currentEffort})`, callback_data: `${AGY_SETUP_CALLBACK_PREFIX}effort` },
-        { text: `👤 账号 (${candidates.length}${quotaBadge})`, callback_data: `${AGY_SETUP_CALLBACK_PREFIX}auth` },
-      ],
-      [
-        { text: '📁 会话历史', callback_data: `${AGY_SETUP_CALLBACK_PREFIX}threads` },
-        { text: '🔌 切换后端', callback_data: 'engine:setup:backend' },
+        { text: `👤 AGY 账号 (${candidates.length}${quotaBadge})`, callback_data: `${AGY_SETUP_CALLBACK_PREFIX}auth` },
+        { text: '📁 AGY 会话历史', callback_data: `${AGY_SETUP_CALLBACK_PREFIX}threads` },
       ],
     ];
   }
@@ -474,6 +706,26 @@ export class AntigravityBridgeCore {
       }
     }
 
+    if (this.codexCore?.hasPendingInteraction(scopeId)) {
+      this.codexCore.dispatchInboundLikeTelegramText(event);
+      return true;
+    }
+
+    const rename = this.pendingAgyRenames.get(scopeId);
+    if (rename && event.text.trim()) {
+      this.pendingAgyRenames.delete(scopeId);
+      const newTitle = event.text.trim();
+      this.conversations.renameConversation(rename.conversationId, newTitle);
+      await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? `✅ 会话名称已修改为: **${newTitle}**`
+          : `✅ Conversation renamed to: **${newTitle}**`,
+      );
+      await this.sendThreadsPanel(scopeId, '', locale);
+      return true;
+    }
+
     return false;
   }
 
@@ -484,6 +736,108 @@ export class AntigravityBridgeCore {
     locale: AppLocale,
     _event?: TelegramTextEvent,
   ): Promise<boolean> {
+    const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
+    const isCodex = activeBackend.engineType === 'codex';
+
+    if (isCodex) {
+      if (this.codexCore) {
+        switch (cmd.toLowerCase()) {
+          case 'threads':
+            if (_event) {
+              this.codexCore.dispatchInboundLikeTelegramText(_event);
+            } else {
+              await this.codexCore.showThreadsPanel(scopeId, undefined, args.trim() || null, locale);
+            }
+            return true;
+
+          case 'open':
+            if (_event) {
+              this.codexCore.dispatchInboundLikeTelegramText(_event);
+            } else if (!args.trim()) {
+              await this.codexCore.showThreadsPanel(scopeId, undefined, null, locale);
+            }
+            return true;
+
+          case 'auth':
+            if (_event) {
+              this.codexCore.dispatchInboundLikeTelegramText(_event);
+            } else {
+              await this.codexCore.handleAuthCommand(scopeId, locale, args ? args.split(/\s+/) : []);
+            }
+            return true;
+
+          case 'login_device':
+            if (_event) {
+              this.codexCore.dispatchInboundLikeTelegramText(_event);
+              return true;
+            }
+            break;
+
+          case 'login':
+            await this.sendMessage(
+              scopeId,
+              locale === 'zh'
+                ? `ℹ️ **Codex 账号登录**\n\n发送 \`/auth\` 可在账号池中一键切换，或点击【🔑 设备登录】使用浏览器授权。`
+                : `ℹ️ Use /auth to manage accounts or use Device Login.`,
+            );
+            return true;
+
+          case 'watch':
+          case 'unwatch':
+            await this.sendMessage(
+              scopeId,
+              locale === 'zh'
+                ? `ℹ️ 会话实时观察模式当前仅在 Google Antigravity (AGY) 引擎下可用。可使用 \`/backend antigravity\` 切换。`
+                : `ℹ️ Observer mode is only available on Google Antigravity (AGY) engine.`,
+            );
+            return true;
+
+          default:
+            return false;
+        }
+      }
+
+      switch (cmd.toLowerCase()) {
+        case 'threads':
+          await this.sendCodexThreadsMenu(scopeId, locale);
+          return true;
+
+        case 'open':
+          if (!args.trim()) {
+            await this.sendCodexThreadsMenu(scopeId, locale);
+          } else {
+            await this.openCodexThread(scopeId, args.trim(), locale);
+          }
+          return true;
+
+        case 'auth':
+          await this.sendCodexAuthMenu(scopeId, locale);
+          return true;
+
+        case 'login':
+          await this.sendMessage(
+            scopeId,
+            locale === 'zh'
+              ? `ℹ️ **Codex 账号管理说明**\n\nCodex 使用 \`~/.codex/auth.json\` 凭据。\n发送 \`/auth\` 可在多个已有账号候选之间一键热切换。\n若需添加新账号，可在终端运行 \`codex auth login\` 或将 \`auth.json_<name>\` 放入 \`~/.codex/\` 目录。`
+              : `ℹ️ **Codex Auth Note**\n\nUse /auth to switch between accounts in ~/.codex/. To log in, run \`codex auth login\` in terminal.`,
+          );
+          return true;
+
+        case 'watch':
+        case 'unwatch':
+          await this.sendMessage(
+            scopeId,
+            locale === 'zh'
+              ? `ℹ️ 会话实时观察模式当前仅在 Google Antigravity (AGY) 引擎下可用。可使用 \`/backend antigravity\` 切换。`
+              : `ℹ️ Observer mode is only available on Google Antigravity (AGY) engine.`,
+          );
+          return true;
+
+        default:
+          return false;
+      }
+    }
+
     switch (cmd.toLowerCase()) {
       case 'threads':
         await this.sendThreadsPanel(scopeId, args.trim(), locale);
@@ -526,7 +880,88 @@ export class AntigravityBridgeCore {
     data: string,
     locale: AppLocale,
     messageId?: number,
+    event?: TelegramCallbackEvent,
   ): Promise<boolean> {
+    if (this.codexCore && (
+      data.startsWith('thread:') ||
+      data.startsWith('auth:') ||
+      data.startsWith('settings:access:') ||
+      data.startsWith('settings:permissions')
+    )) {
+      if (event) {
+        await this.codexCore.handleCallback(event);
+      }
+      return true;
+    }
+
+    if (data.startsWith('codex:setup:auth')) {
+      await this.messaging.answerCallback(data, '');
+      if (this.codexCore) {
+        await this.codexCore.handleAuthCommand(scopeId, locale, []);
+      } else {
+        await this.sendCodexAuthMenu(scopeId, locale, messageId);
+      }
+      return true;
+    }
+
+    if (data.startsWith('codex:setup:threads')) {
+      await this.messaging.answerCallback(data, '');
+      if (this.codexCore) {
+        await this.codexCore.showThreadsPanel(scopeId, messageId, undefined, locale);
+      } else {
+        await this.sendCodexThreadsMenu(scopeId, locale, messageId);
+      }
+      return true;
+    }
+
+    if (data.startsWith('agy:rename:')) {
+      const convId = data.slice('agy:rename:'.length);
+      this.pendingAgyRenames.set(scopeId, { conversationId: convId });
+      await this.messaging.answerCallback(data, '请输入新名称');
+      await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? `✏️ 请直接回复发送该会话的新名称：`
+          : `✏️ Please reply with the new conversation name:`,
+      );
+      return true;
+    }
+
+    if (data.startsWith('agy:archive:')) {
+      const convId = data.slice('agy:archive:'.length);
+      this.conversations.archiveConversation(convId);
+      await this.messaging.answerCallback(data, locale === 'zh' ? '已归档' : 'Archived');
+      await this.sendThreadsPanel(scopeId, '', locale, messageId);
+      return true;
+    }
+
+    if (data.startsWith('agy:new:')) {
+      const convId = data.slice('agy:new:'.length);
+      const conv = this.conversations.getConversation(convId);
+      const cwd = conv?.workspaceDir || this.config.defaultCwd;
+      this.store.clearBinding(scopeId);
+      await this.messaging.answerCallback(data, locale === 'zh' ? '已创建新会话' : 'New conversation ready');
+      await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? `✨ **已在目录创建新会话**\n• 工作目录: \`${cwd}\`\n\n发送任意消息开启新任务。`
+          : `✨ **New conversation ready** in \`${cwd}\`.`,
+      );
+      return true;
+    }
+
+    if (data.startsWith('codex:auth:')) {
+      const cand = data.slice('codex:auth:'.length);
+      await this.switchCodexAccount(scopeId, cand, locale, messageId);
+      return true;
+    }
+
+    if (data.startsWith('codex:open:')) {
+      const threadId = data.slice('codex:open:'.length);
+      await this.openCodexThread(scopeId, threadId, locale, messageId);
+      return true;
+    }
+
     if (data.startsWith(AGY_OPEN_CALLBACK_PREFIX)) {
       const targetId = data.slice(AGY_OPEN_CALLBACK_PREFIX.length);
       const conv = this.conversations.resolveConversation(targetId, scopeId, this.store);
@@ -578,6 +1013,7 @@ export class AntigravityBridgeCore {
     if (data.startsWith(AGY_MODEL_CALLBACK_PREFIX)) {
       const model = data.slice(AGY_MODEL_CALLBACK_PREFIX.length);
       this.store.setChatSettings(scopeId, model, null);
+      this.orchestrator.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(data, `Model: ${model}`);
       await this.orchestrator.sendModelsMenu(scopeId, locale, messageId);
       return true;
@@ -590,6 +1026,7 @@ export class AntigravityBridgeCore {
         this.store.setChatServiceTier(scopeId, null);
       }
       this.store.setChatSettings(scopeId, null, effort);
+      this.orchestrator.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(data, `Effort: ${effort}`);
       await this.sendEffortMenu(scopeId, '', locale, messageId);
       return true;
@@ -663,6 +1100,50 @@ export class AntigravityBridgeCore {
           `   发送 \`/auth add <json_content>\` 即可导入。\n\n` +
           `机器人会自动校验并向 Google API 请求刷新测试，校验成功后立即加入候选池与自动保活轮转！`;
         await this.sendMessage(scopeId, guideText);
+        return true;
+      }
+
+      if (accountName.startsWith('toggle_pause:')) {
+        const target = accountName.slice('toggle_pause:'.length);
+        const nowPaused = this.auth.togglePauseAccount(target);
+        await this.messaging.answerCallback(
+          data,
+          nowPaused ? `⏸ 账号已暂停: ${target}` : `▶️ 账号已恢复启用: ${target}`,
+        );
+        await this.sendAuthMenu(scopeId, '', locale, messageId);
+        return true;
+      }
+
+      if (accountName.startsWith('repair:')) {
+        const target = accountName.slice('repair:'.length);
+        const res = await this.auth.diagnoseAndRepairAccount(target);
+        await this.messaging.answerCallback(
+          data,
+          res.ok ? `🩺 修复成功: ${res.message}` : `❌ 修复失败: ${res.message}`,
+        );
+        await this.sendAuthMenu(scopeId, '', locale, messageId);
+        return true;
+      }
+
+      if (accountName === 'repair_all') {
+        const res = await this.auth.diagnoseAndRepairAll();
+        await this.messaging.answerCallback(
+          data,
+          `🩺 体检完成: 正常/已修复 ${res.healthy + res.repaired} / 需关注 ${res.failed}`,
+        );
+        await this.sendAuthMenu(scopeId, '', locale, messageId);
+        return true;
+      }
+
+      if (accountName.startsWith('switch:')) {
+        const target = accountName.slice('switch:'.length);
+        try {
+          const res = await this.auth.switchAccount(target);
+          await this.messaging.answerCallback(data, `已切换到: ${res.account.email || res.account.name}`);
+        } catch (err) {
+          await this.messaging.answerCallback(data, `切换失败: ${String(err)}`);
+        }
+        await this.sendAuthMenu(scopeId, '', locale, messageId);
         return true;
       }
 
@@ -745,16 +1226,21 @@ export class AntigravityBridgeCore {
       lines.push(`${marker} **${idx + 1}.** ${session.title}${watchBadge}`);
       lines.push(`   \`${short}\` · \`${dir}\` · ${age}`);
 
-      if (idx < 6) {
+      if (idx < 8) {
+        const dirName = path.basename(dir || this.config.defaultCwd);
+        const titleSnippet = session.title ? session.title.replace(/\s+/g, ' ') : 'Untitled';
+        const openText = `${isCurrent ? '✅ ' : ''}${idx + 1}. ${dirName}|${titleSnippet.length > 32 ? titleSnippet.slice(0, 31) + '…' : titleSnippet}`;
         keyboard.push([
           {
-            text: `${marker} ${idx + 1}. ${session.title.slice(0, 20)}`,
+            text: openText,
             callback_data: `${AGY_OPEN_CALLBACK_PREFIX}${session.conversationId}`,
           },
-          {
-            text: isWatching ? '👁 观察中' : '👁 观察',
-            callback_data: `${AGY_WATCH_CALLBACK_PREFIX}${session.conversationId}`,
-          },
+        ]);
+        keyboard.push([
+          { text: '✏️', callback_data: `agy:rename:${session.conversationId}` },
+          { text: isWatching ? '👁 监视' : '👀', callback_data: `${AGY_WATCH_CALLBACK_PREFIX}${session.conversationId}` },
+          { text: '🗑️', callback_data: `agy:archive:${session.conversationId}` },
+          { text: '➕', callback_data: `agy:new:${session.conversationId}` },
         ]);
       }
     });
@@ -771,20 +1257,22 @@ export class AntigravityBridgeCore {
     lines.push(
       '',
       locale === 'zh'
-        ? `• 点击左侧名称切换绑定会话；\n• 点击右侧 [👁 观察] 实时只读监视外部步骤；\n• 命令行：\`/open <编号>\`，\`/watch <编号>\`，\`/unwatch\`，\`/new\`。`
-        : `• Tap left to bind conversation;\n• Tap right [👁] to observe in real-time;\n• Commands: \`/open <num>\`, \`/watch <num>\`, \`/unwatch\`, \`/new\`.`,
+        ? `• 点击名称切换会话；\n• 点击快捷按钮：\`[✏️ 重命名]\` \`[👀 观察]\` \`[🗑️ 归档]\` \`[➕ 新建分支]\`；\n• 命令行：\`/open <编号>\`，\`/watch <编号>\`，\`/unwatch\`，\`/new\`。`
+        : `• Tap name to bind conversation;\n• Tap actions: \`[✏️ Rename]\` \`[👀 Watch]\` \`[🗑️ Archive]\` \`[➕ Fork]\`;\n• Commands: \`/open <num>\`, \`/watch <num>\`, \`/unwatch\`, \`/new\`.`,
     );
 
     keyboard.push([
-      { text: '✨ 新建会话', callback_data: 'engine:setup:new' },
+      { text: '➕ 新建', callback_data: 'engine:setup:new' },
       { text: '◀️ 返回控制面板', callback_data: 'engine:setup:main' },
     ]);
 
     const content = lines.join('\n');
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, content, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
     } else {
-      await this.sendMessage(scopeId, content, keyboard);
+      const msgId = await this.sendMessage(scopeId, content, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
     }
   }
 
@@ -853,6 +1341,268 @@ export class AntigravityBridgeCore {
 
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, text, keyboard);
+    } else {
+      await this.sendMessage(scopeId, text, keyboard);
+    }
+  }
+
+  private async sendCodexAuthMenu(
+    scopeId: string,
+    locale: AppLocale,
+    editMessageId?: number,
+  ): Promise<void> {
+    const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+    let currentAccount = 'default';
+    let candidates: string[] = [];
+    try {
+      const files = await fsPromises.readdir(codexHome);
+      candidates = files
+        .filter((f) => f.startsWith('auth.json_') && !f.endsWith('.bak') && !f.endsWith('.tmp'))
+        .map((f) => f.replace(/^auth\.json_/, ''))
+        .sort();
+
+      const authPath = path.join(codexHome, 'auth.json');
+      const stat = await fsPromises.lstat(authPath).catch(() => null);
+      if (stat?.isSymbolicLink()) {
+        const target = await fsPromises.readlink(authPath);
+        currentAccount = path.basename(target).replace(/^auth\.json_/, '');
+      }
+    } catch (err) {
+      this.logger.warn('codex.list_auth_failed', { error: String(err) });
+    }
+
+    const text =
+      locale === 'zh'
+        ? `👤 **OpenAI Codex 账号管理 (Account Pool)**\n\n` +
+          `• **当前活跃账号**: ● **${currentAccount}**\n` +
+          `• **账号候选池**: 共 ${candidates.length} 个账号\n` +
+          `• **凭据路径**: \`${path.join(codexHome, 'auth.json')}\`\n\n` +
+          `点击下方账号名称可直接热切换 Codex 登录凭据：`
+        : `👤 **OpenAI Codex Account Management**\n\n` +
+          `• **Active Account**: ● **${currentAccount}**\n` +
+          `• **Candidates**: ${candidates.length} accounts\n` +
+          `• **Path**: \`${path.join(codexHome, 'auth.json')}\`\n\n` +
+          `Tap an account below to switch:`;
+
+    const keyboard: InlineKeyboard = [];
+    for (let i = 0; i < candidates.length; i += 2) {
+      const row: InlineKeyboard[0] = [];
+      const c1 = candidates[i]!;
+      const isC1 = c1 === currentAccount;
+      row.push({
+        text: `${isC1 ? '● ' : '○ '}${c1}`,
+        callback_data: `codex:auth:${c1}`,
+      });
+      if (i + 1 < candidates.length) {
+        const c2 = candidates[i + 1]!;
+        const isC2 = c2 === currentAccount;
+        row.push({
+          text: `${isC2 ? '● ' : '○ '}${c2}`,
+          callback_data: `codex:auth:${c2}`,
+        });
+      }
+      keyboard.push(row);
+    }
+
+    keyboard.push([
+      { text: '◀️ 返回控制面板', callback_data: 'engine:setup:main' },
+      { text: '🔄 刷新列表', callback_data: 'codex:setup:auth' },
+    ]);
+
+    if (editMessageId) {
+      await this.editMessage(scopeId, editMessageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
+    } else {
+      const msgId = await this.sendMessage(scopeId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
+    }
+  }
+
+  private async switchCodexAccount(
+    scopeId: string,
+    candName: string,
+    locale: AppLocale,
+    messageId?: number,
+  ): Promise<void> {
+    const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+    const authPath = path.join(codexHome, 'auth.json');
+    const targetPath = path.join(codexHome, `auth.json_${candName}`);
+    try {
+      await fsPromises.unlink(authPath).catch(() => {});
+      await fsPromises.symlink(targetPath, authPath);
+      this.logger.info('codex.auth_switched', { candidate: candName });
+      await this.messaging.answerCallback(`codex:auth:${candName}`, locale === 'zh' ? `已切换至 Codex 账号: ${candName}` : `Switched to: ${candName}`);
+      if (messageId) {
+        await this.sendCodexAuthMenu(scopeId, locale, messageId);
+      }
+      await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? `🔄 **Codex 账号已热切换至: \`${candName}\`**`
+          : `🔄 **Codex account switched to: \`${candName}\`**`,
+      );
+    } catch (err) {
+      this.logger.error('codex.auth_switch_error', { candidate: candName, error: String(err) });
+      await this.messaging.answerCallback(`codex:auth:${candName}`, `切换失败: ${String(err)}`);
+    }
+  }
+
+  private async sendCodexThreadsMenu(
+    scopeId: string,
+    locale: AppLocale,
+    editMessageId?: number,
+  ): Promise<void> {
+    const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+    const currentBinding = this.store.getBinding(scopeId);
+    const activeThreadId = currentBinding?.threadId;
+
+    interface CodexSessionItem {
+      id: string;
+      title: string;
+      updatedAt?: string;
+    }
+
+    const items: CodexSessionItem[] = [];
+    try {
+      const indexPath = path.join(codexHome, 'session_index.jsonl');
+      const content = await fsPromises.readFile(indexPath, 'utf8').catch(() => '');
+      const lines = content.trim().split('\n').filter(Boolean);
+      const seenIds = new Set<string>();
+      for (let i = lines.length - 1; i >= 0 && items.length < 8; i--) {
+        try {
+          const parsed = JSON.parse(lines[i]!);
+          if (parsed.id && !seenIds.has(parsed.id)) {
+            seenIds.add(parsed.id);
+            items.push({
+              id: parsed.id,
+              title: parsed.thread_name || parsed.id.slice(0, 16),
+              updatedAt: parsed.updated_at,
+            });
+          }
+        } catch {}
+      }
+    } catch (err) {
+      this.logger.warn('codex.list_threads_failed', { error: String(err) });
+    }
+
+    const listLines = items.map((item, idx) => {
+      const num = idx + 1;
+      const isActive = item.id === activeThreadId;
+      return `${isActive ? '●' : '○'} **${num}.** ${item.title}${isActive ? ' `[当前会话]`' : ''}\n   \`${item.id.slice(0, 16)}…\``;
+    });
+
+    const text =
+      locale === 'zh'
+        ? `📁 **OpenAI Codex 会话历史**\n\n` +
+          `• **当前会话**: ${activeThreadId ? `\`${activeThreadId.slice(0, 16)}…\`` : '`新会话就绪 (发送消息开启)`'}\n` +
+          `• **工作目录**: \`${currentBinding?.cwd || this.config.defaultCwd}\`\n\n` +
+          (items.length > 0
+            ? `**最近会话列表**：\n${listLines.join('\n')}\n\n点击下方按钮恢复会话，或使用 \`/open <编号>\`：`
+            : `暂无历史会话记录。发送消息将开启新会话。`)
+        : `📁 **OpenAI Codex Session History**\n\n` +
+          `• **Current Thread**: ${activeThreadId ? `\`${activeThreadId.slice(0, 16)}…\`` : '`Ready (new)`'}\n` +
+          `• **Directory**: \`${currentBinding?.cwd || this.config.defaultCwd}\`\n\n` +
+          (items.length > 0 ? `${listLines.join('\n')}\n\nTap below to resume or use \`/open <num>\`:` : 'No sessions found.');
+
+    const keyboard: InlineKeyboard = [];
+    for (let i = 0; i < items.length; i += 2) {
+      const row: InlineKeyboard[0] = [];
+      const item1 = items[i]!;
+      const isA1 = item1.id === activeThreadId;
+      const shortTitle1 = item1.title.length > 14 ? item1.title.slice(0, 13) + '…' : item1.title;
+      row.push({
+        text: `${isA1 ? '● ' : ''}${i + 1}. ${shortTitle1}`,
+        callback_data: `codex:open:${item1.id}`,
+      });
+      if (i + 1 < items.length) {
+        const item2 = items[i + 1]!;
+        const isA2 = item2.id === activeThreadId;
+        const shortTitle2 = item2.title.length > 14 ? item2.title.slice(0, 13) + '…' : item2.title;
+        row.push({
+          text: `${isA2 ? '● ' : ''}${i + 2}. ${shortTitle2}`,
+          callback_data: `codex:open:${item2.id}`,
+        });
+      }
+      keyboard.push(row);
+    }
+
+    keyboard.push([
+      { text: '✨ 新建会话', callback_data: 'engine:setup:new' },
+      { text: '◀️ 返回控制面板', callback_data: 'engine:setup:main' },
+    ]);
+
+    if (editMessageId) {
+      await this.editMessage(scopeId, editMessageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
+    } else {
+      const msgId = await this.sendMessage(scopeId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
+    }
+  }
+
+  private async openCodexThread(
+    scopeId: string,
+    rawTarget: string,
+    locale: AppLocale,
+    messageId?: number,
+  ): Promise<void> {
+    const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+    let targetThreadId = rawTarget.trim();
+
+    if (/^\d+$/.test(targetThreadId)) {
+      const idx = parseInt(targetThreadId, 10) - 1;
+      try {
+        const indexPath = path.join(codexHome, 'session_index.jsonl');
+        const content = await fsPromises.readFile(indexPath, 'utf8').catch(() => '');
+        const lines = content.trim().split('\n').filter(Boolean);
+        const seenIds = new Set<string>();
+        const items: string[] = [];
+        for (let i = lines.length - 1; i >= 0 && items.length < 20; i--) {
+          try {
+            const parsed = JSON.parse(lines[i]!);
+            if (parsed.id && !seenIds.has(parsed.id)) {
+              seenIds.add(parsed.id);
+              items.push(parsed.id);
+            }
+          } catch {}
+        }
+        if (idx >= 0 && idx < items.length) {
+          targetThreadId = items[idx]!;
+        }
+      } catch {}
+    }
+
+    const currentBinding = this.store.getBinding(scopeId);
+    const targetCwd = currentBinding?.cwd || this.config.defaultCwd;
+
+    this.store.setBinding(scopeId, targetThreadId, targetCwd);
+    const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
+    this.store.setScopeBackendBinding(scopeId, activeBackend.id, targetThreadId, targetCwd);
+
+    if (messageId) {
+      await this.messaging.answerCallback(`codex:open:${targetThreadId}`, locale === 'zh' ? '已恢复会话' : 'Thread resumed');
+    }
+
+    const text =
+      locale === 'zh'
+        ? `📂 **已切换绑定到既有 OpenAI Codex 会话**\n\n` +
+          `• **会话 ID**: \`${targetThreadId}\`\n` +
+          `• **工作目录**: \`${targetCwd}\`\n\n` +
+          `后续消息将在此 Codex 会话继续执行。`
+        : `📂 **Switched to Codex Session**\n\n` +
+          `• **ID**: \`${targetThreadId}\`\n` +
+          `• **Directory**: \`${targetCwd}\`\n\n` +
+          `Next messages will continue in this thread.`;
+
+    const keyboard: InlineKeyboard = [
+      [
+        { text: '📁 查看其他会话', callback_data: 'codex:setup:threads' },
+        { text: '⚙️ 控制面板', callback_data: 'engine:setup:main' },
+      ],
+    ];
+
+    if (messageId) {
+      await this.editMessage(scopeId, messageId, text, keyboard);
     } else {
       await this.sendMessage(scopeId, text, keyboard);
     }
@@ -1173,6 +1923,49 @@ export class AntigravityBridgeCore {
         currentFilter = f;
       }
     } else if (trimmedArgs) {
+      if (trimmedArgs.startsWith('pause ')) {
+        const target = trimmedArgs.slice('pause '.length).trim();
+        this.auth.pauseAccount(target);
+        await this.sendMessage(
+          scopeId,
+          locale === 'zh' ? `⏸ 账号 \`${target}\` 已暂停使用。` : `⏸ Account \`${target}\` paused.`,
+        );
+        return;
+      }
+
+      if (trimmedArgs.startsWith('resume ')) {
+        const target = trimmedArgs.slice('resume '.length).trim();
+        this.auth.resumeAccount(target);
+        await this.sendMessage(
+          scopeId,
+          locale === 'zh' ? `▶️ 账号 \`${target}\` 已恢复启用。` : `▶️ Account \`${target}\` resumed.`,
+        );
+        return;
+      }
+
+      if (trimmedArgs === 'repair_all' || trimmedArgs === 'repair all') {
+        const res = await this.auth.diagnoseAndRepairAll();
+        await this.sendMessage(
+          scopeId,
+          locale === 'zh'
+            ? `🩺 **账号池体检与修复结果**\n\n• 总账号数: ${res.total}\n• 正常/已修复: ${res.healthy + res.repaired}\n• 需关注/失败: ${res.failed}\n\n${res.summary.join('\n')}`
+            : `🩺 **Account Diagnostics & Repair**\n\n• Total: ${res.total}\n• Healthy/Repaired: ${res.healthy + res.repaired}\n• Failed: ${res.failed}\n\n${res.summary.join('\n')}`,
+        );
+        return;
+      }
+
+      if (trimmedArgs.startsWith('repair ') || trimmedArgs === 'repair') {
+        const target = trimmedArgs === 'repair' ? 'active' : trimmedArgs.slice('repair '.length).trim();
+        const res = await this.auth.diagnoseAndRepairAccount(target);
+        await this.sendMessage(
+          scopeId,
+          res.ok
+            ? (locale === 'zh' ? `🩺 账号 \`${res.email || res.accountName}\` 检查修复成功：${res.message}` : `🩺 Account \`${res.email || res.accountName}\` repaired: ${res.message}`)
+            : (locale === 'zh' ? `❌ 检查修复失败：${res.message}` : `❌ Repair failed: ${res.message}`),
+        );
+        return;
+      }
+
       if (trimmedArgs === 'rotate') {
         try {
           const res = await this.auth.rotateNextCandidate();
@@ -1258,10 +2051,10 @@ export class AntigravityBridgeCore {
 
     const filtered = candidates.filter((c) => {
       if (currentFilter === 'enabled') {
-        return !c.isCooldown && c.hasRefreshToken;
+        return !c.isPaused && !c.isCooldown && c.hasRefreshToken;
       }
       if (currentFilter === 'attention') {
-        return c.isCooldown || !c.hasRefreshToken;
+        return c.isPaused || c.isCooldown || !c.hasRefreshToken;
       }
       return true;
     });
@@ -1269,17 +2062,37 @@ export class AntigravityBridgeCore {
     const keyboard: InlineKeyboard = [];
     for (const c of filtered) {
       const prefix = formatCandidateButtonPrefix(c);
-      const icon = c.isActive ? '🟢 ' : c.isCooldown ? '⏳ ' : '🔐 ';
-      const statusIcon = c.isActive ? '✅' : c.isCooldown ? '⏳' : c.hasRefreshToken ? '💤' : '?';
-      const label = `${icon}${prefix}|${formatCandidateDisplayName(c)}`;
+      let icon = '🔐 ';
+      if (c.isPaused) {
+        icon = '⏸ ';
+      } else if (c.isActive) {
+        icon = '🟢 ';
+      } else if (c.isCooldown) {
+        icon = '⏳ ';
+      }
+      const label = `${icon}${prefix}|${formatCandidateDisplayName(c)}${c.isPaused ? ' · off' : ''}`;
+
+      let rightBtnText = '⏸';
+      let rightBtnAction = `${AGY_AUTH_CALLBACK_PREFIX}toggle_pause:${c.name}`;
+      if (!c.hasRefreshToken || c.isCooldown) {
+        rightBtnText = '🩺';
+        rightBtnAction = `${AGY_AUTH_CALLBACK_PREFIX}repair:${c.name}`;
+      } else if (c.isPaused) {
+        rightBtnText = '▶️';
+        rightBtnAction = `${AGY_AUTH_CALLBACK_PREFIX}toggle_pause:${c.name}`;
+      } else if (c.isActive) {
+        rightBtnText = '✅';
+        rightBtnAction = `${AGY_AUTH_CALLBACK_PREFIX}toggle_pause:${c.name}`;
+      }
+
       keyboard.push([
         {
           text: label.length > 28 ? `${label.slice(0, 27)}…` : label,
-          callback_data: `${AGY_AUTH_CALLBACK_PREFIX}${c.name}`,
+          callback_data: `${AGY_AUTH_CALLBACK_PREFIX}switch:${c.name}`,
         },
         {
-          text: statusIcon,
-          callback_data: `${AGY_AUTH_CALLBACK_PREFIX}${c.name}`,
+          text: rightBtnText,
+          callback_data: rightBtnAction,
         },
       ]);
     }
@@ -1302,7 +2115,7 @@ export class AntigravityBridgeCore {
 
     keyboard.push([
       { text: '🔑 设备登录', callback_data: `${AGY_AUTH_CALLBACK_PREFIX}login` },
-      { text: '⚡ 刷新当前 Token', callback_data: `${AGY_AUTH_CALLBACK_PREFIX}refresh_current` },
+      { text: '🩺 账号体检与修复', callback_data: `${AGY_AUTH_CALLBACK_PREFIX}repair_all` },
     ]);
 
     keyboard.push([
@@ -1367,8 +2180,10 @@ export class AntigravityBridgeCore {
 
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
     } else {
-      await this.sendMessage(scopeId, text, keyboard);
+      const msgId = await this.sendMessage(scopeId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
     }
   }
 
@@ -1419,6 +2234,7 @@ export class AntigravityBridgeCore {
           this.store.setChatServiceTier(scopeId, null);
         }
         this.store.setChatSettings(scopeId, null, target);
+        this.orchestrator.syncCurrentBackendSettings(scopeId);
         await this.sendMessage(
           scopeId,
           locale === 'zh' ? `✅ 思考深度已切换为: \`${target}\`` : `✅ Effort switched to: \`${target}\``,
@@ -1460,8 +2276,13 @@ export class AntigravityBridgeCore {
 
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, editMessageId);
     } else {
-      await this.sendMessage(scopeId, text, keyboard);
+      const msgId = await this.sendMessage(scopeId, text, keyboard);
+      this.scheduleStalePanelDeletion(scopeId, msgId);
     }
   }
 }
+
+export { UnifiedBridgeCore as AntigravityBridgeCore };
+

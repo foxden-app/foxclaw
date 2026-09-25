@@ -714,6 +714,9 @@ async function runServeCli(): Promise<void> {
     { CrossNodeAuthSync },
     { OpencodeTelegramRuntime },
     { AntigravityTelegramRuntime },
+    { UnifiedBridgeCore },
+    { AntigravityAppClient },
+    { AntigravityAuthManager },
   ] = await Promise.all([
     import('./channels/bridge_messaging_router.js'),
     import('./channels/telegram/telegram_messaging_port.js'),
@@ -731,6 +734,9 @@ async function runServeCli(): Promise<void> {
     import('./auth/cross_node_sync.js'),
     import('./opencode/runtime.js'),
     import('./antigravity/runtime.js'),
+    import('./antigravity/controller.js'),
+    import('./antigravity/client.js'),
+    import('./antigravity/auth.js'),
   ]);
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
@@ -751,8 +757,12 @@ async function runServeCli(): Promise<void> {
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
   let activeAntigravityRuntime: InstanceType<typeof AntigravityTelegramRuntime> | null = null;
   let sharedCodexApp: InstanceType<typeof CodexAppClient> | null = null;
+  let sharedAntigravityApp: InstanceType<typeof AntigravityAppClient> | null = null;
+  let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    sharedAntigravityAuth = new AntigravityAuthManager(config.antigravityAuthDir, logger);
+    sharedAntigravityApp = new AntigravityAppClient(config.antigravityCliBin, logger);
     if (config.codexCliBin) {
       sharedCodexApp = new CodexAppClient(
         config.codexCliBin,
@@ -773,6 +783,8 @@ async function runServeCli(): Promise<void> {
     if (config.antigravityBotToken) {
       activeAntigravityRuntime = new AntigravityTelegramRuntime(config, store, logger, {
         codexApp: sharedCodexApp ?? undefined,
+        app: sharedAntigravityApp,
+        auth: sharedAntigravityAuth,
       });
       await activeAntigravityRuntime.start();
       logger.info('antigravity.bridge.started', activeAntigravityRuntime.getRuntimeStatus());
@@ -788,7 +800,7 @@ async function runServeCli(): Promise<void> {
         app: InstanceType<typeof CodexAppClient>;
       };
       type Runtime = RuntimeSeed & {
-        core: InstanceType<typeof BridgeSessionCore>;
+        core: InstanceType<typeof UnifiedBridgeCore>;
         telegram: InstanceType<typeof TelegramChannelAdapter>;
       };
       const seeds: RuntimeSeed[] = [];
@@ -887,6 +899,7 @@ async function runServeCli(): Promise<void> {
         statusPath: config.statusPath,
         logPath: path.join(APP_HOME, 'logs', 'update.log'),
         codexCliBin: config.codexCliBin,
+        agyCliBin: config.antigravityCliBin,
       });
       const lastSelfUpdatePath = path.join(APP_HOME, 'runtime', 'last-self-update.json');
       let lastSelfUpdate = readSelfUpdateStatus(lastSelfUpdatePath);
@@ -1028,7 +1041,33 @@ async function runServeCli(): Promise<void> {
       for (const seed of seeds) {
         const telegramMessaging = new TelegramMessagingPort(seed.bot);
         const outbound = new BridgeMessagingRouter(telegramMessaging, null);
-        const core = new BridgeSessionCore(seed.config, store, logger, seed.bot, seed.app, outbound, selfUpdater, coordinator);
+        const codexCore = new BridgeSessionCore(
+          seed.config,
+          store,
+          logger,
+          seed.bot,
+          seed.app,
+          outbound,
+          selfUpdater,
+          coordinator,
+          false,
+        );
+        const core = new UnifiedBridgeCore(
+          seed.config,
+          store,
+          logger,
+          seed.bot,
+          sharedAntigravityApp ?? undefined,
+          sharedAntigravityAuth ?? undefined,
+          telegramMessaging,
+          {
+            codexApp: seed.app,
+            codexCore,
+            antigravityApp: sharedAntigravityApp ?? undefined,
+            antigravityAuth: sharedAntigravityAuth ?? undefined,
+            defaultBackendId: 'codex',
+          },
+        );
         runtimes.push({ ...seed, core, telegram: new TelegramChannelAdapter(core) });
       }
       if (config.wxEnabled) {
@@ -1204,10 +1243,32 @@ async function runServeCli(): Promise<void> {
       statusPath: config.statusPath,
       logPath: path.join(APP_HOME, 'logs', 'update.log'),
       codexCliBin: config.codexCliBin,
+      agyCliBin: config.antigravityCliBin,
     });
     let singleAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
     let singleMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
-    let core: InstanceType<typeof BridgeSessionCore> | null = null;
+    let core: InstanceType<typeof UnifiedBridgeCore> | null = null;
+    const writeSingleStatus = (running = true): void => {
+      const coreStatus = core?.getRuntimeStatus();
+      writeRuntimeStatus(config.statusPath, {
+        running,
+        connected: running && Boolean(coreStatus?.connected),
+        userAgent: coreStatus?.userAgent ?? app.getUserAgent(),
+        codexHome: coreStatus?.codexHome ?? singleCodexHome,
+        ...(coreStatus?.codexAppServer ? { codexAppServer: coreStatus.codexAppServer } : app.getServerStatus() ? { codexAppServer: app.getServerStatus()! } : {}),
+        botUsername: coreStatus?.botUsername ?? bot.username,
+        currentBindings: store?.countBindings() ?? 0,
+        pendingApprovals: store?.countPendingApprovals() ?? 0,
+        pendingUserInputs: store?.countPendingUserInputs() ?? 0,
+        queuedTurns: store?.countQueuedTurnInputs() ?? 0,
+        activeTurns: coreStatus?.activeTurns ?? 0,
+        lastError: null,
+        updatedAt: new Date().toISOString(),
+        channels: { telegram: running, weixin: running && config.wxEnabled },
+        authMirror: singleMirror?.getStatus() ?? null,
+        authSync: singleAuthSync?.getStatus() ?? null,
+      });
+    };
     const singleAuthDir = config.codexAuthDir ?? config.codexHome ?? process.env.CODEX_AUTH_DIR ?? path.join(os.homedir(), '.codex');
     const singleLocalAuthRefreshLease = createLocalAuthRefreshLease();
     const singleAuthSyncLocalIdle = (): boolean => Boolean(core?.isIdleForServiceUpdate())
@@ -1259,12 +1320,8 @@ async function runServeCli(): Promise<void> {
       authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
       authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
       authSyncAudit: () => singleAuthSync?.auditCluster() ?? Promise.resolve(null),
-      statusUpdated: (status: import('./types.js').RuntimeStatus): void => {
-        writeRuntimeStatus(config.statusPath, {
-          ...status,
-          authMirror: singleMirror?.getStatus() ?? null,
-          authSync: singleAuthSync?.getStatus() ?? null,
-        });
+      statusUpdated: (_status: import('./types.js').RuntimeStatus): void => {
+        writeSingleStatus(true);
       },
     } : null;
     if (config.authSyncEnabled) {
@@ -1294,7 +1351,34 @@ async function runServeCli(): Promise<void> {
       await singleMirror.initialize();
       activeAuthMirror = singleMirror;
     }
-    core = new BridgeSessionCore(config, store, logger, bot, app, outbound, selfUpdater, singleCoordinator);
+    const singleOutbound = new BridgeMessagingRouter(telegramMessaging, null);
+    const singleCodexCore = new BridgeSessionCore(
+      config,
+      store,
+      logger,
+      bot,
+      app,
+      singleOutbound,
+      selfUpdater,
+      null,
+      false,
+    );
+    core = new UnifiedBridgeCore(
+      config,
+      store,
+      logger,
+      bot,
+      sharedAntigravityApp ?? undefined,
+      sharedAntigravityAuth ?? undefined,
+      telegramMessaging,
+      {
+        codexApp: app,
+        codexCore: singleCodexCore,
+        antigravityApp: sharedAntigravityApp ?? undefined,
+        antigravityAuth: sharedAntigravityAuth ?? undefined,
+        defaultBackendId: 'codex',
+      },
+    );
     if (config.authSyncEnabled && singleMirror) {
       await bot.initializeIdentity();
       singleAuthSync = new CrossNodeAuthSync(
@@ -1372,6 +1456,7 @@ async function runServeCli(): Promise<void> {
     if (weixinAdapter) {
       await weixinAdapter.start();
     }
+    writeSingleStatus(true);
     logger.info('bridge.started', core.getRuntimeStatus());
 
     const shutdown = async (signal: string): Promise<void> => {
@@ -1589,7 +1674,7 @@ function formatAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): st
 }
 
 function newestAuthProactiveRefreshStatus(
-  statuses: RuntimeStatus[],
+  statuses: Array<{ authProactiveRefresh?: RuntimeStatus['authProactiveRefresh'] }>,
 ): NonNullable<RuntimeStatus['authProactiveRefresh']> | null {
   const entries = statuses
     .map(status => status.authProactiveRefresh ?? null)

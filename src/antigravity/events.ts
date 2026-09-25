@@ -138,9 +138,11 @@ export function isCapacityOrUnavailableError(errorMessage: string): boolean {
  */
 export class AntigravityEventNormalizer {
   private accumulatedTextByStep = new Map<number, string>();
+  private lastSeenUsage: AgStepUsage | undefined;
 
   reset(): void {
     this.accumulatedTextByStep.clear();
+    this.lastSeenUsage = undefined;
   }
 
   accept(raw: AgRawEvent): AntigravityBridgeEvent[] {
@@ -157,6 +159,9 @@ export class AntigravityEventNormalizer {
 
       case 'step_update': {
         const payload = raw.step_update;
+        if (payload.usage) {
+          this.lastSeenUsage = payload.usage;
+        }
         if (payload.step_type === 'agent_response' && payload.text_delta) {
           const current = this.accumulatedTextByStep.get(payload.step_index) ?? '';
           const next = current + payload.text_delta;
@@ -191,6 +196,7 @@ export class AntigravityEventNormalizer {
 
       case 'result': {
         const res = raw.result;
+        const usage = res.usage ?? this.lastSeenUsage;
         const events: AntigravityBridgeEvent[] = [
           {
             kind: 'result',
@@ -198,7 +204,7 @@ export class AntigravityEventNormalizer {
             status: res.status,
             response: res.response,
             error: res.error,
-            usage: res.usage,
+            usage,
             durationSeconds: res.duration_seconds,
           },
         ];

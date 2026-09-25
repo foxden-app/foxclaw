@@ -51,10 +51,11 @@ test('CodexEngineAdapter implements IEngineAdapter, lists models and executes tu
   assert.equal(adapter.name, 'OpenAI Codex (App Server)');
 
   const models = await adapter.listModels();
-  assert.equal(models.length, 2);
+  assert.equal(models.length, 3);
   assert.equal(models[0]?.id, 'o3');
   assert.equal(models[0]?.name, 'o3 Reasoning');
   assert.equal(models[0]?.isDefault, true);
+  assert.ok(models.some((m) => m.id === 'gpt-6-sol'));
 
   const deltas: string[] = [];
   const tools: any[] = [];

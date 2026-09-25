@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import type { AppLocale } from './types.js';
@@ -22,6 +23,9 @@ export interface SelfUpdateStatus {
   codexUpdate?: string | null;
   codexFromVersion?: string | null;
   codexToVersion?: string | null;
+  agyUpdate?: string | null;
+  agyFromVersion?: string | null;
+  agyToVersion?: string | null;
   error: string | null;
   updatedAt: string;
 }
@@ -47,6 +51,7 @@ interface CreateSelfUpdateRuntimeOptions {
   statusPath: string;
   logPath: string;
   codexCliBin?: string;
+  agyCliBin?: string;
   pendingTimeoutMs?: number;
   now?: () => Date;
 }
@@ -58,6 +63,7 @@ interface PerformSelfUpdateOptions {
   notificationFile?: string;
   clusterBroadcastFile?: string;
   codexCliBin?: string;
+  agyCliBin?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -314,6 +320,7 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           statusFile,
           logPath: options.logPath,
           ...(options.codexCliBin ? { codexCliBin: options.codexCliBin } : {}),
+          ...(options.agyCliBin ? { agyCliBin: options.agyCliBin } : {}),
         });
         if (launch.viaSystemdRun) {
           const result = spawnSync(launch.command, launch.args, {
@@ -350,6 +357,9 @@ export function createSelfUpdateRuntime(options: CreateSelfUpdateRuntimeOptions)
           codexUpdate: null,
           codexFromVersion: null,
           codexToVersion: null,
+          agyUpdate: null,
+          agyFromVersion: null,
+          agyToVersion: null,
           error: formatError(error),
           updatedAt: new Date().toISOString(),
         });
@@ -373,14 +383,15 @@ export function buildSelfUpdateLaunchCommand(options: {
   statusFile: string;
   logPath: string;
   codexCliBin?: string;
+  agyCliBin?: string;
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   systemdRunPath?: string | null;
   unitName?: string;
 }): SelfUpdateLaunchCommand {
-  const env = options.codexCliBin
-    ? { ...(options.env ?? process.env), CODEX_CLI_BIN: options.codexCliBin }
-    : { ...(options.env ?? process.env) };
+  const env = { ...(options.env ?? process.env) };
+  if (options.codexCliBin) env.CODEX_CLI_BIN = options.codexCliBin;
+  if (options.agyCliBin) env.AGY_CLI_BIN = options.agyCliBin;
   const updateArgs = [options.entryPoint, 'update', '--notification-file', options.statusFile];
   const platform = options.platform ?? process.platform;
   const systemdRunPath = options.systemdRunPath === undefined
@@ -416,9 +427,12 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
   const env = options.env ?? process.env;
   let toVersion: string | null = null;
   let codexUpdate: CodexCliUpdateResult | null = null;
+  let agyUpdate: AgyCliUpdateResult | null = null;
   try {
     codexUpdate = updateManagedCodexCli(options.codexCliBin ?? env.CODEX_CLI_BIN ?? '', options.nodePath, env);
     console.log(`[UPDATE] ${codexUpdate.message}`);
+    agyUpdate = updateManagedAgyCli(options.agyCliBin ?? env.AGY_CLI_BIN ?? '', env);
+    console.log(`[UPDATE] ${agyUpdate.message}`);
     const installer = resolveSelfUpdateInstaller(options.entryPoint, options.nodePath, fs.existsSync, env);
     const installerEnv = buildInstallerEnv(options.entryPoint, installer, env);
     console.log(`[UPDATE] Installing ${PACKAGE_SPEC} with ${installer.manager}...`);
@@ -428,7 +442,7 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     const releaseNotes = readInstalledReleaseNotes(updatedEntryPoint, toVersion, options.notificationFile);
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
     runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
-    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null, releaseNotes);
+    completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null, releaseNotes, agyUpdate);
     if (options.clusterBroadcastFile && env.FOXCLAW_SUPPRESS_UPDATE_BROADCAST !== '1') {
       writePendingClusterUpdateBroadcast(options.clusterBroadcastFile, {
         targetVersion: toVersion,
@@ -445,7 +459,7 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
     };
   } catch (error) {
     const message = formatError(error);
-    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message, null);
+    completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message, null, agyUpdate);
     console.error(`[FAIL] FoxClaw update failed: ${message}`);
     return {
       ok: false,
@@ -535,6 +549,72 @@ function readCodexCliVersion(codexCliBin: string, env: NodeJS.ProcessEnv): strin
 
 function parseCodexCliVersion(output: string): string | null {
   return output.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? null;
+}
+
+interface AgyCliUpdateResult {
+  message: string;
+  fromVersion: string | null;
+  toVersion: string | null;
+}
+
+function updateManagedAgyCli(agyCliBin: string, env: NodeJS.ProcessEnv): AgyCliUpdateResult {
+  const candidateBins = [
+    agyCliBin,
+    resolveCommand('agy', env),
+    path.join(os.homedir(), '.local', 'bin', 'agy'),
+    '/usr/local/bin/agy',
+  ].filter(Boolean) as string[];
+
+  const resolved = candidateBins.find((c) => c && fs.existsSync(c));
+  if (!resolved) {
+    return {
+      message: 'Antigravity CLI (agy) update skipped: agy binary not found.',
+      fromVersion: null,
+      toVersion: null,
+    };
+  }
+
+  const fromVersion = readAgyCliVersion(resolved, env);
+  try {
+    const res = spawnSync(resolved, ['update'], { encoding: 'utf8', env });
+    const toVersion = readAgyCliVersion(resolved, env) ?? fromVersion;
+    const stdout = (res.stdout || '').trim();
+    if (stdout.includes('already on the latest')) {
+      return {
+        message: `Antigravity CLI (agy): already on latest version (${toVersion || fromVersion || 'latest'}).`,
+        fromVersion,
+        toVersion,
+      };
+    }
+    if (fromVersion && toVersion && fromVersion !== toVersion) {
+      return {
+        message: `Antigravity CLI (agy) updated: ${fromVersion} -> ${toVersion}.`,
+        fromVersion,
+        toVersion,
+      };
+    }
+    return {
+      message: stdout || `Antigravity CLI (agy) checked: ${toVersion || fromVersion || 'ok'}.`,
+      fromVersion,
+      toVersion,
+    };
+  } catch (error) {
+    return {
+      message: `Antigravity CLI (agy) update failed without blocking FoxClaw update: ${formatError(error)}`,
+      fromVersion,
+      toVersion: readAgyCliVersion(resolved, env) ?? fromVersion,
+    };
+  }
+}
+
+function readAgyCliVersion(agyCliBin: string, env: NodeJS.ProcessEnv): string | null {
+  try {
+    const result = spawnSync(agyCliBin, ['--version'], { encoding: 'utf8', env });
+    if (result.error || result.status !== 0) return null;
+    return (result.stdout || '').trim().match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/)?.[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function executableCandidates(
@@ -759,6 +839,7 @@ function completeNotification(
   codexUpdate: CodexCliUpdateResult | null,
   error: string | null,
   releaseNotes: string[] | null,
+  agyUpdate?: AgyCliUpdateResult | null,
 ): void {
   if (!notificationFile) {
     return;
@@ -776,6 +857,9 @@ function completeNotification(
     codexUpdate: codexUpdate?.message ?? null,
     codexFromVersion: codexUpdate?.fromVersion ?? null,
     codexToVersion: codexUpdate?.toVersion ?? null,
+    agyUpdate: agyUpdate?.message ?? null,
+    agyFromVersion: agyUpdate?.fromVersion ?? null,
+    agyToVersion: agyUpdate?.toVersion ?? null,
     error,
     updatedAt: new Date().toISOString(),
   });

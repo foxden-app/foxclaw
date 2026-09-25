@@ -194,6 +194,7 @@ test('buildSelfUpdateLaunchCommand uses a transient user systemd service on Linu
     statusFile: '/home/user/.foxclaw/runtime/self-update.json',
     logPath: '/home/user/.foxclaw/logs/update.log',
     codexCliBin: '/home/user/bin/codex',
+    agyCliBin: '/home/user/.local/bin/agy',
     env: {
       HOME: '/home/user',
       PATH: '/usr/bin:/bin',
@@ -214,6 +215,7 @@ test('buildSelfUpdateLaunchCommand uses a transient user systemd service on Linu
     '--property=StandardError=append:/home/user/.foxclaw/logs/update.log',
   ]);
   assert.ok(launch.args.includes('--setenv=CODEX_CLI_BIN=/home/user/bin/codex'));
+  assert.ok(launch.args.includes('--setenv=AGY_CLI_BIN=/home/user/.local/bin/agy'));
   assert.ok(launch.args.includes('--setenv=TG_BOT_TOKEN=secret-token'));
   assert.deepEqual(launch.args.slice(-5), [
     '/opt/node/bin/node',

@@ -25,6 +25,8 @@ export interface EngineToolEvent {
   args?: Record<string, unknown> | string | undefined;
   output?: string | undefined;
   status?: 'running' | 'completed' | 'failed' | undefined;
+  stepIndex?: number | undefined;
+  summary?: string | undefined;
 }
 
 export interface EngineTurnResult {
@@ -35,6 +37,8 @@ export interface EngineTurnResult {
   usage?: {
     inputTokens?: number | undefined;
     outputTokens?: number | undefined;
+    cachedTokens?: number | undefined;
+    totalTokens?: number | undefined;
   } | undefined;
 }
 
