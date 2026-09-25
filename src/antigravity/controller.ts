@@ -15,6 +15,9 @@ import { formatQuotaResetTime, type AntigravityAccount, type AntigravityAuthMana
 import { AntigravityConversationManager, formatAge, type AntigravityConversation } from './conversations.js';
 import { UnifiedChannelOrchestrator } from '../core/orchestrator.js';
 import { AntigravityEngineAdapter } from './adapter.js';
+import { CodexEngineAdapter } from '../codex_app/adapter.js';
+import type { CodexAppClient } from '../codex_app/client.js';
+import type { BackendDescriptor } from '../core/engine_spi.js';
 
 function formatCandidateButtonPrefix(c: AntigravityAccount): string {
   const p5h = typeof c.quota?.fiveHourPercent === 'number' ? `${c.quota.fiveHourPercent}%` : '—';
@@ -75,6 +78,7 @@ export class AntigravityBridgeCore {
   private readonly conversations: AntigravityConversationManager;
   private readonly messaging: TelegramMessagingPort;
   private readonly adapter: AntigravityEngineAdapter;
+  private readonly codexAdapter?: CodexEngineAdapter;
   private readonly orchestrator: UnifiedChannelOrchestrator;
   private readonly watchers = new Map<string, AntigravityWatcher>();
 
@@ -86,6 +90,9 @@ export class AntigravityBridgeCore {
     app: AntigravityAppClient,
     auth: AntigravityAuthManager,
     messaging: TelegramMessagingPort,
+    options?: {
+      codexApp?: CodexAppClient | undefined;
+    },
   ) {
     this.config = config;
     this.store = store;
@@ -103,12 +110,19 @@ export class AntigravityBridgeCore {
       logger,
     );
 
+    if (options?.codexApp) {
+      this.codexAdapter = new CodexEngineAdapter(options.codexApp, {
+        defaultModel: 'gpt-4o',
+      });
+    }
+
     this.orchestrator = new UnifiedChannelOrchestrator({
       config,
       store,
       logger,
       bot,
       adapter: this.adapter,
+      backendProvider: () => this.getBackendDescriptors(),
       messaging,
       customUi: {
         renderCustomStatus: (scopeId, locale) => this.renderCustomStatus(scopeId, locale),
@@ -120,6 +134,108 @@ export class AntigravityBridgeCore {
         handleCustomInbound: (event, locale) => this.handleCustomInbound(event, locale),
       },
     });
+  }
+
+  private async getBackendDescriptors(): Promise<BackendDescriptor[]> {
+    const list: BackendDescriptor[] = [];
+    const active = await this.auth.getActiveAccount();
+    const activeQuota = active?.quota
+      ? `${formatCandidateButtonPrefix(active)} · ${formatAccountExpiry(active.expiry, 'zh', true)}`
+      : undefined;
+
+    // 1. Antigravity primary engine
+    list.push({
+      id: 'antigravity',
+      name: 'Google Antigravity (AGY)',
+      engineType: 'antigravity',
+      adapter: this.adapter,
+      account: active?.email || active?.name || 'default',
+      details: activeQuota,
+      isDefault: true,
+    });
+
+    // 2. Antigravity candidate accounts
+    try {
+      const candidates = await this.auth.listCandidates();
+      for (const c of candidates) {
+        const isAct = c.isActive;
+        const qPrefix = formatCandidateButtonPrefix(c);
+        const name = formatCandidateDisplayName(c);
+        list.push({
+          id: `antigravity:${c.name}`,
+          name: `AGY: ${name}`,
+          engineType: 'antigravity',
+          adapter: this.adapter,
+          account: c.email || c.name,
+          details: `${qPrefix} · ${isAct ? '当前活跃' : '待命中'}`,
+          onSelect: async () => {
+            await this.auth.switchAccount(c.name);
+          },
+        });
+      }
+    } catch (err) {
+      this.logger.warn('antigravity.list_backend_candidates_failed', { error: String(err) });
+    }
+
+    // 3. Codex engine (if adapter exists)
+    if (this.codexAdapter) {
+      const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
+      let currentCodexAccount = 'default';
+      try {
+        const authPath = path.join(codexHome, 'auth.json');
+        const stat = await fsPromises.lstat(authPath).catch(() => null);
+        if (stat?.isSymbolicLink()) {
+          const target = await fsPromises.readlink(authPath);
+          currentCodexAccount = path.basename(target).replace(/^auth\.json_/, '');
+        }
+      } catch {
+        // ignore
+      }
+
+      list.push({
+        id: 'codex',
+        name: 'OpenAI Codex (App Server)',
+        engineType: 'codex',
+        adapter: this.codexAdapter,
+        account: currentCodexAccount,
+        details: 'Official Codex App runtime',
+      });
+
+      // 4. Codex candidate accounts in codexAuthDir
+      try {
+        const files = await fsPromises.readdir(codexHome);
+        const authCandidates = files
+          .filter((f) => f.startsWith('auth.json_') && !f.endsWith('.bak') && !f.endsWith('.tmp'))
+          .sort();
+        for (const candFile of authCandidates) {
+          const candName = candFile.replace(/^auth\.json_/, '');
+          const isAct = candName === currentCodexAccount;
+          list.push({
+            id: `codex:${candName}`,
+            name: `Codex: ${candName}`,
+            engineType: 'codex',
+            adapter: this.codexAdapter,
+            account: candName,
+            details: isAct ? '当前活跃' : '待命中',
+            onSelect: async () => {
+              const authPath = path.join(codexHome, 'auth.json');
+              const targetPath = path.join(codexHome, candFile);
+              try {
+                await fsPromises.unlink(authPath).catch(() => {});
+                await fsPromises.symlink(targetPath, authPath);
+                this.logger.info('codex.auth_switched_via_backend', { candidate: candFile });
+              } catch (e) {
+                this.logger.warn('codex.auth_switch_failed', { candidate: candFile, error: String(e) });
+              }
+            },
+          });
+        }
+      } catch (err) {
+        this.logger.warn('antigravity.list_codex_candidates_failed', { error: String(err) });
+      }
+    }
+
+    return list;
   }
 
   registerInboundHandlers(): void {

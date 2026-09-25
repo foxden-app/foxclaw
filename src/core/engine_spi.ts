@@ -66,3 +66,15 @@ export interface IEngineAdapter {
   preflightTurn?(request: EngineTurnRequest): Promise<void>;
   handleTurnError?(context: EngineTurnErrorContext): Promise<boolean>;
 }
+
+export interface BackendDescriptor {
+  id: string;
+  name: string;
+  engineType: string;
+  adapter: IEngineAdapter;
+  account?: string | undefined;
+  details?: string | undefined;
+  isDefault?: boolean | undefined;
+  onSelect?: (scopeId: string) => Promise<void>;
+}
+

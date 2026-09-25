@@ -105,7 +105,16 @@ export class BridgeStore {
         collaboration_mode TEXT,
         service_tier TEXT,
         active_turn_message_mode TEXT,
+        active_backend_id TEXT,
         updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS scope_backend_bindings (
+        scope_id TEXT NOT NULL,
+        backend_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        cwd TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (scope_id, backend_id)
       );
       CREATE TABLE IF NOT EXISTS thread_cache (
         chat_id TEXT NOT NULL,
@@ -295,6 +304,7 @@ export class BridgeStore {
     this.ensureColumn('chat_settings', 'collaboration_mode', 'TEXT');
     this.ensureColumn('chat_settings', 'service_tier', 'TEXT');
     this.ensureColumn('chat_settings', 'active_turn_message_mode', 'TEXT');
+    this.ensureColumn('chat_settings', 'active_backend_id', 'TEXT');
     this.ensureColumn('pending_approvals', 'payload_json', 'TEXT');
     this.ensureColumn('pending_user_inputs', 'status', "TEXT NOT NULL DEFAULT 'pending'");
     this.ensureColumn('pending_user_inputs', 'submitted_at', 'INTEGER');
@@ -411,7 +421,7 @@ export class BridgeStore {
   }
 
   getChatSettings(chatId: string): ChatSessionSettings | null {
-    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, active_turn_message_mode, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
+    const row = this.db.prepare('SELECT chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, active_turn_message_mode, active_backend_id, updated_at FROM chat_settings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
     if (!row) return null;
     return {
       chatId: String(row.chat_id),
@@ -422,6 +432,7 @@ export class BridgeStore {
       collaborationMode: normalizeCollaborationMode(row.collaboration_mode),
       serviceTier: row.service_tier === null ? null : String(row.service_tier),
       activeTurnMessageMode: normalizeActiveTurnMessageMode(row.active_turn_message_mode),
+      activeBackendId: row.active_backend_id === null || row.active_backend_id === undefined ? null : String(row.active_backend_id),
       updatedAt: Number(row.updated_at),
     };
   }
@@ -438,6 +449,7 @@ export class BridgeStore {
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
       current?.activeTurnMessageMode ?? null,
+      current?.activeBackendId ?? null,
     );
   }
 
@@ -452,6 +464,7 @@ export class BridgeStore {
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
       current?.activeTurnMessageMode ?? null,
+      current?.activeBackendId ?? null,
     );
   }
 
@@ -466,6 +479,7 @@ export class BridgeStore {
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
       current?.activeTurnMessageMode ?? null,
+      current?.activeBackendId ?? null,
     );
   }
 
@@ -480,6 +494,7 @@ export class BridgeStore {
       collaborationMode,
       current?.serviceTier ?? null,
       current?.activeTurnMessageMode ?? null,
+      current?.activeBackendId ?? null,
     );
   }
 
@@ -494,6 +509,7 @@ export class BridgeStore {
       current?.collaborationMode ?? null,
       serviceTier,
       current?.activeTurnMessageMode ?? null,
+      current?.activeBackendId ?? null,
     );
   }
 
@@ -508,7 +524,65 @@ export class BridgeStore {
       current?.collaborationMode ?? null,
       current?.serviceTier ?? null,
       activeTurnMessageMode,
+      current?.activeBackendId ?? null,
     );
+  }
+
+  getActiveBackend(chatId: string): string | null {
+    return this.getChatSettings(chatId)?.activeBackendId ?? null;
+  }
+
+  setActiveBackend(chatId: string, backendId: string | null): void {
+    const current = this.getChatSettings(chatId);
+    this.writeChatSettings(
+      chatId,
+      current?.model ?? null,
+      current?.reasoningEffort ?? null,
+      current?.locale ?? null,
+      current?.accessPreset ?? null,
+      current?.collaborationMode ?? null,
+      current?.serviceTier ?? null,
+      current?.activeTurnMessageMode ?? null,
+      backendId,
+    );
+  }
+
+  getScopeBackendBinding(scopeId: string, backendId: string): { threadId: string; cwd: string | null } | null {
+    const row = this.db.prepare(`
+      SELECT thread_id, cwd FROM scope_backend_bindings
+      WHERE scope_id = ? AND backend_id = ?
+    `).get(scopeId, backendId) as { thread_id: string; cwd: string | null } | undefined;
+    if (!row) return null;
+    return {
+      threadId: String(row.thread_id),
+      cwd: row.cwd ? String(row.cwd) : null,
+    };
+  }
+
+  setScopeBackendBinding(scopeId: string, backendId: string, threadId: string, cwd: string | null): void {
+    this.db.prepare(`
+      INSERT INTO scope_backend_bindings (scope_id, backend_id, thread_id, cwd, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(scope_id, backend_id) DO UPDATE SET
+        thread_id = excluded.thread_id,
+        cwd = excluded.cwd,
+        updated_at = excluded.updated_at
+    `).run(scopeId, backendId, threadId, cwd, Date.now());
+  }
+
+  listScopeBackendBindings(scopeId: string): Array<{ backendId: string; threadId: string; cwd: string | null; updatedAt: number }> {
+    const rows = this.db.prepare(`
+      SELECT backend_id, thread_id, cwd, updated_at
+      FROM scope_backend_bindings
+      WHERE scope_id = ?
+      ORDER BY updated_at DESC
+    `).all(scopeId) as Array<{ backend_id: string; thread_id: string; cwd: string | null; updated_at: number }>;
+    return rows.map((r) => ({
+      backendId: String(r.backend_id),
+      threadId: String(r.thread_id),
+      cwd: r.cwd ? String(r.cwd) : null,
+      updatedAt: Number(r.updated_at),
+    }));
   }
 
   findChatIdByThreadId(threadId: string): string | null {
@@ -1160,10 +1234,11 @@ export class BridgeStore {
     collaborationMode: CollaborationModeValue | null,
     serviceTier: string | null,
     activeTurnMessageMode: ActiveTurnMessageMode | null,
+    activeBackendId: string | null = null,
   ): void {
     this.db.prepare(`
-      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, active_turn_message_mode, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO chat_settings (chat_id, model, reasoning_effort, locale, access_preset, collaboration_mode, service_tier, active_turn_message_mode, active_backend_id, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id) DO UPDATE SET
         model = excluded.model,
         reasoning_effort = excluded.reasoning_effort,
@@ -1172,8 +1247,9 @@ export class BridgeStore {
         collaboration_mode = excluded.collaboration_mode,
         service_tier = excluded.service_tier,
         active_turn_message_mode = excluded.active_turn_message_mode,
+        active_backend_id = excluded.active_backend_id,
         updated_at = excluded.updated_at
-    `).run(chatId, model, reasoningEffort, locale, accessPreset, collaborationMode, serviceTier, activeTurnMessageMode, Date.now());
+    `).run(chatId, model, reasoningEffort, locale, accessPreset, collaborationMode, serviceTier, activeTurnMessageMode, activeBackendId, Date.now());
   }
 
   getWeixinContextToken(scopeId: string): string | null {

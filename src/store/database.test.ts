@@ -304,6 +304,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: null,
       serviceTier: null,
       activeTurnMessageMode: null,
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -317,6 +318,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: null,
       serviceTier: null,
       activeTurnMessageMode: null,
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -330,6 +332,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: null,
       serviceTier: null,
       activeTurnMessageMode: null,
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -343,6 +346,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: null,
       serviceTier: null,
       activeTurnMessageMode: null,
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -356,6 +360,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: 'plan',
       serviceTier: null,
       activeTurnMessageMode: null,
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -369,6 +374,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: 'plan',
       serviceTier: 'priority',
       activeTurnMessageMode: null,
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -382,6 +388,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: 'plan',
       serviceTier: 'priority',
       activeTurnMessageMode: 'queue',
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
 
@@ -395,6 +402,7 @@ test('BridgeStore persists chat session settings', () => {
       collaborationMode: 'plan',
       serviceTier: 'priority',
       activeTurnMessageMode: 'queue',
+      activeBackendId: null,
       updatedAt: store.getChatSettings(S3)!.updatedAt,
     });
   });
@@ -649,4 +657,37 @@ test('BridgeStore migrates legacy telegram scope keys on reopen', () => {
     store.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test('BridgeStore persists active backend and scope backend bindings for hot-switching', () => {
+  withStore((store) => {
+    const scopeId = 'telegram:12345';
+    assert.equal(store.getActiveBackend(scopeId), null);
+
+    store.setActiveBackend(scopeId, 'antigravity');
+    assert.equal(store.getActiveBackend(scopeId), 'antigravity');
+    assert.equal(store.getChatSettings(scopeId)?.activeBackendId, 'antigravity');
+
+    store.setScopeBackendBinding(scopeId, 'antigravity', 'conv-agy-1', '/repo/foxclaw');
+    store.setScopeBackendBinding(scopeId, 'codex', 'thread-codex-2', '/repo/podcast');
+
+    const agyBinding = store.getScopeBackendBinding(scopeId, 'antigravity');
+    assert.ok(agyBinding);
+    assert.equal(agyBinding!.threadId, 'conv-agy-1');
+    assert.equal(agyBinding!.cwd, '/repo/foxclaw');
+
+    const codexBinding = store.getScopeBackendBinding(scopeId, 'codex');
+    assert.ok(codexBinding);
+    assert.equal(codexBinding!.threadId, 'thread-codex-2');
+    assert.equal(codexBinding!.cwd, '/repo/podcast');
+
+    const allBindings = store.listScopeBackendBindings(scopeId);
+    assert.equal(allBindings.length, 2);
+    assert.ok(allBindings.some((b) => b.backendId === 'antigravity' && b.threadId === 'conv-agy-1'));
+    assert.ok(allBindings.some((b) => b.backendId === 'codex' && b.threadId === 'thread-codex-2'));
+
+    // Switch active backend to codex
+    store.setActiveBackend(scopeId, 'codex');
+    assert.equal(store.getActiveBackend(scopeId), 'codex');
+  });
 });

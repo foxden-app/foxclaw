@@ -18,6 +18,7 @@ import type {
   EngineTurnExecution,
   EngineTurnResult,
   EngineModel,
+  BackendDescriptor,
 } from './engine_spi.js';
 
 export const STREAM_THROTTLE_MS = 700;
@@ -48,19 +49,29 @@ export class UnifiedChannelOrchestrator {
   readonly store: BridgeStore;
   readonly logger: Logger;
   readonly bot: TelegramGateway;
-  readonly adapter: IEngineAdapter;
   readonly messaging: TelegramMessagingPort;
   readonly queueManager: TurnQueueManager;
   readonly customUi?: EngineCustomUiHook | undefined;
 
+  private readonly backends = new Map<string, BackendDescriptor>();
+  private readonly defaultBackendId: string;
   private readonly activeTurns = new Map<string, UnifiedActiveTurn>();
+  private readonly backendProvider?: (() => Promise<BackendDescriptor[]> | BackendDescriptor[]) | undefined;
+
+  get adapter(): IEngineAdapter {
+    return this.getAdapterForBackend(this.defaultBackendId);
+  }
 
   constructor(options: {
     config: AppConfig;
     store: BridgeStore;
     logger: Logger;
     bot: TelegramGateway;
-    adapter: IEngineAdapter;
+    adapter?: IEngineAdapter;
+    adapters?: Map<string, IEngineAdapter> | IEngineAdapter[];
+    backends?: BackendDescriptor[];
+    backendProvider?: (() => Promise<BackendDescriptor[]> | BackendDescriptor[]) | undefined;
+    defaultBackendId?: string;
     messaging: TelegramMessagingPort;
     customUi?: EngineCustomUiHook | undefined;
   }) {
@@ -68,10 +79,183 @@ export class UnifiedChannelOrchestrator {
     this.store = options.store;
     this.logger = options.logger;
     this.bot = options.bot;
-    this.adapter = options.adapter;
     this.messaging = options.messaging;
     this.queueManager = new TurnQueueManager();
     this.customUi = options.customUi;
+    this.backendProvider = options.backendProvider;
+
+    if (options.backends) {
+      for (const b of options.backends) {
+        this.backends.set(b.id, b);
+      }
+    }
+    if (options.adapters) {
+      if (options.adapters instanceof Map) {
+        for (const [id, ad] of options.adapters) {
+          if (!this.backends.has(id)) {
+            this.backends.set(id, { id, name: ad.name, engineType: id, adapter: ad });
+          }
+        }
+      } else if (Array.isArray(options.adapters)) {
+        for (const ad of options.adapters) {
+          if (!this.backends.has(ad.id)) {
+            this.backends.set(ad.id, { id: ad.id, name: ad.name, engineType: ad.id, adapter: ad });
+          }
+        }
+      }
+    }
+    if (options.adapter && !this.backends.has(options.adapter.id)) {
+      this.backends.set(options.adapter.id, {
+        id: options.adapter.id,
+        name: options.adapter.name,
+        engineType: options.adapter.id,
+        adapter: options.adapter,
+        isDefault: true,
+      });
+    }
+
+    const firstId = Array.from(this.backends.keys())[0] ?? 'default';
+    this.defaultBackendId = options.defaultBackendId ?? options.adapter?.id ?? firstId;
+  }
+
+  getAdapterForScope(scopeId: string): IEngineAdapter {
+    const activeBackendId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    return this.getAdapterForBackend(activeBackendId);
+  }
+
+  getBackendDescriptorForScope(scopeId: string): BackendDescriptor {
+    const activeBackendId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    return (
+      this.backends.get(activeBackendId) ??
+      this.backends.get(this.defaultBackendId) ?? {
+        id: activeBackendId,
+        name: activeBackendId,
+        engineType: activeBackendId,
+        adapter: this.adapter,
+      }
+    );
+  }
+
+  getAdapterForBackend(backendId: string): IEngineAdapter {
+    const desc = this.backends.get(backendId);
+    if (desc) return desc.adapter;
+    const fallback = this.backends.get(this.defaultBackendId) ?? Array.from(this.backends.values())[0];
+    if (!fallback) {
+      throw new Error(`No engine adapter available in orchestrator for backend '${backendId}'`);
+    }
+    return fallback.adapter;
+  }
+
+  registerBackend(desc: BackendDescriptor): void {
+    this.backends.set(desc.id, desc);
+  }
+
+  async listBackends(): Promise<BackendDescriptor[]> {
+    const list: BackendDescriptor[] = [];
+    const seen = new Set<string>();
+
+    if (this.backendProvider) {
+      try {
+        const dynamicList = await this.backendProvider();
+        for (const b of dynamicList) {
+          list.push(b);
+          seen.add(b.id);
+          if (!this.backends.has(b.id)) {
+            this.backends.set(b.id, b);
+          }
+        }
+      } catch (err) {
+        this.logger.warn('orchestrator.backend_provider_failed', { error: String(err) });
+      }
+    }
+
+    for (const b of this.backends.values()) {
+      if (!seen.has(b.id)) {
+        list.push(b);
+        seen.add(b.id);
+      }
+    }
+
+    return list;
+  }
+
+  async resolveBackendDescriptor(backendId: string): Promise<BackendDescriptor | null> {
+    const cached = this.backends.get(backendId);
+    if (cached) return cached;
+    const all = await this.listBackends();
+    return all.find((b) => b.id === backendId) ?? null;
+  }
+
+  async switchBackend(
+    scopeId: string,
+    targetBackendId: string,
+    locale: AppLocale,
+  ): Promise<{
+    previousBackendId: string;
+    newBackendId: string;
+    restoredThreadId: string | null;
+    cwd: string | null;
+  }> {
+    const currentBackendId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    const targetDesc = await this.resolveBackendDescriptor(targetBackendId);
+    if (!targetDesc) {
+      throw new Error(
+        locale === 'zh'
+          ? `未找到目标后端: ${targetBackendId}`
+          : `Target backend not found: ${targetBackendId}`,
+      );
+    }
+
+    if (targetDesc.onSelect) {
+      await targetDesc.onSelect(scopeId);
+    }
+
+    if (!this.backends.has(targetDesc.id)) {
+      this.backends.set(targetDesc.id, targetDesc);
+    }
+
+    if (currentBackendId === targetBackendId) {
+      const currentBinding = this.store.getBinding(scopeId);
+      return {
+        previousBackendId: currentBackendId,
+        newBackendId: targetBackendId,
+        restoredThreadId: currentBinding?.threadId ?? null,
+        cwd: currentBinding?.cwd ?? null,
+      };
+    }
+
+    const currentBinding = this.store.getBinding(scopeId);
+    if (currentBinding) {
+      this.store.setScopeBackendBinding(
+        scopeId,
+        currentBackendId,
+        currentBinding.threadId,
+        currentBinding.cwd,
+      );
+    }
+
+    this.store.setActiveBackend(scopeId, targetBackendId);
+
+    const saved = this.store.getScopeBackendBinding(scopeId, targetBackendId);
+    if (saved) {
+      this.store.setBinding(scopeId, saved.threadId, saved.cwd ?? this.config.defaultCwd);
+    } else {
+      this.store.clearBinding(scopeId);
+    }
+
+    this.logger.info('orchestrator.backend_switched', {
+      scopeId,
+      from: currentBackendId,
+      to: targetBackendId,
+      restoredThreadId: saved?.threadId ?? null,
+    });
+
+    return {
+      previousBackendId: currentBackendId,
+      newBackendId: targetBackendId,
+      restoredThreadId: saved?.threadId ?? null,
+      cwd: saved?.cwd ?? null,
+    };
   }
 
   registerInboundHandlers(): void {
@@ -94,13 +278,23 @@ export class UnifiedChannelOrchestrator {
 
   async start(): Promise<void> {
     await this.bot.start();
-    this.logger.info('orchestrator.started', { engine: this.adapter.id });
+    this.logger.info('orchestrator.started', {
+      defaultEngine: this.adapter.id,
+      backends: Array.from(this.backends.keys()),
+    });
 
     // Crash recovery: check interrupted preview messages from before restart
     try {
-      const activePreviews = this.store.listActiveTurnPreviews().filter(
-        (p) => p.turnId.startsWith(`${this.adapter.id}_`),
-      );
+      const backendIds = new Set(this.backends.keys());
+      for (const desc of this.backends.values()) {
+        backendIds.add(desc.adapter.id);
+      }
+      const activePreviews = this.store.listActiveTurnPreviews().filter((p) => {
+        for (const bId of backendIds) {
+          if (p.turnId.startsWith(`${bId}_`)) return true;
+        }
+        return false;
+      });
       for (const prev of activePreviews) {
         this.store.removeActiveTurnPreview(prev.turnId);
         this.editMessage(
@@ -232,6 +426,12 @@ export class UnifiedChannelOrchestrator {
             await this.sendModelsMenu(scopeId, locale);
           }
           return;
+        case 'backend':
+        case 'backends':
+        case 'engine':
+        case 'engines':
+          await this.handleBackendCommand(scopeId, argsString, locale);
+          return;
         case 'effort':
           await this.handleEffortCommand(scopeId, argsString, locale);
           return;
@@ -273,6 +473,32 @@ export class UnifiedChannelOrchestrator {
     if (this.customUi?.handleCustomCallback) {
       const handled = await this.customUi.handleCustomCallback(scopeId, data, locale, messageId);
       if (handled) return;
+    }
+
+    if (data.startsWith('engine:backend:')) {
+      const targetId = data.slice('engine:backend:'.length);
+      try {
+        const targetDesc = await this.resolveBackendDescriptor(targetId);
+        if (targetDesc) {
+          await this.switchBackend(scopeId, targetId, locale);
+          await this.messaging.answerCallback(
+            event.callbackQueryId,
+            locale === 'zh' ? `已切换到: ${targetDesc.name}` : `Switched to: ${targetDesc.name}`,
+          );
+        } else {
+          await this.messaging.answerCallback(
+            event.callbackQueryId,
+            locale === 'zh' ? '未找到对应后端服务' : 'Backend not found',
+          );
+        }
+      } catch (err) {
+        await this.messaging.answerCallback(
+          event.callbackQueryId,
+          locale === 'zh' ? `切换失败: ${String(err)}` : `Switch failed: ${String(err)}`,
+        );
+      }
+      await this.sendBackendMenu(scopeId, locale, messageId);
+      return;
     }
 
     if (data.startsWith('engine:m:')) {
@@ -319,6 +545,11 @@ export class UnifiedChannelOrchestrator {
           next === 'steer' ? '已切换为：⚡ 插话模式' : '已切换为：⏳ 排队模式',
         );
         await this.sendSetupMenu(scopeId, locale, messageId);
+        return;
+      }
+      if (sub === 'backend') {
+        await this.messaging.answerCallback(event.callbackQueryId, '');
+        await this.sendBackendMenu(scopeId, locale, messageId);
         return;
       }
       if (sub === 'new') {
@@ -395,7 +626,8 @@ export class UnifiedChannelOrchestrator {
     locale: AppLocale,
   ): Promise<void> {
     const scopeId = event.scopeId;
-    const queueId = `${this.adapter.id}_q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const adapter = this.getAdapterForScope(scopeId);
+    const queueId = `${adapter.id}_q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const binding = this.store.getBinding(scopeId);
 
     this.store.saveQueuedTurnInput({
@@ -469,6 +701,7 @@ export class UnifiedChannelOrchestrator {
     const scopeId = event.scopeId;
     const binding = this.store.getBinding(scopeId);
     const settings = this.store.getChatSettings(scopeId);
+    const adapter = this.getAdapterForScope(scopeId);
 
     const cwd = binding?.cwd || this.config.defaultCwd;
     const threadId = binding?.threadId || null;
@@ -483,11 +716,11 @@ export class UnifiedChannelOrchestrator {
     const initialMsgId = await this.sendMessage(
       scopeId,
       locale === 'zh'
-        ? (isBoost ? `🚀 ${this.adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${this.adapter.name} 正在思考中…`)
-        : (isBoost ? `🚀 ${this.adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${this.adapter.name} is thinking…`),
+        ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
+        : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`),
     );
 
-    const turnKey = `${this.adapter.id}_${scopeId}_${Date.now()}`;
+    const turnKey = `${adapter.id}_${scopeId}_${Date.now()}`;
     try {
       this.store.saveActiveTurnPreview({
         turnId: turnKey,
@@ -509,15 +742,15 @@ export class UnifiedChannelOrchestrator {
       locale,
     };
 
-    if (this.adapter.preflightTurn) {
+    if (adapter.preflightTurn) {
       try {
-        await this.adapter.preflightTurn(req);
+        await adapter.preflightTurn(req);
       } catch (err) {
         this.logger.warn('orchestrator.preflight_failed', { error: String(err) });
       }
     }
 
-    const execution = this.adapter.executeTurn(req);
+    const execution = adapter.executeTurn(req);
 
     const activeTurn: UnifiedActiveTurn = {
       scopeId,
@@ -549,7 +782,7 @@ export class UnifiedChannelOrchestrator {
           toolLines: activeTurn.toolLines,
           accumulatedText: activeTurn.accumulatedText,
           isBoost,
-          engineName: this.adapter.name,
+          engineName: adapter.name,
         });
         this.editMessage(activeTurn.scopeId, activeTurn.messageId, content).catch(() => {});
       }, delay);
@@ -611,8 +844,8 @@ export class UnifiedChannelOrchestrator {
 
       if (res.status === 'ERROR') {
         const errorText = res.response || (res as any).error || 'Unknown error';
-        if (this.adapter.handleTurnError) {
-          const handled = await this.adapter.handleTurnError({
+        if (adapter.handleTurnError) {
+          const handled = await adapter.handleTurnError({
             error: errorText,
             request: req,
             retryCount,
@@ -626,7 +859,7 @@ export class UnifiedChannelOrchestrator {
         await this.editMessage(
           scopeId,
           activeTurn.messageId,
-          `❌ **${this.adapter.name} 错误**:\n\`\`\`\n${errorText}\n\`\`\``,
+          `❌ **${adapter.name} 错误**:\n\`\`\`\n${errorText}\n\`\`\``,
         );
         await this.drainNextQueuedTurn(event, locale);
         return;
@@ -646,8 +879,8 @@ export class UnifiedChannelOrchestrator {
       this.activeTurns.delete(scopeId);
       this.store.removeActiveTurnPreview(turnKey);
 
-      if (this.adapter.handleTurnError) {
-        const handled = await this.adapter.handleTurnError({
+      if (adapter.handleTurnError) {
+        const handled = await adapter.handleTurnError({
           error: err.message,
           request: req,
           retryCount,
@@ -817,7 +1050,8 @@ export class UnifiedChannelOrchestrator {
   async handleNewSession(scopeId: string, locale: AppLocale): Promise<void> {
     const binding = this.store.getBinding(scopeId);
     const cwd = binding?.cwd || this.config.defaultCwd;
-    const newThreadId = `${this.adapter.id}_${Date.now()}`;
+    const adapter = this.getAdapterForScope(scopeId);
+    const newThreadId = `${adapter.id}_${Date.now()}`;
     this.store.setBinding(scopeId, newThreadId, cwd);
 
     await this.sendMessage(
@@ -832,17 +1066,21 @@ export class UnifiedChannelOrchestrator {
     const binding = this.store.getBinding(scopeId);
     const settings = this.store.getChatSettings(scopeId);
     const isBusy = this.activeTurns.has(scopeId);
+    const backendDesc = this.getBackendDescriptorForScope(scopeId);
+    const adapter = backendDesc.adapter;
     const customStatus = this.customUi?.renderCustomStatus ? await this.customUi.renderCustomStatus(scopeId, locale) : '';
 
     const text =
       locale === 'zh'
-        ? `📊 **${this.adapter.name} 运行状态**\n\n` +
+        ? `📊 **${adapter.name} 运行状态**\n\n` +
+          `• **当前引擎**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **状态**: ${isBusy ? '⚡ 正在执行任务' : '💤 空闲'}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
           `• **绑定会话**: \`${binding?.threadId || '(新会话)'}\`\n` +
           `• **工作目录**: \`${binding?.cwd || this.config.defaultCwd}\`` +
           (customStatus ? `\n${customStatus}` : '')
-        : `📊 **${this.adapter.name} Status**\n\n` +
+        : `📊 **${adapter.name} Status**\n\n` +
+          `• **Engine**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **State**: ${isBusy ? '⚡ Executing' : '💤 Idle'}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
           `• **Thread**: \`${binding?.threadId || '(new)'}\`\n` +
@@ -856,6 +1094,12 @@ export class UnifiedChannelOrchestrator {
       ],
     ];
 
+    if (this.backends.size > 1) {
+      keyboard.push([
+        { text: `🔌 切换后端 (${this.backends.size})`, callback_data: 'engine:setup:backend' },
+      ]);
+    }
+
     await this.sendMessage(scopeId, text, keyboard);
   }
 
@@ -863,15 +1107,20 @@ export class UnifiedChannelOrchestrator {
     const settings = this.store.getChatSettings(scopeId);
     const mode = settings?.activeTurnMessageMode ?? 'queue';
     const isBoost = settings?.serviceTier === 'boost';
+    const backendDesc = this.getBackendDescriptorForScope(scopeId);
+    const adapter = backendDesc.adapter;
+    const hasMultipleBackends = this.backends.size > 1;
 
     const text =
       locale === 'zh'
-        ? `⚙️ **${this.adapter.name} 控制面板**\n\n` +
+        ? `⚙️ **${adapter.name} 控制面板**\n\n` +
+          `• **当前引擎**: \`${backendDesc.id}\`${backendDesc.account ? ` (${backendDesc.account})` : ''}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
           `• **Boost 增强**: ${isBoost ? '🚀 已开启' : '⚪ 已关闭'}\n` +
           `• **运行中消息**: ${mode === 'steer' ? '⚡ 插话 (立即中断接管)' : '⏳ 排队 (完成后自动执行)'}\n\n` +
           `请选择要配置的项目：`
-        : `⚙️ **${this.adapter.name} Setup Panel**\n\n` +
+        : `⚙️ **${adapter.name} Setup Panel**\n\n` +
+          `• **Engine**: \`${backendDesc.id}\`${backendDesc.account ? ` (${backendDesc.account})` : ''}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
           `• **Boost**: ${isBoost ? '🚀 Enabled' : '⚪ Disabled'}\n` +
           `• **Active-Turn**: ${mode === 'steer' ? '⚡ Steer' : '⏳ Queue'}\n\n` +
@@ -892,10 +1141,18 @@ export class UnifiedChannelOrchestrator {
         },
         { text: '✨ 新建会话', callback_data: 'engine:setup:new' },
       ],
-      [
-        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
-      ],
     ];
+
+    if (hasMultipleBackends) {
+      keyboard.push([
+        { text: `🔌 切换后端 (${this.backends.size})`, callback_data: 'engine:setup:backend' },
+        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
+      ]);
+    } else {
+      keyboard.push([
+        { text: '🔄 刷新面板', callback_data: 'engine:setup:main' },
+      ]);
+    }
 
     if (this.customUi?.renderCustomSetupRows) {
       const customRows = await this.customUi.renderCustomSetupRows(scopeId, locale);
@@ -912,7 +1169,8 @@ export class UnifiedChannelOrchestrator {
   async sendModelsMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
     const settings = this.store.getChatSettings(scopeId);
     const currentModel = settings?.model;
-    const models = await this.adapter.listModels();
+    const adapter = this.getAdapterForScope(scopeId);
+    const models = await adapter.listModels();
 
     const keyboard: InlineKeyboard = [];
     for (let i = 0; i < models.length; i += 2) {
@@ -938,8 +1196,8 @@ export class UnifiedChannelOrchestrator {
 
     const title =
       locale === 'zh'
-        ? `🎯 **选择 ${this.adapter.name} 模型**`
-        : `🎯 **Select ${this.adapter.name} Model**`;
+        ? `🎯 **选择 ${adapter.name} 模型**`
+        : `🎯 **Select ${adapter.name} Model**`;
 
     if (editMessageId) {
       await this.editMessage(scopeId, editMessageId, title, keyboard);
@@ -949,29 +1207,164 @@ export class UnifiedChannelOrchestrator {
   }
 
   async sendHelp(scopeId: string, locale: AppLocale): Promise<void> {
+    const adapter = this.getAdapterForScope(scopeId);
     const text =
       locale === 'zh'
-        ? `🦊 **FoxClaw — ${this.adapter.name} 使用指南**\n\n` +
+        ? `🦊 **FoxClaw — ${adapter.name} 使用指南**\n\n` +
           `• 直接发送消息即可向 AI 发起提问或任务\n` +
           `• 发送照片、文件等多媒体，AI 可自动下载落盘并分析\n\n` +
           `**常用命令：**\n` +
           `/setup — 控制面板（切换模型、插话/排队模式管理）\n` +
+          `/backend — 切换当前后端引擎与账号（如 Google Antigravity / OpenAI Codex / OpenCode）\n` +
           `/models — 快速切换 AI 模型\n` +
+          `/threads — 查看与切换会话历史\n` +
           `/status — 查看当前运行状态与会话信息\n` +
           `/interrupt — 中断当前正在运行的任务\n` +
           `/new — 清空历史并新建会话\n` +
           `/help — 显示本帮助手册\n`
-        : `🦊 **FoxClaw — ${this.adapter.name} Quick Guide**\n\n` +
+        : `🦊 **FoxClaw — ${adapter.name} Quick Guide**\n\n` +
           `• Send any prompt to chat or run tasks\n` +
           `• Send photos or documents for AI inspection\n\n` +
           `**Commands:**\n` +
           `/setup — Control panel\n` +
+          `/backend — Switch active backend engine or account\n` +
           `/models — Switch model\n` +
+          `/threads — List and switch conversations\n` +
           `/status — Check runtime status\n` +
           `/interrupt — Stop active turn\n` +
           `/new — Start fresh session\n` +
           `/help — Show this help\n`;
 
     await this.sendMessage(scopeId, text);
+  }
+
+  async sendBackendMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
+    const backends = await this.listBackends();
+    const activeBackend = this.getBackendDescriptorForScope(scopeId);
+    const binding = this.store.getBinding(scopeId);
+
+    const lines: string[] = [
+      locale === 'zh' ? '🔌 **后端运行环境与账号 (Backends & Engines)**' : '🔌 **Backends & Engines**',
+      '',
+      locale === 'zh'
+        ? `• **当前活跃**: ● **${activeBackend.name}** (\`${activeBackend.id}\`)`
+        : `• **Active**: ● **${activeBackend.name}** (\`${activeBackend.id}\`)`,
+    ];
+
+    if (activeBackend.account) {
+      lines.push(locale === 'zh' ? `• **绑定账号**: \`${activeBackend.account}\`` : `• **Account**: \`${activeBackend.account}\``);
+    }
+    if (activeBackend.details) {
+      lines.push(locale === 'zh' ? `• **状态详情**: ${activeBackend.details}` : `• **Details**: ${activeBackend.details}`);
+    }
+    if (binding?.threadId) {
+      lines.push(
+        locale === 'zh'
+          ? `• **当前会话**: \`${binding.threadId.slice(0, 16)}…\` (\`${binding.cwd ?? this.config.defaultCwd}\`)`
+          : `• **Thread**: \`${binding.threadId.slice(0, 16)}…\` (\`${binding.cwd ?? this.config.defaultCwd}\`)`,
+      );
+    } else {
+      lines.push(
+        locale === 'zh'
+          ? `• **会话状态**: 未绑定 (发送新消息将开启新会话)`
+          : `• **Thread**: None (next prompt starts new thread)`,
+      );
+    }
+
+    lines.push('', '───────────────────', locale === 'zh' ? '**可用后端与账号列表**：' : '**Available Backends & Accounts**:');
+
+    const keyboard: InlineKeyboard = [];
+
+    backends.forEach((b, idx) => {
+      const isCurrent = b.id === activeBackend.id;
+      const marker = isCurrent ? '●' : '○';
+      const badge = isCurrent ? (locale === 'zh' ? ' [当前活跃]' : ' [Active]') : '';
+      const num = idx + 1;
+
+      lines.push(`${marker} **${num}.** ${b.name}${badge}`);
+      if (b.details || b.account) {
+        lines.push(`   ${b.details || b.account}`);
+      }
+
+      keyboard.push([
+        {
+          text: `${marker} ${num}. ${b.name.length > 24 ? `${b.name.slice(0, 23)}…` : b.name}`,
+          callback_data: `engine:backend:${b.id}`,
+        },
+      ]);
+    });
+
+    keyboard.push([{ text: '◀️ 返回控制面板', callback_data: 'engine:setup:main' }]);
+
+    const text = lines.join('\n');
+    if (editMessageId) {
+      await this.editMessage(scopeId, editMessageId, text, keyboard);
+    } else {
+      await this.sendMessage(scopeId, text, keyboard);
+    }
+  }
+
+  async handleBackendCommand(scopeId: string, argsString: string, locale: AppLocale): Promise<void> {
+    if (!argsString) {
+      await this.sendBackendMenu(scopeId, locale);
+      return;
+    }
+
+    const backends = await this.listBackends();
+    let targetId = argsString.trim().toLowerCase();
+
+    // Check if target is a number index
+    const num = parseInt(targetId, 10);
+    if (!isNaN(num) && num >= 1 && num <= backends.length) {
+      targetId = backends[num - 1]!.id;
+    } else {
+      // Find matching by id or name
+      const found = backends.find(
+        (b) => b.id.toLowerCase() === targetId || b.name.toLowerCase().includes(targetId),
+      );
+      if (found) {
+        targetId = found.id;
+      }
+    }
+
+    const targetDesc = await this.resolveBackendDescriptor(targetId);
+    if (!targetDesc) {
+      await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? `❌ 未找到后端: \`${argsString}\`。可用列表: ${backends.map((b) => `\`${b.id}\``).join(', ')}`
+          : `❌ Backend not found: \`${argsString}\`. Available: ${backends.map((b) => `\`${b.id}\``).join(', ')}`,
+      );
+      return;
+    }
+
+    const result = await this.switchBackend(scopeId, targetId, locale);
+    const restoredNote = result.restoredThreadId
+      ? (locale === 'zh'
+          ? `• **已恢复该后端既有会话**: \`${result.restoredThreadId.slice(0, 12)}…\`\n• **工作目录**: \`${result.cwd ?? this.config.defaultCwd}\``
+          : `• **Restored Thread**: \`${result.restoredThreadId.slice(0, 12)}…\`\n• **Directory**: \`${result.cwd ?? this.config.defaultCwd}\``)
+      : (locale === 'zh'
+          ? `• **会话状态**: 就绪 (发送任意新消息将在此后端创建新会话)`
+          : `• **Session**: Ready (send a message to start a new thread)`);
+
+    const text =
+      locale === 'zh'
+        ? `✅ **已切换至后端: ${targetDesc.name}**\n\n` +
+          `• **后端引擎**: \`${targetDesc.id}\`\n` +
+          restoredNote +
+          `\n\n后续所有消息和指令将直接路由至该后端执行。发送 /threads 可查看此后端的会话列表。`
+        : `✅ **Switched to Backend: ${targetDesc.name}**\n\n` +
+          `• **Engine**: \`${targetDesc.id}\`\n` +
+          restoredNote +
+          `\n\nAll subsequent turns will run on this backend. Run /threads to list sessions.`;
+
+    const keyboard: InlineKeyboard = [
+      [
+        { text: '🔌 切换其他后端', callback_data: 'engine:setup:backend' },
+        { text: '⚙️ 控制面板', callback_data: 'engine:setup:main' },
+      ],
+    ];
+
+    await this.sendMessage(scopeId, text, keyboard);
   }
 }

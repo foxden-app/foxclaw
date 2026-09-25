@@ -25,6 +25,7 @@ export interface ChatSessionSettings {
   collaborationMode: CollaborationModeValue | null;
   serviceTier: string | null;
   activeTurnMessageMode: ActiveTurnMessageMode | null;
+  activeBackendId?: string | null;
   updatedAt: number;
 }
 

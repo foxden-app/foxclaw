@@ -750,15 +750,30 @@ async function runServeCli(): Promise<void> {
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
   let activeAntigravityRuntime: InstanceType<typeof AntigravityTelegramRuntime> | null = null;
+  let sharedCodexApp: InstanceType<typeof CodexAppClient> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    if (config.codexCliBin) {
+      sharedCodexApp = new CodexAppClient(
+        config.codexCliBin,
+        config.codexAppLaunchCmd,
+        config.codexAppAutolaunch,
+        config.codexAppServerStatePath,
+        config.codexAppServerLogPath,
+        logger,
+        config.codexHome ? { CODEX_HOME: config.codexHome } : null,
+        codexApiProviderOverrides,
+      );
+    }
     if (config.opencodeBotToken) {
       activeOpencodeRuntime = new OpencodeTelegramRuntime(config, store, logger);
       await activeOpencodeRuntime.start();
       logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
     }
     if (config.antigravityBotToken) {
-      activeAntigravityRuntime = new AntigravityTelegramRuntime(config, store, logger);
+      activeAntigravityRuntime = new AntigravityTelegramRuntime(config, store, logger, {
+        codexApp: sharedCodexApp ?? undefined,
+      });
       await activeAntigravityRuntime.start();
       logger.info('antigravity.bridge.started', activeAntigravityRuntime.getRuntimeStatus());
     }
@@ -1144,7 +1159,8 @@ async function runServeCli(): Promise<void> {
         await activeOpencodeRuntime?.stop();
         await activeAntigravityRuntime?.stop();
         writeAggregateStatus(false);
-        await Promise.all(managedApps.map((app) => app.stop({ terminateServer: true }).catch((error) => {
+        const allManaged = [...managedApps, ...(sharedCodexApp ? [sharedCodexApp] : [])];
+        await Promise.all(allManaged.map((app) => app.stop({ terminateServer: true }).catch((error) => {
           logger.warn('codex.app-server.stop_failed', { error: serializeError(error) });
         })));
         store?.close();
@@ -1166,7 +1182,7 @@ async function runServeCli(): Promise<void> {
       store,
       logger,
     );
-    const app = new CodexAppClient(
+    const app = sharedCodexApp ?? new CodexAppClient(
       config.codexCliBin,
       config.codexAppLaunchCmd,
       config.codexAppAutolaunch,

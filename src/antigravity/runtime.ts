@@ -7,6 +7,7 @@ import { TelegramGateway } from '../telegram/gateway.js';
 import { AntigravityAppClient } from './client.js';
 import { AntigravityAuthManager } from './auth.js';
 import { AntigravityBridgeCore } from './controller.js';
+import type { CodexAppClient } from '../codex_app/client.js';
 
 /** Keeps the optional Antigravity Telegram bot lifecycle decoupled from Codex and OpenCode runtimes. */
 export class AntigravityTelegramRuntime {
@@ -15,7 +16,14 @@ export class AntigravityTelegramRuntime {
   private readonly auth: AntigravityAuthManager;
   private readonly core: AntigravityBridgeCore;
 
-  constructor(config: AppConfig, store: BridgeStore, logger: Logger) {
+  constructor(
+    config: AppConfig,
+    store: BridgeStore,
+    logger: Logger,
+    options?: {
+      codexApp?: CodexAppClient | undefined;
+    },
+  ) {
     if (!config.antigravityBotToken) {
       throw new Error('ANTIGRAVITY_BOT_TOKEN is required for the Antigravity runtime');
     }
@@ -39,6 +47,7 @@ export class AntigravityTelegramRuntime {
       this.app,
       this.auth,
       new TelegramMessagingPort(this.bot),
+      options,
     );
     this.core.registerInboundHandlers();
   }

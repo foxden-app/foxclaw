@@ -209,3 +209,172 @@ test('UnifiedChannelOrchestrator manages active turn, streaming preview, steer a
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test('UnifiedChannelOrchestrator supports multi-backend registration and hot-switching like threads', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-multi-backend-'));
+  const dbPath = path.join(tempDir, 'test.db');
+  const store = new BridgeStore(dbPath);
+  const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+
+  try {
+    const config = {
+      defaultCwd: tempDir,
+      tgAllowedUserId: 'user-1',
+      tgAllowedChatId: null,
+      tgAllowedTopicId: null,
+    } as unknown as AppConfig;
+
+    const mockBot = new EventEmitter() as any;
+    mockBot.username = 'test_bot';
+    mockBot.start = async () => {};
+    mockBot.stop = () => {};
+
+    const sentMessages: Array<{ scopeId: string; text: string; keyboard?: any }> = [];
+    const mockMessaging: any = {
+      sendRichMarkdown: async (scopeId: string, text: string, keyboard?: any) => {
+        sentMessages.push({ scopeId, text, keyboard });
+        return 1;
+      },
+      editRichMarkdown: async (scopeId: string, _msgId: number, text: string, keyboard?: any) => {
+        sentMessages.push({ scopeId, text, keyboard });
+      },
+      answerCallback: async () => {},
+      sendTypingInScope: async () => {},
+    };
+
+    let executedEngineId = '';
+    const createMockAdapter = (id: string, name: string): IEngineAdapter => ({
+      id,
+      name,
+      listModels: async () => [{ id: `${id}-model-1`, name: `${name} Model 1`, isDefault: true }],
+      executeTurn: (req) => {
+        executedEngineId = id;
+        const emitter = new EventEmitter();
+        const turnExec: EngineTurnExecution = {
+          turnId: `${id}_turn_1`,
+          cancel: () => {},
+          waitForResult: async () => ({
+            kind: 'result',
+            status: 'SUCCESS',
+            response: `Response from ${name}`,
+            conversationId: req.threadId || `${id}_thread_auto`,
+          }),
+          on: (event: string, listener: any) => emitter.on(event, listener),
+        };
+        setTimeout(() => {
+          emitter.emit('delta', `Hello from ${name}`);
+          emitter.emit('result', {
+            kind: 'result',
+            status: 'SUCCESS',
+            response: `Hello from ${name}`,
+            conversationId: req.threadId || `${id}_thread_auto`,
+          });
+        }, 10);
+        return turnExec;
+      },
+    });
+
+    const agyAdapter = createMockAdapter('antigravity', 'Google Antigravity (AGY)');
+    const codexAdapter = createMockAdapter('codex', 'OpenAI Codex');
+    const opencodeAdapter = createMockAdapter('opencode', 'OpenCode (SDK)');
+
+    const orchestrator = new UnifiedChannelOrchestrator({
+      config,
+      store,
+      logger,
+      bot: mockBot,
+      messaging: mockMessaging,
+      backends: [
+        { id: 'antigravity', name: 'Google Antigravity (AGY)', engineType: 'antigravity', adapter: agyAdapter, account: 'wuya@gmail.com' },
+        { id: 'codex', name: 'OpenAI Codex', engineType: 'codex', adapter: codexAdapter, account: 'Codex App' },
+        { id: 'opencode', name: 'OpenCode (SDK)', engineType: 'opencode', adapter: opencodeAdapter },
+      ],
+      defaultBackendId: 'antigravity',
+    });
+
+    orchestrator.registerInboundHandlers();
+    await orchestrator.start();
+
+    const scopeId = 'scope-multi-1';
+    const baseEvent: TelegramTextEvent = {
+      scopeId,
+      chatId: 'chat-1',
+      topicId: null,
+      chatType: 'private',
+      userId: 'user-1',
+      messageId: 1,
+      text: '',
+      attachments: [],
+      entities: [],
+      replyToBot: false,
+    };
+
+    // 1. Initial status and /backend list
+    await orchestrator.handleText({ ...baseEvent, messageId: 1, text: '/backend' });
+    const backendListMsg = sentMessages.find((m) => m.text.includes('后端运行环境与账号'));
+    assert.ok(backendListMsg, 'Should show backend list menu');
+    assert.ok(backendListMsg!.text.includes('Google Antigravity (AGY)'));
+    assert.ok(backendListMsg!.text.includes('OpenAI Codex'));
+    assert.ok(backendListMsg!.text.includes('OpenCode (SDK)'));
+
+    // Check setup panel includes backend switcher
+    await orchestrator.handleText({ ...baseEvent, messageId: 2, text: '/setup' });
+    const setupMsg = sentMessages[sentMessages.length - 1];
+    assert.ok(setupMsg?.keyboard?.some((row: any) => row.some((btn: any) => btn.text.includes('切换后端'))));
+
+    // 2. Execute prompt on default backend (antigravity)
+    store.setBinding(scopeId, 'conv-agy-init', '/repo/foxclaw');
+    await orchestrator.handleText({ ...baseEvent, messageId: 3, text: 'Hello Antigravity' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(executedEngineId, 'antigravity');
+
+    // 3. Hot-switch to Codex via /backend codex
+    await orchestrator.handleText({ ...baseEvent, messageId: 4, text: '/backend codex' });
+    const switchedMsg = sentMessages.find((m) => m.text.includes('已切换至后端: OpenAI Codex'));
+    assert.ok(switchedMsg, 'Should confirm switch to OpenAI Codex');
+    assert.equal(store.getActiveBackend(scopeId), 'codex');
+
+    // Antigravity binding should have been saved to scope_backend_bindings
+    const savedAgy = store.getScopeBackendBinding(scopeId, 'antigravity');
+    assert.ok(savedAgy);
+    assert.equal(savedAgy!.threadId, 'conv-agy-init');
+
+    // Execute prompt on Codex
+    store.setBinding(scopeId, 'thread-codex-1', '/repo/podcast');
+    await orchestrator.handleText({ ...baseEvent, messageId: 5, text: 'Hello Codex' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(executedEngineId, 'codex');
+
+    // 4. Hot-switch back to Antigravity via callback
+    await orchestrator.handleCallback({
+      scopeId,
+      chatId: 'chat-1',
+      topicId: null,
+      userId: 'user-1',
+      callbackQueryId: 'cb-back-agy',
+      messageId: 10,
+      data: 'engine:backend:antigravity',
+    });
+
+    assert.equal(store.getActiveBackend(scopeId), 'antigravity');
+    // Previous Antigravity thread should be restored automatically!
+    const restoredBinding = store.getBinding(scopeId);
+    assert.ok(restoredBinding);
+    assert.equal(restoredBinding!.threadId, 'conv-agy-init');
+
+    // Codex binding should also be preserved in store
+    const savedCodex = store.getScopeBackendBinding(scopeId, 'codex');
+    assert.ok(savedCodex);
+    assert.equal(savedCodex!.threadId, 'thread-codex-1');
+
+    // Execute prompt on restored Antigravity
+    await orchestrator.handleText({ ...baseEvent, messageId: 6, text: 'Back on Antigravity' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(executedEngineId, 'antigravity');
+
+    await orchestrator.stop();
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
