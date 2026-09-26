@@ -939,7 +939,8 @@ export class UnifiedBridgeCore {
       const convId = data.slice('agy:new:'.length);
       const conv = this.conversations.getConversation(convId);
       const cwd = conv?.workspaceDir || this.config.defaultCwd;
-      this.store.clearBinding(scopeId);
+      this.store.setBinding(scopeId, '', cwd);
+      this.orchestrator.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(data, locale === 'zh' ? '已创建新会话' : 'New conversation ready');
       await this.sendMessage(
         scopeId,

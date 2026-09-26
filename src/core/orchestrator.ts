@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import type { AppConfig } from '../config.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
@@ -198,18 +201,17 @@ export class UnifiedChannelOrchestrator {
     const activeBackend = this.getBackendDescriptorForScope(scopeId);
     const binding = this.store.getBinding(scopeId);
     const settings = this.store.getChatSettings(scopeId);
-    if (!settings) return;
     this.store.setScopeBackendBinding(
       scopeId,
       activeBackend.id,
       binding?.threadId ?? '',
       binding?.cwd ?? null,
       {
-        model: settings.model ?? null,
-        reasoningEffort: settings.reasoningEffort ?? null,
-        activeTurnMessageMode: settings.activeTurnMessageMode ?? null,
-        serviceTier: settings.serviceTier ?? null,
-        accessPreset: settings.accessPreset ?? null,
+        model: settings?.model ?? null,
+        reasoningEffort: settings?.reasoningEffort ?? null,
+        activeTurnMessageMode: settings?.activeTurnMessageMode ?? null,
+        serviceTier: settings?.serviceTier ?? null,
+        accessPreset: settings?.accessPreset ?? null,
       },
     );
   }
@@ -580,7 +582,7 @@ export class UnifiedChannelOrchestrator {
           return;
         case 'clear':
         case 'new':
-          await this.handleNewSession(scopeId, locale);
+          await this.handleNewSession(scopeId, locale, argsString);
           return;
       }
     }
@@ -918,6 +920,7 @@ export class UnifiedChannelOrchestrator {
 
     this.activeTurns.set(scopeId, activeTurn);
 
+    this.messaging.sendTypingInScope(scopeId).catch(() => {});
     activeTurn.typingTimer = setInterval(() => {
       this.messaging.sendTypingInScope(scopeId).catch(() => {});
       scheduleFlush();
@@ -990,6 +993,7 @@ export class UnifiedChannelOrchestrator {
 
       if (res.conversationId && (!binding?.threadId || binding.threadId !== res.conversationId)) {
         this.store.setBinding(scopeId, res.conversationId, cwd);
+        this.syncCurrentBackendSettings(scopeId);
       }
 
       if (res.usage) {
@@ -1300,18 +1304,64 @@ export class UnifiedChannelOrchestrator {
     }
   }
 
-  async handleNewSession(scopeId: string, locale: AppLocale): Promise<void> {
+  async handleNewSession(scopeId: string, locale: AppLocale, targetCwdInput?: string): Promise<void> {
+    const rawTarget = targetCwdInput?.trim();
     const binding = this.store.getBinding(scopeId);
-    const cwd = binding?.cwd || this.config.defaultCwd;
-    const adapter = this.getAdapterForScope(scopeId);
-    const newThreadId = `${adapter.id}_${Date.now()}`;
-    this.store.setBinding(scopeId, newThreadId, cwd);
+    let cwd = binding?.cwd || this.config.defaultCwd;
 
+    if (rawTarget) {
+      let resolved = rawTarget;
+      if (resolved.startsWith('~')) {
+        resolved = path.join(os.homedir(), resolved.slice(1));
+      } else if (!path.isAbsolute(resolved)) {
+        resolved = path.resolve(cwd, resolved);
+      }
+      resolved = path.normalize(resolved);
+
+      if (!fs.existsSync(resolved)) {
+        await this.sendMessage(
+          scopeId,
+          locale === 'zh'
+            ? `❌ **指定的工作目录不存在**：\`${resolved}\`\n请检查路径是否正确。`
+            : `❌ **Directory does not exist**: \`${resolved}\``,
+        );
+        return;
+      }
+      const stat = fs.statSync(resolved);
+      if (!stat.isDirectory()) {
+        await this.sendMessage(
+          scopeId,
+          locale === 'zh'
+            ? `❌ **指定的路径不是一个目录**：\`${resolved}\``
+            : `❌ **Path is not a directory**: \`${resolved}\``,
+        );
+        return;
+      }
+      cwd = resolved;
+    }
+
+    // Cancel queued turn inputs
+    this.store.cancelQueuedTurnInputs(scopeId);
+
+    const active = this.activeTurns.get(scopeId);
+    if (active) {
+      active.execution.cancel();
+      if (active.typingTimer) clearInterval(active.typingTimer);
+      if (active.flushTimer) clearTimeout(active.flushTimer);
+      this.activeTurns.delete(scopeId);
+    }
+
+    // Reset thread binding to empty/ready state with the target cwd
+    this.store.setBinding(scopeId, '', cwd);
+
+    this.syncCurrentBackendSettings(scopeId);
+
+    const adapter = this.getAdapterForScope(scopeId);
     await this.sendMessage(
       scopeId,
       locale === 'zh'
-        ? `✨ **已开启全新会话**\n会话 ID: \`${newThreadId}\`\n工作目录: \`${cwd}\``
-        : `✨ **New Session Created**\nThread: \`${newThreadId}\`\nDirectory: \`${cwd}\``,
+        ? `✨ **已开启全新会话**\n• 当前引擎: **${adapter.name}**\n• 工作目录: \`${cwd}\`\n\n发送任意消息开启新任务。`
+        : `✨ **New Session Created**\n• Engine: **${adapter.name}**\n• Directory: \`${cwd}\`\n\nSend a message to start.`,
     );
   }
 

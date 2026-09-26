@@ -595,5 +595,91 @@ test('UnifiedChannelOrchestrator rescues substantive response text when turn end
   }
 });
 
+test('UnifiedChannelOrchestrator handleNewSession validates target cwd and resets binding cleanly', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-new-session-test-'));
+  const subDir = path.join(tempDir, 'podcast-workspace');
+  await fs.mkdir(subDir, { recursive: true });
+  const dbPath = path.join(tempDir, 'test.db');
+  const store = new BridgeStore(dbPath);
+  const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+
+  const sentMessages: string[] = [];
+  const mockMessaging = {
+    sendRichMarkdown: async (_scopeId: string, text: string) => {
+      sentMessages.push(text);
+      return 1;
+    },
+    editRichMarkdown: async () => {},
+    sendTypingInScope: async () => {},
+  } as any;
+
+  const mockAdapter = {
+    id: 'antigravity',
+    name: 'Google Antigravity (AGY)',
+    engineType: 'antigravity',
+    listModels: async () => [{ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', isDefault: true }],
+    executeTurn: () => ({ on: () => {}, cancel: () => {}, waitForResult: async () => {} }),
+  };
+
+  const scopeId = 'telegram:test::root';
+  store.setBinding(scopeId, 'old-thread-123', tempDir);
+
+  const orchestrator = new UnifiedChannelOrchestrator({
+    config: { defaultCwd: tempDir } as any,
+    store,
+    logger,
+    bot: { id: 'testbot', token: 'token', username: 'testbot', on: () => {}, start: async () => {}, stop: () => {} } as any,
+    messaging: mockMessaging,
+    backends: [
+      { id: 'antigravity', name: 'Google Antigravity (AGY)', engineType: 'antigravity', adapter: mockAdapter as any },
+    ],
+    defaultBackendId: 'antigravity',
+  });
+
+  try {
+    // 1. Try nonexistent path
+    await orchestrator.handleText({
+      scopeId,
+      chatId: '123',
+      topicId: null,
+      chatType: 'private',
+      userId: 'u1',
+      messageId: 1,
+      text: '/new /non/existent/path_xyz',
+      attachments: [],
+      entities: [],
+      replyToBot: false,
+    });
+    assert.ok(sentMessages[0]!.includes('指定的工作目录不存在'), 'Should reject nonexistent directory');
+    assert.equal(store.getBinding(scopeId)?.threadId, 'old-thread-123', 'Should not change binding on error');
+
+    // 2. Run /new with valid directory
+    await orchestrator.handleText({
+      scopeId,
+      chatId: '123',
+      topicId: null,
+      chatType: 'private',
+      userId: 'u1',
+      messageId: 2,
+      text: `/new ${subDir}`,
+      attachments: [],
+      entities: [],
+      replyToBot: false,
+    });
+    const latestBinding = store.getBinding(scopeId);
+    assert.equal(latestBinding?.cwd, subDir, 'Cwd should be updated to target directory');
+    assert.equal(latestBinding?.threadId, '', 'Thread ID should be reset to empty');
+    assert.ok(sentMessages[1]!.includes('已开启全新会话'), 'Should confirm session creation');
+    assert.ok(sentMessages[1]!.includes(subDir), 'Confirmation should mention new cwd');
+
+    const savedBackendBinding = store.getScopeBackendBinding(scopeId, 'antigravity');
+    assert.equal(savedBackendBinding?.cwd, subDir, 'scope_backend_bindings should reflect target cwd');
+    assert.equal(savedBackendBinding?.threadId, '', 'scope_backend_bindings threadId should be empty');
+  } finally {
+    await orchestrator.stop();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 
 

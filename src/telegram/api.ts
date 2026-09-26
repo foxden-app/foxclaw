@@ -20,7 +20,20 @@ export interface TelegramRemoteFile {
 
 const DEFAULT_API_BASE_URL = 'https://api.telegram.org';
 
-export async function callTelegramApi<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
+function isTransientNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = String((err as any).message || err);
+  return (
+    msg.includes('Client network socket disconnected') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('EAI_AGAIN') ||
+    msg.includes('ENOTFOUND') ||
+    msg.includes('socket hang up')
+  );
+}
+
+function callTelegramApiOnce<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
   const payload = JSON.stringify(body);
   const endpoint = telegramApiUrl(botToken, method);
   return new Promise<TelegramApiResult<T>>((resolve, reject) => {
@@ -53,6 +66,24 @@ export async function callTelegramApi<T>(botToken: string, method: string, body:
     request.write(payload);
     request.end();
   });
+}
+
+export async function callTelegramApi<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
+  const maxAttempts = method === 'getUpdates' ? 1 : 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await callTelegramApiOnce<T>(botToken, method, body);
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts && isTransientNetworkError(err)) {
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 export async function callTelegramMultipartApi<T>(
