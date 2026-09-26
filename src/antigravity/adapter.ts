@@ -11,7 +11,11 @@ import type {
 } from '../core/engine_spi.js';
 import { normalizeAgyModelId, type AntigravityAppClient, type AntigravityTurnExecution } from './client.js';
 import type { AntigravityAuthManager } from './auth.js';
-import { isCapacityOrUnavailableError } from './events.js';
+import {
+  isCapacityOrUnavailableError,
+  isVerificationError,
+  isQuotaOrAuthError,
+} from './events.js';
 import { buildAttachmentPrompt } from '../telegram/media.js';
 import type { Logger } from '../logger.js';
 
@@ -138,6 +142,7 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
             kind: 'result',
             status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
             response: ev.response || ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : ''),
+            error: ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : undefined),
             conversationId: ev.conversationId,
             usage: ev.usage
               ? {
@@ -172,6 +177,7 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
           kind: 'result',
           status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
           response: ev.response || ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : ''),
+          error: ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : undefined),
           conversationId: ev.conversationId,
           usage: ev.usage
             ? {
@@ -200,24 +206,60 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
   }
 
   async handleTurnError(ctx: EngineTurnErrorContext): Promise<boolean> {
-    const isQuota =
-      ctx.error.includes('ResourceExhausted') ||
-      ctx.error.includes('RESOURCE_EXHAUSTED') ||
-      ctx.error.includes('429') ||
-      ctx.error.includes('quota') ||
-      ctx.error.includes('Quota');
+    const isVerification = isVerificationError(ctx.error);
+    const isQuota = !isVerification && isQuotaOrAuthError(ctx.error);
+
+    if (isVerification && this.auth && ctx.retryCount < 3) {
+      try {
+        const active = await this.auth.getActiveAccount();
+        const failingName = active?.name || 'unknown';
+        const failingEmail = active?.email || failingName;
+
+        this.auth.pauseAccount(failingName);
+        this.auth.markCooldown(failingName, 60 * 60 * 1000);
+        if (active?.email) {
+          this.auth.pauseAccount(active.email);
+          this.auth.markCooldown(active.email, 60 * 60 * 1000);
+        }
+
+        const rotated = await this.auth.rotateNextCandidate(failingName);
+        const nextAccountName = rotated.account.email || rotated.account.name;
+
+        await ctx.sendMessage(
+          ctx.request.locale === 'zh'
+            ? `🛡️ **检测到 Google 安全验证风控 (Verification Required)**\n\n` +
+              `• **受限账号**: \`${failingEmail}\` (已自动暂停并冷却)\n` +
+              `• **故障恢复**: 已无感切换至备用账号 \`${nextAccountName}\`，正在继续执行您的任务…\n\n` +
+              `💡 **如何人工解除该账号风控**：\n` +
+              `1. 可在终端/CLI 执行 \`agy -p "hi"\`，在弹出的浏览器完成人机验证；\n` +
+              `2. 或在 Telegram 发送 \`/login\` 重新授权该账号后即可恢复。`
+            : `🛡️ **Google Security Verification Triggered (Verification Required)**\n\n` +
+              `• **Affected**: \`${failingEmail}\` (paused & cooling)\n` +
+              `• **Failover**: Switched to \`${nextAccountName}\`, continuing your task…\n\n` +
+              `💡 **How to resolve**: Complete verification via \`agy -p "hi"\` in browser or run \`/login\` in Telegram.`,
+        );
+
+        await ctx.retryTurn(ctx.retryCount + 1);
+        return true;
+      } catch (err) {
+        this.logger?.warn('antigravity.verification_rotation_failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     if (isQuota && this.auth && ctx.retryCount < 3) {
       try {
         const active = await this.auth.getActiveAccount();
         if (active) {
           this.auth.markCooldown(active.name, 30 * 60 * 1000);
+          if (active.email) this.auth.markCooldown(active.email, 30 * 60 * 1000);
         }
-        const rotated = await this.auth.rotateNextCandidate();
+        const rotated = await this.auth.rotateNextCandidate(active?.name);
         await ctx.sendMessage(
           ctx.request.locale === 'zh'
-            ? `⚠️ 检测到当前账号配额超限，已标记进入 30 分钟冷却，自动切换到账号 \`${rotated.account.email || rotated.account.name}\` 并重试…`
-            : `⚠️ Quota limit detected. Marked account into 30m cooldown, switched to \`${rotated.account.email || rotated.account.name}\` and retrying…`,
+            ? `⚠️ 检测到当前账号配额超限或凭据失效，已标记进入 30 分钟冷却，自动切换到账号 \`${rotated.account.email || rotated.account.name}\` 并重试…`
+            : `⚠️ Quota or auth issue detected. Marked account into 30m cooldown, switched to \`${rotated.account.email || rotated.account.name}\` and retrying…`,
         );
         await ctx.retryTurn(ctx.retryCount + 1);
         return true;

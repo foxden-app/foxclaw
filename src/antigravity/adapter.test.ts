@@ -186,3 +186,48 @@ test('AntigravityEngineAdapter falls back to defaultModel and captures error mes
   assert.equal(resultReceived?.response, 'invalid model selection (--model "default")');
 });
 
+test('AntigravityEngineAdapter automatically pauses failing account, rotates and retries on Verification Required', async () => {
+  const pausedAccounts: string[] = [];
+  const cooldowns: string[] = [];
+  let rotatedAccount = '';
+  const sentMessages: string[] = [];
+  let retriedCount = -1;
+
+  const mockAuth: any = {
+    getActiveAccount: async () => ({ name: 'aiopx2024_gmail_com', email: 'aiopx2024@gmail.com' }),
+    pauseAccount: (name: string) => pausedAccounts.push(name),
+    markCooldown: (name: string) => cooldowns.push(name),
+    rotateNextCandidate: async () => {
+      rotatedAccount = 'aiopx2026@gmail.com';
+      return { success: true, account: { name: 'aiopx2026_gmail_com', email: 'aiopx2026@gmail.com' } };
+    },
+  };
+
+  const adapter = new AntigravityEngineAdapter({} as any, 'gemini-3.8-flash', mockAuth);
+
+  const handled = await adapter.handleTurnError({
+    error: 'Verification Required: Please complete verification in your browser to continue.',
+    request: { locale: 'zh', model: 'gemini-3.8-flash' } as any,
+    retryCount: 0,
+    retryTurn: async (nextCount) => {
+      retriedCount = nextCount;
+    },
+    sendMessage: async (text) => {
+      sentMessages.push(text);
+      return 1;
+    },
+    editMessage: async () => {},
+  });
+
+  assert.equal(handled, true);
+  assert.ok(pausedAccounts.includes('aiopx2024_gmail_com'));
+  assert.ok(cooldowns.includes('aiopx2024_gmail_com'));
+  assert.equal(rotatedAccount, 'aiopx2026@gmail.com');
+  assert.equal(retriedCount, 1);
+  assert.ok(sentMessages[0]?.includes('Verification Required'));
+  assert.ok(sentMessages[0]?.includes('aiopx2024@gmail.com'));
+  assert.ok(sentMessages[0]?.includes('aiopx2026@gmail.com'));
+  assert.ok(sentMessages[0]?.includes('agy -p "hi"'));
+});
+
+

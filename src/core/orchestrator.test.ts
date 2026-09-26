@@ -496,4 +496,104 @@ test('UnifiedChannelOrchestrator records turn token usage and displays metric to
   }
 });
 
+test('UnifiedChannelOrchestrator rescues substantive response text when turn ends with ERROR status', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-orch-rescue-'));
+  try {
+    const config = { defaultCwd: '/tmp' } as any;
+    const dbPath = path.join(tempDir, 'test.db');
+    const store = new BridgeStore(dbPath);
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+
+    const sentMessages: Array<{ scopeId: string; text: string }> = [];
+    const editedMessages: Array<{ scopeId: string; messageId: number; text: string }> = [];
+
+    const mockMessaging: any = {
+      sendRichMarkdown: async (scopeId: string, text: string) => {
+        sentMessages.push({ scopeId, text });
+        return 100 + sentMessages.length;
+      },
+      editRichMarkdown: async (scopeId: string, messageId: number, text: string) => {
+        editedMessages.push({ scopeId, messageId, text });
+      },
+      sendTypingInScope: async () => {},
+      deleteMessage: async () => {},
+      answerCallback: async () => {},
+    };
+
+    let turnEmitter: EventEmitter | null = null;
+    const mockAdapter: Partial<IEngineAdapter> = {
+      id: 'mock-engine',
+      name: 'Mock Engine',
+      listModels: async () => [{ id: 'mock-model', name: 'Mock Model', isDefault: true }],
+      executeTurn: () => {
+        turnEmitter = new EventEmitter();
+        return {
+          cancel: () => {},
+          waitForResult: async () => null,
+          on: (ev: any, fn: any) => turnEmitter!.on(ev, fn),
+        } as any;
+      },
+    };
+
+    const orchestrator = new UnifiedChannelOrchestrator({
+      config,
+      store,
+      logger,
+      bot: { id: 'testbot', token: 'token', username: 'testbot', on: () => {}, start: async () => {}, stop: () => {} } as any,
+      messaging: mockMessaging,
+      backends: [
+        { id: 'mock-engine', name: 'Mock Engine', engineType: 'antigravity', adapter: mockAdapter as any },
+      ],
+      defaultBackendId: 'mock-engine',
+    });
+
+    orchestrator.registerInboundHandlers();
+    await orchestrator.start();
+
+    // Trigger turn
+    await orchestrator.handleText({
+      scopeId: 'scope-rescue',
+      chatId: 'chat-rescue',
+      topicId: null,
+      chatType: 'private',
+      userId: 'user-1',
+      messageId: 100,
+      text: 'Tell me about the project',
+      attachments: [],
+      entities: [],
+      replyToBot: false,
+    });
+
+    // Simulate tool output
+    turnEmitter!.emit('tool', {
+      name: 'view_file',
+      parameters: { path: 'README.md' },
+      status: 'completed',
+      summary: 'README.md',
+    });
+
+    // Emit result with status: 'ERROR', but response contains a rich substantive answer
+    const substantiveAnswer = 'Here is the complete project overview and architecture explanation. Everything is working as expected.';
+    turnEmitter!.emit('result', {
+      kind: 'result',
+      status: 'ERROR',
+      response: substantiveAnswer,
+      error: 'Process exited with code 1',
+      conversationId: 'conv-rescue',
+    });
+
+    // Verify the edited message contains the substantive answer and execution summary, NOT an error box
+    const lastEdit = editedMessages[editedMessages.length - 1];
+    assert.ok(lastEdit);
+    assert.ok(lastEdit.text.includes(substantiveAnswer), 'Should preserve substantive answer');
+    assert.ok(lastEdit.text.includes('执行小结'), 'Should include folded tools summary');
+    assert.ok(!lastEdit.text.startsWith('❌ **Mock Engine 错误**'), 'Should not wrap in pure error box');
+
+    await orchestrator.stop();
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+
 

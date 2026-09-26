@@ -425,6 +425,8 @@ export class AntigravityAuthManager {
 
     this.clearCooldown(target.name);
     if (target.email) this.clearCooldown(target.email);
+    this.resumeAccount(target.name);
+    if (target.email) this.resumeAccount(target.email);
 
     try {
       await this.fetchQuotaForAccount(target.name, true);

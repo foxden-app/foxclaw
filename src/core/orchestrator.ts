@@ -1031,7 +1031,7 @@ export class UnifiedChannelOrchestrator {
       }
 
       if (res.status === 'ERROR') {
-        const errorText = res.response || (res as any).error || 'Unknown error';
+        const errorText = (res.error || res.response || (res as any).error || 'Unknown error').trim();
         if (adapter.handleTurnError) {
           const handled = await adapter.handleTurnError({
             error: errorText,
@@ -1042,6 +1042,45 @@ export class UnifiedChannelOrchestrator {
             editMessage: (messageId: number, text: string) => this.editMessage(scopeId, messageId, text),
           });
           if (handled) return;
+        }
+
+        // If the agent actually produced substantive response text, do NOT mask it with an error box!
+        let finalText = (res.response || '').trim();
+        if (!finalText && activeTurn.accumulatedText) {
+          finalText = activeTurn.accumulatedText.trim();
+        }
+
+        const isPureError =
+          !finalText ||
+          finalText === errorText ||
+          finalText.startsWith('Process exited with code') ||
+          finalText.startsWith('Verification Required') ||
+          finalText.startsWith('Error:') ||
+          finalText.length <= 20;
+
+        if (!isPureError) {
+          let foldedTools = '';
+          if (activeTurn.toolLines.length > 0) {
+            const roundText = activeTurn.stepIndex && activeTurn.stepIndex > 1 ? ` · 共 ${activeTurn.stepIndex} 轮` : '';
+            foldedTools = `<blockquote expandable>🛠️ <b>执行小结${roundText} · 累计执行 ${activeTurn.toolLines.length} 次工具</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
+          }
+
+          const warningNote =
+            errorText && errorText !== 'Unknown error' && errorText !== 'Antigravity execution failed'
+              ? `\n\n⚠️ <i>(注意：任务结束时伴随提示: ${escapeTelegramHtml(errorText.slice(0, 120))})</i>`
+              : '';
+          const fullText = foldedTools + finalText + warningNote;
+          const chunks = chunkTelegramMessage(fullText, 4000);
+          if (chunks.length > 0) {
+            await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
+              return this.sendMessage(scopeId, chunks[0]!);
+            });
+            for (let i = 1; i < chunks.length; i++) {
+              await this.sendMessage(scopeId, chunks[i]!);
+            }
+          }
+          await this.drainNextQueuedTurn(event, locale);
+          return;
         }
 
         await this.editMessage(
@@ -1077,6 +1116,29 @@ export class UnifiedChannelOrchestrator {
           editMessage: (messageId: number, text: string) => this.editMessage(scopeId, messageId, text),
         });
         if (handled) return;
+      }
+
+      if (activeTurn.accumulatedText && activeTurn.accumulatedText.trim().length > 20) {
+        let foldedTools = '';
+        if (activeTurn.toolLines.length > 0) {
+          const roundText = activeTurn.stepIndex && activeTurn.stepIndex > 1 ? ` · 共 ${activeTurn.stepIndex} 轮` : '';
+          foldedTools = `<blockquote expandable>🛠️ <b>执行小结${roundText} · 累计执行 ${activeTurn.toolLines.length} 次工具</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
+        }
+        const fullText =
+          foldedTools +
+          activeTurn.accumulatedText.trim() +
+          `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeTelegramHtml(err.message.slice(0, 120))})</i>`;
+        const chunks = chunkTelegramMessage(fullText, 4000);
+        if (chunks.length > 0) {
+          await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
+            return this.sendMessage(scopeId, chunks[0]!);
+          });
+          for (let i = 1; i < chunks.length; i++) {
+            await this.sendMessage(scopeId, chunks[i]!);
+          }
+        }
+        await this.drainNextQueuedTurn(event, locale);
+        return;
       }
 
       await this.editMessage(
@@ -1565,6 +1627,11 @@ export class UnifiedChannelOrchestrator {
 
     const backends = await this.listBackends();
     let targetId = argsString.trim().toLowerCase();
+    if (targetId.includes('反重力') || targetId === 'agy' || targetId === 'gemini') {
+      targetId = 'antigravity';
+    } else if (targetId.includes('codex') || targetId.includes('openai')) {
+      targetId = 'codex';
+    }
 
     // Check if target is a number index
     const num = parseInt(targetId, 10);

@@ -33,6 +33,7 @@ export interface EngineTurnResult {
   kind: 'result';
   status: 'SUCCESS' | 'ERROR' | 'INTERRUPTED';
   response: string;
+  error?: string | undefined;
   conversationId: string | null;
   usage?: {
     inputTokens?: number | undefined;

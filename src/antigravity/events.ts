@@ -107,6 +107,15 @@ export type AntigravityBridgeEvent =
   | AgResultBridgeEvent
   | AgErrorBridgeEvent;
 
+export function isVerificationError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase();
+  return (
+    lower.includes('verification required') ||
+    lower.includes('verification. please complete') ||
+    lower.includes('eligibility check failed')
+  );
+}
+
 export function isQuotaOrAuthError(errorMessage: string): boolean {
   const lower = errorMessage.toLowerCase();
   return (
@@ -118,7 +127,11 @@ export function isQuotaOrAuthError(errorMessage: string): boolean {
     lower.includes('token expired') ||
     lower.includes('not authenticated') ||
     lower.includes('unauthenticated') ||
-    lower.includes('invalid_grant')
+    lower.includes('invalid_grant') ||
+    lower.includes('verification required') ||
+    lower.includes('verification. please complete') ||
+    lower.includes('eligibility check failed') ||
+    lower.includes('precondition required')
   );
 }
 
