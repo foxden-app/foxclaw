@@ -127,7 +127,27 @@ export function resolveSelfUpdateInstaller(
   exists: (target: string) => boolean = fs.existsSync,
   env: NodeJS.ProcessEnv = process.env,
 ): SelfUpdateInstaller {
-  const pnpmHome = inferPnpmHomeFromEntryPoint(entryPoint);
+  let pnpmHome = inferPnpmHomeFromEntryPoint(entryPoint);
+  const normalizedEntryPoint = entryPoint.replace(/\\/g, '/');
+  const isExplicitNpm = normalizedEntryPoint.includes('/node_modules/@foxden-app/foxclaw/')
+    && !normalizedEntryPoint.includes('/.pnpm/')
+    && !normalizedEntryPoint.includes('/global/');
+
+  if (!pnpmHome && !isExplicitNpm) {
+    const candidatePnpmHome = env.PNPM_HOME?.trim() || (
+      process.platform === 'win32'
+        ? (env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'pnpm') : null)
+        : path.join(os.homedir(), '.local', 'share', 'pnpm')
+    );
+    if (candidatePnpmHome && exists(candidatePnpmHome)) {
+      const foxclawBin = path.join(candidatePnpmHome, process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw');
+      const globalDir = path.join(candidatePnpmHome, 'global');
+      if (exists(foxclawBin) || exists(globalDir)) {
+        pnpmHome = candidatePnpmHome;
+      }
+    }
+  }
+
   if (pnpmHome) {
     const npmCommandName = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const npmCommand = executableCandidates(npmCommandName, nodePath, env)
