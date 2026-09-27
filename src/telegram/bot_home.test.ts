@@ -7,7 +7,7 @@ import { prepareTelegramBotHome } from './bot_home.js';
 import { inferTelegramBotId, resolveTelegramVoiceTarget } from '../voice/target.js';
 
 function tempRoot(t: test.TestContext): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-bot-home-'));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-bot-home-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }

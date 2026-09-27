@@ -7,8 +7,8 @@ const ID_FILE = '.foxclaw-bot.json';
 export function prepareTelegramBotHome(baseDir: string, botId: string, username: string | null, sharedHome: string | null = null): string {
   if (!/^bot\d+$/.test(botId)) throw new Error('Invalid Telegram bot identity');
   if (username !== null && !/^[A-Za-z0-9_]{1,64}$/.test(username)) throw new Error('Invalid Telegram username for directory');
-  const base = path.resolve(baseDir);
-  fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
+  const base = fs.realpathSync(path.resolve(baseDir));
   const legacy = path.join(base, botId);
   const legacyStat = lstat(legacy);
   const source = legacyStat?.isSymbolicLink() ? fs.realpathSync(legacy) : legacy;
