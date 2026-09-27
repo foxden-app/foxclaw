@@ -2,6 +2,30 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.10.0 - 2026-09-27
+
+### 中文
+- **Antigravity 多 Bot 原生隔离与同机共存**：
+  - 支持通过 `ANTIGRAVITY_BOT_TOKENS` 启动多个独立 Telegram Bot，每个 Bot 自动拥有完全隔离的工作空间目录（`~/.gemini/antigravity-cli/telegram_bots/<bot-id>/`），独立记忆会话历史与进程状态，彻底杜绝多 Bot 互相踩踏与符号链接覆盖冲突。
+  - 默认主 Bot 保持与终端默认环境无缝衔接，终端与 Telegram 会话可相互无缝接手。
+- **Telegram 执行小结折叠增强与长任务防穿透分片**：
+  - 任务执行小结加入精准耗时换算（秒/分/小时）与全维度 Token 消耗细分（总计、输入、输出、缓存，自动换算 K/M/G 单位）。
+  - 完整保留普通任务中全部十几个阶段小节（≤ 25 项调用完整保留无损呈现，展开可回溯全流程），超大规模任务（> 25 项）智能首尾收敛折叠。
+  - 新增 `combineSummaryAndResponse` 彻底杜绝超长任务分片切断折叠块导致工具调用裸露冠在最终答复上方的问题。
+- **全后端 `/update` 一键联动自升级**：
+  - 无论处于 Codex 还是 Antigravity 运行模式，均可直接发送 `/update` 触发全链路升级。
+  - 自动联动升级 Antigravity CLI（`agy update`）、Codex CLI（`pnpm add -g @openai/codex`）以及 FoxClaw 自身，并自动平滑重载服务。
+
+### English
+- **Native Multi-Bot Isolation for Antigravity**:
+  - Supports multiple concurrent Telegram bot instances via `ANTIGRAVITY_BOT_TOKENS` with fully isolated runtime homes (`~/.gemini/antigravity-cli/telegram_bots/<bot-id>/`), eliminating directory collision and symlink overwrites while keeping the primary bot synchronized with the local terminal environment.
+- **Enhanced Collapsible Execution Summary & Leak-Proof Chunking**:
+  - Execution summaries now include precise elapsed durations and four-dimensional token metrics (Total, Input, Output, Cached).
+  - Preserves all intermediate step summaries (up to 25 items) inside expandable folds for complete visibility, while gracefully bounding massive tool runs (> 25 items).
+  - New `combineSummaryAndResponse` eliminates blockquote tearing across Telegram chunk boundaries, preventing uncollapsed tool items from spilling onto the final answer.
+- **Universal `/update` with Full Backend Synchronization**:
+  - `/update` is now available across all engine modes (Codex & Antigravity), seamlessly updating FoxClaw, the Antigravity CLI (`agy update`), and Codex CLI in one step.
+
 ## 0.9.0 - 2026-09-26
 
 ### 中文

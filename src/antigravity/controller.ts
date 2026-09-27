@@ -740,6 +740,30 @@ export class UnifiedBridgeCore {
     const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
     const isCodex = activeBackend.engineType === 'codex';
 
+    if (cmd.toLowerCase() === 'update') {
+      if (this.codexCore) {
+        if (_event) {
+          this.codexCore.dispatchInboundLikeTelegramText(_event);
+        } else {
+          this.codexCore.dispatchInboundLikeTelegramText({
+            scopeId,
+            text: '/update',
+            senderId: '0',
+            senderName: 'User',
+            timestamp: Date.now(),
+          } as unknown as TelegramTextEvent);
+        }
+        return true;
+      }
+      await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? '⚠️ 当前运行环境下未配置自升级服务，请在终端执行 `foxclaw update`。'
+          : '⚠️ Self-updater is not available in current runtime. Run `foxclaw update` in terminal.',
+      );
+      return true;
+    }
+
     if (isCodex) {
       if (this.codexCore) {
         switch (cmd.toLowerCase()) {

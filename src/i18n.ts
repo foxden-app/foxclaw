@@ -1615,6 +1615,7 @@ export function getAntigravityTelegramCommands(locale: AppLocale): Array<{ comma
         { command: 'steer', description: '插话并中断当前回复' },
         { command: 'effort', description: '设置思考深度' },
         { command: 'status', description: '运行状态' },
+        { command: 'update', description: '自升级服务及后端 (Codex/AGY)' },
         { command: 'interrupt', description: '打断当前任务' },
       ]
     : [
@@ -1635,6 +1636,7 @@ export function getAntigravityTelegramCommands(locale: AppLocale): Array<{ comma
         { command: 'steer', description: 'Interrupt and steer turn' },
         { command: 'effort', description: 'Reasoning effort' },
         { command: 'status', description: 'Bridge status' },
+        { command: 'update', description: 'Self-update service & backends' },
         { command: 'interrupt', description: 'Stop active turn' },
       ];
 }
