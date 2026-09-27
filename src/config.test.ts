@@ -7,6 +7,7 @@ import {
   selectDefaultRuntimeBotToken,
   validateOpencodeBotToken,
   validateAntigravityBotToken,
+  validateAntigravityBotTokens,
 } from './config.js';
 
 test('selectDefaultRuntimeBotToken marks a token already present in TG_BOT_TOKENS', () => {
@@ -39,6 +40,23 @@ test('validateAntigravityBotToken requires an independent Telegram bot from Code
   );
   assert.throws(
     () => validateAntigravityBotToken('opencode', ['codex-a', 'codex-b'], 'opencode'),
+    /must use a different bot from OPENCODE_BOT_TOKEN/,
+  );
+});
+
+test('validateAntigravityBotTokens supports multiple bots and catches duplicates or collisions', () => {
+  assert.doesNotThrow(() => validateAntigravityBotTokens(['agy-1', 'agy-2'], ['codex-a', 'codex-b'], 'opencode'));
+  assert.doesNotThrow(() => validateAntigravityBotTokens([], ['codex-a'], null));
+  assert.throws(
+    () => validateAntigravityBotTokens(['agy-1', 'agy-1'], ['codex-a'], null),
+    /contains duplicate Telegram bot token/,
+  );
+  assert.throws(
+    () => validateAntigravityBotTokens(['agy-1', 'codex-a'], ['codex-a', 'codex-b'], null),
+    /must use a different bot from TG_BOT_TOKENS/,
+  );
+  assert.throws(
+    () => validateAntigravityBotTokens(['agy-1', 'opencode'], ['codex-a'], 'opencode'),
     /must use a different bot from OPENCODE_BOT_TOKEN/,
   );
 });

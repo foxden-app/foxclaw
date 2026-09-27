@@ -42,11 +42,17 @@ export function normalizeAgyModelId(rawId: string): string {
 export class AntigravityAppClient {
   private readonly cliBin: string;
   private readonly logger: Logger | undefined;
+  private readonly childEnv: NodeJS.ProcessEnv | null;
   private cachedModels: string[] | null = null;
 
-  constructor(cliBin: string, logger?: Logger) {
+  constructor(cliBin: string, logger?: Logger, childEnv?: NodeJS.ProcessEnv | null) {
     this.cliBin = cliBin;
     this.logger = logger;
+    this.childEnv = childEnv ?? null;
+  }
+
+  get env(): NodeJS.ProcessEnv | null {
+    return this.childEnv;
   }
 
   async listModels(): Promise<string[]> {
@@ -55,7 +61,10 @@ export class AntigravityAppClient {
     }
 
     try {
-      const child = spawn(this.cliBin, ['models'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(this.cliBin, ['models'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: this.childEnv ? { ...process.env, ...this.childEnv } : process.env,
+      });
       let output = '';
       child.stdout.on('data', (d: Buffer) => {
         output += d.toString('utf8');
@@ -161,7 +170,7 @@ export class AntigravityAppClient {
     let child: ChildProcess | null = spawn(this.cliBin, args, {
       cwd: workingDir,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: this.childEnv ? { ...process.env, ...this.childEnv } : { ...process.env },
     });
 
     let activeConversationId: string | null = options.conversationId ?? null;

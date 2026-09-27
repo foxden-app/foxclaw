@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { AntigravityEngineAdapter } from './adapter.js';
-import type { AntigravityAppClient, AntigravityTurnExecution } from './client.js';
+import { AntigravityAppClient, type AntigravityTurnExecution } from './client.js';
 import type { AntigravityBridgeEvent } from './events.js';
+import { AntigravityTelegramRuntime } from './runtime.js';
 
 test('AntigravityEngineAdapter converts models and maps turn lifecycle events to Engine SPI', async () => {
   const mockClientEmitter = new EventEmitter();
@@ -228,6 +229,51 @@ test('AntigravityEngineAdapter automatically pauses failing account, rotates and
   assert.ok(sentMessages[0]?.includes('aiopx2024@gmail.com'));
   assert.ok(sentMessages[0]?.includes('aiopx2026@gmail.com'));
   assert.ok(sentMessages[0]?.includes('agy -p "hi"'));
+});
+
+test('AntigravityAppClient propagates childEnv', () => {
+  const client = new AntigravityAppClient('agy', undefined, { HOME: '/custom/bot/home' });
+  assert.deepEqual(client.env, { HOME: '/custom/bot/home' });
+});
+
+test('AntigravityTelegramRuntime initializes multi-bot options with custom botId, home, and authDir', () => {
+  const mockConfig: any = {
+    tgAllowedUserId: '12345',
+    tgAllowedChatId: null,
+    telegramPollIntervalMs: 1000,
+    antigravityCliBin: 'agy',
+    antigravityAuthDir: '/tmp/default-auth',
+    antigravityDefaultModel: 'gemini-3.8-flash',
+    antigravityBotToken: 'default_token',
+    antigravityBotTokens: ['default_token', 'bot2_token'],
+    antigravityDefaultRuntimeBotToken: 'default_token',
+  };
+  const mockStore: any = {
+    getTelegramOffset: () => 0,
+    setTelegramOffset: () => {},
+    on: () => {},
+  };
+  const mockLogger: any = {
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
+  };
+
+  const runtime = new AntigravityTelegramRuntime(mockConfig, mockStore, mockLogger, {
+    botToken: 'bot2_token',
+    botId: 'bot9999',
+    botUsername: 'SecondAgyBot',
+    sharedDefaultRuntime: false,
+    home: '/tmp/foxclaw/antigravity/@SecondAgyBot/home',
+    authDir: '/tmp/foxclaw/antigravity/@SecondAgyBot/home/.gemini/antigravity-cli',
+  });
+
+  assert.equal(runtime.id, 'bot9999');
+  assert.equal(runtime.username, 'SecondAgyBot');
+  assert.equal(runtime.isSharedDefaultRuntime, false);
+  assert.equal(runtime.botHome, '/tmp/foxclaw/antigravity/@SecondAgyBot/home');
+  assert.equal(runtime.authDirectory, '/tmp/foxclaw/antigravity/@SecondAgyBot/home/.gemini/antigravity-cli');
 });
 
 

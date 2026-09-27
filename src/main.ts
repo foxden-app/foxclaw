@@ -11,6 +11,7 @@ import {
   APP_HOME,
   buildCodexApiProviderOverrides,
   DEFAULT_CODEX_TELEGRAM_HOME,
+  DEFAULT_ANTIGRAVITY_TELEGRAM_HOME,
   DEFAULT_ENV_PATH,
   DEFAULT_LOG_PATH,
   DEFAULT_STATUS_PATH,
@@ -27,6 +28,7 @@ import {
 } from './auth/notifications.js';
 import type { CodexAuthPoolStats } from './store/database.js';
 import type { AppLocale, RuntimeStatus } from './types.js';
+import { getAntigravityTelegramCommands } from './i18n.js';
 import { installBundledCodexSkills } from './codex_skills.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
@@ -755,7 +757,7 @@ async function runServeCli(): Promise<void> {
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
-  let activeAntigravityRuntime: InstanceType<typeof AntigravityTelegramRuntime> | null = null;
+  let activeAntigravityRuntimes: Array<InstanceType<typeof AntigravityTelegramRuntime>> = [];
   let sharedCodexApp: InstanceType<typeof CodexAppClient> | null = null;
   let sharedAntigravityApp: InstanceType<typeof AntigravityAppClient> | null = null;
   let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
@@ -780,14 +782,71 @@ async function runServeCli(): Promise<void> {
       await activeOpencodeRuntime.start();
       logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
     }
-    if (config.antigravityBotToken) {
-      activeAntigravityRuntime = new AntigravityTelegramRuntime(config, store, logger, {
-        codexApp: sharedCodexApp ?? undefined,
-        app: sharedAntigravityApp,
-        auth: sharedAntigravityAuth,
-      });
-      await activeAntigravityRuntime.start();
-      logger.info('antigravity.bridge.started', activeAntigravityRuntime.getRuntimeStatus());
+    if (config.antigravityBotTokens.length > 0) {
+      for (const token of config.antigravityBotTokens) {
+        const bot = new TelegramGateway(
+          token,
+          config.tgAllowedUserId,
+          config.tgAllowedChatId,
+          config.telegramPollIntervalMs,
+          store,
+          logger,
+          true,
+          getAntigravityTelegramCommands,
+        );
+        const id = await bot.initializeIdentity();
+        const username = await bot.resolveUsername();
+
+        const sharedDefaultRuntime = config.antigravityDefaultRuntimeBotToken
+          ? config.antigravityDefaultRuntimeBotToken === token
+          : (token === config.antigravityBotTokens[0]);
+
+        let home: string;
+        let authDir: string;
+        let app: InstanceType<typeof AntigravityAppClient>;
+        let auth: InstanceType<typeof AntigravityAuthManager>;
+
+        if (sharedDefaultRuntime) {
+          home = os.homedir();
+          authDir = config.antigravityAuthDir;
+          app = sharedAntigravityApp!;
+          auth = sharedAntigravityAuth!;
+        } else {
+          home = prepareTelegramBotHome(
+            DEFAULT_ANTIGRAVITY_TELEGRAM_HOME,
+            id,
+            username,
+            null,
+          );
+          authDir = path.join(home, '.gemini', 'antigravity-cli');
+          fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
+          app = new AntigravityAppClient(config.antigravityCliBin, logger, { HOME: home });
+          auth = new AntigravityAuthManager(authDir, logger);
+        }
+
+        const runtimeConfig = {
+          ...config,
+          antigravityBotToken: token,
+          antigravityBotTokens: [token],
+          tgScopeBotId: id,
+          antigravityAuthDir: authDir,
+        };
+
+        const runtime = new AntigravityTelegramRuntime(runtimeConfig, store, logger, {
+          botToken: token,
+          botId: id,
+          botUsername: username ?? undefined,
+          sharedDefaultRuntime,
+          home,
+          authDir,
+          codexApp: sharedCodexApp ?? undefined,
+          app,
+          auth,
+        });
+        await runtime.start();
+        activeAntigravityRuntimes.push(runtime);
+        logger.info('antigravity.bridge.started', runtime.getRuntimeStatus());
+      }
     }
     if (config.tgMultiBotMode) {
       type RuntimeSeed = {
@@ -945,6 +1004,20 @@ async function runServeCli(): Promise<void> {
               activeTurns: running ? weixinStatus.activeTurns : 0,
               ...(weixinStatus.codexAppServer ? { codexAppServer: weixinStatus.codexAppServer } : {}),
             },
+          } : {}),
+          ...(activeAntigravityRuntimes.length > 0 ? {
+            antigravityBots: activeAntigravityRuntimes.map((runtime) => {
+              const status = runtime.getRuntimeStatus();
+              return {
+                id: runtime.id,
+                username: status.botUsername ?? runtime.botGateway.username,
+                connected: running && Boolean(status.connected),
+                activeTurns: running ? (status.activeTurns ?? 0) : 0,
+                runtimeKind: runtime.isSharedDefaultRuntime ? 'default' as const : 'isolated' as const,
+                home: runtime.botHome,
+                authDir: runtime.authDirectory,
+              };
+            }),
           } : {}),
           authMirror: mirror.getStatus(),
           authSync: authSync?.getStatus() ?? null,
@@ -1196,7 +1269,7 @@ async function runServeCli(): Promise<void> {
         await activeWeixinCore?.stop();
         await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
         await activeOpencodeRuntime?.stop();
-        await activeAntigravityRuntime?.stop();
+        await Promise.all(activeAntigravityRuntimes.map((runtime) => runtime.stop().catch(() => {})));
         writeAggregateStatus(false);
         const allManaged = [...managedApps, ...(sharedCodexApp ? [sharedCodexApp] : [])];
         await Promise.all(allManaged.map((app) => app.stop({ terminateServer: true }).catch((error) => {
@@ -1467,7 +1540,7 @@ async function runServeCli(): Promise<void> {
       await weixinAdapter?.stop();
       await telegram.stop();
       await activeOpencodeRuntime?.stop();
-      await activeAntigravityRuntime?.stop();
+      await Promise.all(activeAntigravityRuntimes.map((runtime) => runtime.stop().catch(() => {})));
       writeRuntimeStatus(config.statusPath, {
         running: false,
         connected: false,
@@ -1502,7 +1575,7 @@ async function runServeCli(): Promise<void> {
     await activeWeixinCore?.stop().catch(() => {});
     await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
     await activeOpencodeRuntime?.stop().catch(() => {});
-    await activeAntigravityRuntime?.stop().catch(() => {});
+    await Promise.allSettled(activeAntigravityRuntimes.map((runtime) => runtime.stop()));
     await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
     store?.close();
     processLock.release();
@@ -2333,14 +2406,19 @@ function runDoctorChecks(): boolean {
     ].map((value) => value.trim()).filter(Boolean);
     checks.push(['OpenCode uses an independent Telegram bot', !codexTokens.includes(process.env.OPENCODE_BOT_TOKEN.trim())]);
   }
-  if (process.env.ANTIGRAVITY_BOT_TOKEN?.trim()) {
+  const antigravityTokens = [
+    ...(process.env.ANTIGRAVITY_BOT_TOKENS ?? '').split(','),
+    process.env.ANTIGRAVITY_BOT_TOKEN ?? '',
+  ].map((value) => value.trim()).filter(Boolean);
+  if (antigravityTokens.length > 0) {
     const configuredAgyBin = process.env.ANTIGRAVITY_CLI_BIN;
     checks.push(['antigravity (agy) cli available', hasConfiguredCommand(configuredAgyBin, 'agy')]);
     const codexTokens = [
       ...(process.env.TG_BOT_TOKENS ?? '').split(','),
       process.env.TG_BOT_TOKEN ?? '',
     ].map((value) => value.trim()).filter(Boolean);
-    checks.push(['Antigravity uses an independent Telegram bot', !codexTokens.includes(process.env.ANTIGRAVITY_BOT_TOKEN.trim())]);
+    const hasConflict = antigravityTokens.some((t) => codexTokens.includes(t));
+    checks.push(['Antigravity uses independent Telegram bot(s)', !hasConflict]);
     const authDir = process.env.ANTIGRAVITY_AUTH_DIR || path.join(os.homedir(), '.gemini', 'antigravity-cli');
     const hasAuth = fs.existsSync(path.join(authDir, 'antigravity-oauth-token'));
     checks.push(['antigravity oauth token available', hasAuth]);

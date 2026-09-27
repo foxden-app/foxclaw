@@ -134,7 +134,8 @@ export class UnifiedBridgeCore {
     this.bot = bot;
     this.auth = options?.antigravityAuth ?? auth ?? new AntigravityAuthManager(config.antigravityAuthDir, logger);
     this.app = options?.antigravityApp ?? app ?? new AntigravityAppClient(config.antigravityCliBin, logger);
-    this.conversations = new AntigravityConversationManager(config.antigravityAuthDir, logger);
+    const effectiveAuthDir = this.auth.authDir || config.antigravityAuthDir;
+    this.conversations = new AntigravityConversationManager(effectiveAuthDir, logger);
     this.messaging = messaging ?? new TelegramMessagingPort(bot);
     this.codexApp = options?.codexApp;
     this.defaultBackendId = options?.defaultBackendId ?? 'antigravity';
