@@ -757,7 +757,7 @@ async function runServeCli(): Promise<void> {
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
-  let activeAntigravityRuntimes: Array<InstanceType<typeof AntigravityTelegramRuntime>> = [];
+  const activeAntigravityRuntimes: Array<InstanceType<typeof AntigravityTelegramRuntime>> = [];
   let sharedCodexApp: InstanceType<typeof CodexAppClient> | null = null;
   let sharedAntigravityApp: InstanceType<typeof AntigravityAppClient> | null = null;
   let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
@@ -1309,6 +1309,7 @@ async function runServeCli(): Promise<void> {
       ? new WeixinMessagingPort(store, (id) => loadWeixinAccount(config.weixinAccountsDir, id))
       : null;
     const outbound = new BridgeMessagingRouter(telegramMessaging, weixinMessaging);
+    void outbound;
     const selfUpdater = createSelfUpdateRuntime({
       entryPoint,
       nodePath: process.execPath,
@@ -1394,6 +1395,7 @@ async function runServeCli(): Promise<void> {
       authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
       authSyncAudit: () => singleAuthSync?.auditCluster() ?? Promise.resolve(null),
       statusUpdated: (_status: import('./types.js').RuntimeStatus): void => {
+        void _status;
         writeSingleStatus(true);
       },
     } : null;
@@ -1433,7 +1435,7 @@ async function runServeCli(): Promise<void> {
       app,
       singleOutbound,
       selfUpdater,
-      null,
+      singleCoordinator,
       false,
     );
     core = new UnifiedBridgeCore(

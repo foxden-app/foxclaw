@@ -45,7 +45,7 @@ test('UnifiedChannelOrchestrator manages active turn, streaming preview, steer a
     } as unknown as TelegramGateway;
 
     let executedRequest: EngineTurnRequest | null = null;
-    let turnEmitter = new EventEmitter();
+    const turnEmitter = new EventEmitter();
 
     const mockAdapter: IEngineAdapter = {
       id: 'test_engine',

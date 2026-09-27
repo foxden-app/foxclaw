@@ -8,7 +8,7 @@ import type { AppLocale, ReasoningEffortValue, AccessPresetValue, ActiveTurnMess
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
 import { parseCommand } from '../controller/commands.js';
-import { normalizeLocale, getTelegramCommands, getAntigravityTelegramCommands } from '../i18n.js';
+import { getTelegramCommands, getAntigravityTelegramCommands } from '../i18n.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { chunkTelegramMessage } from '../telegram/text.js';
 import { stageInboundAttachments } from './attachments.js';
@@ -23,7 +23,6 @@ import type {
   EngineTurnRequest,
   EngineTurnExecution,
   EngineTurnResult,
-  EngineModel,
   BackendDescriptor,
 } from './engine_spi.js';
 
@@ -819,7 +818,9 @@ export class UnifiedChannelOrchestrator {
         if (Array.isArray(arr) && arr[0]?.text) {
           parsedInput = arr[0].text;
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
 
       await this.sendMessage(
         scopeId,
@@ -878,7 +879,9 @@ export class UnifiedChannelOrchestrator {
         threadId: threadId || '',
         messageId: initialMsgId,
       });
-    } catch {}
+    } catch {
+      /* ignore */
+    }
 
     const req: EngineTurnRequest = {
       scopeId,

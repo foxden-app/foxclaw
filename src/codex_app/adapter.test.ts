@@ -141,6 +141,7 @@ test('CodexEngineAdapter implements IEngineAdapter, lists models and executes tu
   assert.equal(tools[0]?.name, 'git status');
   assert.equal(tools[0]?.status, 'running');
   assert.equal(tools[1]?.status, 'completed');
+  assert.ok(resultReceived);
 
   // Test cancellation
   execution.cancel();

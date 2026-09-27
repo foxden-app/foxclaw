@@ -418,11 +418,14 @@ export class UnifiedBridgeCore {
         const target = await fsPromises.readlink(authPath);
         return path.basename(target).replace(/^auth\.json_/, '');
       }
-    } catch {}
+    } catch {
+      /* ignore */
+    }
     return 'default';
   }
 
   async handleExternalCodexAuthCandidateDeleted(candidateName: string, _reason: string | null = null): Promise<void> {
+    void _reason;
     this.store.deleteCodexAuthCandidate(candidateName);
     if (this.codexApp) {
       await this.codexApp.restart().catch(() => {});
@@ -434,6 +437,9 @@ export class UnifiedBridgeCore {
     _rawAuth: string,
     _expectedAccountId: string,
   ): Promise<{ ok: boolean; reason?: string | null }> {
+    void _candidateName;
+    void _rawAuth;
+    void _expectedAccountId;
     return { ok: true };
   }
 
@@ -491,7 +497,9 @@ export class UnifiedBridgeCore {
           const target = await fsPromises.readlink(authPath);
           currentCodexAccount = path.basename(target).replace(/^auth\.json_/, '');
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
 
       const binding = this.store.getBinding(scopeId);
       const threadLine = binding?.threadId
@@ -548,6 +556,7 @@ export class UnifiedBridgeCore {
   }
 
   private async renderCustomSetupRows(scopeId: string, _locale: AppLocale): Promise<InlineKeyboard> {
+    void _locale;
     const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
 
     if (activeBackend.engineType === 'codex') {
@@ -560,7 +569,9 @@ export class UnifiedBridgeCore {
           const target = await fsPromises.readlink(authPath);
           currentCodexAccount = path.basename(target).replace(/^auth\.json_/, '');
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
 
       return [
         [
@@ -1505,7 +1516,9 @@ export class UnifiedBridgeCore {
               updatedAt: parsed.updated_at,
             });
           }
-        } catch {}
+        } catch {
+          /* ignore */
+        }
       }
     } catch (err) {
       this.logger.warn('codex.list_threads_failed', { error: String(err) });
@@ -1590,12 +1603,16 @@ export class UnifiedBridgeCore {
               seenIds.add(parsed.id);
               items.push(parsed.id);
             }
-          } catch {}
+          } catch {
+            /* ignore */
+          }
         }
         if (idx >= 0 && idx < items.length) {
           targetThreadId = items[idx]!;
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
     }
 
     const currentBinding = this.store.getBinding(scopeId);
@@ -1689,7 +1706,9 @@ export class UnifiedBridgeCore {
       if (fs.existsSync(transcriptPath)) {
         initialOffset = fs.statSync(transcriptPath).size;
       }
-    } catch {}
+    } catch {
+      /* ignore */
+    }
 
     const watcher: AntigravityWatcher = {
       scopeId,
@@ -1799,7 +1818,9 @@ export class UnifiedBridgeCore {
         if (fs.existsSync(watcher.transcriptPath)) {
           watcher.fileOffset = fs.statSync(watcher.transcriptPath).size;
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
       return;
     }
 

@@ -290,7 +290,9 @@ export class AntigravityConversationManager {
             killed: false,
           };
         }
-      } catch {}
+      } catch {
+        /* ignore */
+      }
     }
 
     return null;

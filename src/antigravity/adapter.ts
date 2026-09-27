@@ -196,6 +196,7 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
   }
 
   async preflightTurn(_request: EngineTurnRequest): Promise<void> {
+    void _request;
     if (this.auth) {
       try {
         await this.auth.ensureActiveTokenFresh(300);

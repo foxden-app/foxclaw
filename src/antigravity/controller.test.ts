@@ -8,7 +8,7 @@ import { AntigravityBridgeCore, UnifiedBridgeCore } from './controller.js';
 import { BridgeStore } from '../store/database.js';
 import { AntigravityAuthManager } from './auth.js';
 import type { AntigravityAppClient } from './client.js';
-import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
+import type { TelegramGateway, TelegramTextEvent } from '../telegram/gateway.js';
 import type { TelegramMessagingPort } from '../channels/telegram/telegram_messaging_port.js';
 import type { AppConfig } from '../config.js';
 

@@ -372,7 +372,7 @@ test('switchAccount performs JIT refresh if target account token is expired', as
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agy-jit-switch-test-'));
 
   try {
-    let refreshCalls: string[] = [];
+    const refreshCalls: string[] = [];
     const mockFetch = (async (url: string | URL | Request, init?: RequestInit) => {
       const body = String(init?.body || '');
       refreshCalls.push(body);
@@ -433,7 +433,7 @@ test('runKeepAliveCheck refreshes only the active account and ignores standby ca
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agy-selective-keepalive-test-'));
 
   try {
-    let refreshTokensCalled: string[] = [];
+    const refreshTokensCalled: string[] = [];
     const mockFetch = (async (url: string | URL | Request, init?: RequestInit) => {
       const body = String(init?.body || '');
       refreshTokensCalled.push(body);

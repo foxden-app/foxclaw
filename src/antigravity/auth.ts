@@ -211,7 +211,9 @@ export class AntigravityAuthManager {
           code = decodeURIComponent(match[1]);
         }
       }
-    } catch {}
+    } catch {
+      /* ignore */
+    }
 
     if (!code) {
       return {
@@ -430,7 +432,9 @@ export class AntigravityAuthManager {
 
     try {
       await this.fetchQuotaForAccount(target.name, true);
-    } catch {}
+    } catch {
+      /* ignore */
+    }
 
     return {
       ok: true,

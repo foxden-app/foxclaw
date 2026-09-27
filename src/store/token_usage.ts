@@ -1,4 +1,3 @@
-import path from 'node:path';
 import type { AppLocale } from '../types.js';
 import type { BridgeStore } from './database.js';
 import { readCodexLocalUsageStats } from '../codex_app/local_usage.js';
