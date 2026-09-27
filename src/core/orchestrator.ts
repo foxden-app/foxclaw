@@ -14,7 +14,7 @@ import { chunkTelegramMessage } from '../telegram/text.js';
 import { stageInboundAttachments } from './attachments.js';
 import { buildAttachmentPrompt, type StagedTelegramAttachment } from '../telegram/media.js';
 import { TurnQueueManager, type TurnMessageMode } from './turn_queue.js';
-import { renderStreamPreviewContent } from './stream_preview.js';
+import { renderStreamPreviewContent, buildFoldedToolsSummary, combineSummaryAndResponse } from './stream_preview.js';
 import { BRIDGE_SCOPE_TELEGRAM_PREFIX, BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope } from './bridge_scope.js';
 import { escapeTelegramHtml } from '../telegram/html.js';
 import { formatTokenUsageSummary, formatBackendTokenUsageBreakdown } from '../store/token_usage.js';
@@ -1014,14 +1014,16 @@ export class UnifiedChannelOrchestrator {
           finalText = activeTurn.accumulatedText.trim();
         }
 
-        let foldedTools = '';
-        if (activeTurn.toolLines.length > 0) {
-          const roundText = activeTurn.stepIndex && activeTurn.stepIndex > 1 ? ` · 共 ${activeTurn.stepIndex} 轮` : '';
-          foldedTools = `<blockquote expandable>🛠️ <b>执行小结${roundText} · 累计执行 ${activeTurn.toolLines.length} 次工具</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
-        }
+        const foldedTools = buildFoldedToolsSummary({
+          stepIndex: activeTurn.stepIndex,
+          toolLines: activeTurn.toolLines,
+          toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
+          startTime: activeTurn.startTime,
+          usage: res.usage,
+          locale,
+        });
 
-        const fullText = foldedTools + (finalText || '(无输出 / No output)');
-        const chunks = chunkTelegramMessage(fullText, 4000);
+        const chunks = combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
         if (chunks.length > 0) {
           await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
             return this.sendMessage(scopeId, chunks[0]!);
@@ -1063,18 +1065,20 @@ export class UnifiedChannelOrchestrator {
           finalText.length <= 20;
 
         if (!isPureError) {
-          let foldedTools = '';
-          if (activeTurn.toolLines.length > 0) {
-            const roundText = activeTurn.stepIndex && activeTurn.stepIndex > 1 ? ` · 共 ${activeTurn.stepIndex} 轮` : '';
-            foldedTools = `<blockquote expandable>🛠️ <b>执行小结${roundText} · 累计执行 ${activeTurn.toolLines.length} 次工具</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
-          }
+          const foldedTools = buildFoldedToolsSummary({
+            stepIndex: activeTurn.stepIndex,
+            toolLines: activeTurn.toolLines,
+            toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
+            startTime: activeTurn.startTime,
+            usage: res.usage,
+            locale,
+          });
 
           const warningNote =
             errorText && errorText !== 'Unknown error' && errorText !== 'Antigravity execution failed'
               ? `\n\n⚠️ <i>(注意：任务结束时伴随提示: ${escapeTelegramHtml(errorText.slice(0, 120))})</i>`
               : '';
-          const fullText = foldedTools + finalText + warningNote;
-          const chunks = chunkTelegramMessage(fullText, 4000);
+          const chunks = combineSummaryAndResponse(foldedTools, finalText + warningNote);
           if (chunks.length > 0) {
             await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
               return this.sendMessage(scopeId, chunks[0]!);
@@ -1123,16 +1127,17 @@ export class UnifiedChannelOrchestrator {
       }
 
       if (activeTurn.accumulatedText && activeTurn.accumulatedText.trim().length > 20) {
-        let foldedTools = '';
-        if (activeTurn.toolLines.length > 0) {
-          const roundText = activeTurn.stepIndex && activeTurn.stepIndex > 1 ? ` · 共 ${activeTurn.stepIndex} 轮` : '';
-          foldedTools = `<blockquote expandable>🛠️ <b>执行小结${roundText} · 累计执行 ${activeTurn.toolLines.length} 次工具</b>\n${activeTurn.toolLines.join('\n')}</blockquote>\n\n`;
-        }
-        const fullText =
-          foldedTools +
+        const foldedTools = buildFoldedToolsSummary({
+          stepIndex: activeTurn.stepIndex,
+          toolLines: activeTurn.toolLines,
+          toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
+          startTime: activeTurn.startTime,
+          locale,
+        });
+        const fullAnswer =
           activeTurn.accumulatedText.trim() +
           `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeTelegramHtml(err.message.slice(0, 120))})</i>`;
-        const chunks = chunkTelegramMessage(fullText, 4000);
+        const chunks = combineSummaryAndResponse(foldedTools, fullAnswer);
         if (chunks.length > 0) {
           await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
             return this.sendMessage(scopeId, chunks[0]!);

@@ -1868,7 +1868,13 @@ export class UnifiedBridgeCore {
         if (watcher.messageId) {
           let progressFinal = `✅ <b>[Antigravity 步骤已完成]</b>`;
           if (watcher.currentToolLines.length > 0) {
-            progressFinal += `\n\n<blockquote expandable>🛠️ <b>已调用工具 (${watcher.currentToolLines.length} 项)</b>\n${watcher.currentToolLines.join('\n')}</blockquote>`;
+            const maxPreview = 3;
+            const recent = watcher.currentToolLines.slice(-maxPreview);
+            const hiddenCount = watcher.currentToolLines.length - recent.length;
+            const hiddenNote = hiddenCount > 0
+              ? `\n<i>(其余 ${hiddenCount} 项历史工具调用已折叠收起)</i>`
+              : '';
+            progressFinal += `\n\n<blockquote expandable>🛠️ <b>已调用工具 (${watcher.currentToolLines.length} 项)</b>\n${recent.join('\n')}${hiddenNote}</blockquote>`;
           }
           await this.editMessage(watcher.scopeId, watcher.messageId, progressFinal).catch(() => {});
         }
