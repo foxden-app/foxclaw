@@ -24,6 +24,7 @@ import { BridgeSessionCore } from '../controller/controller.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX } from '../core/bridge_scope.js';
 import { syncCodexLocalUsageToStore } from '../store/token_usage.js';
+import type { SelfUpdateRuntime } from '../update.js';
 
 export interface UnifiedBridgeRuntimeStatus {
   running: boolean;
@@ -96,6 +97,7 @@ export interface UnifiedBridgeCoreOptions {
   opencodeApp?: OpencodeAppClient | undefined;
   opencodeAdapter?: OpencodeEngineAdapter | undefined;
   defaultBackendId?: 'antigravity' | 'codex' | 'opencode' | string | undefined;
+  selfUpdater?: SelfUpdateRuntime | undefined;
 }
 
 export class UnifiedBridgeCore {
@@ -113,6 +115,7 @@ export class UnifiedBridgeCore {
   readonly codexCore?: BridgeSessionCore | undefined;
   private readonly opencodeAdapter?: OpencodeEngineAdapter | undefined;
   private readonly defaultBackendId: string;
+  private readonly selfUpdater?: SelfUpdateRuntime | undefined;
   private readonly orchestrator: UnifiedChannelOrchestrator;
   private readonly watchers = new Map<string, AntigravityWatcher>();
   private readonly pendingAgyRenames = new Map<string, { conversationId: string }>();
@@ -139,6 +142,7 @@ export class UnifiedBridgeCore {
     this.messaging = messaging ?? new TelegramMessagingPort(bot);
     this.codexApp = options?.codexApp;
     this.defaultBackendId = options?.defaultBackendId ?? 'antigravity';
+    this.selfUpdater = options?.selfUpdater;
 
     this.codexCore = options?.codexCore;
     if (!this.codexCore && options?.codexApp) {
@@ -752,6 +756,30 @@ export class UnifiedBridgeCore {
     const isCodex = activeBackend.engineType === 'codex';
 
     if (cmd.toLowerCase() === 'update') {
+      if (this.selfUpdater) {
+        const status = await this.selfUpdater.readStatus();
+        if (status?.state === 'pending') {
+          await this.sendMessage(
+            scopeId,
+            locale === 'zh'
+              ? '⏳ 升级任务已在后台执行中，请稍候…'
+              : '⏳ Self-update is already running, please wait…',
+          );
+          return true;
+        }
+        await this.sendMessage(
+          scopeId,
+          locale === 'zh'
+            ? '🚀 正在启动全链路自升级（FoxClaw + Codex + Antigravity CLI），服务将自动更新并重载…'
+            : '🚀 Starting full-stack self-update (FoxClaw + Codex + Antigravity CLI). Service will restart automatically…',
+        );
+        try {
+          await this.selfUpdater.launch(scopeId, locale);
+        } catch (err) {
+          await this.sendMessage(scopeId, `❌ 自升级启动失败: ${String(err)}`);
+        }
+        return true;
+      }
       if (this.codexCore) {
         if (_event) {
           this.codexCore.dispatchInboundLikeTelegramText(_event);

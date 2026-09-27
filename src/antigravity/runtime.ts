@@ -9,6 +9,7 @@ import { AntigravityAppClient } from './client.js';
 import { AntigravityAuthManager } from './auth.js';
 import { AntigravityBridgeCore } from './controller.js';
 import type { CodexAppClient } from '../codex_app/client.js';
+import type { SelfUpdateRuntime } from '../update.js';
 
 export interface AntigravityRuntimeOptions {
   botToken?: string | undefined;
@@ -20,6 +21,7 @@ export interface AntigravityRuntimeOptions {
   codexApp?: CodexAppClient | undefined;
   app?: AntigravityAppClient | undefined;
   auth?: AntigravityAuthManager | undefined;
+  selfUpdater?: SelfUpdateRuntime | undefined;
 }
 
 /** Keeps the optional Antigravity Telegram bot lifecycle decoupled from Codex and OpenCode runtimes. */

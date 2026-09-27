@@ -275,6 +275,9 @@ async function main(): Promise<void> {
       ...(process.env.CODEX_CLI_BIN || resolveCommand('codex')
         ? { codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex')! }
         : {}),
+      ...(process.env.AGY_CLI_BIN || resolveCommand('agy')
+        ? { agyCliBin: process.env.AGY_CLI_BIN || resolveCommand('agy')! }
+        : {}),
       ...(notificationFile ? { notificationFile } : {}),
     };
     const outcome = performSelfUpdate(options);
@@ -763,6 +766,15 @@ async function runServeCli(): Promise<void> {
   let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    const selfUpdater = createSelfUpdateRuntime({
+      entryPoint,
+      nodePath: process.execPath,
+      version: readPackageVersion(),
+      statusPath: config.statusPath,
+      logPath: path.join(APP_HOME, 'logs', 'update.log'),
+      codexCliBin: config.codexCliBin,
+      agyCliBin: config.antigravityCliBin,
+    });
     sharedAntigravityAuth = new AntigravityAuthManager(config.antigravityAuthDir, logger);
     sharedAntigravityApp = new AntigravityAppClient(config.antigravityCliBin, logger);
     if (config.codexCliBin) {
@@ -842,6 +854,7 @@ async function runServeCli(): Promise<void> {
           codexApp: sharedCodexApp ?? undefined,
           app,
           auth,
+          selfUpdater,
         });
         await runtime.start();
         activeAntigravityRuntimes.push(runtime);
@@ -950,16 +963,6 @@ async function runServeCli(): Promise<void> {
       await mirror.initialize();
       activeAuthMirror = mirror;
       managedApps = seeds.map((runtime) => runtime.app);
-
-      const selfUpdater = createSelfUpdateRuntime({
-        entryPoint,
-        nodePath: process.execPath,
-        version: readPackageVersion(),
-        statusPath: config.statusPath,
-        logPath: path.join(APP_HOME, 'logs', 'update.log'),
-        codexCliBin: config.codexCliBin,
-        agyCliBin: config.antigravityCliBin,
-      });
       const lastSelfUpdatePath = path.join(APP_HOME, 'runtime', 'last-self-update.json');
       let lastSelfUpdate = readSelfUpdateStatus(lastSelfUpdatePath);
       const runtimes: Runtime[] = [];
@@ -1310,15 +1313,6 @@ async function runServeCli(): Promise<void> {
       : null;
     const outbound = new BridgeMessagingRouter(telegramMessaging, weixinMessaging);
     void outbound;
-    const selfUpdater = createSelfUpdateRuntime({
-      entryPoint,
-      nodePath: process.execPath,
-      version: readPackageVersion(),
-      statusPath: config.statusPath,
-      logPath: path.join(APP_HOME, 'logs', 'update.log'),
-      codexCliBin: config.codexCliBin,
-      agyCliBin: config.antigravityCliBin,
-    });
     let singleAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
     let singleMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
     let core: InstanceType<typeof UnifiedBridgeCore> | null = null;
@@ -1452,6 +1446,7 @@ async function runServeCli(): Promise<void> {
         antigravityApp: sharedAntigravityApp ?? undefined,
         antigravityAuth: sharedAntigravityAuth ?? undefined,
         defaultBackendId: 'codex',
+        selfUpdater,
       },
     );
     if (config.authSyncEnabled && singleMirror) {
