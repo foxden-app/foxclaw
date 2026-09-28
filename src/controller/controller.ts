@@ -611,6 +611,7 @@ export class BridgeSessionCore {
   }>();
   private pendingLoginScopesById = new Map<string, string>();
   private pendingAuthAddsByLoginId = new Map<string, PendingAuthAdd>();
+  private authLoginRecoveryTimers = new Map<string, NodeJS.Timeout>();
   private latestTurnDiffs = new Map<string, { scopeId: string; threadId: string; turnId: string; diff: string; updatedAt: number }>();
   private threadTokenUsageAlerts = new Map<string, { turnId: string | null; bucket: number; limit: number }>();
   private pendingAuthChoiceLists = new Map<string, PendingAuthChoiceList>();
@@ -789,6 +790,8 @@ export class BridgeSessionCore {
     this.pendingLoginsByScope.clear();
     this.pendingLoginScopesById.clear();
     this.pendingAuthAddsByLoginId.clear();
+    for (const timer of this.authLoginRecoveryTimers.values()) clearTimeout(timer);
+    this.authLoginRecoveryTimers.clear();
     this.latestTurnDiffs.clear();
     this.threadTokenUsageAlerts.clear();
     this.pendingAuthChoiceLists.clear();
@@ -2440,6 +2443,12 @@ export class BridgeSessionCore {
       return;
     }
     const pendingAuthAdd = loginId ? this.pendingAuthAddsByLoginId.get(loginId) ?? null : null;
+    if (params?.success && pendingAuthAdd) await this.reconcileAuthLoginCredential(pendingAuthAdd);
+    // A recovery check and the server notification may complete concurrently.
+    if (this.pendingLoginScopesById.get(loginId!) !== scopeId) return;
+    const timer = this.authLoginRecoveryTimers.get(loginId!);
+    if (timer) clearTimeout(timer);
+    this.authLoginRecoveryTimers.delete(loginId!);
     this.pendingLoginScopesById.delete(loginId!);
     if (this.pendingLoginsByScope.get(scopeId) === loginId) {
       this.pendingLoginsByScope.delete(scopeId);
@@ -2513,6 +2522,60 @@ export class BridgeSessionCore {
   private async restorePendingAuthAdd(record: PendingAuthAdd): Promise<void> {
     const state = await this.listCodexAuthState();
     await this.restoreAuthAfterAddFailure(state.authDir, state.authPath, record.previousTargetPath);
+  }
+
+  private scheduleAuthLoginRecovery(loginId: string): void {
+    const timer = setTimeout(() => {
+      this.authLoginRecoveryTimers.delete(loginId);
+      void this.recoverAuthLogin(loginId).catch(error => {
+        this.logger.warn('codex.auth_login_recovery_failed', { error: toErrorMeta(error) });
+      }).finally(() => {
+        if (!this.stopping && this.pendingAuthAddsByLoginId.has(loginId)) {
+          this.scheduleAuthLoginRecovery(loginId);
+        }
+      });
+    }, 5_000);
+    timer.unref();
+    this.authLoginRecoveryTimers.set(loginId, timer);
+  }
+
+  private async recoverAuthLogin(loginId: string): Promise<void> {
+    const record = this.pendingAuthAddsByLoginId.get(loginId);
+    if (!record) return;
+    if (Date.now() - record.createdAt >= 15 * 60_000) {
+      await this.handleAccountLoginCompleted({ loginId, success: false, error: 'Device login timed out; completion was not confirmed.' });
+      return;
+    }
+    await this.reconcileAuthLoginCredential(record);
+    const metadata = await readChatGptAuthMetadata(record.path);
+    if (!metadata || metadata.lastRefreshMs < record.createdAt
+      || !chatGptAuthMetadataMatchesCandidateName(record.name, metadata)) return;
+    const account = await this.app.readAccount(true);
+    const limits = await this.app.readAccountRateLimits();
+    if (!account || !limits || !selectCodexRateLimitSnapshot(limits)
+      || (metadata.email && account.email !== metadata.email)) return;
+    if (!this.pendingAuthAddsByLoginId.has(loginId)) return;
+    this.logger.info('codex.auth_login_recovered', { candidate: record.name });
+    await this.handleAccountLoginCompleted({ loginId, success: true });
+  }
+
+  private async reconcileAuthLoginCredential(record: PendingAuthAdd): Promise<void> {
+    const authPath = path.join(this.resolveAuthDir(), 'auth.json');
+    const [target, current] = await Promise.all([
+      readChatGptAuthRecord(record.path), readChatGptAuthRecord(authPath),
+    ]);
+    // Codex can replace auth.json atomically, breaking our candidate symlink.
+    // Only adopt a newly written credential for the same account identity.
+    if (target && current && current.lastRefreshMs >= record.createdAt
+      && current.quotaIdentityId === target.quotaIdentityId
+      && current.lastRefreshMs > target.lastRefreshMs
+      && chatGptAuthMetadataMatchesCandidateName(record.name, current)) {
+      if (!this.pendingAuthAddsByLoginId.has(record.loginId)) return;
+      const temporary = `${record.path}.${process.pid}.tmp`;
+      await fs.writeFile(temporary, current.raw, { mode: 0o600 });
+      await fs.rename(temporary, record.path);
+      await pointCodexAuthAtTarget(this.resolveAuthDir(), authPath, record.path);
+    }
   }
 
   private async restoreAuthAfterAddFailure(authDir: string, authPath: string, previousTargetPath: string | null): Promise<void> {
@@ -6733,6 +6796,7 @@ export class BridgeSessionCore {
         mode: 'add',
         createdAt: Date.now(),
       });
+      this.scheduleAuthLoginRecovery(login.loginId);
       await this.sendMessage(scopeId, [
         t(locale, 'auth_add_started', { value: candidateName }),
         t(locale, 'login_device_prereq'),
@@ -6781,6 +6845,7 @@ export class BridgeSessionCore {
         mode: 'repair',
         createdAt: Date.now(),
       });
+      this.scheduleAuthLoginRecovery(login.loginId);
       await this.sendMessage(scopeId, [
         t(locale, 'auth_repair_started', { value: target.name }),
         t(locale, 'login_device_prereq'),

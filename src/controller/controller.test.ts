@@ -3225,6 +3225,65 @@ test('/auth marks repair candidates with a question action and can repair login'
   assert.match(rig.sentMessages.at(-1)!, /Auth candidate repaired: auth\.json_b/);
 });
 
+test('auth login recovery adopts a newer regular auth file and validates before completing', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  const controller = rig.controller as any;
+  const scopeId = 'telegram:99::root';
+  const createdAt = Date.now() - 1_000;
+  writeChatGptAuthCandidate(authDir, 'auth.json_b', 'acct-b', new Date(createdAt - 1_000).toISOString(), { email: 'b@example.com' });
+  fs.unlinkSync(path.join(authDir, 'auth.json'));
+  writeChatGptAuthCandidate(authDir, 'auth.json', 'acct-b', new Date().toISOString(), { email: 'b@example.com' });
+  const expected = fs.readFileSync(path.join(authDir, 'auth.json'), 'utf8');
+  controller.pendingLoginsByScope.set(scopeId, 'recovery-login');
+  controller.pendingLoginScopesById.set('recovery-login', scopeId);
+  controller.pendingAuthAddsByLoginId.set('recovery-login', {
+    loginId: 'recovery-login', scopeId, name: 'auth.json_b', path: path.join(authDir, 'auth.json_b'),
+    previousTargetPath: path.join(authDir, 'auth.json_a'), mode: 'repair', createdAt,
+  });
+  const calls: boolean[] = [];
+  controller.app.readAccount = async (refresh: boolean) => { calls.push(refresh); return { email: 'b@example.com', type: 'chatgpt' }; };
+  controller.app.readAccountRateLimits = async () => codexRateLimits();
+  await controller.recoverAuthLogin('recovery-login');
+  assert.equal(calls[0], true);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), path.join(authDir, 'auth.json_b'));
+  assert.equal(fs.readFileSync(path.join(authDir, 'auth.json_b'), 'utf8'), expected);
+  assert.equal(rig.store.listCodexAuthCandidateStates().get('auth.json_b'), 'active');
+  assert.equal(controller.pendingLoginsByScope.size, 0);
+  assert.match(rig.sentMessages.at(-1)!, /Auth candidate repaired/);
+});
+
+test('auth login recovery rejects stale and revoked credentials then clears an expired login', async (t) => {
+  const rig = createControllerRig();
+  t.after(() => { rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  const authDir = installTempAuthFiles(t, rig.tempDir);
+  const controller = rig.controller as any;
+  const scopeId = 'telegram:99::root';
+  const record = {
+    loginId: 'recovery-login', scopeId, name: 'auth.json_b', path: path.join(authDir, 'auth.json_b'),
+    previousTargetPath: path.join(authDir, 'auth.json_a'), mode: 'repair', createdAt: Date.now() - 1_000,
+  };
+  controller.pendingLoginsByScope.set(scopeId, record.loginId);
+  controller.pendingLoginScopesById.set(record.loginId, scopeId);
+  controller.pendingAuthAddsByLoginId.set(record.loginId, record);
+  rig.store.setCodexAuthCandidateState(record.name, 'needs_repair');
+  let calls = 0;
+  controller.app.readAccount = async () => { calls++; return { email: 'b@example.com', type: 'chatgpt' }; };
+  controller.app.readAccountRateLimits = async () => { throw new Error('401 token_revoked'); };
+  await controller.recoverAuthLogin(record.loginId);
+  assert.equal(calls, 0);
+  writeChatGptAuthCandidate(authDir, record.name, 'acct-b', new Date().toISOString(), { email: 'b@example.com' });
+  await assert.rejects(controller.recoverAuthLogin(record.loginId), /token_revoked/);
+  assert.equal(rig.store.listCodexAuthCandidateStates().get(record.name), 'needs_repair');
+  assert.equal(controller.pendingAuthAddsByLoginId.size, 1);
+  record.createdAt = Date.now() - 15 * 60_000;
+  await controller.recoverAuthLogin(record.loginId);
+  assert.equal(controller.pendingLoginsByScope.size, 0);
+  assert.equal(fs.readlinkSync(path.join(authDir, 'auth.json')), record.previousTargetPath);
+  assert.match(rig.sentMessages.at(-1)!, /timed out/);
+});
+
 test('/auth repair menu can delete an unrecoverable candidate', async (t) => {
   const rig = createControllerRig();
   t.after(() => {
