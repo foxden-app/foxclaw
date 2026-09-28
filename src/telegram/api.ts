@@ -20,16 +20,28 @@ export interface TelegramRemoteFile {
 
 const DEFAULT_API_BASE_URL = 'https://api.telegram.org';
 
-function isTransientNetworkError(err: unknown): boolean {
+export function isTransientNetworkError(err: unknown): boolean {
   if (!err) return false;
-  const msg = String((err as any).message || err);
+  const msg = String((err as any).message || err).toLowerCase();
   return (
-    msg.includes('Client network socket disconnected') ||
-    msg.includes('ECONNRESET') ||
-    msg.includes('ETIMEDOUT') ||
-    msg.includes('EAI_AGAIN') ||
-    msg.includes('ENOTFOUND') ||
-    msg.includes('socket hang up')
+    msg.includes('client network socket disconnected') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('eai_again') ||
+    msg.includes('enotfound') ||
+    msg.includes('econnrefused') ||
+    msg.includes('socket hang up') ||
+    msg.includes('timed out') ||
+    msg.includes('timeout') ||
+    msg.includes('network socket disconnected') ||
+    msg.includes('network error') ||
+    msg.includes('fetch failed') ||
+    msg.includes('und_err_') ||
+    msg.includes('read tcp') ||
+    msg.includes('connection timed out') ||
+    msg.includes('broken pipe') ||
+    msg.includes('ehostunreach') ||
+    msg.includes('enetunreach')
   );
 }
 
@@ -69,7 +81,7 @@ function callTelegramApiOnce<T>(botToken: string, method: string, body: Record<s
 }
 
 export async function callTelegramApi<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
-  const maxAttempts = method === 'getUpdates' ? 1 : 3;
+  const maxAttempts = method === 'getUpdates' ? 1 : 4;
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -77,7 +89,7 @@ export async function callTelegramApi<T>(botToken: string, method: string, body:
     } catch (err) {
       lastError = err;
       if (attempt < maxAttempts && isTransientNetworkError(err)) {
-        await new Promise((r) => setTimeout(r, 400 * attempt));
+        await new Promise((r) => setTimeout(r, Math.min(3000, 500 * Math.pow(2, attempt - 1))));
         continue;
       }
       throw err;
@@ -86,7 +98,7 @@ export async function callTelegramApi<T>(botToken: string, method: string, body:
   throw lastError;
 }
 
-export async function callTelegramMultipartApi<T>(
+function callTelegramMultipartApiOnce<T>(
   botToken: string,
   method: string,
   fields: Record<string, string>,
@@ -143,6 +155,29 @@ export async function callTelegramMultipartApi<T>(
   });
 }
 
+export async function callTelegramMultipartApi<T>(
+  botToken: string,
+  method: string,
+  fields: Record<string, string>,
+  files: Array<{ fieldName: string; filename: string; contents: Buffer; contentType: string }>,
+): Promise<TelegramApiResult<T>> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await callTelegramMultipartApiOnce<T>(botToken, method, fields, files);
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts && isTransientNetworkError(err)) {
+        await new Promise((r) => setTimeout(r, Math.min(3000, 500 * Math.pow(2, attempt - 1))));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 export async function getTelegramFile(botToken: string, fileId: string): Promise<TelegramRemoteFile> {
   const result = await callTelegramApi<TelegramRemoteFile>(botToken, 'getFile', { file_id: fileId });
   if (!result.ok || !result.result) {
@@ -151,7 +186,7 @@ export async function getTelegramFile(botToken: string, fileId: string): Promise
   return result.result;
 }
 
-export async function downloadTelegramFile(botToken: string, remoteFilePath: string, destinationPath: string): Promise<number> {
+async function downloadTelegramFileOnce(botToken: string, remoteFilePath: string, destinationPath: string): Promise<number> {
   await fs.promises.mkdir(path.dirname(destinationPath), { recursive: true });
   const tempPath = `${destinationPath}.tmp-${process.pid}-${Date.now()}`;
   let response: IncomingMessage | null = null;
@@ -186,6 +221,24 @@ export async function downloadTelegramFile(botToken: string, remoteFilePath: str
   } finally {
     response?.destroy();
   }
+}
+
+export async function downloadTelegramFile(botToken: string, remoteFilePath: string, destinationPath: string): Promise<number> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await downloadTelegramFileOnce(botToken, remoteFilePath, destinationPath);
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts && isTransientNetworkError(err)) {
+        await new Promise((r) => setTimeout(r, Math.min(3000, 500 * Math.pow(2, attempt - 1))));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 function escapeMultipartName(value: string): string {

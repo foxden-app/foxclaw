@@ -146,6 +146,37 @@ export function isCapacityOrUnavailableError(errorMessage: string): boolean {
   );
 }
 
+export function isTransientNetworkError(errorMessage: string): boolean {
+  if (!errorMessage) return false;
+  const lower = errorMessage.toLowerCase();
+  return (
+    lower.includes('client network socket disconnected') ||
+    lower.includes('connection timed out') ||
+    lower.includes('timed out') ||
+    lower.includes('timeout') ||
+    lower.includes('econnreset') ||
+    lower.includes('etimedout') ||
+    lower.includes('enotfound') ||
+    lower.includes('eai_again') ||
+    lower.includes('econnrefused') ||
+    lower.includes('socket hang up') ||
+    lower.includes('network socket disconnected') ||
+    lower.includes('retryable') ||
+    lower.includes('grpc') ||
+    lower.includes('network error') ||
+    lower.includes('fetch failed') ||
+    lower.includes('502 bad gateway') ||
+    lower.includes('504 gateway timeout') ||
+    lower.includes('proxy error') ||
+    lower.includes('read tcp') ||
+    lower.includes('und_err_') ||
+    lower.includes('broken pipe') ||
+    lower.includes('ehostunreach') ||
+    lower.includes('enetunreach') ||
+    lower.includes('exited unexpectedly')
+  );
+}
+
 /**
  * Normalizes raw NDJSON stream events from `agy` into clean bridge events.
  */

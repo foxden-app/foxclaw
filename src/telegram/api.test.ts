@@ -32,3 +32,15 @@ test('Telegram requests abort a trickling response at the total deadline, then r
   await assert.rejects(callTelegramMultipartApi('test', 'sendDocument', {}, []), /abort|timed out/i);
   assert.deepEqual(await callTelegramApi('test', 'getMe', {}), { ok: true, result: { id: 1 } });
 });
+
+test('isTransientNetworkError identifies network and socket drop errors', async () => {
+  const { isTransientNetworkError } = await import('./api.js');
+  assert.equal(isTransientNetworkError(new Error('Client network socket disconnected before secure TLS connection was established')), true);
+  assert.equal(isTransientNetworkError(new Error('read tcp 127.0.0.1:44600->127.0.0.1:7897: read: connection timed out')), true);
+  assert.equal(isTransientNetworkError(new Error('ECONNRESET')), true);
+  assert.equal(isTransientNetworkError(new Error('ETIMEDOUT')), true);
+  assert.equal(isTransientNetworkError(new Error('fetch failed')), true);
+  assert.equal(isTransientNetworkError(new Error('socket hang up')), true);
+  assert.equal(isTransientNetworkError(new Error('Bad Request: chat not found')), false);
+  assert.equal(isTransientNetworkError(null), false);
+});

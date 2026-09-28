@@ -15,6 +15,7 @@ import {
   isCapacityOrUnavailableError,
   isVerificationError,
   isQuotaOrAuthError,
+  isTransientNetworkError,
 } from './events.js';
 import { buildAttachmentPrompt } from '../telegram/media.js';
 import type { Logger } from '../logger.js';
@@ -226,19 +227,23 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
         const rotated = await this.auth.rotateNextCandidate(failingName);
         const nextAccountName = rotated.account.email || rotated.account.name;
 
-        await ctx.sendMessage(
-          ctx.request.locale === 'zh'
-            ? `🛡️ **检测到 Google 安全验证风控 (Verification Required)**\n\n` +
-              `• **受限账号**: \`${failingEmail}\` (已自动暂停并冷却)\n` +
-              `• **故障恢复**: 已无感切换至备用账号 \`${nextAccountName}\`，正在继续执行您的任务…\n\n` +
-              `💡 **如何人工解除该账号风控**：\n` +
-              `1. 可在终端/CLI 执行 \`agy -p "hi"\`，在弹出的浏览器完成人机验证；\n` +
-              `2. 或在 Telegram 发送 \`/login\` 重新授权该账号后即可恢复。`
-            : `🛡️ **Google Security Verification Triggered (Verification Required)**\n\n` +
-              `• **Affected**: \`${failingEmail}\` (paused & cooling)\n` +
-              `• **Failover**: Switched to \`${nextAccountName}\`, continuing your task…\n\n` +
-              `💡 **How to resolve**: Complete verification via \`agy -p "hi"\` in browser or run \`/login\` in Telegram.`,
-        );
+        try {
+          await ctx.sendMessage(
+            ctx.request.locale === 'zh'
+              ? `🛡️ **检测到 Google 安全验证风控 (Verification Required)**\n\n` +
+                `• **受限账号**: \`${failingEmail}\` (已自动暂停并冷却)\n` +
+                `• **故障恢复**: 已无感切换至备用账号 \`${nextAccountName}\`，正在继续执行您的任务…\n\n` +
+                `💡 **如何人工解除该账号风控**：\n` +
+                `1. 可在终端/CLI 执行 \`agy -p "hi"\`，在弹出的浏览器完成人机验证；\n` +
+                `2. 或在 Telegram 发送 \`/login\` 重新授权该账号后即可恢复。`
+              : `🛡️ **Google Security Verification Triggered (Verification Required)**\n\n` +
+                `• **Affected**: \`${failingEmail}\` (paused & cooling)\n` +
+                `• **Failover**: Switched to \`${nextAccountName}\`, continuing your task…\n\n` +
+                `💡 **How to resolve**: Complete verification via \`agy -p "hi"\` in browser or run \`/login\` in Telegram.`,
+          );
+        } catch {
+          /* messaging may fail during network glitch */
+        }
 
         await ctx.retryTurn(ctx.retryCount + 1);
         return true;
@@ -257,11 +262,15 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
           if (active.email) this.auth.markCooldown(active.email, 30 * 60 * 1000);
         }
         const rotated = await this.auth.rotateNextCandidate(active?.name);
-        await ctx.sendMessage(
-          ctx.request.locale === 'zh'
-            ? `⚠️ 检测到当前账号配额超限或凭据失效，已标记进入 30 分钟冷却，自动切换到账号 \`${rotated.account.email || rotated.account.name}\` 并重试…`
-            : `⚠️ Quota or auth issue detected. Marked account into 30m cooldown, switched to \`${rotated.account.email || rotated.account.name}\` and retrying…`,
-        );
+        try {
+          await ctx.sendMessage(
+            ctx.request.locale === 'zh'
+              ? `⚠️ 检测到当前账号配额超限或凭据失效，已标记进入 30 分钟冷却，自动切换到账号 \`${rotated.account.email || rotated.account.name}\` 并重试…`
+              : `⚠️ Quota or auth issue detected. Marked account into 30m cooldown, switched to \`${rotated.account.email || rotated.account.name}\` and retrying…`,
+          );
+        } catch {
+          /* messaging may fail during network glitch */
+        }
         await ctx.retryTurn(ctx.retryCount + 1);
         return true;
       } catch (rotateErr) {
@@ -273,22 +282,75 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
 
     const isCapacity = isCapacityOrUnavailableError(ctx.error);
     if (isCapacity && ctx.retryCount < 2) {
-      await ctx.sendMessage(
-        ctx.request.locale === 'zh'
-          ? `⏳ Google 模型服务临时繁忙 (503 Unavailable)，等待 2 秒后自动重试 (第 ${ctx.retryCount + 1}/2 次)…`
-          : `⏳ Google model temporarily unavailable (503), retrying in 2s (attempt ${ctx.retryCount + 1}/2)…`,
-      );
+      try {
+        await ctx.sendMessage(
+          ctx.request.locale === 'zh'
+            ? `⏳ Google 模型服务临时繁忙 (503 Unavailable)，等待 2 秒后自动重试 (第 ${ctx.retryCount + 1}/2 次)…`
+            : `⏳ Google model temporarily unavailable (503), retrying in 2s (attempt ${ctx.retryCount + 1}/2)…`,
+        );
+      } catch {
+        /* messaging may fail during network glitch */
+      }
       await new Promise((r) => setTimeout(r, 2000));
       await ctx.retryTurn(ctx.retryCount + 1);
       return true;
     }
 
     if (isCapacity) {
-      await ctx.sendMessage(
-        ctx.request.locale === 'zh'
-          ? `⚠️ **Google 模型容量繁忙 (503 UNAVAILABLE)**\n\nGoogle 服务端当前模型 (\`${ctx.request.model}\`) 暂时无可用容量。\n\n💡 **建议方案**：\n• 稍等 1 分钟后重试\n• 发送 /setup 或 /models 切换为 \`gemini-3.1-pro-high\` 继续`
-          : `⚠️ **Model Capacity Unavailable (503)**\n\nGoogle servers have no capacity for \`${ctx.request.model}\` right now.\n\n💡 Tip: Wait 1 minute or switch model via /setup or /models.`,
-      );
+      try {
+        await ctx.sendMessage(
+          ctx.request.locale === 'zh'
+            ? `⚠️ **Google 模型容量繁忙 (503 UNAVAILABLE)**\n\nGoogle 服务端当前模型 (\`${ctx.request.model}\`) 暂时无可用容量。\n\n💡 **建议方案**：\n• 稍等 1 分钟后重试\n• 发送 /setup 或 /models 切换为 \`gemini-3.1-pro-high\` 继续`
+            : `⚠️ **Model Capacity Unavailable (503)**\n\nGoogle servers have no capacity for \`${ctx.request.model}\` right now.\n\n💡 Tip: Wait 1 minute or switch model via /setup or /models.`,
+        );
+      } catch {
+        /* messaging may fail during network glitch */
+      }
+      return true;
+    }
+
+    const isNetwork = isTransientNetworkError(ctx.error);
+    if (isNetwork && ctx.retryCount < 3) {
+      const backoffMs = Math.min(15000, 3000 * Math.pow(2, ctx.retryCount));
+      const delaySec = Math.round(backoffMs / 1000);
+      try {
+        await ctx.sendMessage(
+          ctx.request.locale === 'zh'
+            ? `🌐 **检测到网络波动或连接中断**\n\n` +
+              `• **错误提示**: \`${ctx.error.slice(0, 100)}\`\n` +
+              `• **安全重试**: 将在 ${delaySec} 秒后自动重试并在网络恢复后继续执行 (第 ${ctx.retryCount + 1}/3 次)…`
+            : `🌐 **Network Fluctuation Detected**\n\n` +
+              `• **Error**: \`${ctx.error.slice(0, 100)}\`\n` +
+              `• **Auto-Retry**: Retrying in ${delaySec}s to resume execution after network recovery (attempt ${ctx.retryCount + 1}/3)…`,
+        );
+      } catch {
+        /* messaging may fail during network glitch */
+      }
+      await new Promise((r) => setTimeout(r, backoffMs));
+      try {
+        await ctx.retryTurn(ctx.retryCount + 1);
+      } catch (err) {
+        this.logger?.error('antigravity.retry_turn_failed', { error: String(err) });
+      }
+      return true;
+    }
+
+    if (isNetwork) {
+      try {
+        await ctx.sendMessage(
+          ctx.request.locale === 'zh'
+            ? `⚠️ **网络连接连续中断 (已重试 3 次)**\n\n` +
+              `• **错误详情**: \`${ctx.error.slice(0, 150)}\`\n` +
+              `• **说明**: 代理或网络暂时无法稳定连接 Google 服务端。\n\n` +
+              `💡 **建议方案**：\n• 请检查本机网络与代理设置（如 Clash / v2ray / proxy）\n• 网络恢复后直接再次发送您的指令即可继续`
+            : `⚠️ **Network Connection Failed (Retried 3 times)**\n\n` +
+              `• **Error**: \`${ctx.error.slice(0, 150)}\`\n` +
+              `• **Note**: Unable to reach Google servers stably.\n\n` +
+              `💡 Tip: Please check your network/proxy connection, and send your message again once restored.`,
+        );
+      } catch {
+        /* messaging may fail during network glitch */
+      }
       return true;
     }
 

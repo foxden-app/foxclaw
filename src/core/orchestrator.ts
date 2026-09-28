@@ -18,6 +18,7 @@ import { renderStreamPreviewContent, buildFoldedToolsSummary, combineSummaryAndR
 import { BRIDGE_SCOPE_TELEGRAM_PREFIX, BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope } from './bridge_scope.js';
 import { escapeTelegramHtml } from '../telegram/html.js';
 import { formatTokenUsageSummary, formatBackendTokenUsageBreakdown } from '../store/token_usage.js';
+import { isTransientNetworkError } from '../telegram/api.js';
 import type {
   IEngineAdapter,
   EngineTurnRequest,
@@ -486,7 +487,34 @@ export class UnifiedChannelOrchestrator {
   }
 
   async editMessage(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
+    if (!messageId || messageId <= 0) {
+      await this.sendMessage(scopeId, text, keyboard);
+      return;
+    }
     await this.messaging.editRichMarkdown(scopeId, messageId, text, keyboard);
+  }
+
+  private async safeDeliverChunks(scopeId: string, messageId: number, chunks: string[]): Promise<void> {
+    if (!chunks || chunks.length === 0) return;
+    try {
+      if (messageId > 0) {
+        await this.editMessage(scopeId, messageId, chunks[0]!).catch(async () => {
+          await this.sendMessage(scopeId, chunks[0]!).catch(() => {});
+        });
+      } else {
+        await this.sendMessage(scopeId, chunks[0]!).catch(() => {});
+      }
+      for (let i = 1; i < chunks.length; i++) {
+        await this.sendMessage(scopeId, chunks[i]!).catch(() => {});
+      }
+    } catch (err) {
+      this.logger.warn('orchestrator.safe_deliver_chunks_failed', { error: String(err) });
+    }
+  }
+
+  private async safeDeliverMessage(scopeId: string, messageId: number, text: string): Promise<void> {
+    const chunks = chunkTelegramMessage(text);
+    await this.safeDeliverChunks(scopeId, messageId, chunks);
   }
 
   async handleText(event: TelegramTextEvent): Promise<void> {
@@ -864,12 +892,17 @@ export class UnifiedChannelOrchestrator {
       ? `[Boost Mode: Proceed with deep thinking, strategic planning, multiple perspectives, and rigorous verification.]\n\n${prompt}`
       : prompt;
 
-    const initialMsgId = await this.sendMessage(
-      scopeId,
-      locale === 'zh'
-        ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
-        : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`),
-    );
+    let initialMsgId = 0;
+    try {
+      initialMsgId = await this.sendMessage(
+        scopeId,
+        locale === 'zh'
+          ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
+          : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`),
+      );
+    } catch (sendErr) {
+      this.logger.warn('orchestrator.initial_message_failed', { error: String(sendErr) });
+    }
 
     const turnKey = `${adapter.id}_${scopeId}_${Date.now()}`;
     try {
@@ -989,85 +1022,35 @@ export class UnifiedChannelOrchestrator {
     };
 
     execution.on('result', async (res: EngineTurnResult) => {
-      if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
-      if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
-      this.activeTurns.delete(scopeId);
-      this.store.removeActiveTurnPreview(turnKey);
+      try {
+        if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
+        if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
+        this.activeTurns.delete(scopeId);
+        this.store.removeActiveTurnPreview(turnKey);
 
-      if (res.conversationId && (!binding?.threadId || binding.threadId !== res.conversationId)) {
-        this.store.setBinding(scopeId, res.conversationId, cwd);
-        this.syncCurrentBackendSettings(scopeId);
-      }
-
-      if (res.usage) {
-        this.store.recordTokenUsage(
-          {
-            inputTokens: res.usage.inputTokens,
-            outputTokens: res.usage.outputTokens,
-            cachedTokens: res.usage.cachedTokens,
-            totalTokens: res.usage.totalTokens,
-          },
-          adapter.id,
-        );
-      }
-
-      if (res.status === 'SUCCESS') {
-        let finalText = (res.response || '').trim();
-        if (!finalText && activeTurn.accumulatedText) {
-          finalText = activeTurn.accumulatedText.trim();
+        if (res.conversationId && (!binding?.threadId || binding.threadId !== res.conversationId)) {
+          this.store.setBinding(scopeId, res.conversationId, cwd);
+          this.syncCurrentBackendSettings(scopeId);
         }
 
-        const foldedTools = buildFoldedToolsSummary({
-          stepIndex: activeTurn.stepIndex,
-          toolLines: activeTurn.toolLines,
-          toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
-          startTime: activeTurn.startTime,
-          usage: res.usage,
-          locale,
-        });
+        if (res.usage) {
+          this.store.recordTokenUsage(
+            {
+              inputTokens: res.usage.inputTokens,
+              outputTokens: res.usage.outputTokens,
+              cachedTokens: res.usage.cachedTokens,
+              totalTokens: res.usage.totalTokens,
+            },
+            adapter.id,
+          );
+        }
 
-        const chunks = combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
-        if (chunks.length > 0) {
-          await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
-            return this.sendMessage(scopeId, chunks[0]!);
-          });
-          for (let i = 1; i < chunks.length; i++) {
-            await this.sendMessage(scopeId, chunks[i]!);
+        if (res.status === 'SUCCESS') {
+          let finalText = (res.response || '').trim();
+          if (!finalText && activeTurn.accumulatedText) {
+            finalText = activeTurn.accumulatedText.trim();
           }
-        }
-        await this.drainNextQueuedTurn(event, locale);
-        return;
-      }
 
-      if (res.status === 'ERROR') {
-        const errorText = (res.error || res.response || (res as any).error || 'Unknown error').trim();
-        if (adapter.handleTurnError) {
-          const handled = await adapter.handleTurnError({
-            error: errorText,
-            request: req,
-            retryCount,
-            retryTurn,
-            sendMessage: (text: string) => this.sendMessage(scopeId, text),
-            editMessage: (messageId: number, text: string) => this.editMessage(scopeId, messageId, text),
-          });
-          if (handled) return;
-        }
-
-        // If the agent actually produced substantive response text, do NOT mask it with an error box!
-        let finalText = (res.response || '').trim();
-        if (!finalText && activeTurn.accumulatedText) {
-          finalText = activeTurn.accumulatedText.trim();
-        }
-
-        const isPureError =
-          !finalText ||
-          finalText === errorText ||
-          finalText.startsWith('Process exited with code') ||
-          finalText.startsWith('Verification Required') ||
-          finalText.startsWith('Error:') ||
-          finalText.length <= 20;
-
-        if (!isPureError) {
           const foldedTools = buildFoldedToolsSummary({
             stepIndex: activeTurn.stepIndex,
             toolLines: activeTurn.toolLines,
@@ -1077,88 +1060,177 @@ export class UnifiedChannelOrchestrator {
             locale,
           });
 
-          const warningNote =
-            errorText && errorText !== 'Unknown error' && errorText !== 'Antigravity execution failed'
-              ? `\n\n⚠️ <i>(注意：任务结束时伴随提示: ${escapeTelegramHtml(errorText.slice(0, 120))})</i>`
-              : '';
-          const chunks = combineSummaryAndResponse(foldedTools, finalText + warningNote);
-          if (chunks.length > 0) {
-            await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
-              return this.sendMessage(scopeId, chunks[0]!);
-            });
-            for (let i = 1; i < chunks.length; i++) {
-              await this.sendMessage(scopeId, chunks[i]!);
-            }
-          }
-          await this.drainNextQueuedTurn(event, locale);
+          const chunks = combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
+          await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
+          await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
-        await this.editMessage(
+        if (res.status === 'ERROR') {
+          const errorText = (res.error || res.response || (res as any).error || 'Unknown error').trim();
+          if (adapter.handleTurnError) {
+            try {
+              const handled = await adapter.handleTurnError({
+                error: errorText,
+                request: req,
+                retryCount,
+                retryTurn,
+                sendMessage: (text: string) => this.sendMessage(scopeId, text),
+                editMessage: (messageId: number, text: string) => this.editMessage(scopeId, messageId, text),
+              });
+              if (handled) return;
+            } catch (adapterErr) {
+              this.logger.warn('orchestrator.adapter_handle_turn_error_failed', { error: String(adapterErr) });
+            }
+          }
+
+          if (isTransientNetworkError(errorText) && retryCount < 3) {
+            const backoffMs = Math.min(15000, 3000 * Math.pow(2, retryCount));
+            const delaySec = Math.round(backoffMs / 1000);
+            try {
+              await this.sendMessage(
+                scopeId,
+                locale === 'zh'
+                  ? `🌐 **网络波动重试 (第 ${retryCount + 1}/3 次)**: 正在等待网络稳定 (${delaySec}s) 后自动恢复任务…`
+                  : `🌐 **Network Retry (${retryCount + 1}/3)**: Waiting for connection (${delaySec}s) to resume task…`,
+              );
+            } catch {
+              /* ignore messaging error during network glitch */
+            }
+            await new Promise((r) => setTimeout(r, backoffMs));
+            try {
+              await retryTurn(retryCount + 1);
+            } catch (retryErr) {
+              this.logger.error('orchestrator.retry_turn_failed', { error: String(retryErr) });
+            }
+            return;
+          }
+
+          // If the agent actually produced substantive response text, do NOT mask it with an error box!
+          let finalText = (res.response || '').trim();
+          if (!finalText && activeTurn.accumulatedText) {
+            finalText = activeTurn.accumulatedText.trim();
+          }
+
+          const isPureError =
+            !finalText ||
+            finalText === errorText ||
+            finalText.startsWith('Process exited with code') ||
+            finalText.startsWith('Verification Required') ||
+            finalText.startsWith('Error:') ||
+            finalText.length <= 20;
+
+          if (!isPureError) {
+            const foldedTools = buildFoldedToolsSummary({
+              stepIndex: activeTurn.stepIndex,
+              toolLines: activeTurn.toolLines,
+              toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
+              startTime: activeTurn.startTime,
+              usage: res.usage,
+              locale,
+            });
+
+            const warningNote =
+              errorText && errorText !== 'Unknown error' && errorText !== 'Antigravity execution failed'
+                ? `\n\n⚠️ <i>(注意：任务结束时伴随提示: ${escapeTelegramHtml(errorText.slice(0, 120))})</i>`
+                : '';
+            const chunks = combineSummaryAndResponse(foldedTools, finalText + warningNote);
+            await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
+            await this.drainNextQueuedTurn(event, locale).catch(() => {});
+            return;
+          }
+
+          await this.safeDeliverMessage(
+            scopeId,
+            activeTurn.messageId,
+            `❌ **${adapter.name} 错误**:\n\`\`\`\n${errorText}\n\`\`\``,
+          );
+          await this.drainNextQueuedTurn(event, locale).catch(() => {});
+          return;
+        }
+
+        await this.safeDeliverMessage(
           scopeId,
           activeTurn.messageId,
-          `❌ **${adapter.name} 错误**:\n\`\`\`\n${errorText}\n\`\`\``,
+          activeTurn.accumulatedText || '⚠️ 执行结束',
         );
-        await this.drainNextQueuedTurn(event, locale);
-        return;
+        await this.drainNextQueuedTurn(event, locale).catch(() => {});
+      } catch (fatalErr) {
+        this.logger.error('orchestrator.turn_result_unhandled', { error: String(fatalErr) });
       }
-
-      await this.editMessage(
-        scopeId,
-        activeTurn.messageId,
-        activeTurn.accumulatedText || '⚠️ 执行结束',
-      );
-      await this.drainNextQueuedTurn(event, locale);
     });
 
     execution.on('error', async (err: Error) => {
-      if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
-      if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
-      this.activeTurns.delete(scopeId);
-      this.store.removeActiveTurnPreview(turnKey);
+      try {
+        if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
+        if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
+        this.activeTurns.delete(scopeId);
+        this.store.removeActiveTurnPreview(turnKey);
 
-      if (adapter.handleTurnError) {
-        const handled = await adapter.handleTurnError({
-          error: err.message,
-          request: req,
-          retryCount,
-          retryTurn,
-          sendMessage: (text: string) => this.sendMessage(scopeId, text),
-          editMessage: (messageId: number, text: string) => this.editMessage(scopeId, messageId, text),
-        });
-        if (handled) return;
-      }
-
-      if (activeTurn.accumulatedText && activeTurn.accumulatedText.trim().length > 20) {
-        const foldedTools = buildFoldedToolsSummary({
-          stepIndex: activeTurn.stepIndex,
-          toolLines: activeTurn.toolLines,
-          toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
-          startTime: activeTurn.startTime,
-          locale,
-        });
-        const fullAnswer =
-          activeTurn.accumulatedText.trim() +
-          `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeTelegramHtml(err.message.slice(0, 120))})</i>`;
-        const chunks = combineSummaryAndResponse(foldedTools, fullAnswer);
-        if (chunks.length > 0) {
-          await this.editMessage(scopeId, activeTurn.messageId, chunks[0]!).catch(() => {
-            return this.sendMessage(scopeId, chunks[0]!);
-          });
-          for (let i = 1; i < chunks.length; i++) {
-            await this.sendMessage(scopeId, chunks[i]!);
+        if (adapter.handleTurnError) {
+          try {
+            const handled = await adapter.handleTurnError({
+              error: err.message,
+              request: req,
+              retryCount,
+              retryTurn,
+              sendMessage: (text: string) => this.sendMessage(scopeId, text),
+              editMessage: (messageId: number, text: string) => this.editMessage(scopeId, messageId, text),
+            });
+            if (handled) return;
+          } catch (adapterErr) {
+            this.logger.warn('orchestrator.adapter_handle_error_failed', { error: String(adapterErr) });
           }
         }
-        await this.drainNextQueuedTurn(event, locale);
-        return;
-      }
 
-      await this.editMessage(
-        scopeId,
-        activeTurn.messageId,
-        `❌ **执行异常**:\n\`\`\`\n${err.message}\n\`\`\``,
-      );
-      await this.drainNextQueuedTurn(event, locale);
+        if (isTransientNetworkError(err.message) && retryCount < 3) {
+          const backoffMs = Math.min(15000, 3000 * Math.pow(2, retryCount));
+          const delaySec = Math.round(backoffMs / 1000);
+          try {
+            await this.sendMessage(
+              scopeId,
+              locale === 'zh'
+                ? `🌐 **网络波动重试 (第 ${retryCount + 1}/3 次)**: 正在等待网络稳定 (${delaySec}s) 后自动恢复任务…`
+                : `🌐 **Network Retry (${retryCount + 1}/3)**: Waiting for connection (${delaySec}s) to resume task…`,
+            );
+          } catch {
+            /* ignore */
+          }
+          await new Promise((r) => setTimeout(r, backoffMs));
+          try {
+            await retryTurn(retryCount + 1);
+          } catch (retryErr) {
+            this.logger.error('orchestrator.retry_turn_failed', { error: String(retryErr) });
+          }
+          return;
+        }
+
+        if (activeTurn.accumulatedText && activeTurn.accumulatedText.trim().length > 20) {
+          const foldedTools = buildFoldedToolsSummary({
+            stepIndex: activeTurn.stepIndex,
+            toolLines: activeTurn.toolLines,
+            toolCount: activeTurn.toolCount || activeTurn.toolLines.length,
+            startTime: activeTurn.startTime,
+            locale,
+          });
+          const fullAnswer =
+            activeTurn.accumulatedText.trim() +
+            `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeTelegramHtml(err.message.slice(0, 120))})</i>`;
+          const chunks = combineSummaryAndResponse(foldedTools, fullAnswer);
+          await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
+          await this.drainNextQueuedTurn(event, locale).catch(() => {});
+          return;
+        }
+
+        await this.safeDeliverMessage(
+          scopeId,
+          activeTurn.messageId,
+          `❌ **执行异常**:\n\`\`\`\n${err.message}\n\`\`\``,
+        );
+        await this.drainNextQueuedTurn(event, locale).catch(() => {});
+      } catch (fatalErr) {
+        this.logger.error('orchestrator.turn_error_unhandled', { error: String(fatalErr) });
+      }
     });
   }
 

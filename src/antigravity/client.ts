@@ -233,8 +233,15 @@ export class AntigravityAppClient {
         conversationId: activeConversationId,
         stderr: stderrBuffer ? stderrBuffer.slice(-200) : undefined,
       });
-      if (!finalResultEvent && code !== 0) {
-        const errorMsg = stderrBuffer.trim() || `Process exited with code ${code}${signal ? ` (${signal})` : ''}`;
+      if (!finalResultEvent) {
+        const isCanceled = signal === 'SIGINT' || signal === 'SIGTERM';
+        const errorMsg =
+          isCanceled
+            ? 'Execution canceled'
+            : (stderrBuffer.trim() ||
+              (code !== 0
+                ? `Process exited with code ${code}${signal ? ` (${signal})` : ''}`
+                : 'Process exited unexpectedly before producing a result'));
         const errResult: AntigravityBridgeEvent = {
           kind: 'result',
           conversationId: activeConversationId || '',

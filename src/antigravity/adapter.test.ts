@@ -276,4 +276,76 @@ test('AntigravityTelegramRuntime initializes multi-bot options with custom botId
   assert.equal(runtime.authDirectory, '/tmp/foxclaw/antigravity/@SecondAgyBot/home/.gemini/antigravity-cli');
 });
 
+test('AntigravityEngineAdapter handles transient network errors and retries', async () => {
+  const adapter = new AntigravityEngineAdapter({} as any, 'gemini-3.8-flash');
+  let retriedCount = -1;
+  const sentMessages: string[] = [];
+
+  const handled = await adapter.handleTurnError({
+    error: 'Client network socket disconnected before secure TLS connection was established',
+    request: { locale: 'zh', model: 'gemini-3.8-flash' } as any,
+    retryCount: 0,
+    retryTurn: async (nextCount) => {
+      retriedCount = nextCount;
+    },
+    sendMessage: async (text) => {
+      sentMessages.push(text);
+      return 1;
+    },
+    editMessage: async () => {},
+  });
+
+  assert.equal(handled, true);
+  assert.equal(retriedCount, 1);
+  assert.equal(sentMessages.length, 1);
+  assert.ok(sentMessages[0]?.includes('网络波动或连接中断'));
+  assert.ok(sentMessages[0]?.includes('安全重试'));
+});
+
+test('AntigravityEngineAdapter tolerates messaging failure during network drops', async () => {
+  const adapter = new AntigravityEngineAdapter({} as any, 'gemini-3.8-flash');
+  let retriedCount = -1;
+
+  const handled = await adapter.handleTurnError({
+    error: 'read tcp 127.0.0.1:44600->127.0.0.1:7897: read: connection timed out status: UNKNOWN code_kind: grpc retryable: true',
+    request: { locale: 'zh', model: 'gemini-3.8-flash' } as any,
+    retryCount: 1,
+    retryTurn: async (nextCount) => {
+      retriedCount = nextCount;
+    },
+    sendMessage: async () => {
+      throw new Error('Client network socket disconnected');
+    },
+    editMessage: async () => {},
+  });
+
+  assert.equal(handled, true);
+  assert.equal(retriedCount, 2);
+});
+
+test('AntigravityEngineAdapter notifies user when network retries are exhausted', async () => {
+  const adapter = new AntigravityEngineAdapter({} as any, 'gemini-3.8-flash');
+  let retried = false;
+  const sentMessages: string[] = [];
+
+  const handled = await adapter.handleTurnError({
+    error: 'Client network socket disconnected before secure TLS connection was established',
+    request: { locale: 'zh', model: 'gemini-3.8-flash' } as any,
+    retryCount: 3,
+    retryTurn: async () => {
+      retried = true;
+    },
+    sendMessage: async (text) => {
+      sentMessages.push(text);
+      return 1;
+    },
+    editMessage: async () => {},
+  });
+
+  assert.equal(handled, true);
+  assert.equal(retried, false);
+  assert.equal(sentMessages.length, 1);
+  assert.ok(sentMessages[0]?.includes('网络连接连续中断 (已重试 3 次)'));
+});
+
 
