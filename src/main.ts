@@ -730,7 +730,6 @@ async function runServeCli(): Promise<void> {
     { AuthCandidateMirror },
     { CrossNodeAuthSync },
     { OpencodeTelegramRuntime },
-    { AntigravityTelegramRuntime },
     { UnifiedBridgeCore },
     { AntigravityAppClient },
     { AntigravityAuthManager, linkAntigravityAuthTokens },
@@ -750,7 +749,6 @@ async function runServeCli(): Promise<void> {
     import('./auth/mirror.js'),
     import('./auth/cross_node_sync.js'),
     import('./opencode/runtime.js'),
-    import('./antigravity/runtime.js'),
     import('./antigravity/controller.js'),
     import('./antigravity/client.js'),
     import('./antigravity/auth.js'),
@@ -772,7 +770,6 @@ async function runServeCli(): Promise<void> {
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
-  const activeAntigravityRuntimes: Array<InstanceType<typeof AntigravityTelegramRuntime>> = [];
   let sharedCodexApp: InstanceType<typeof CodexAppClient> | null = null;
   let sharedAntigravityApp: InstanceType<typeof AntigravityAppClient> | null = null;
   let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
@@ -1294,7 +1291,6 @@ async function runServeCli(): Promise<void> {
         await activeWeixinCore?.stop();
         await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
         await activeOpencodeRuntime?.stop();
-        await Promise.all(activeAntigravityRuntimes.map((runtime) => runtime.stop().catch(() => {})));
         writeAggregateStatus(false);
         const allManaged = [...managedApps, ...(sharedCodexApp ? [sharedCodexApp] : [])];
         await Promise.all(allManaged.map((app) => app.stop({ terminateServer: true }).catch((error) => {
@@ -1315,7 +1311,6 @@ async function runServeCli(): Promise<void> {
     await activeWeixinCore?.stop().catch(() => {});
     await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
     await activeOpencodeRuntime?.stop().catch(() => {});
-    await Promise.allSettled(activeAntigravityRuntimes.map((runtime) => runtime.stop()));
     await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
     store?.close();
     processLock.release();

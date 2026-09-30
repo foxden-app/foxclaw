@@ -1131,7 +1131,9 @@ export function linkAntigravityAuthTokens(sourceAuthDir: string, targetAuthDir: 
       } catch {
         try {
           fsSync.copyFileSync(sourceFile, targetFile);
-        } catch {}
+        } catch {
+          // best-effort fallback
+        }
       }
     }
   }

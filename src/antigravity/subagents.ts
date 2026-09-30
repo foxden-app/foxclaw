@@ -162,7 +162,7 @@ export class AntigravitySubagentTracker {
     this.discoverSubagentsFromParentTranscript();
 
     // 3. Poll each tracked subagent's transcript
-    for (const [subId, state] of this.subagents.entries()) {
+    for (const state of this.subagents.values()) {
       const updated = this.pollSubagentTranscript(state, newToolEvents);
       if (updated) {
         hasUpdates = true;
@@ -291,7 +291,7 @@ export class AntigravitySubagentTracker {
           if (Array.isArray(subagentsArg)) {
             for (const sub of subagentsArg) {
               const name = sub.Role || sub.TypeName || 'Subagent';
-              // Stored as pending hints if needed
+              void name;
             }
           }
         }
