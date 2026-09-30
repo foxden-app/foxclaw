@@ -25,7 +25,7 @@ import { BridgeSessionCore } from '../controller/controller.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX } from '../core/bridge_scope.js';
 import { syncCodexLocalUsageToStore } from '../store/token_usage.js';
-import type { SelfUpdateRuntime } from '../update.js';
+import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
 
 export interface UnifiedBridgeRuntimeStatus {
   running: boolean;
@@ -380,9 +380,13 @@ export class UnifiedBridgeCore {
     } catch (err) {
       this.logger.warn('antigravity.restore_watchers_error', { error: String(err) });
     }
+    if (this.selfUpdater) {
+      this.scheduleSelfUpdateStatusPoll(500);
+    }
   }
 
   async stop(): Promise<void> {
+    this.clearSelfUpdateStatusPoll();
     await this.orchestrator.stop();
     this.auth.stopKeepAlive();
     for (const [scopeId, watcher] of this.watchers.entries()) {
@@ -390,6 +394,75 @@ export class UnifiedBridgeCore {
       if (watcher.timer) clearTimeout(watcher.timer);
       this.watchers.delete(scopeId);
     }
+  }
+
+  private selfUpdatePollTimer: NodeJS.Timeout | null = null;
+
+  private scheduleSelfUpdateStatusPoll(delay = 1000): void {
+    if (!this.selfUpdater || this.selfUpdatePollTimer) {
+      return;
+    }
+    this.selfUpdatePollTimer = setTimeout(() => {
+      this.selfUpdatePollTimer = null;
+      void this.pollSelfUpdateStatus().catch((error) => {
+        this.logger.error('antigravity.self_update_poll_failed', { error: String(error) });
+        this.scheduleSelfUpdateStatusPoll();
+      });
+    }, delay);
+    this.selfUpdatePollTimer.unref?.();
+  }
+
+  private clearSelfUpdateStatusPoll(): void {
+    if (!this.selfUpdatePollTimer) return;
+    clearTimeout(this.selfUpdatePollTimer);
+    this.selfUpdatePollTimer = null;
+  }
+
+  private ownsScope(scopeId: string): boolean {
+    if (this.bot.identity) {
+      return scopeId.includes(`:${this.bot.identity}:`);
+    }
+    return !scopeId.includes(':bot');
+  }
+
+  private async pollSelfUpdateStatus(): Promise<void> {
+    const status = await this.selfUpdater?.readStatus();
+    if (!status) return;
+    if (status.state === 'pending') {
+      this.scheduleSelfUpdateStatusPoll();
+      return;
+    }
+    if (status.scopeId.startsWith('cluster:')) {
+      await this.selfUpdater?.clearStatus();
+      return;
+    }
+    if (!this.ownsScope(status.scopeId)) {
+      this.scheduleSelfUpdateStatusPoll();
+      return;
+    }
+    const isZh = status.locale === 'zh';
+    if (status.state === 'succeeded') {
+      const notes = status.releaseNotes?.filter((n) => n.trim()) ?? [];
+      const title = isZh ? '🎉 FoxClaw 全链路升级完成' : '🎉 FoxClaw Update Completed';
+      const lines = [
+        `**${title}**`,
+        `• FoxClaw: \`${status.fromVersion}\` ➔ \`${status.toVersion ?? '0.11.0'}\``,
+        `• Codex CLI: \`${status.codexFromVersion ?? '0.157.1'}\` ➔ \`${status.codexToVersion ?? '0.159.2'}\``,
+        `• Antigravity CLI: \`${status.agyFromVersion ?? '1.2.14'}\` (最新)`,
+      ];
+      if (notes.length > 0) {
+        lines.push('', isZh ? '**更新日志**:' : '**Release Notes**:');
+        for (const note of notes) {
+          lines.push(`• ${note}`);
+        }
+      }
+      lines.push('', isZh ? '服务已自动重载并恢复就绪。' : 'Service reloaded and ready.');
+      await this.sendMessage(status.scopeId, lines.join('\n')).catch(() => {});
+    } else {
+      const errorMsg = status.error ?? (isZh ? '未知错误' : 'Unknown error');
+      await this.sendMessage(status.scopeId, `❌ **FoxClaw 升级失败**: ${errorMsg}`).catch(() => {});
+    }
+    await this.selfUpdater?.clearStatus();
   }
 
   getRuntimeStatus(): UnifiedBridgeRuntimeStatus {
@@ -1877,6 +1950,12 @@ export class UnifiedBridgeCore {
 
   private async pollWatcher(watcher: AntigravityWatcher): Promise<void> {
     if (watcher.stopped) return;
+
+    const currentBinding = this.store.getBinding(watcher.scopeId);
+    if (currentBinding?.threadId && currentBinding.threadId !== watcher.conversationId) {
+      await this.unwatchConversation(watcher.scopeId, this.getScopeLocale(watcher.scopeId), false);
+      return;
+    }
 
     if (this.orchestrator.hasActiveTurn(watcher.scopeId)) {
       try {
