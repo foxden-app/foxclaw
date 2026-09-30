@@ -25,7 +25,7 @@ import { BridgeSessionCore } from '../controller/controller.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
 import { BRIDGE_SCOPE_WEIXIN_PREFIX } from '../core/bridge_scope.js';
 import { syncCodexLocalUsageToStore } from '../store/token_usage.js';
-import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
+import type { SelfUpdateRuntime } from '../update.js';
 
 export interface UnifiedBridgeRuntimeStatus {
   running: boolean;
