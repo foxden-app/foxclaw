@@ -2,6 +2,24 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.11.1 - 2026-09-30
+
+### 中文
+- **Antigravity 控制器自升级完成通知闭环**：
+  - 修复通过 Antigravity 机器人（瓦小安）触发 `/update` 后，服务自升级成功重启却未能轮询并投递升级完成卡片及更新日志的问题。
+  - 补齐 `UnifiedBridgeCore` 的自升级状态轮询（`pollSelfUpdateStatus`）与多 Bot 归属检测。
+- **只读观察器（Watcher）会话切换自动解绑**：
+  - 修复当前聊天会话切换至新任务后，后台旧任务 Watcher 持续抢占消息卡片导致跨任务串屏与日志污染的问题。
+  - `pollWatcher` 检测到当前绑定会话与被观察会话不一致时，自动静默卸载 Watcher。
+
+### English
+- **Antigravity Post-Update Notification Delivery**:
+  - Fixed an issue where running `/update` on Antigravity bots (e.g. `@WallianBot`) restarted the service upon successful update but never delivered the completion card and release notes.
+  - Implemented `pollSelfUpdateStatus` in `UnifiedBridgeCore` with scope ownership validation.
+- **Watcher Auto-Detachment on Thread Switch**:
+  - Fixed an issue where background watchers from other conversations continued hijacking Telegram previews after the chat scope switched to a different task.
+  - `pollWatcher` now silently detaches when the active thread binding no longer matches the observed conversation.
+
 ## 0.11.0 - 2026-09-30
 
 ### 中文
