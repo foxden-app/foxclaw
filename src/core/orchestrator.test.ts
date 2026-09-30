@@ -724,6 +724,8 @@ test('UnifiedChannelOrchestrator setup menu: model and reasoning effort are not 
     await orchestrator.handleCallback({
       scopeId,
       chatId: '123',
+      topicId: null,
+      userId: 'user-1',
       messageId: 10,
       callbackQueryId: 'cb-1',
       data: 'engine:m:gemini-3.1-pro',
@@ -736,6 +738,8 @@ test('UnifiedChannelOrchestrator setup menu: model and reasoning effort are not 
     await orchestrator.handleCallback({
       scopeId,
       chatId: '123',
+      topicId: null,
+      userId: 'user-1',
       messageId: 10,
       callbackQueryId: 'cb-2',
       data: 'engine:effort:high',
@@ -750,6 +754,8 @@ test('UnifiedChannelOrchestrator setup menu: model and reasoning effort are not 
     await orchestrator.handleCallback({
       scopeId,
       chatId: '123',
+      topicId: null,
+      userId: 'user-1',
       messageId: 10,
       callbackQueryId: 'cb-3',
       data: 'engine:m:gemini-3.8-flash',

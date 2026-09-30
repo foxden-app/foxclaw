@@ -24,6 +24,7 @@ const loggerStub = {
 
 function createConfig(tempDir: string): AppConfig {
   return {
+    codexBotTokens: ['token'],
     tgBotToken: 'token',
     tgBotTokens: ['token'],
     tgMultiBotMode: false,

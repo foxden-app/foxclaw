@@ -411,6 +411,8 @@ test('AntigravityEngineAdapter tracks and emits subagent tool events during exec
         kind: 'result',
         status: 'SUCCESS',
         conversationId: parentId,
+        response: 'done',
+        durationSeconds: 1,
       }),
       on: (ev: any, listener: any) => {
         mockClientEmitter.on(ev, listener);
@@ -435,6 +437,8 @@ test('AntigravityEngineAdapter tracks and emits subagent tool events during exec
       prompt: 'do subagent work',
       threadId: parentId,
       locale: 'zh',
+      cwd: tempDir,
+      model: 'gemini-3.8-flash',
     });
 
     execution.on('tool', (t) => toolEvents.push(t));
