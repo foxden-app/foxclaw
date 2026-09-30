@@ -3,23 +3,33 @@ import assert from 'node:assert/strict';
 
 import {
   buildCodexApiProviderOverrides,
+  loadConfig,
   parseCodexApiProviders,
   selectDefaultRuntimeBotToken,
+  validateCodexBotTokens,
   validateOpencodeBotToken,
   validateAntigravityBotToken,
   validateAntigravityBotTokens,
 } from './config.js';
 
-test('selectDefaultRuntimeBotToken marks a token already present in TG_BOT_TOKENS', () => {
+test('selectDefaultRuntimeBotToken marks a token already present in tokens list', () => {
   assert.equal(selectDefaultRuntimeBotToken(['iso-a', 'shared', 'iso-b'], 'shared'), 'shared');
 });
 
-test('selectDefaultRuntimeBotToken ignores legacy token outside TG_BOT_TOKENS', () => {
+test('selectDefaultRuntimeBotToken ignores token outside configured tokens', () => {
   assert.equal(selectDefaultRuntimeBotToken(['iso-a', 'iso-b'], 'legacy'), null);
 });
 
-test('selectDefaultRuntimeBotToken keeps pure legacy single-bot mode unchanged', () => {
+test('selectDefaultRuntimeBotToken returns null for empty configured tokens', () => {
   assert.equal(selectDefaultRuntimeBotToken([], 'legacy'), null);
+});
+
+test('validateCodexBotTokens catches duplicates', () => {
+  assert.doesNotThrow(() => validateCodexBotTokens(['codex-a', 'codex-b']));
+  assert.throws(
+    () => validateCodexBotTokens(['codex-a', 'codex-a']),
+    /CODEX_BOT_TOKENS contains duplicate Telegram bot token/,
+  );
 });
 
 test('validateOpencodeBotToken requires an independent Telegram bot', () => {
@@ -36,7 +46,7 @@ test('validateAntigravityBotToken requires an independent Telegram bot from Code
   assert.doesNotThrow(() => validateAntigravityBotToken(null, ['codex-a'], null));
   assert.throws(
     () => validateAntigravityBotToken('codex-a', ['codex-a', 'codex-b'], 'opencode'),
-    /must use a different bot from TG_BOT_TOKENS/,
+    /must use a different bot from CODEX_BOT_TOKENS/,
   );
   assert.throws(
     () => validateAntigravityBotToken('opencode', ['codex-a', 'codex-b'], 'opencode'),
@@ -53,12 +63,37 @@ test('validateAntigravityBotTokens supports multiple bots and catches duplicates
   );
   assert.throws(
     () => validateAntigravityBotTokens(['agy-1', 'codex-a'], ['codex-a', 'codex-b'], null),
-    /must use a different bot from TG_BOT_TOKENS/,
+    /must use a different bot from CODEX_BOT_TOKENS/,
   );
   assert.throws(
     () => validateAntigravityBotTokens(['agy-1', 'opencode'], ['codex-a'], 'opencode'),
     /must use a different bot from OPENCODE_BOT_TOKEN/,
   );
+});
+
+test('loadConfig explicitly rejects legacy TG_BOT_TOKEN and TG_BOT_TOKENS', () => {
+  const origTg = process.env.TG_BOT_TOKEN;
+  const origTgs = process.env.TG_BOT_TOKENS;
+  const origCodex = process.env.CODEX_BOT_TOKENS;
+  try {
+    delete process.env.CODEX_BOT_TOKENS;
+    process.env.TG_BOT_TOKEN = '123:abc';
+    assert.throws(
+      () => loadConfig(),
+      /Configuration error: TG_BOT_TOKEN and TG_BOT_TOKENS have been removed/,
+    );
+
+    delete process.env.TG_BOT_TOKEN;
+    process.env.TG_BOT_TOKENS = '123:abc,456:def';
+    assert.throws(
+      () => loadConfig(),
+      /Configuration error: TG_BOT_TOKEN and TG_BOT_TOKENS have been removed/,
+    );
+  } finally {
+    if (origTg !== undefined) process.env.TG_BOT_TOKEN = origTg; else delete process.env.TG_BOT_TOKEN;
+    if (origTgs !== undefined) process.env.TG_BOT_TOKENS = origTgs; else delete process.env.TG_BOT_TOKENS;
+    if (origCodex !== undefined) process.env.CODEX_BOT_TOKENS = origCodex; else delete process.env.CODEX_BOT_TOKENS;
+  }
 });
 
 test('parseCodexApiProviders accepts compact OpenAI-compatible provider specs', () => {

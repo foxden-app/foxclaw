@@ -15,6 +15,7 @@ import { formatQuotaResetTime, AntigravityAuthManager, type AntigravityAccount }
 import { AntigravityConversationManager, formatAge, type AntigravityConversation } from './conversations.js';
 import { UnifiedChannelOrchestrator } from '../core/orchestrator.js';
 import { AntigravityEngineAdapter } from './adapter.js';
+import { AntigravitySubagentTracker } from './subagents.js';
 import { CodexEngineAdapter } from '../codex_app/adapter.js';
 import type { CodexAppClient, CodexAppServerRuntimeStatus } from '../codex_app/client.js';
 import { OpencodeEngineAdapter } from '../opencode/adapter.js';
@@ -85,6 +86,7 @@ interface AntigravityWatcher {
   messageId: number | null;
   currentToolLines: string[];
   lastContentPreview: string;
+  subagentTracker: AntigravitySubagentTracker;
 }
 
 export interface UnifiedBridgeCoreOptions {
@@ -1077,7 +1079,7 @@ export class UnifiedBridgeCore {
 
     if (data.startsWith(AGY_MODEL_CALLBACK_PREFIX)) {
       const model = data.slice(AGY_MODEL_CALLBACK_PREFIX.length);
-      this.store.setChatSettings(scopeId, model, null);
+      this.store.setChatModel(scopeId, model === 'default' ? null : model);
       this.orchestrator.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(data, `Model: ${model}`);
       await this.orchestrator.sendModelsMenu(scopeId, locale, messageId);
@@ -1090,7 +1092,7 @@ export class UnifiedBridgeCore {
       if (effort !== 'high' && settings?.serviceTier === 'boost') {
         this.store.setChatServiceTier(scopeId, null);
       }
-      this.store.setChatSettings(scopeId, null, effort);
+      this.store.setChatEffort(scopeId, effort);
       this.orchestrator.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(data, `Effort: ${effort}`);
       await this.sendEffortMenu(scopeId, '', locale, messageId);
@@ -1749,6 +1751,7 @@ export class UnifiedBridgeCore {
       messageId: null,
       currentToolLines: [],
       lastContentPreview: '',
+      subagentTracker: new AntigravitySubagentTracker(conv.conversationId, undefined, this.logger),
     };
 
     this.watchers.set(scopeId, watcher);
@@ -1838,6 +1841,40 @@ export class UnifiedBridgeCore {
     watcher.timer?.unref?.();
   }
 
+  private getScopeLocale(scopeId: string): AppLocale {
+    return this.store.getChatSettings(scopeId)?.locale || 'zh';
+  }
+
+  private async renderWatcherProgressUpdate(watcher: AntigravityWatcher): Promise<void> {
+    const locale = this.getScopeLocale(watcher.scopeId);
+    let messageText = `👁 <b>[Antigravity 观察中]</b>\n\n`;
+
+    if (watcher.currentToolLines.length > 0) {
+      const recent = watcher.currentToolLines.slice(-8);
+      messageText += `<blockquote expandable>🛠️ <b>主会话工具 (${watcher.currentToolLines.length} 项)</b>\n${recent.join('\n')}</blockquote>\n\n`;
+    }
+
+    const subBlock = watcher.subagentTracker.renderTelegramBlock(locale);
+    if (subBlock) {
+      messageText += `${subBlock}\n\n`;
+    }
+
+    const activeSubSummary = watcher.subagentTracker.getActiveSummaryLine(locale);
+    if (activeSubSummary) {
+      messageText += `⏳ <b>${escapeTelegramHtml(activeSubSummary)}</b>`;
+    } else if (watcher.lastContentPreview) {
+      messageText += watcher.lastContentPreview.slice(-3000);
+    } else {
+      messageText += `⏳ 正在执行中…`;
+    }
+
+    if (watcher.messageId) {
+      await this.editMessage(watcher.scopeId, watcher.messageId, messageText).catch(() => {});
+    } else {
+      watcher.messageId = await this.sendMessage(watcher.scopeId, messageText).catch(() => null);
+    }
+  }
+
   private async pollWatcher(watcher: AntigravityWatcher): Promise<void> {
     if (watcher.stopped) return;
 
@@ -1853,34 +1890,32 @@ export class UnifiedBridgeCore {
     }
 
     try {
-      if (!fs.existsSync(watcher.transcriptPath)) {
-        return;
-      }
+      let hasParentLines = false;
+      const lines: string[] = [];
 
-      const stats = fs.statSync(watcher.transcriptPath);
-      if (stats.size < watcher.fileOffset) {
-        watcher.fileOffset = 0;
-        watcher.remainder = '';
-        return;
-      }
+      if (fs.existsSync(watcher.transcriptPath)) {
+        const stats = fs.statSync(watcher.transcriptPath);
+        if (stats.size < watcher.fileOffset) {
+          watcher.fileOffset = 0;
+          watcher.remainder = '';
+        } else if (stats.size > watcher.fileOffset) {
+          const bytesToRead = stats.size - watcher.fileOffset;
+          const buffer = Buffer.alloc(bytesToRead);
+          const fd = fs.openSync(watcher.transcriptPath, 'r');
+          try {
+            fs.readSync(fd, buffer, 0, bytesToRead, watcher.fileOffset);
+          } finally {
+            fs.closeSync(fd);
+          }
 
-      if (stats.size === watcher.fileOffset) {
-        return;
+          watcher.fileOffset = stats.size;
+          const chunk = watcher.remainder + buffer.toString('utf8');
+          const splitLines = chunk.split('\n');
+          watcher.remainder = splitLines.pop() ?? '';
+          lines.push(...splitLines);
+          hasParentLines = splitLines.length > 0;
+        }
       }
-
-      const bytesToRead = stats.size - watcher.fileOffset;
-      const buffer = Buffer.alloc(bytesToRead);
-      const fd = fs.openSync(watcher.transcriptPath, 'r');
-      try {
-        fs.readSync(fd, buffer, 0, bytesToRead, watcher.fileOffset);
-      } finally {
-        fs.closeSync(fd);
-      }
-
-      watcher.fileOffset = stats.size;
-      const chunk = watcher.remainder + buffer.toString('utf8');
-      const lines = chunk.split('\n');
-      watcher.remainder = lines.pop() ?? '';
 
       for (const line of lines) {
         const trimmed = line.trim();
@@ -1894,12 +1929,22 @@ export class UnifiedBridgeCore {
 
         await this.handleWatcherTranscriptEntry(watcher, entry);
       }
+
+      // Poll subagents
+      const subResult = await watcher.subagentTracker.poll();
+
+      // If subagents had new tool events or status updates while the parent has no new lines
+      if (subResult.hasUpdates && !hasParentLines) {
+        await this.renderWatcherProgressUpdate(watcher);
+      }
     } catch (err) {
       this.logger.debug('antigravity.poll_watcher_error', { error: String(err) });
     }
   }
 
   private async handleWatcherTranscriptEntry(watcher: AntigravityWatcher, entry: any): Promise<void> {
+    const locale = this.getScopeLocale(watcher.scopeId);
+
     if (entry.type === 'USER_INPUT') {
       const text = typeof entry.content === 'string' ? entry.content : '';
       const preview = text.length > 300 ? text.slice(0, 300) + '…' : text;
@@ -1910,6 +1955,17 @@ export class UnifiedBridgeCore {
       watcher.messageId = null;
       watcher.currentToolLines = [];
       watcher.lastContentPreview = '';
+      return;
+    }
+
+    if (entry.type === 'GENERIC') {
+      const content = typeof entry.content === 'string' ? entry.content : '';
+      if (content.includes('Created the following subagents') || content.includes('conversationId')) {
+        const subResult = await watcher.subagentTracker.poll();
+        if (subResult.hasUpdates) {
+          await this.renderWatcherProgressUpdate(watcher);
+        }
+      }
       return;
     }
 
@@ -1949,6 +2005,12 @@ export class UnifiedBridgeCore {
               : '';
             progressFinal += `\n\n<blockquote expandable>🛠️ <b>已调用工具 (${watcher.currentToolLines.length} 项)</b>\n${recent.join('\n')}${hiddenNote}</blockquote>`;
           }
+
+          const subBlock = watcher.subagentTracker.renderTelegramBlock(locale);
+          if (subBlock) {
+            progressFinal += `\n\n<blockquote expandable>${subBlock}</blockquote>`;
+          }
+
           await this.editMessage(watcher.scopeId, watcher.messageId, progressFinal).catch(() => {});
         }
 
@@ -1960,6 +2022,7 @@ export class UnifiedBridgeCore {
         watcher.messageId = null;
         watcher.currentToolLines = [];
         watcher.lastContentPreview = '';
+        watcher.subagentTracker = new AntigravitySubagentTracker(watcher.conversationId, undefined, this.logger);
         return;
       }
 
@@ -1974,7 +2037,16 @@ export class UnifiedBridgeCore {
           const recent = watcher.currentToolLines.slice(-8);
           messageText += `<blockquote expandable>🛠️ <b>已调用工具 (${watcher.currentToolLines.length} 项)</b>\n${recent.join('\n')}</blockquote>\n\n`;
         }
-        if (watcher.lastContentPreview) {
+
+        const subBlock = watcher.subagentTracker.renderTelegramBlock(locale);
+        if (subBlock) {
+          messageText += `${subBlock}\n\n`;
+        }
+
+        const activeSubSummary = watcher.subagentTracker.getActiveSummaryLine(locale);
+        if (activeSubSummary) {
+          messageText += `⏳ <b>${escapeTelegramHtml(activeSubSummary)}</b>`;
+        } else if (watcher.lastContentPreview) {
           messageText += watcher.lastContentPreview.slice(-3000);
         } else {
           messageText += `⏳ 正在执行步骤 #${entry.step_index ?? '…'}…`;
@@ -2314,7 +2386,7 @@ export class UnifiedBridgeCore {
         if (target !== 'high' && isBoost) {
           this.store.setChatServiceTier(scopeId, null);
         }
-        this.store.setChatSettings(scopeId, null, target);
+        this.store.setChatEffort(scopeId, target);
         this.orchestrator.syncCurrentBackendSettings(scopeId);
         await this.sendMessage(
           scopeId,

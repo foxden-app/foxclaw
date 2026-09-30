@@ -18,6 +18,7 @@ import {
   isTransientNetworkError,
 } from './events.js';
 import { buildAttachmentPrompt } from '../telegram/media.js';
+import { AntigravitySubagentTracker } from './subagents.js';
 import type { Logger } from '../logger.js';
 
 function extractToolSummary(name: string, parameters?: Record<string, unknown>): string | undefined {
@@ -57,17 +58,20 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
   private readonly defaultModel: string;
   private readonly auth: AntigravityAuthManager | undefined;
   private readonly logger: Logger | undefined;
+  private readonly baseDir: string | undefined;
 
   constructor(
     client: AntigravityAppClient,
     defaultModel = 'gemini-3.8-flash',
     auth?: AntigravityAuthManager,
     logger?: Logger,
+    baseDir?: string,
   ) {
     this.client = client;
     this.defaultModel = defaultModel;
     this.auth = auth;
     this.logger = logger;
+    this.baseDir = baseDir ?? auth?.authDir;
   }
 
   async listModels(): Promise<EngineModel[]> {
@@ -123,7 +127,70 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
       effort: request.effort ?? null,
     });
 
+    let subagentTracker: AntigravitySubagentTracker | null = null;
+    let pollTimer: NodeJS.Timeout | null = null;
+    let turnFinished = false;
+
+    const ensureTracker = (convId: string | null | undefined) => {
+      if (!convId || subagentTracker) return;
+      subagentTracker = new AntigravitySubagentTracker(convId, this.baseDir, this.logger);
+    };
+
+    if (request.threadId) {
+      ensureTracker(request.threadId);
+    }
+
+    const stopSubagentPolling = () => {
+      turnFinished = true;
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const startSubagentPolling = () => {
+      if (pollTimer || turnFinished) return;
+      pollTimer = setInterval(async () => {
+        if (turnFinished) {
+          stopSubagentPolling();
+          return;
+        }
+        if (!subagentTracker && agTurn.conversationId) {
+          ensureTracker(agTurn.conversationId);
+        }
+        if (subagentTracker) {
+          try {
+            const res = await subagentTracker.poll();
+            if (res.newToolEvents && res.newToolEvents.length > 0) {
+              for (const ev of res.newToolEvents) {
+                emitter.emit('tool', {
+                  name: `[${ev.subagentName}] ${ev.toolName}`,
+                  args: ev.args,
+                  status: ev.status,
+                  stepIndex: ev.stepIndex,
+                  summary: ev.summary,
+                } satisfies EngineToolEvent);
+              }
+            }
+          } catch {
+            // ignore polling errors
+          }
+        }
+      }, 1000);
+      pollTimer.unref?.();
+    };
+
+    startSubagentPolling();
+
+    let emittedConvId: string | null = null;
     agTurn.on('event', (ev) => {
+      if (ev.conversationId) {
+        ensureTracker(ev.conversationId);
+        if (emittedConvId !== ev.conversationId) {
+          emittedConvId = ev.conversationId;
+          emitter.emit('conversation', ev.conversationId);
+        }
+      }
       switch (ev.kind) {
         case 'text':
           emitter.emit('delta', ev.delta);
@@ -139,6 +206,7 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
           } satisfies EngineToolEvent);
           break;
         case 'result': {
+          stopSubagentPolling();
           const res: EngineTurnResult = {
             kind: 'result',
             status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
@@ -161,34 +229,45 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
     });
 
     agTurn.on('error', (err) => {
+      stopSubagentPolling();
       emitter.emit('error', err);
     });
 
     agTurn.on('exit', (code) => {
+      stopSubagentPolling();
       emitter.emit('exit', code);
     });
 
     return {
-      turnId: agTurn.conversationId ?? undefined,
-      cancel: () => agTurn.cancel(),
+      get turnId() {
+        return agTurn.conversationId ?? undefined;
+      },
+      cancel: () => {
+        stopSubagentPolling();
+        agTurn.cancel();
+      },
       waitForResult: async () => {
-        const ev = await agTurn.waitForResult();
-        if (!ev || ev.kind !== 'result') return null;
-        return {
-          kind: 'result',
-          status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
-          response: ev.response || ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : ''),
-          error: ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : undefined),
-          conversationId: ev.conversationId,
-          usage: ev.usage
-            ? {
-                inputTokens: ev.usage.input_tokens,
-                outputTokens: ev.usage.output_tokens,
-                cachedTokens: ev.usage.cache_read_tokens,
-                totalTokens: ev.usage.total_tokens,
-              }
-            : undefined,
-        };
+        try {
+          const ev = await agTurn.waitForResult();
+          if (!ev || ev.kind !== 'result') return null;
+          return {
+            kind: 'result',
+            status: ev.status === 'SUCCESS' ? 'SUCCESS' : 'ERROR',
+            response: ev.response || ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : ''),
+            error: ev.error || (ev.status === 'ERROR' ? 'Antigravity execution failed' : undefined),
+            conversationId: ev.conversationId,
+            usage: ev.usage
+              ? {
+                  inputTokens: ev.usage.input_tokens,
+                  outputTokens: ev.usage.output_tokens,
+                  cachedTokens: ev.usage.cache_read_tokens,
+                  totalTokens: ev.usage.total_tokens,
+                }
+              : undefined,
+          };
+        } finally {
+          stopSubagentPolling();
+        }
       },
       on: (event: string, listener: (...args: any[]) => void) => {
         emitter.on(event, listener);

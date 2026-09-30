@@ -28,7 +28,7 @@ import {
 } from './auth/notifications.js';
 import type { CodexAuthPoolStats } from './store/database.js';
 import type { AppLocale, RuntimeStatus } from './types.js';
-import { getAntigravityTelegramCommands } from './i18n.js';
+import { getAntigravityTelegramCommands, getTelegramCommands } from './i18n.js';
 import { installBundledCodexSkills } from './codex_skills.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
@@ -445,7 +445,8 @@ async function runSendVoiceCli(): Promise<void> {
   }
 
   const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
-  const { botId, botToken } = resolveTelegramVoiceTarget(config.tgBotTokens, inferredBotId);
+  const allTokens = [...config.codexBotTokens, ...config.antigravityBotTokens];
+  const { botId, botToken } = resolveTelegramVoiceTarget(allTokens, inferredBotId);
   const { BridgeStore } = await import('./store/database.js');
   const store = new BridgeStore(config.storePath);
   let chatId = parsed.chatId;
@@ -498,7 +499,8 @@ async function runSendMediaCli(): Promise<void> {
   const plan = planTelegramOutboundMedia(filePath);
 
   const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
-  const { botId, botToken } = resolveTelegramVoiceTarget(config.tgBotTokens, inferredBotId);
+  const allTokens = [...config.codexBotTokens, ...config.antigravityBotTokens];
+  const { botId, botToken } = resolveTelegramVoiceTarget(allTokens, inferredBotId);
   const { BridgeStore } = await import('./store/database.js');
   const store = new BridgeStore(config.storePath);
   let chatId = parsed.chatId;
@@ -639,6 +641,16 @@ function formatRuntimeStatusSummary(status: RuntimeStatus): string {
   } else if (status.codexHome) {
     lines.push(`Codex home: ${status.codexHome}`);
   }
+  const agyHomes = (status.bots ?? [])
+    .flatMap(bot => (bot as any).antigravityHome ? [{ label: bot.username ? `@${bot.username}` : bot.id, home: (bot as any).antigravityHome }] : []);
+  if (agyHomes.length > 1) {
+    lines.push('Antigravity homes:');
+    for (const { label, home } of agyHomes) {
+      lines.push(`  ${label}: ${home}`);
+    }
+  } else if (agyHomes.length === 1) {
+    lines.push(`Antigravity home: ${agyHomes[0]!.home}`);
+  }
   if (status.codexAppServer) {
     lines.push(`App server: ${status.codexAppServer.running ? 'running' : 'stopped'}${status.codexAppServer.pid ? ` pid=${status.codexAppServer.pid}` : ''}${status.codexAppServer.port ? ` port=${status.codexAppServer.port}` : ''}`);
   }
@@ -721,7 +733,7 @@ async function runServeCli(): Promise<void> {
     { AntigravityTelegramRuntime },
     { UnifiedBridgeCore },
     { AntigravityAppClient },
-    { AntigravityAuthManager },
+    { AntigravityAuthManager, linkAntigravityAuthTokens },
   ] = await Promise.all([
     import('./channels/bridge_messaging_router.js'),
     import('./channels/telegram/telegram_messaging_port.js'),
@@ -794,146 +806,167 @@ async function runServeCli(): Promise<void> {
       await activeOpencodeRuntime.start();
       logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
     }
-    if (config.antigravityBotTokens.length > 0) {
-      for (const token of config.antigravityBotTokens) {
-        const bot = new TelegramGateway(
-          token,
-          config.tgAllowedUserId,
-          config.tgAllowedChatId,
-          config.telegramPollIntervalMs,
-          store,
-          logger,
-          true,
-          getAntigravityTelegramCommands,
-        );
-        const id = await bot.initializeIdentity();
-        const username = await bot.resolveUsername();
+    const totalBots = config.codexBotTokens.length + config.antigravityBotTokens.length;
+    const namespacedScopes = totalBots > 1;
 
-        const sharedDefaultRuntime = config.antigravityDefaultRuntimeBotToken
+    type RuntimeSeed = {
+      id: string;
+      username: string | null;
+      home: string;
+      authDir: string;
+      sharedDefaultRuntime: boolean;
+      config: typeof config;
+      bot: InstanceType<typeof TelegramGateway>;
+      app: InstanceType<typeof CodexAppClient>;
+      antigravityApp: InstanceType<typeof AntigravityAppClient>;
+      antigravityAuth: InstanceType<typeof AntigravityAuthManager>;
+      antigravityHome: string;
+      antigravityAuthDir: string;
+      defaultBackend: 'codex' | 'antigravity';
+    };
+    type Runtime = RuntimeSeed & {
+      core: InstanceType<typeof UnifiedBridgeCore>;
+      telegram: InstanceType<typeof TelegramChannelAdapter>;
+    };
+    const seeds: RuntimeSeed[] = [];
+    const canonicalAuthDir = config.codexAuthDir ?? config.codexHome ?? path.join(os.homedir(), '.codex');
+
+    type BotSpec = {
+      token: string;
+      backend: 'codex' | 'antigravity';
+      isDefaultRuntimeForBackend: boolean;
+    };
+    const specs: BotSpec[] = [
+      ...config.codexBotTokens.map((token, i) => ({
+        token,
+        backend: 'codex' as const,
+        isDefaultRuntimeForBackend: config.tgDefaultRuntimeBotToken
+          ? config.tgDefaultRuntimeBotToken === token
+          : i === 0,
+      })),
+      ...config.antigravityBotTokens.map((token, i) => ({
+        token,
+        backend: 'antigravity' as const,
+        isDefaultRuntimeForBackend: config.antigravityDefaultRuntimeBotToken
           ? config.antigravityDefaultRuntimeBotToken === token
-          : (token === config.antigravityBotTokens[0]);
+          : i === 0,
+      })),
+    ];
 
-        let home: string;
-        let authDir: string;
-        let app: InstanceType<typeof AntigravityAppClient>;
-        let auth: InstanceType<typeof AntigravityAuthManager>;
+    const identities = await Promise.all(specs.map(async (spec) => {
+      const bot = new TelegramGateway(
+        spec.token,
+        config.tgAllowedUserId,
+        config.tgAllowedChatId,
+        config.telegramPollIntervalMs,
+        store!,
+        logger,
+        namespacedScopes,
+        spec.backend === 'antigravity' ? getAntigravityTelegramCommands : getTelegramCommands,
+      );
+      const id = await bot.initializeIdentity();
+      const username = await bot.resolveUsername();
+      return { ...spec, bot, id, username };
+    }));
 
-        if (sharedDefaultRuntime) {
-          home = os.homedir();
-          authDir = config.antigravityAuthDir;
-          app = sharedAntigravityApp!;
-          auth = sharedAntigravityAuth!;
-        } else {
-          home = prepareTelegramBotHome(
-            DEFAULT_ANTIGRAVITY_TELEGRAM_HOME,
-            id,
-            username,
-            null,
+    for (const { token, backend, isDefaultRuntimeForBackend, bot, id, username } of identities) {
+      if (seeds.some((runtime) => runtime.id === id)) {
+        throw new Error(`Duplicate Telegram bot identity detected: ${id}`);
+      }
+
+      // Codex environment
+      const isCodexDefault = backend === 'codex' && isDefaultRuntimeForBackend;
+      const codexHome = isCodexDefault
+        ? (config.codexHome ?? path.join(os.homedir(), '.codex'))
+        : prepareTelegramBotHome(DEFAULT_CODEX_TELEGRAM_HOME, id, username, null);
+      const codexAuthDir = isCodexDefault ? (config.codexAuthDir ?? codexHome) : codexHome;
+      if (!isCodexDefault) {
+        fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+      }
+      installBundledCodexSkills(packageRoot, codexHome);
+      const codexAppAutolaunch = isCodexDefault ? config.codexAppAutolaunch : false;
+      const codexAppServerStatePath = isCodexDefault
+        ? config.codexAppServerStatePath
+        : path.join(APP_HOME, 'runtime', `codex-app-server-${id}.json`);
+      const codexAppServerLogPath = isCodexDefault
+        ? config.codexAppServerLogPath
+        : path.join(APP_HOME, 'logs', `codex-app-server-${id}.log`);
+      const codexApp = (isCodexDefault && sharedCodexApp)
+        ? sharedCodexApp
+        : new CodexAppClient(
+            config.codexCliBin,
+            config.codexAppLaunchCmd,
+            codexAppAutolaunch,
+            codexAppServerStatePath,
+            codexAppServerLogPath,
+            logger,
+            { CODEX_HOME: codexHome },
+            [
+              ...codexApiProviderOverrides,
+              ...(isCodexDefault ? [] : ['cli_auth_credentials_store="file"']),
+            ],
           );
-          authDir = path.join(home, '.gemini', 'antigravity-cli');
-          fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
-          app = new AntigravityAppClient(config.antigravityCliBin, logger, { HOME: home });
-          auth = new AntigravityAuthManager(authDir, logger);
-        }
 
-        const runtimeConfig = {
-          ...config,
-          antigravityBotToken: token,
-          antigravityBotTokens: [token],
-          tgScopeBotId: id,
-          antigravityAuthDir: authDir,
-        };
+      // Antigravity environment
+      const isAntigravityDefault = backend === 'antigravity' && isDefaultRuntimeForBackend;
+      let antigravityHome: string;
+      let antigravityAuthDir: string;
+      let antigravityApp: InstanceType<typeof AntigravityAppClient>;
+      let antigravityAuth: InstanceType<typeof AntigravityAuthManager>;
 
-        const runtime = new AntigravityTelegramRuntime(runtimeConfig, store, logger, {
-          botToken: token,
-          botId: id,
-          botUsername: username ?? undefined,
-          sharedDefaultRuntime,
-          home,
-          authDir,
-          codexApp: sharedCodexApp ?? undefined,
-          app,
-          auth,
-          selfUpdater,
-        });
-        await runtime.start();
-        activeAntigravityRuntimes.push(runtime);
-        logger.info('antigravity.bridge.started', runtime.getRuntimeStatus());
+      if (isAntigravityDefault) {
+        antigravityHome = os.homedir();
+        antigravityAuthDir = config.antigravityAuthDir;
+        antigravityApp = sharedAntigravityApp!;
+        antigravityAuth = sharedAntigravityAuth!;
+      } else {
+        antigravityHome = prepareTelegramBotHome(
+          DEFAULT_ANTIGRAVITY_TELEGRAM_HOME,
+          id,
+          username,
+          null,
+        );
+        antigravityAuthDir = path.join(antigravityHome, '.gemini', 'antigravity-cli');
+        fs.mkdirSync(antigravityAuthDir, { recursive: true, mode: 0o700 });
+        linkAntigravityAuthTokens(config.antigravityAuthDir, antigravityAuthDir);
+        antigravityApp = new AntigravityAppClient(config.antigravityCliBin, logger, { HOME: antigravityHome });
+        antigravityAuth = new AntigravityAuthManager(antigravityAuthDir, logger);
       }
+
+      const runtimeConfig = {
+        ...config,
+        tgBotToken: token,
+        tgBotTokens: [token],
+        tgScopeBotId: id,
+        codexAuthDir,
+        codexHome,
+        antigravityHome,
+        antigravityAuthDir,
+        codexAppAutolaunch,
+        codexAppServerStatePath,
+        codexAppServerLogPath,
+      };
+
+      if (namespacedScopes && (isCodexDefault || isAntigravityDefault)) {
+        store!.migrateTelegramUnnamespacedScope(id, config.tgAllowedUserId);
+      }
+
+      seeds.push({
+        id,
+        username,
+        home: codexHome,
+        authDir: codexAuthDir,
+        sharedDefaultRuntime: isCodexDefault || isAntigravityDefault,
+        config: runtimeConfig,
+        bot,
+        app: codexApp,
+        antigravityApp,
+        antigravityAuth,
+        antigravityHome,
+        antigravityAuthDir,
+        defaultBackend: backend,
+      });
     }
-    if (config.tgMultiBotMode) {
-      type RuntimeSeed = {
-        id: string;
-        home: string;
-        authDir: string;
-        sharedDefaultRuntime: boolean;
-        config: typeof config;
-        bot: InstanceType<typeof TelegramGateway>;
-        app: InstanceType<typeof CodexAppClient>;
-      };
-      type Runtime = RuntimeSeed & {
-        core: InstanceType<typeof UnifiedBridgeCore>;
-        telegram: InstanceType<typeof TelegramChannelAdapter>;
-      };
-      const seeds: RuntimeSeed[] = [];
-      const canonicalAuthDir = config.codexAuthDir ?? config.codexHome ?? path.join(os.homedir(), '.codex');
-      const identities = await Promise.all(config.tgBotTokens.map(async (token) => {
-        const bot = new TelegramGateway(
-          token,
-          config.tgAllowedUserId,
-          config.tgAllowedChatId,
-          config.telegramPollIntervalMs,
-          store!,
-          logger,
-          true,
-        );
-        const id = await bot.initializeIdentity();
-        const username = await bot.resolveUsername();
-        return { token, bot, id, username };
-      }));
-      for (const { token, bot, id, username } of identities) {
-        if (seeds.some((runtime) => runtime.id === id)) {
-          throw new Error(`TG_BOT_TOKENS contains duplicate Telegram bot identity: ${id}`);
-        }
-        const sharedDefaultRuntime = config.tgDefaultRuntimeBotToken === token;
-        const home = prepareTelegramBotHome(DEFAULT_CODEX_TELEGRAM_HOME, id, username,
-          sharedDefaultRuntime ? (config.codexHome ?? path.join(os.homedir(), '.codex')) : null);
-        const authDir = sharedDefaultRuntime ? canonicalAuthDir : home;
-        if (!sharedDefaultRuntime) {
-          fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-        }
-        installBundledCodexSkills(packageRoot, home);
-        const runtimeConfig = {
-          ...config,
-          tgBotToken: token,
-          tgBotTokens: [token],
-          tgScopeBotId: id,
-          codexAuthDir: sharedDefaultRuntime ? config.codexAuthDir : home,
-          codexHome: home,
-          codexAppAutolaunch: sharedDefaultRuntime ? config.codexAppAutolaunch : false,
-          codexAppServerStatePath: sharedDefaultRuntime
-            ? config.codexAppServerStatePath
-            : path.join(APP_HOME, 'runtime', `codex-app-server-${id}.json`),
-          codexAppServerLogPath: sharedDefaultRuntime
-            ? config.codexAppServerLogPath
-            : path.join(APP_HOME, 'logs', `codex-app-server-${id}.log`),
-        };
-        const childEnv = { CODEX_HOME: home };
-        const app = new CodexAppClient(
-          runtimeConfig.codexCliBin,
-          runtimeConfig.codexAppLaunchCmd,
-          runtimeConfig.codexAppAutolaunch,
-          runtimeConfig.codexAppServerStatePath,
-          runtimeConfig.codexAppServerLogPath,
-          logger,
-          childEnv,
-          [
-            ...codexApiProviderOverrides,
-            ...(sharedDefaultRuntime ? [] : ['cli_auth_credentials_store="file"']),
-          ],
-        );
-        seeds.push({ id, home, authDir, sharedDefaultRuntime, config: runtimeConfig, bot, app });
-      }
 
       let authSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
       const authRuntimeIds = seeds.map((runtime) => runtime.id);
@@ -998,7 +1031,9 @@ async function runServeCli(): Promise<void> {
             connected: running && Boolean(statuses[index]?.connected),
             activeTurns: running ? (statuses[index]?.activeTurns ?? 0) : 0,
             runtimeKind: runtime.sharedDefaultRuntime ? 'default' as const : 'isolated' as const,
+            defaultBackend: runtime.defaultBackend,
             codexHome: statuses[index]?.codexHome ?? runtime.home,
+            antigravityHome: runtime.antigravityHome,
             ...(statuses[index]?.codexAppServer ? { codexAppServer: statuses[index].codexAppServer } : {}),
           })),
           ...(weixinStatus ? {
@@ -1007,20 +1042,6 @@ async function runServeCli(): Promise<void> {
               activeTurns: running ? weixinStatus.activeTurns : 0,
               ...(weixinStatus.codexAppServer ? { codexAppServer: weixinStatus.codexAppServer } : {}),
             },
-          } : {}),
-          ...(activeAntigravityRuntimes.length > 0 ? {
-            antigravityBots: activeAntigravityRuntimes.map((runtime) => {
-              const status = runtime.getRuntimeStatus();
-              return {
-                id: runtime.id,
-                username: status.botUsername ?? runtime.botGateway.username,
-                connected: running && Boolean(status.connected),
-                activeTurns: running ? (status.activeTurns ?? 0) : 0,
-                runtimeKind: runtime.isSharedDefaultRuntime ? 'default' as const : 'isolated' as const,
-                home: runtime.botHome,
-                authDir: runtime.authDirectory,
-              };
-            }),
           } : {}),
           authMirror: mirror.getStatus(),
           authSync: authSync?.getStatus() ?? null,
@@ -1133,15 +1154,16 @@ async function runServeCli(): Promise<void> {
           store,
           logger,
           seed.bot,
-          sharedAntigravityApp ?? undefined,
-          sharedAntigravityAuth ?? undefined,
+          seed.antigravityApp,
+          seed.antigravityAuth,
           telegramMessaging,
           {
             codexApp: seed.app,
             codexCore,
-            antigravityApp: sharedAntigravityApp ?? undefined,
-            antigravityAuth: sharedAntigravityAuth ?? undefined,
-            defaultBackendId: 'codex',
+            antigravityApp: seed.antigravityApp,
+            antigravityAuth: seed.antigravityAuth,
+            defaultBackendId: seed.defaultBackend,
+            selfUpdater,
           },
         );
         runtimes.push({ ...seed, core, telegram: new TelegramChannelAdapter(core) });
@@ -1285,285 +1307,6 @@ async function runServeCli(): Promise<void> {
 
       process.on('SIGINT', () => void shutdown('SIGINT'));
       process.on('SIGTERM', () => void shutdown('SIGTERM'));
-      return;
-    }
-    const singleCodexHome = config.codexHome ?? path.join(os.homedir(), '.codex');
-    installBundledCodexSkills(packageRoot, singleCodexHome);
-    const bot = new TelegramGateway(
-      config.tgBotToken,
-      config.tgAllowedUserId,
-      config.tgAllowedChatId,
-      config.telegramPollIntervalMs,
-      store,
-      logger,
-    );
-    const app = sharedCodexApp ?? new CodexAppClient(
-      config.codexCliBin,
-      config.codexAppLaunchCmd,
-      config.codexAppAutolaunch,
-      config.codexAppServerStatePath,
-      config.codexAppServerLogPath,
-      logger,
-      config.codexHome ? { CODEX_HOME: config.codexHome } : null,
-      codexApiProviderOverrides,
-    );
-    const telegramMessaging = new TelegramMessagingPort(bot);
-    const weixinMessaging = config.wxEnabled
-      ? new WeixinMessagingPort(store, (id) => loadWeixinAccount(config.weixinAccountsDir, id))
-      : null;
-    const outbound = new BridgeMessagingRouter(telegramMessaging, weixinMessaging);
-    void outbound;
-    let singleAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
-    let singleMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
-    let core: InstanceType<typeof UnifiedBridgeCore> | null = null;
-    const writeSingleStatus = (running = true): void => {
-      const coreStatus = core?.getRuntimeStatus();
-      writeRuntimeStatus(config.statusPath, {
-        running,
-        connected: running && Boolean(coreStatus?.connected),
-        userAgent: coreStatus?.userAgent ?? app.getUserAgent(),
-        codexHome: coreStatus?.codexHome ?? singleCodexHome,
-        ...(coreStatus?.codexAppServer ? { codexAppServer: coreStatus.codexAppServer } : app.getServerStatus() ? { codexAppServer: app.getServerStatus()! } : {}),
-        botUsername: coreStatus?.botUsername ?? bot.username,
-        currentBindings: store?.countBindings() ?? 0,
-        pendingApprovals: store?.countPendingApprovals() ?? 0,
-        pendingUserInputs: store?.countPendingUserInputs() ?? 0,
-        queuedTurns: store?.countQueuedTurnInputs() ?? 0,
-        activeTurns: coreStatus?.activeTurns ?? 0,
-        lastError: null,
-        updatedAt: new Date().toISOString(),
-        channels: { telegram: running, weixin: running && config.wxEnabled },
-        authMirror: singleMirror?.getStatus() ?? null,
-        authSync: singleAuthSync?.getStatus() ?? null,
-      });
-    };
-    const singleAuthDir = config.codexAuthDir ?? config.codexHome ?? process.env.CODEX_AUTH_DIR ?? path.join(os.homedir(), '.codex');
-    const singleLocalAuthRefreshLease = createLocalAuthRefreshLease();
-    const singleAuthSyncLocalIdle = (): boolean => Boolean(core?.isIdleForServiceUpdate())
-      && (!singleMirror || singleMirror.isIdle());
-    const singleClusterUpdateScheduler = createClusterUpdateScheduler({
-      selfUpdater,
-      canUpdate: () => singleAuthSyncLocalIdle()
-        && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
-      currentVersion: readPackageVersion,
-      logger,
-    });
-    const singleCoordinator = config.authSyncEnabled ? {
-      canSelfUpdate: (): boolean => singleAuthSyncLocalIdle()
-        && (singleAuthSync ? singleAuthSync.isIdle() : singleLocalAuthRefreshLease.isIdle()),
-      authCandidateUpdated: (runtimeId: string, candidateName: string): Promise<void> =>
-        singleMirror?.syncRuntimeCandidate(runtimeId, candidateName).then(() => undefined) ?? Promise.resolve(),
-      authCandidateDeleted: async (_runtimeId: string, candidateName: string, reason: string | null = null): Promise<void> => {
-        await singleMirror?.deleteCandidate(candidateName);
-        await singleAuthSync?.publishCandidateDeletion(candidateName, reason);
-      },
-      recoverAuthCandidate: async (runtimeId: string, candidateName: string, options: { crossNode?: boolean } = {}): Promise<boolean> => {
-        const local = await singleMirror?.recoverRuntimeCandidate(runtimeId, candidateName) ?? null;
-        if (local) return true;
-        if (options.crossNode === false) return false;
-        const current = await singleMirror?.readRuntimeCandidate(runtimeId, candidateName)
-          ?? await singleMirror?.readNewestCandidate(candidateName)
-          ?? null;
-        return await singleAuthSync?.requestRecovery(candidateName, {
-          accountId: current?.accountId ?? null,
-          quotaIdentityId: current?.quotaIdentityId ?? null,
-          lastRefreshMs: current?.lastRefreshMs ?? null,
-        }) ?? false;
-      },
-      acquireAuthRefreshLease: (reason: string) => singleAuthSync?.acquireRefreshLease(reason)
-        ?? singleLocalAuthRefreshLease.acquire(reason),
-      releaseAuthRefreshLease: (leaseId: string | null) => singleAuthSync?.releaseRefreshLease(leaseId)
-        ?? singleLocalAuthRefreshLease.release(leaseId),
-      getAuthSyncStatus: () => singleAuthSync?.getStatus() ?? null,
-      authSyncSafeAll: async () => {
-        const local = await singleMirror?.syncAllRuntimeCandidates() ?? { synced: 0, skipped: 0 };
-        const remote = await singleAuthSync?.pushAll() ?? { sent: 0, skipped: 0 };
-        return {
-          localSynced: local.synced,
-          localSkipped: local.skipped,
-          sent: remote.sent,
-          skipped: remote.skipped,
-        };
-      },
-      authSyncPushAll: () => singleAuthSync?.pushAll() ?? Promise.resolve({ sent: 0, skipped: 0 }),
-      authSyncTest: () => singleAuthSync?.testPeers() ?? Promise.resolve({ sent: 0, replied: 0, missing: [] }),
-      authSyncAudit: () => singleAuthSync?.auditCluster() ?? Promise.resolve(null),
-      statusUpdated: (_status: import('./types.js').RuntimeStatus): void => {
-        void _status;
-        writeSingleStatus(true);
-      },
-    } : null;
-    if (config.authSyncEnabled) {
-      singleMirror = new AuthCandidateMirror(
-        singleAuthDir,
-        [{
-          id: 'default',
-          label: bot.username ? `@${bot.username}` : 'default',
-          authDir: singleAuthDir,
-          validate: async (context) => validateRefreshedAuthCandidate({
-            id: 'default',
-            authDir: singleAuthDir,
-            app,
-          }, context.candidateName),
-        }],
-        logger,
-        path.join(APP_HOME, 'runtime', 'auth-mirror.json'),
-        {
-          onSynced: async (event): Promise<void> => {
-            await singleAuthSync?.publishCandidate(event.record.candidateName);
-          },
-          onRemoteImported: (event): void => {
-            restoreImportedAuthCandidateState(store!, event.record.candidateName, ['default']);
-          },
-        },
-      );
-      await singleMirror.initialize();
-      activeAuthMirror = singleMirror;
-    }
-    const singleOutbound = new BridgeMessagingRouter(telegramMessaging, null);
-    const singleCodexCore = new BridgeSessionCore(
-      config,
-      store,
-      logger,
-      bot,
-      app,
-      singleOutbound,
-      selfUpdater,
-      singleCoordinator,
-      false,
-    );
-    core = new UnifiedBridgeCore(
-      config,
-      store,
-      logger,
-      bot,
-      sharedAntigravityApp ?? undefined,
-      sharedAntigravityAuth ?? undefined,
-      telegramMessaging,
-      {
-        codexApp: app,
-        codexCore: singleCodexCore,
-        antigravityApp: sharedAntigravityApp ?? undefined,
-        antigravityAuth: sharedAntigravityAuth ?? undefined,
-        defaultBackendId: 'codex',
-        selfUpdater,
-      },
-    );
-    if (config.authSyncEnabled && singleMirror) {
-      await bot.initializeIdentity();
-      singleAuthSync = new CrossNodeAuthSync(
-        buildAuthSyncConfig(config, bot.username ? `@${bot.username}` : 'default'),
-        logger,
-        {
-          send: async (peer: string, envelope: string): Promise<void> => {
-            await bot.sendDocument(
-              peer,
-              `foxclaw-auth-sync-${Date.now()}.json`,
-              Buffer.from(envelope, 'utf8'),
-              'FOXCLAW_AUTH_SYNC_V1',
-            );
-          },
-        },
-        {
-          readLocalCandidate: (candidateName: string) => singleMirror!.readNewestCandidate(candidateName),
-          listLocalCandidates: () => singleMirror!.listNewestCandidates(),
-          listLocalCandidateCopies: () => singleMirror!.listCandidateCopies(),
-          validateCandidate: async (candidateName: string, raw: string, expectedAccountId: string) => {
-            if (!singleAuthSyncLocalIdle()) {
-              return { ok: false, reason: 'runtime is not idle' };
-            }
-            return core!.validateExternalCodexAuthCandidate(candidateName, raw, expectedAccountId);
-          },
-          importCandidate: (candidateName, raw, source) => singleMirror!.importExternalCandidate(candidateName, raw, source),
-          markCandidateState: (candidateName, state, expected) => markAuditedAuthCandidateState(
-            store!,
-            singleMirror!,
-            candidateName,
-            state,
-            expected,
-            ['default'],
-          ),
-          deleteLocalCandidate: async (candidateName, source) => {
-            if (!singleAuthSyncLocalIdle()) {
-              return { ok: false, deleted: false, reason: 'runtime is not idle' };
-            }
-            await singleMirror!.deleteCandidate(candidateName);
-            store!.deleteCodexAuthCandidate(candidateName);
-            await core!.handleExternalCodexAuthCandidateDeleted(candidateName, source.reason ?? null);
-            return { ok: true, deleted: true, reason: source.reason ?? null };
-          },
-          scheduleServiceUpdate: (source) => singleClusterUpdateScheduler.schedule(source),
-          isIdle: singleAuthSyncLocalIdle,
-          notify: createAuthSyncNotifier(store!, bot, authNotificationAggregator, {
-            quietAuthPoolMode: () => config.authAutoDeleteNeedsRepair,
-            suppressBackgroundNotifications: () => true,
-          }),
-        },
-      );
-      await singleAuthSync.initialize();
-      activeAuthSync = singleAuthSync;
-      attachTelegramAuthSync(bot, singleAuthSync, config, logger);
-      singleAuthSync.start();
-      void publishPendingClusterUpdateBroadcast(singleAuthSync, logger);
-      singleMirror.start();
-    }
-    const telegram = new TelegramChannelAdapter(core);
-    managedApps = [app];
-    activeTelegramAdapters = [telegram];
-    if (config.wxEnabled) {
-      weixinAdapter = new WeixinChannelAdapter(core, store, config, logger);
-    }
-
-    process.on('unhandledRejection', (error) => {
-      logger.error('process.unhandled_rejection', { error: serializeError(error) });
-    });
-
-    process.on('uncaughtException', (error) => {
-      logger.error('process.uncaught_exception', { error: serializeError(error) });
-    });
-
-    await telegram.start();
-    if (weixinAdapter) {
-      await weixinAdapter.start();
-    }
-    writeSingleStatus(true);
-    logger.info('bridge.started', core.getRuntimeStatus());
-
-    const shutdown = async (signal: string): Promise<void> => {
-      logger.info('bridge.shutting_down', { signal });
-      await authNotificationAggregator.flushAll();
-      singleAuthSync?.stop();
-      singleMirror?.stop();
-      await weixinAdapter?.stop();
-      await telegram.stop();
-      await activeOpencodeRuntime?.stop();
-      await Promise.all(activeAntigravityRuntimes.map((runtime) => runtime.stop().catch(() => {})));
-      writeRuntimeStatus(config.statusPath, {
-        running: false,
-        connected: false,
-        userAgent: app.getUserAgent(),
-        codexHome: singleCodexHome,
-        codexAppServer: app.getServerStatus(),
-        botUsername: bot.username,
-        currentBindings: 0,
-        pendingApprovals: 0,
-        pendingUserInputs: 0,
-        queuedTurns: 0,
-        activeTurns: 0,
-        lastError: null,
-        updatedAt: new Date().toISOString(),
-        channels: { telegram: false, weixin: false },
-      });
-      await app.stop({ terminateServer: true }).catch((error) => {
-        logger.warn('codex.app-server.stop_failed', { error: serializeError(error) });
-      });
-      store?.close();
-      processLock.release();
-      process.exit(0);
-    };
-
-    process.on('SIGINT', () => void shutdown('SIGINT'));
-    process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
     await authNotificationAggregator.flushAll().catch(() => {});
     activeAuthSync?.stop();
@@ -2156,14 +1899,22 @@ async function configureEnvInteractively(envPath: string, existed: boolean): Pro
 
     Object.assign(updates, await maybeSaveProxyEnvFromShell(rl, envPath));
 
-    const tokens = sanitizeEnvInput(await rl.question('Telegram bot token(s), comma-separated (TG_BOT_TOKENS): '));
-    if (tokens) {
-      updates.TG_BOT_TOKENS = tokens;
-      if (tokens.split(',').map((token) => token.trim()).some((token) => !/^\d+:[A-Za-z0-9_-]+$/.test(token))) {
-        warnings.push('One or more TG_BOT_TOKENS values do not look like standard Telegram bot tokens.');
+    const codexTokens = sanitizeEnvInput(await rl.question('Codex Telegram bot token(s), comma-separated (CODEX_BOT_TOKENS): '));
+    if (codexTokens) {
+      updates.CODEX_BOT_TOKENS = codexTokens;
+      if (codexTokens.split(',').map((token) => token.trim()).some((token) => !/^\d+:[A-Za-z0-9_-]+$/.test(token))) {
+        warnings.push('One or more CODEX_BOT_TOKENS values do not look like standard Telegram bot tokens.');
       }
     } else {
-      skipped.push('TG_BOT_TOKENS');
+      skipped.push('CODEX_BOT_TOKENS');
+    }
+
+    const agyTokens = sanitizeEnvInput(await rl.question('Antigravity Telegram bot token(s), comma-separated (ANTIGRAVITY_BOT_TOKENS) [optional]: '));
+    if (agyTokens) {
+      updates.ANTIGRAVITY_BOT_TOKENS = agyTokens;
+      if (agyTokens.split(',').map((token) => token.trim()).some((token) => !/^\d+:[A-Za-z0-9_-]+$/.test(token))) {
+        warnings.push('One or more ANTIGRAVITY_BOT_TOKENS values do not look like standard Telegram bot tokens.');
+      }
     }
 
     const userId = sanitizeEnvInput(await rl.question('Telegram numeric user ID (TG_ALLOWED_USER_ID): '));
@@ -2388,32 +2139,30 @@ function stopService(): void {
 
 function runDoctorChecks(): boolean {
   const configuredCodexBin = process.env.CODEX_CLI_BIN;
+  const codexTokens = [
+    ...(process.env.CODEX_BOT_TOKENS ?? '').split(','),
+    process.env.CODEX_BOT_TOKEN ?? '',
+  ].map((value) => value.trim()).filter(Boolean);
+  const antigravityTokens = [
+    ...(process.env.ANTIGRAVITY_BOT_TOKENS ?? '').split(','),
+    process.env.ANTIGRAVITY_BOT_TOKEN ?? '',
+  ].map((value) => value.trim()).filter(Boolean);
+
   const checks: Array<[string, boolean]> = [
     ['node >= 24', Number(process.versions.node.split('.')[0]) >= 24],
     ['codex cli available', hasConfiguredCommand(configuredCodexBin, 'codex')],
-    ['telegram bot token(s) configured', Boolean(process.env.TG_BOT_TOKENS?.trim() || process.env.TG_BOT_TOKEN?.trim())],
+    ['telegram bot token(s) configured', codexTokens.length > 0 || antigravityTokens.length > 0],
     ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
   ];
   if (process.env.OPENCODE_BOT_TOKEN?.trim()) {
     const configuredOpencodeBin = process.env.OPENCODE_CLI_BIN;
     checks.push(['opencode cli available', hasConfiguredCommand(configuredOpencodeBin, 'opencode')]);
-    const codexTokens = [
-      ...(process.env.TG_BOT_TOKENS ?? '').split(','),
-      process.env.TG_BOT_TOKEN ?? '',
-    ].map((value) => value.trim()).filter(Boolean);
-    checks.push(['OpenCode uses an independent Telegram bot', !codexTokens.includes(process.env.OPENCODE_BOT_TOKEN.trim())]);
+    const allOtherTokens = [...codexTokens, ...antigravityTokens];
+    checks.push(['OpenCode uses an independent Telegram bot', !allOtherTokens.includes(process.env.OPENCODE_BOT_TOKEN.trim())]);
   }
-  const antigravityTokens = [
-    ...(process.env.ANTIGRAVITY_BOT_TOKENS ?? '').split(','),
-    process.env.ANTIGRAVITY_BOT_TOKEN ?? '',
-  ].map((value) => value.trim()).filter(Boolean);
   if (antigravityTokens.length > 0) {
     const configuredAgyBin = process.env.ANTIGRAVITY_CLI_BIN;
     checks.push(['antigravity (agy) cli available', hasConfiguredCommand(configuredAgyBin, 'agy')]);
-    const codexTokens = [
-      ...(process.env.TG_BOT_TOKENS ?? '').split(','),
-      process.env.TG_BOT_TOKEN ?? '',
-    ].map((value) => value.trim()).filter(Boolean);
     const hasConflict = antigravityTokens.some((t) => codexTokens.includes(t));
     checks.push(['Antigravity uses independent Telegram bot(s)', !hasConflict]);
     const authDir = process.env.ANTIGRAVITY_AUTH_DIR || path.join(os.homedir(), '.gemini', 'antigravity-cli');

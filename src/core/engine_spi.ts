@@ -52,6 +52,7 @@ export interface EngineTurnExecution {
   on(event: 'result', listener: (result: EngineTurnResult) => void): void;
   on(event: 'error', listener: (error: Error) => void): void;
   on(event: 'exit', listener: (code: number | null) => void): void;
+  on(event: 'conversation', listener: (conversationId: string) => void): void;
 }
 
 export interface EngineTurnErrorContext {

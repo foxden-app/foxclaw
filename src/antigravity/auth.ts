@@ -1102,3 +1102,38 @@ export class AntigravityAuthManager {
     await fs.rename(tempPath, destPath);
   }
 }
+
+/**
+ * Links Antigravity OAuth tokens and paused account state from sourceAuthDir into targetAuthDir.
+ * Does NOT link conversation_summaries.db or brain/ to keep conversation history isolated per bot.
+ */
+export function linkAntigravityAuthTokens(sourceAuthDir: string, targetAuthDir: string): void {
+  const resolvedSource = path.resolve(sourceAuthDir);
+  const resolvedTarget = path.resolve(targetAuthDir);
+  if (resolvedSource === resolvedTarget) return;
+  fsSync.mkdirSync(resolvedTarget, { recursive: true, mode: 0o700 });
+  if (!fsSync.existsSync(resolvedSource)) return;
+  const entries = fsSync.readdirSync(resolvedSource, { withFileTypes: true });
+  for (const entry of entries) {
+    if (
+      entry.isFile() &&
+      (entry.name === 'antigravity-oauth-token' ||
+        entry.name.startsWith('antigravity-oauth-token_') ||
+        entry.name === 'paused-accounts.json')
+    ) {
+      const sourceFile = path.join(resolvedSource, entry.name);
+      const targetFile = path.join(resolvedTarget, entry.name);
+      try {
+        if (fsSync.existsSync(targetFile) || fsSync.lstatSync(targetFile, { throwIfNoEntry: false })) {
+          fsSync.unlinkSync(targetFile);
+        }
+        fsSync.symlinkSync(sourceFile, targetFile);
+      } catch {
+        try {
+          fsSync.copyFileSync(sourceFile, targetFile);
+        } catch {}
+      }
+    }
+  }
+}
+

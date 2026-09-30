@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { EventEmitter } from 'node:events';
 import { AntigravityEngineAdapter } from './adapter.js';
 import { AntigravityAppClient, type AntigravityTurnExecution } from './client.js';
@@ -347,5 +351,116 @@ test('AntigravityEngineAdapter notifies user when network retries are exhausted'
   assert.equal(sentMessages.length, 1);
   assert.ok(sentMessages[0]?.includes('网络连接连续中断 (已重试 3 次)'));
 });
+
+test('AntigravityEngineAdapter tracks and emits subagent tool events during executeTurn', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-adapter-subagent-test-'));
+  try {
+    const parentId = 'parent-conv-subtest';
+    const subId = 'sub-conv-subtest';
+
+    // 1. Prepare conversation_summaries.db
+    const dbPath = path.join(tempDir, 'conversation_summaries.db');
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec(`
+        CREATE TABLE conversation_summaries (
+          conversation_id text PRIMARY KEY,
+          agent_name text NOT NULL DEFAULT "",
+          parent_conversation_id text NOT NULL DEFAULT "",
+          status text NOT NULL DEFAULT "",
+          not_fully_idle numeric NOT NULL DEFAULT 1,
+          killed numeric NOT NULL DEFAULT 0,
+          last_modified_time datetime NOT NULL
+        );
+      `);
+      db.prepare(`
+        INSERT INTO conversation_summaries
+          (conversation_id, agent_name, parent_conversation_id, status, not_fully_idle, killed, last_modified_time)
+        VALUES
+          (?, 'DeepCoder', ?, 'CASCADE_RUN_STATUS_RUNNING', 1, 0, datetime('now'))
+      `).run(subId, parentId);
+    } finally {
+      db.close();
+    }
+
+    // 2. Prepare subagent transcript directory
+    const subDir = path.join(tempDir, 'brain', subId, '.system_generated', 'logs');
+    fs.mkdirSync(subDir, { recursive: true });
+    const subTranscript = path.join(subDir, 'transcript.jsonl');
+    fs.writeFileSync(
+      subTranscript,
+      JSON.stringify({
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        tool_calls: [
+          {
+            name: 'view_file',
+            args: { AbsolutePath: '/workspace/src/index.ts' },
+          },
+        ],
+      }) + '\n',
+    );
+
+    const mockClientEmitter = new EventEmitter();
+    const mockExecution: AntigravityTurnExecution = {
+      conversationId: parentId,
+      cancel: () => {},
+      waitForResult: async () => ({
+        kind: 'result',
+        status: 'SUCCESS',
+        conversationId: parentId,
+      }),
+      on: (ev: any, listener: any) => {
+        mockClientEmitter.on(ev, listener);
+      },
+    };
+
+    const mockClient: Partial<AntigravityAppClient> = {
+      executeTurn: () => mockExecution,
+    };
+
+    const adapter = new AntigravityEngineAdapter(
+      mockClient as AntigravityAppClient,
+      'gemini-3.8-flash',
+      undefined,
+      undefined,
+      tempDir,
+    );
+
+    const toolEvents: any[] = [];
+    const execution = adapter.executeTurn({
+      scopeId: 'test-scope',
+      prompt: 'do subagent work',
+      threadId: parentId,
+      locale: 'zh',
+    });
+
+    execution.on('tool', (t) => toolEvents.push(t));
+
+    // Wait for the polling tick to pick up the subagent tool
+    for (let i = 0; i < 30; i++) {
+      if (toolEvents.length > 0) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    assert.ok(toolEvents.length >= 1, 'Should emit subagent tool event');
+    assert.equal(toolEvents[0]?.name, '[DeepCoder] view_file');
+    assert.equal(toolEvents[0]?.summary, 'index.ts');
+    assert.equal(toolEvents[0]?.status, 'running');
+
+    // Finish execution cleanly
+    mockClientEmitter.emit('event', {
+      kind: 'result',
+      status: 'SUCCESS',
+      conversationId: parentId,
+    });
+    await execution.waitForResult();
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 
 

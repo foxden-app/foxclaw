@@ -198,7 +198,7 @@ test('buildSelfUpdateLaunchCommand uses a transient user systemd service on Linu
     env: {
       HOME: '/home/user',
       PATH: '/usr/bin:/bin',
-      TG_BOT_TOKEN: 'secret-token',
+      CODEX_BOT_TOKENS: 'secret-token',
     },
     platform: 'linux',
     systemdRunPath: '/usr/bin/systemd-run',
@@ -216,7 +216,7 @@ test('buildSelfUpdateLaunchCommand uses a transient user systemd service on Linu
   ]);
   assert.ok(launch.args.includes('--setenv=CODEX_CLI_BIN=/home/user/bin/codex'));
   assert.ok(launch.args.includes('--setenv=AGY_CLI_BIN=/home/user/.local/bin/agy'));
-  assert.ok(launch.args.includes('--setenv=TG_BOT_TOKEN=secret-token'));
+  assert.ok(launch.args.includes('--setenv=CODEX_BOT_TOKENS=secret-token'));
   assert.deepEqual(launch.args.slice(-5), [
     '/opt/node/bin/node',
     '/opt/foxclaw/dist/main.js',

@@ -2,6 +2,31 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.11.0 - 2026-09-30
+
+### 中文
+- **多后端 Telegram Bot 变量重构与后端原生隔离**：
+  - 弃用原有的 `TG_BOT_TOKEN`/`TG_BOT_TOKENS`，引入面向具体执行后端的 `CODEX_BOT_TOKENS` 与 `ANTIGRAVITY_BOT_TOKENS`。
+  - 每类后端的首个 Bot 默认与本地终端 CLI 共享主目录（Codex 共享 `~/.codex`，Antigravity 共享 `~/.gemini/antigravity-cli`），后续实例自动创建隔离主目录。
+  - 隔离目录路径统一升级为人类可读格式（如 `@WallianBot`、`@waxiaosheBot`），彻底告别原有的裸数字 ID 目录。
+- **作用域会话继承与迁移容错增强**：
+  - 修复多 Bot 模式下旧未命名空间会话因历史脏数据导致无法自动迁移的问题；加入 `updated_at` 时间戳比对，自动无缝承接最新正在执行的任务线程。
+  - 增强 `scope_backend_bindings` 的自动迁移与跨引擎会话保持能力。
+- **网络鲁棒性与服务重启自愈**：
+  - 强化 Telegram 长轮询与分片投递在网络断连、代理抖动时的自动恢复机制。
+  - 修复服务重启后活跃任务的断点自动续跑逻辑。
+
+### English
+- **Backend-Centric Bot Variables & Native Home Isolation**:
+  - Deprecated legacy `TG_BOT_TOKEN`/`TG_BOT_TOKENS` in favor of backend-specific `CODEX_BOT_TOKENS` and `ANTIGRAVITY_BOT_TOKENS`.
+  - The first bot of each backend type shares the default terminal CLI home (`~/.codex` for Codex, `~/.gemini/antigravity-cli` for Antigravity), while additional bots receive fully isolated homes.
+  - Isolated directories are now standardized to human-readable Telegram usernames (e.g. `@WallianBot`, `@waxiaosheBot`).
+- **Resilient Scope Migration & Session Inheritance**:
+  - Resolved scope migration conflicts where stale historical records blocked recent unnamespaced turns from being adopted under multi-bot mode.
+  - Added timestamp-based migration for `chat_bindings` and `scope_backend_bindings` to ensure seamless continuation of active sessions across restarts.
+- **Network Resilience & Service Auto-Recovery**:
+  - Enhanced polling and chunk delivery retry mechanisms during transient network resets and proxy timeouts.
+
 ## 0.10.0 - 2026-09-27
 
 ### 中文

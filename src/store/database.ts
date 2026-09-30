@@ -384,6 +384,73 @@ export class BridgeStore {
     return row ? { scopeId: String(row.scope_id), chatId: String(row.chat_id) } : null;
   }
 
+  migrateTelegramUnnamespacedScope(botId: string, chatId: string): void {
+    const legacyScope = `telegram:${chatId}::root`;
+    const namespacedScope = `telegram:${botId}:${chatId}::root`;
+    const existing = this.db.prepare('SELECT chat_id, thread_id, cwd, updated_at FROM chat_bindings WHERE chat_id = ?').get(legacyScope) as {
+      chat_id: string;
+      thread_id: string;
+      cwd: string | null;
+      updated_at: number;
+    } | undefined;
+    if (existing) {
+      const target = this.db.prepare('SELECT chat_id, thread_id, cwd, updated_at FROM chat_bindings WHERE chat_id = ?').get(namespacedScope) as {
+        chat_id: string;
+        thread_id: string;
+        cwd: string | null;
+        updated_at: number;
+      } | undefined;
+      if (!target) {
+        this.db.prepare('INSERT INTO chat_bindings (chat_id, thread_id, cwd, updated_at) VALUES (?, ?, ?, ?)').run(
+          namespacedScope,
+          existing.thread_id,
+          existing.cwd,
+          existing.updated_at,
+        );
+      } else if (Number(existing.updated_at) > Number(target.updated_at)) {
+        this.db.prepare('UPDATE chat_bindings SET thread_id = ?, cwd = ?, updated_at = ? WHERE chat_id = ?').run(
+          existing.thread_id,
+          existing.cwd,
+          existing.updated_at,
+          namespacedScope,
+        );
+      }
+    }
+
+    const legacyBackends = this.db.prepare('SELECT * FROM scope_backend_bindings WHERE scope_id = ?').all(legacyScope) as Array<Record<string, unknown>>;
+    for (const row of legacyBackends) {
+      const backendId = String(row.backend_id);
+      const targetRow = this.db.prepare('SELECT updated_at FROM scope_backend_bindings WHERE scope_id = ? AND backend_id = ?').get(namespacedScope, backendId) as { updated_at: number } | undefined;
+      if (!targetRow) {
+        this.db.prepare('INSERT INTO scope_backend_bindings (scope_id, backend_id, thread_id, cwd, updated_at, model, reasoning_effort, active_turn_message_mode, service_tier, access_preset) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+          namespacedScope,
+          backendId,
+          row.thread_id as string,
+          row.cwd as string | null,
+          row.updated_at as number,
+          row.model as string | null,
+          row.reasoning_effort as string | null,
+          row.active_turn_message_mode as string | null,
+          row.service_tier as string | null,
+          row.access_preset as string | null,
+        );
+      } else if (Number(row.updated_at) > Number(targetRow.updated_at)) {
+        this.db.prepare('UPDATE scope_backend_bindings SET thread_id = ?, cwd = ?, updated_at = ?, model = ?, reasoning_effort = ?, active_turn_message_mode = ?, service_tier = ?, access_preset = ? WHERE scope_id = ? AND backend_id = ?').run(
+          row.thread_id as string,
+          row.cwd as string | null,
+          row.updated_at as number,
+          row.model as string | null,
+          row.reasoning_effort as string | null,
+          row.active_turn_message_mode as string | null,
+          row.service_tier as string | null,
+          row.access_preset as string | null,
+          namespacedScope,
+          backendId,
+        );
+      }
+    }
+  }
+
   getBinding(chatId: string): ThreadBinding | null {
     const row = this.db.prepare('SELECT chat_id, thread_id, cwd, updated_at FROM chat_bindings WHERE chat_id = ?').get(chatId) as Record<string, unknown> | undefined;
     if (!row) return null;
@@ -470,6 +537,16 @@ export class BridgeStore {
       current?.activeTurnMessageMode ?? null,
       current?.activeBackendId ?? null,
     );
+  }
+
+  setChatModel(chatId: string, model: string | null): void {
+    const current = this.getChatSettings(chatId);
+    this.setChatSettings(chatId, model, current?.reasoningEffort ?? null);
+  }
+
+  setChatEffort(chatId: string, effort: ReasoningEffortValue | null): void {
+    const current = this.getChatSettings(chatId);
+    this.setChatSettings(chatId, current?.model ?? null, effort);
   }
 
   setChatLocale(chatId: string, locale: AppLocale): void {

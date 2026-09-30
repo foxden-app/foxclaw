@@ -746,7 +746,7 @@ export class OpencodeBridgeCore {
     const model = index >= 0 ? models[index] : models.find((item) =>
       `${item.providerId}/${item.modelId}` === normalized || item.modelId === normalized || storeModel(item.providerId, item.modelId) === normalized);
     if (!model) throw new Error(localize(locale, `未知模型：${raw}`, `Unknown model: ${raw}`));
-    this.store.setChatSettings(scopeId, storeModel(model.providerId, model.modelId), null);
+    this.store.setChatModel(scopeId, storeModel(model.providerId, model.modelId));
     const prefs = readPrefs(this.store.getChatSettings(scopeId));
     if (prefs.variant && !model.variants.includes(prefs.variant)) this.writePrefs(scopeId, { ...prefs, variant: null });
     await this.send(scopeId, localize(locale, `模型 → \`${model.providerId}/${model.modelId}\``, `Model → \`${model.providerId}/${model.modelId}\``));
@@ -1783,7 +1783,7 @@ export class OpencodeBridgeCore {
           answer = localize(locale, '服务端默认', 'Server default');
         } else {
           const parsed = parseStoredModel(action.value)!;
-          this.store.setChatSettings(event.scopeId, action.value, null);
+          this.store.setChatModel(event.scopeId, action.value);
           this.writePrefs(event.scopeId, { ...readPrefs(this.store.getChatSettings(event.scopeId)), variant: null });
           answer = `${parsed.providerId}/${parsed.modelId}`;
         }

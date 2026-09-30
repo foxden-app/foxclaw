@@ -681,5 +681,192 @@ test('UnifiedChannelOrchestrator handleNewSession validates target cwd and reset
   }
 });
 
+test('UnifiedChannelOrchestrator setup menu: model and reasoning effort are not mutually exclusive', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-orch-setup-nonexclusive-'));
+  try {
+    const config = { defaultCwd: '/tmp' } as any;
+    const dbPath = path.join(tempDir, 'test.db');
+    const store = new BridgeStore(dbPath);
+    const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+
+    const mockMessaging: any = {
+      sendRichMarkdown: async () => 101,
+      editRichMarkdown: async () => {},
+      sendTypingInScope: async () => {},
+      deleteMessage: async () => {},
+      answerCallback: async () => {},
+    };
+
+    const mockAdapter: Partial<IEngineAdapter> = {
+      id: 'mock-engine',
+      name: 'Mock Engine',
+      listModels: async () => [
+        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', isDefault: true },
+        { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', isDefault: false },
+      ],
+      executeTurn: () => ({ cancel: () => {}, waitForResult: async () => null, on: () => {} } as any),
+    };
+
+    const orchestrator = new UnifiedChannelOrchestrator({
+      config,
+      store,
+      logger,
+      bot: { id: 'testbot', token: 'token', username: 'testbot', on: () => {}, start: async () => {}, stop: () => {} } as any,
+      messaging: mockMessaging,
+      backends: [
+        { id: 'mock-engine', name: 'Mock Engine', engineType: 'antigravity', adapter: mockAdapter as any },
+      ],
+      defaultBackendId: 'mock-engine',
+    });
+
+    const scopeId = 'scope-setup-test';
+    // 1. Initially set model via callback
+    await orchestrator.handleCallback({
+      scopeId,
+      chatId: '123',
+      messageId: 10,
+      callbackQueryId: 'cb-1',
+      data: 'engine:m:gemini-3.1-pro',
+    });
+
+    let settings = store.getChatSettings(scopeId);
+    assert.equal(settings?.model, 'gemini-3.1-pro');
+
+    // 2. Select reasoning effort via callback
+    await orchestrator.handleCallback({
+      scopeId,
+      chatId: '123',
+      messageId: 10,
+      callbackQueryId: 'cb-2',
+      data: 'engine:effort:high',
+    });
+
+    // Both model and effort must be preserved!
+    settings = store.getChatSettings(scopeId);
+    assert.equal(settings?.model, 'gemini-3.1-pro', 'Model must not be cleared when effort is selected');
+    assert.equal(settings?.reasoningEffort, 'high', 'Effort must be set');
+
+    // 3. Select a different model via callback
+    await orchestrator.handleCallback({
+      scopeId,
+      chatId: '123',
+      messageId: 10,
+      callbackQueryId: 'cb-3',
+      data: 'engine:m:gemini-3.8-flash',
+    });
+
+    settings = store.getChatSettings(scopeId);
+    assert.equal(settings?.model, 'gemini-3.8-flash', 'Model must be updated');
+    assert.equal(settings?.reasoningEffort, 'high', 'Effort must not be cleared when model is changed');
+
+    // 4. Change effort via /effort command
+    await orchestrator.handleText({
+      scopeId,
+      chatId: '123',
+      topicId: null,
+      chatType: 'private',
+      userId: 'u1',
+      messageId: 2,
+      text: '/effort medium',
+      attachments: [],
+      entities: [],
+      replyToBot: false,
+    });
+
+    settings = store.getChatSettings(scopeId);
+    assert.equal(settings?.model, 'gemini-3.8-flash', 'Model must remain intact after /effort');
+    assert.equal(settings?.reasoningEffort, 'medium', 'Effort must be updated to medium');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('orchestrator recovers interrupted turn after restart, preserves threadId and reuses preview message', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-orch-restart-'));
+  const dbPath = path.join(tempDir, 'test.sqlite');
+  const store = new BridgeStore(dbPath);
+  const logger = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any;
+
+  let executedRequest: EngineTurnRequest | null = null;
+  const turnEmitter = new EventEmitter();
+
+  const mockAdapter = {
+    id: 'mock-engine',
+    name: 'Mock Engine',
+    listModels: async () => [{ id: 'm1', name: 'M1', isDefault: true }],
+    executeTurn: (req: EngineTurnRequest) => {
+      executedRequest = req;
+      return {
+        cancel: () => {},
+        waitForResult: async () => null,
+        on: (event: string, listener: (...args: any[]) => void) => {
+          turnEmitter.on(event, listener);
+        },
+      } as any;
+    },
+  };
+
+  const sentMessages: Array<{ text: string }> = [];
+  const editedMessages: Array<{ messageId: number; text: string }> = [];
+
+  const mockMessaging = {
+    sendMessage: async (_scopeId: string, text: string) => {
+      sentMessages.push({ text });
+      return 999;
+    },
+    editMessage: async (_scopeId: string, messageId: number, text: string) => {
+      editedMessages.push({ messageId, text });
+    },
+    editRichMarkdown: async (_scopeId: string, messageId: number, text: string) => {
+      editedMessages.push({ messageId, text });
+    },
+    sendTypingInScope: async () => {},
+  } as unknown as TelegramMessagingPort;
+
+  try {
+    const scopeId = 'scope-restart-test';
+    // Simulate an interrupted turn preview before restart
+    store.saveActiveTurnPreview({
+      turnId: 'mock-engine_scope-restart-test_12345',
+      scopeId,
+      threadId: 'conv-resumed-uuid-1',
+      messageId: 888,
+    });
+
+    const orchestrator = new UnifiedChannelOrchestrator({
+      config: { defaultCwd: '/test/cwd', telegramPanelTtlMs: 300000 } as any,
+      store,
+      logger,
+      bot: { id: 'testbot', token: 'token', username: 'testbot', on: () => {}, start: async () => {}, stop: () => {} } as any,
+      messaging: mockMessaging,
+      backends: [
+        { id: 'mock-engine', name: 'Mock Engine', engineType: 'antigravity', adapter: mockAdapter as any },
+      ],
+      defaultBackendId: 'mock-engine',
+    });
+
+    await orchestrator.start();
+
+    // Wait for the restart auto-resume timer (1500ms + margin)
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+
+    // Verify auto-resume executed with the preserved threadId and in-place message reuse
+    assert.ok(executedRequest, 'An auto-resume turn should have been executed');
+    assert.equal((executedRequest as any).threadId, 'conv-resumed-uuid-1', 'Should preserve the original threadId');
+    assert.equal(store.getBinding(scopeId)?.threadId, 'conv-resumed-uuid-1', 'Scope binding should be updated to resumed threadId');
+
+    // Check edited messages reused messageId 888
+    assert.ok(editedMessages.some((m) => m.messageId === 888 && m.text.includes('重启恢复')), 'Should edit the original message in-place');
+
+    // Verify conversation event immediately updates binding and active turn preview
+    turnEmitter.emit('conversation', 'conv-updated-during-turn');
+    assert.equal(store.getBinding(scopeId)?.threadId, 'conv-updated-during-turn', 'Conversation event should immediately update chat binding');
+    const previews = store.listActiveTurnPreviews();
+    assert.ok(previews.some((p) => p.threadId === 'conv-updated-during-turn'), 'Active preview should record newly discovered conversation ID');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 
 

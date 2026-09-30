@@ -410,6 +410,16 @@ export class UnifiedChannelOrchestrator {
       backends: Array.from(this.backends.keys()),
     });
 
+    // Requeue any interrupted turns from previous crash/restart
+    try {
+      const requeued = this.store.requeueInterruptedQueuedTurnInputs();
+      if (requeued > 0) {
+        this.logger.info('orchestrator.requeued_interrupted_turns', { count: requeued });
+      }
+    } catch (err) {
+      this.logger.warn('orchestrator.requeue_interrupted_error', { error: String(err) });
+    }
+
     // Crash recovery: check interrupted preview messages from before restart
     try {
       const backendIds = new Set(this.backends.keys());
@@ -422,12 +432,27 @@ export class UnifiedChannelOrchestrator {
         }
         return false;
       });
+
+      const recoveredScopes = new Set<string>();
+
       for (const prev of activePreviews) {
         this.store.removeActiveTurnPreview(prev.turnId);
+        recoveredScopes.add(prev.scopeId);
+
+        // Bind existing threadId immediately so auto-resume continues in the exact same thread
+        if (prev.threadId) {
+          const currentBinding = this.store.getBinding(prev.scopeId);
+          this.store.setBinding(prev.scopeId, prev.threadId, currentBinding?.cwd ?? this.config.defaultCwd);
+        }
+
+        const locale = this.store.getChatSettings(prev.scopeId)?.locale || 'zh';
+
         this.editMessage(
           prev.scopeId,
           prev.messageId,
-          '🔄 **Foxclaw 服务已重新加载/重启**\n\n检测到上一轮任务执行被服务重启中断，正在自动继续执行…',
+          locale === 'zh'
+            ? '🔄 **[Foxclaw 服务已重新加载/重启]**\n\n检测到上一轮任务执行被服务重启中断，正在自动继续执行…'
+            : '🔄 **[FoxClaw Service Reloaded / Restarted]**\n\nInterrupted turn detected. Resuming automatically…',
         ).catch(() => {});
 
         const fakeEvent: TelegramTextEvent = {
@@ -442,8 +467,16 @@ export class UnifiedChannelOrchestrator {
           entities: [],
           replyToBot: false,
         };
+
+        const resumePrompt = prev.threadId
+          ? (locale === 'zh' ? 'FoxClaw 服务重启中断，请在当前会话中从中断处继续完成刚才的工作。' : 'FoxClaw restarted while previous turn was running. Please resume and complete the work from where it left off.')
+          : (locale === 'zh' ? '请继续完成上一步未完成的任务。' : 'Please continue and complete the unfinished task from previous step.');
+
         const resumeTimer = setTimeout(() => {
-          this.startPromptTurn(fakeEvent, '请继续完成上一步未完成的任务', 'zh').catch((err) => {
+          this.startPromptTurn(fakeEvent, resumePrompt, locale, {
+            reuseMessageId: prev.messageId,
+            forcedThreadId: prev.threadId || undefined,
+          }).catch((err) => {
             this.logger.warn('orchestrator.auto_resume_failed', {
               scopeId: prev.scopeId,
               error: String(err),
@@ -451,6 +484,33 @@ export class UnifiedChannelOrchestrator {
           });
         }, 1500);
         resumeTimer?.unref?.();
+      }
+
+      // Check for queued turns on scopes without active previews
+      const queuedInputs = this.store.listQueuedTurnInputs();
+      for (const q of queuedInputs) {
+        if (!recoveredScopes.has(q.scopeId) && !this.activeTurns.has(q.scopeId)) {
+          recoveredScopes.add(q.scopeId);
+          const locale = this.store.getChatSettings(q.scopeId)?.locale || 'zh';
+          const fakeEvent: TelegramTextEvent = {
+            scopeId: q.scopeId,
+            chatId: q.chatId,
+            topicId: q.topicId ?? null,
+            chatType: (q.chatType as any) || 'private',
+            userId: 'system',
+            messageId: q.messageId ?? 0,
+            text: q.sourceSummary,
+            attachments: [],
+            entities: [],
+            replyToBot: false,
+          };
+          const drainTimer = setTimeout(() => {
+            this.drainNextQueuedTurn(fakeEvent, locale).catch((err) => {
+              this.logger.warn('orchestrator.auto_drain_failed', { scopeId: q.scopeId, error: String(err) });
+            });
+          }, 2000);
+          drainTimer?.unref?.();
+        }
       }
     } catch (err) {
       this.logger.warn('orchestrator.restore_active_turns_error', { error: String(err) });
@@ -571,7 +631,7 @@ export class UnifiedChannelOrchestrator {
           return;
         case 'model':
           if (argsString) {
-            this.store.setChatSettings(scopeId, argsString, null);
+            this.store.setChatModel(scopeId, argsString === 'default' ? null : argsString);
             this.syncCurrentBackendSettings(scopeId);
             await this.sendMessage(
               scopeId,
@@ -661,7 +721,7 @@ export class UnifiedChannelOrchestrator {
         ? data.slice('engine:m:'.length)
         : decodeURIComponent(data.slice('setup:model:'.length));
       const model = rawModel === 'default' ? null : rawModel;
-      this.store.setChatSettings(scopeId, model, null);
+      this.store.setChatModel(scopeId, model);
       this.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(event.callbackQueryId, `Model: ${rawModel}`);
       await this.sendSetupMenu(scopeId, locale, messageId);
@@ -677,7 +737,7 @@ export class UnifiedChannelOrchestrator {
       if (targetEffort !== 'high' && settings?.serviceTier === 'boost') {
         this.store.setChatServiceTier(scopeId, null);
       }
-      this.store.setChatSettings(scopeId, null, targetEffort);
+      this.store.setChatEffort(scopeId, targetEffort);
       this.syncCurrentBackendSettings(scopeId);
       await this.messaging.answerCallback(event.callbackQueryId, `Effort: ${rawEffort}`);
       await this.sendSetupMenu(scopeId, locale, messageId);
@@ -696,7 +756,7 @@ export class UnifiedChannelOrchestrator {
         const nextBoost = !isBoost;
         this.store.setChatServiceTier(scopeId, nextBoost ? 'boost' : null);
         if (nextBoost) {
-          this.store.setChatSettings(scopeId, null, 'high');
+          this.store.setChatEffort(scopeId, 'high');
         }
         this.syncCurrentBackendSettings(scopeId);
         await this.messaging.answerCallback(
@@ -741,11 +801,12 @@ export class UnifiedChannelOrchestrator {
     event: TelegramTextEvent,
     prompt: string,
     locale: AppLocale,
+    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined },
   ): Promise<void> {
     const scopeId = event.scopeId;
     const binding = this.store.getBinding(scopeId);
     const cwd = binding?.cwd || this.config.defaultCwd;
-    const threadId = binding?.threadId || 'default';
+    const threadId = options?.forcedThreadId ?? binding?.threadId ?? 'default';
 
     let effectivePrompt = prompt;
     let stagedAttachments: StagedTelegramAttachment[] | undefined;
@@ -786,7 +847,7 @@ export class UnifiedChannelOrchestrator {
             ? `⚡ **已插话中断前置任务，立即开始新指令**：\n> ${effectivePrompt}`
             : `⚡ **Interrupted previous turn, executing new instruction**:\n> ${effectivePrompt}`,
         );
-        await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments);
+        await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments, options);
         return;
       }
 
@@ -794,7 +855,7 @@ export class UnifiedChannelOrchestrator {
       return;
     }
 
-    await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments);
+    await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments, options);
   }
 
   private async enqueuePromptTurn(
@@ -876,6 +937,7 @@ export class UnifiedChannelOrchestrator {
     locale: AppLocale,
     retryCount = 0,
     stagedAttachments?: StagedTelegramAttachment[],
+    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined },
   ): Promise<void> {
     const scopeId = event.scopeId;
     const binding = this.store.getBinding(scopeId);
@@ -883,7 +945,7 @@ export class UnifiedChannelOrchestrator {
     const adapter = this.getAdapterForScope(scopeId);
 
     const cwd = binding?.cwd || this.config.defaultCwd;
-    const threadId = binding?.threadId || null;
+    const threadId = options?.forcedThreadId ?? binding?.threadId ?? null;
     const model = settings?.model || 'default';
     const isBoost = settings?.serviceTier === 'boost';
     const effort = isBoost ? 'high' : (settings?.reasoningEffort ?? 'high');
@@ -893,15 +955,30 @@ export class UnifiedChannelOrchestrator {
       : prompt;
 
     let initialMsgId = 0;
-    try {
-      initialMsgId = await this.sendMessage(
-        scopeId,
-        locale === 'zh'
-          ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
-          : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`),
-      );
-    } catch (sendErr) {
-      this.logger.warn('orchestrator.initial_message_failed', { error: String(sendErr) });
+    if (options?.reuseMessageId) {
+      initialMsgId = options.reuseMessageId;
+      try {
+        await this.editMessage(
+          scopeId,
+          initialMsgId,
+          locale === 'zh'
+            ? `🔄 **[重启恢复] ${adapter.name} 正在继续执行…**`
+            : `🔄 **[Resuming after restart] ${adapter.name} is continuing…**`,
+        );
+      } catch (editErr) {
+        this.logger.warn('orchestrator.reuse_message_failed', { error: String(editErr) });
+      }
+    } else {
+      try {
+        initialMsgId = await this.sendMessage(
+          scopeId,
+          locale === 'zh'
+            ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
+            : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`),
+        );
+      } catch (sendErr) {
+        this.logger.warn('orchestrator.initial_message_failed', { error: String(sendErr) });
+      }
     }
 
     const turnKey = `${adapter.id}_${scopeId}_${Date.now()}`;
@@ -1017,8 +1094,21 @@ export class UnifiedChannelOrchestrator {
       scheduleFlush();
     });
 
+    execution.on('conversation', (convId: string) => {
+      if (!convId) return;
+      activeTurn.threadId = convId;
+      this.store.setBinding(scopeId, convId, cwd);
+      this.store.saveActiveTurnPreview({
+        turnId: turnKey,
+        scopeId,
+        threadId: convId,
+        messageId: activeTurn.messageId,
+      });
+      this.syncCurrentBackendSettings(scopeId);
+    });
+
     const retryTurn = async (nextRetryCount: number) => {
-      await this.executeTurn(event, prompt, locale, nextRetryCount, stagedAttachments);
+      await this.executeTurn(event, prompt, locale, nextRetryCount, stagedAttachments, options);
     };
 
     execution.on('result', async (res: EngineTurnResult) => {
@@ -1241,7 +1331,7 @@ export class UnifiedChannelOrchestrator {
       if (target !== 'high' && settings?.serviceTier === 'boost') {
         this.store.setChatServiceTier(scopeId, null);
       }
-      this.store.setChatSettings(scopeId, null, target as 'low' | 'medium' | 'high');
+      this.store.setChatEffort(scopeId, target as 'low' | 'medium' | 'high');
       this.syncCurrentBackendSettings(scopeId);
       await this.sendMessage(
         scopeId,
@@ -1267,7 +1357,7 @@ export class UnifiedChannelOrchestrator {
 
     this.store.setChatServiceTier(scopeId, nextBoost ? 'boost' : null);
     if (nextBoost) {
-      this.store.setChatSettings(scopeId, null, 'high');
+      this.store.setChatEffort(scopeId, 'high');
     }
     this.syncCurrentBackendSettings(scopeId);
     const msg = locale === 'zh'

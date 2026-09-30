@@ -427,7 +427,9 @@ export interface RuntimeStatus {
     activeTurns: number;
     runtimeKind?: 'default' | 'isolated';
     currentAuth?: string | null;
+    defaultBackend?: 'codex' | 'antigravity';
     codexHome?: string | null;
+    antigravityHome?: string | null;
     codexAppServer?: RuntimeStatus['codexAppServer'];
   }>;
   weixinRuntime?: {

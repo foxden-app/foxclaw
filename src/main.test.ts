@@ -115,8 +115,7 @@ test('CLI doctor rejects an invalid explicitly configured OpenCode binary', () =
     CODEX_CLI_BIN: process.execPath,
     OPENCODE_CLI_BIN: '/definitely/missing/opencode',
     OPENCODE_BOT_TOKEN: 'opencode-test-token',
-    TG_BOT_TOKEN: 'codex-test-token',
-    TG_BOT_TOKENS: '',
+    CODEX_BOT_TOKENS: 'codex-test-token',
     TG_ALLOWED_USER_ID: '1',
   }, 'doctor');
   assert.equal(result.status, 1);

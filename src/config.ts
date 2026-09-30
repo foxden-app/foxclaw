@@ -50,6 +50,8 @@ export function loadEnv(): void {
 }
 
 export interface AppConfig {
+  codexBotTokens: string[];
+  antigravityBotTokens: string[];
   tgBotToken: string;
   tgBotTokens: string[];
   tgMultiBotMode: boolean;
@@ -76,7 +78,6 @@ export interface AppConfig {
   opencodeServerStatePath: string;
   opencodeServerLogPath: string;
   antigravityBotToken: string | null;
-  antigravityBotTokens: string[];
   antigravityMultiBotMode: boolean;
   antigravityDefaultRuntimeBotToken: string | null;
   antigravityHome: string | null;
@@ -143,36 +144,46 @@ export interface CodexApiProviderConfig {
 
 export function loadConfig(): AppConfig {
   loadEnv();
-  const configuredTokens = parseCommaSeparatedIds(process.env.TG_BOT_TOKENS);
-  const legacyToken = optional('TG_BOT_TOKEN');
-  const tgDefaultRuntimeBotToken = selectDefaultRuntimeBotToken(configuredTokens, legacyToken);
-  const tgBotTokens = configuredTokens.length > 0
-    ? configuredTokens
-    : legacyToken
-      ? [legacyToken]
-      : [];
-  if (tgBotTokens.length === 0) {
-    throw new Error('TG_BOT_TOKENS or TG_BOT_TOKEN is required');
+
+  if (process.env.TG_BOT_TOKEN?.trim() || process.env.TG_BOT_TOKENS?.trim()) {
+    throw new Error(
+      'Configuration error: TG_BOT_TOKEN and TG_BOT_TOKENS have been removed. Please update .env to use CODEX_BOT_TOKENS and/or ANTIGRAVITY_BOT_TOKENS.',
+    );
   }
+
+  const codexBotTokens = parseCommaSeparatedIds(process.env.CODEX_BOT_TOKENS || process.env.CODEX_BOT_TOKEN);
+  const antigravityBotTokens = parseCommaSeparatedIds(process.env.ANTIGRAVITY_BOT_TOKENS || process.env.ANTIGRAVITY_BOT_TOKEN);
   const opencodeBotToken = optional('OPENCODE_BOT_TOKEN');
-  validateOpencodeBotToken(opencodeBotToken, tgBotTokens);
-  const configuredAntigravityTokens = parseCommaSeparatedIds(process.env.ANTIGRAVITY_BOT_TOKENS);
-  const legacyAntigravityToken = optional('ANTIGRAVITY_BOT_TOKEN');
-  const antigravityDefaultRuntimeBotToken = selectDefaultRuntimeBotToken(configuredAntigravityTokens, legacyAntigravityToken);
-  const antigravityBotTokens = configuredAntigravityTokens.length > 0
-    ? configuredAntigravityTokens
-    : legacyAntigravityToken
-      ? [legacyAntigravityToken]
-      : [];
+
+  if (codexBotTokens.length === 0 && antigravityBotTokens.length === 0) {
+    throw new Error('At least one Telegram bot token must be configured via CODEX_BOT_TOKENS or ANTIGRAVITY_BOT_TOKENS');
+  }
+
+  validateCodexBotTokens(codexBotTokens);
+  validateAntigravityBotTokens(antigravityBotTokens, codexBotTokens, opencodeBotToken);
+  validateOpencodeBotToken(opencodeBotToken, [...codexBotTokens, ...antigravityBotTokens]);
+
+  const codexDefaultRuntimeBotToken =
+    selectDefaultRuntimeBotToken(codexBotTokens, optional('CODEX_DEFAULT_RUNTIME_BOT_TOKEN')) || codexBotTokens[0] || null;
+  const antigravityDefaultRuntimeBotToken =
+    selectDefaultRuntimeBotToken(antigravityBotTokens, optional('ANTIGRAVITY_DEFAULT_RUNTIME_BOT_TOKEN')) ||
+    antigravityBotTokens[0] ||
+    null;
+
+  const totalBots = codexBotTokens.length + antigravityBotTokens.length;
+  const tgBotTokens = codexBotTokens.length > 0 ? codexBotTokens : antigravityBotTokens;
+  const tgBotToken = (codexBotTokens[0] || antigravityBotTokens[0])!;
   const antigravityBotToken = antigravityBotTokens[0] || null;
-  validateAntigravityBotTokens(antigravityBotTokens, tgBotTokens, opencodeBotToken);
+
   const config: AppConfig = {
-    tgBotToken: tgBotTokens[0]!,
+    codexBotTokens,
+    antigravityBotTokens,
+    tgBotToken,
     tgBotTokens,
-    tgMultiBotMode: configuredTokens.length > 0,
-    tgDefaultRuntimeBotToken,
+    tgMultiBotMode: totalBots > 1,
+    tgDefaultRuntimeBotToken: codexDefaultRuntimeBotToken,
     tgScopeBotId: null,
-    tgRequireExplicitGroupAddressing: configuredTokens.length > 1,
+    tgRequireExplicitGroupAddressing: totalBots > 1,
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
     tgAllowedChatId: optional('TG_ALLOWED_CHAT_ID'),
     tgAllowedTopicId: nullableIntEnv('TG_ALLOWED_TOPIC_ID'),
@@ -193,8 +204,7 @@ export function loadConfig(): AppConfig {
     opencodeServerStatePath: process.env.OPENCODE_SERVER_STATE_PATH || DEFAULT_OPENCODE_SERVER_STATE_PATH,
     opencodeServerLogPath: process.env.OPENCODE_SERVER_LOG_PATH || DEFAULT_OPENCODE_SERVER_LOG_PATH,
     antigravityBotToken,
-    antigravityBotTokens,
-    antigravityMultiBotMode: configuredAntigravityTokens.length > 0,
+    antigravityMultiBotMode: antigravityBotTokens.length > 0,
     antigravityDefaultRuntimeBotToken,
     antigravityHome: process.env.ANTIGRAVITY_HOME?.trim() || null,
     antigravityCliBin: process.env.ANTIGRAVITY_CLI_BIN || resolveCommand('agy') || '/home/wuya/.local/bin/agy',
@@ -273,10 +283,20 @@ export function buildCodexApiProviderOverrides(
   return overrides;
 }
 
+export function validateCodexBotTokens(tokens: readonly string[]): void {
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    if (seen.has(token)) {
+      throw new Error(`CODEX_BOT_TOKENS contains duplicate Telegram bot token: ${token}`);
+    }
+    seen.add(token);
+  }
+}
+
 export function validateOpencodeBotToken(token: string | null, codexTokens: readonly string[]): void {
   if (!token) return;
   if (codexTokens.includes(token)) {
-    throw new Error('OPENCODE_BOT_TOKEN must use a different bot from TG_BOT_TOKENS/TG_BOT_TOKEN');
+    throw new Error('OPENCODE_BOT_TOKEN must use a different bot from CODEX_BOT_TOKENS');
   }
 }
 
@@ -293,10 +313,10 @@ export function validateAntigravityBotTokens(
     }
     seen.add(token);
     if (codexTokens.includes(token)) {
-      throw new Error('ANTIGRAVITY_BOT_TOKENS/ANTIGRAVITY_BOT_TOKEN must use a different bot from TG_BOT_TOKENS/TG_BOT_TOKEN');
+      throw new Error('ANTIGRAVITY_BOT_TOKENS must use a different bot from CODEX_BOT_TOKENS');
     }
     if (opencodeToken && token === opencodeToken) {
-      throw new Error('ANTIGRAVITY_BOT_TOKENS/ANTIGRAVITY_BOT_TOKEN must use a different bot from OPENCODE_BOT_TOKEN');
+      throw new Error('ANTIGRAVITY_BOT_TOKENS must use a different bot from OPENCODE_BOT_TOKEN');
     }
   }
 }

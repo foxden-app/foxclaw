@@ -6,14 +6,15 @@ const ID_FILE = '.foxclaw-bot.json';
 /** Keep storage names readable while bot IDs remain the stable routing identity. */
 export function prepareTelegramBotHome(baseDir: string, botId: string, username: string | null, sharedHome: string | null = null): string {
   if (!/^bot\d+$/.test(botId)) throw new Error('Invalid Telegram bot identity');
-  if (username !== null && !/^[A-Za-z0-9_]{1,64}$/.test(username)) throw new Error('Invalid Telegram username for directory');
+  const normalizedUsername = username ? username.replace(/^@/, '') : null;
+  if (normalizedUsername !== null && !/^[A-Za-z0-9_]{1,64}$/.test(normalizedUsername)) throw new Error('Invalid Telegram username for directory');
   fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
   const base = fs.realpathSync(path.resolve(baseDir));
   const legacy = path.join(base, botId);
   const legacyStat = lstat(legacy);
   const source = legacyStat?.isSymbolicLink() ? fs.realpathSync(legacy) : legacy;
   if (path.dirname(source) !== base) throw new Error(`Bot directory points outside its storage root: ${legacy}`);
-  const target = username ? path.join(base, `@${username}`) : source;
+  const target = normalizedUsername ? path.join(base, `@${normalizedUsername}`) : source;
   const sourceStat = lstat(source);
   const targetStat = lstat(target);
   if (sourceStat && !sourceStat.isDirectory()) throw new Error(`Bot storage is not a directory: ${source}`);

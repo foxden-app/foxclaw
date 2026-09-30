@@ -76,6 +76,7 @@ export class OpencodeEngineAdapter implements IEngineAdapter {
             throw new Error(`Failed to create OpenCode session: ${formatSdkError(createRes.error)}`);
           }
           sessionId = createRes.data.id;
+          emitter.emit('conversation', sessionId);
         }
 
         if (cancelled) return;
