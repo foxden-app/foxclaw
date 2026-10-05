@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -11,6 +12,14 @@ import type { AntigravityAppClient } from './client.js';
 import type { TelegramGateway, TelegramTextEvent } from '../telegram/gateway.js';
 import type { TelegramMessagingPort } from '../channels/telegram/telegram_messaging_port.js';
 import type { AppConfig } from '../config.js';
+
+async function waitFor(predicate: () => boolean, description: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `Timed out waiting for ${description}`);
+    await delay(10);
+  }
+}
 
 test('AntigravityBridgeCore initializes with orchestrator, handles custom commands and auth panels', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agy-core-test-'));
@@ -30,8 +39,10 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
     }),
   );
 
+  const store = new BridgeStore(dbPath);
+  let core: AntigravityBridgeCore | undefined;
+  const resultTimers = new Set<NodeJS.Timeout>();
   try {
-    const store = new BridgeStore(dbPath);
     const sentMessages: Array<{ scopeId: string; text: string; keyboard?: any }> = [];
     const editedMessages: Array<{ scopeId: string; messageId: number; text: string }> = [];
 
@@ -70,9 +81,15 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
       listModels: async () => ['gemini-3.8-flash-high', 'gemini-3.1-pro-high'],
       executeTurn: () => {
         const agEmitter = new EventEmitter();
+        let resultTimer: NodeJS.Timeout | undefined;
         return {
           conversationId: 'agy_conv_1',
-          cancel: () => {},
+          cancel: () => {
+            if (resultTimer) {
+              clearTimeout(resultTimer);
+              resultTimers.delete(resultTimer);
+            }
+          },
           waitForResult: async () => ({
             kind: 'result',
             status: 'SUCCESS',
@@ -83,7 +100,8 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
           on: (event: any, listener: any) => {
             agEmitter.on(event, listener);
             if (event === 'event') {
-              setTimeout(() => {
+              resultTimer = setTimeout(() => {
+                resultTimers.delete(resultTimer!);
                 agEmitter.emit('event', {
                   kind: 'result',
                   status: 'SUCCESS',
@@ -92,6 +110,7 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
                 });
                 agEmitter.emit('exit', 0);
               }, 10);
+              resultTimers.add(resultTimer);
             }
           },
         } as any;
@@ -122,7 +141,7 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
       }),
     });
     const auth = new AntigravityAuthManager(authDir, mockLogger, mockFetch as any);
-    const core = new AntigravityBridgeCore(
+    core = new AntigravityBridgeCore(
       mockConfig as AppConfig,
       store,
       mockLogger,
@@ -154,7 +173,7 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
     };
 
     mockBotEmitter.emit('text', authEvent);
-    await new Promise((r) => setTimeout(r, 80));
+    await waitFor(() => sentMessages.some((m) => m.text.includes('Antigravity 账号管理池')), 'auth panel');
 
     const authMsg = sentMessages.find((m) => m.text.includes('Antigravity 账号管理池'));
     assert.ok(authMsg, 'Should send auth management panel');
@@ -164,7 +183,7 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
 
     // Verify /status includes quota line with remaining percentage label
     mockBotEmitter.emit('text', { ...authEvent, messageId: 10, text: '/status' });
-    await new Promise((r) => setTimeout(r, 80));
+    await waitFor(() => sentMessages.some((m) => m.text.includes('运行状态')), 'status panel');
     const statusMsg = sentMessages.find((m) => m.text.includes('运行状态'));
     assert.ok(statusMsg, 'Should send status message');
     assert.ok(statusMsg.text.includes('5h/7d 额度'), 'Status message should include 5h/7d quota line');
@@ -185,7 +204,7 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
     };
 
     mockBotEmitter.emit('text', promptEvent);
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => editedMessages.some((m) => m.text.includes('Antigravity answer from orchestrator')), 'final answer');
 
     // Initial thinking message sent
     const thinkingMsg = sentMessages.find((m) => m.text.includes('正在思考中'));
@@ -194,9 +213,10 @@ test('AntigravityBridgeCore initializes with orchestrator, handles custom comman
     // Final answer edited into preview message
     const finalAnswer = editedMessages.find((m) => m.text.includes('Antigravity answer from orchestrator'));
     assert.ok(finalAnswer, 'Should edit preview message with final response from engine adapter');
-
-    await core.stop();
   } finally {
+    await core?.stop();
+    for (const timer of resultTimers) clearTimeout(timer);
+    store.close();
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
@@ -345,7 +365,7 @@ test('Codex /threads and /auth align 100% with original Codex functionality and 
 
     // 1. In Codex mode, /threads must show 4 action buttons (✏️, 👀, 🗑️, ➕) + [➕ 新建] + [🗄️ 已归档]
     mockBotEmitter.emit('text', { scopeId, chatId: scopeId, topicId: null, chatType: 'private', userId: 'u1', messageId: 1, text: '/threads', attachments: [], entities: [], replyToBot: false });
-    await new Promise((r) => setTimeout(r, 80));
+    await waitFor(() => sentMessages.length > 0, 'Codex threads panel');
     const threadsMsg = sentMessages[sentMessages.length - 1];
     assert.ok(threadsMsg, 'Should send threads message');
 
@@ -360,9 +380,10 @@ test('Codex /threads and /auth align 100% with original Codex functionality and 
     assert.ok(kb.some((row: any) => row.some((b: any) => b.callback_data === 'thread:new')), 'Must have ➕ new button');
     assert.ok(kb.some((row: any) => row.some((b: any) => b.callback_data.includes('thread:list:'))), 'Must have thread list navigation/archive buttons');
 
+    const beforeAuth = sentMessages.length;
     // 2. In Codex mode, /auth must show Quota table and candidate toggle buttons
     mockBotEmitter.emit('text', { scopeId, chatId: scopeId, topicId: null, chatType: 'private', userId: 'u1', messageId: 2, text: '/auth', attachments: [], entities: [], replyToBot: false });
-    await new Promise((r) => setTimeout(r, 80));
+    await waitFor(() => sentMessages.length > beforeAuth, 'Codex auth panel');
     const authMsg = sentMessages[sentMessages.length - 1];
     assert.ok(authMsg, 'Should send auth message');
 
@@ -376,13 +397,14 @@ test('Codex /threads and /auth align 100% with original Codex functionality and 
 
     // 3. Switch to Antigravity and verify /threads has the same 2-row layout with 4 icon buttons
     await (core as any).orchestrator.switchBackend(scopeId, 'antigravity', 'zh');
+    const beforeAgyThreads = sentMessages.length;
     mockBotEmitter.emit('text', { scopeId, chatId: scopeId, topicId: null, chatType: 'private', userId: 'u1', messageId: 3, text: '/threads', attachments: [], entities: [], replyToBot: false });
-    await new Promise((r) => setTimeout(r, 80));
+    await waitFor(() => sentMessages.length > beforeAgyThreads, 'Antigravity threads panel');
     const agyThreadsMsg = sentMessages[sentMessages.length - 1];
     assert.ok(agyThreadsMsg, 'Should send Antigravity threads message');
-
-    await core.stop();
   } finally {
+    await core.stop();
+    store.close();
     await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
