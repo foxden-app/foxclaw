@@ -122,6 +122,18 @@ test('CLI doctor rejects an invalid explicitly configured OpenCode binary', () =
   assert.match(result.stdout, /\[FAIL\] opencode cli available/);
 });
 
+test('CLI doctor accepts standalone DSH without requiring Codex', () => {
+  const result = runFoxclawCliWithEnv({
+    CODEX_CLI_BIN: '/definitely/missing/codex', CODEX_BOT_TOKENS: '', CODEX_BOT_TOKEN: '',
+    ANTIGRAVITY_BOT_TOKENS: '', ANTIGRAVITY_BOT_TOKEN: '', OPENCODE_BOT_TOKEN: '',
+    DSH_BOT_TOKEN: 'dsh-test', DSH_CLI_BIN: process.execPath, DSH_SOURCE_DIR: '', DSH_ENABLED: 'true',
+    TG_ALLOWED_USER_ID: '1', WX_ENABLED: 'false',
+  }, 'doctor');
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /\[OK\] DSH CLI available/);
+  assert.doesNotMatch(result.stdout, /codex cli available/);
+});
+
 test('CLI status prints a compact summary by default and keeps --json', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-cli-status-'));
   try {

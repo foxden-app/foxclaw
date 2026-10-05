@@ -23,14 +23,16 @@ import type { OpencodeAppClient } from '../opencode/client.js';
 import type { BackendDescriptor, IEngineAdapter } from '../core/engine_spi.js';
 import { BridgeSessionCore } from '../controller/controller.js';
 import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
-import { BRIDGE_SCOPE_WEIXIN_PREFIX } from '../core/bridge_scope.js';
+import { BRIDGE_SCOPE_WEIXIN_PREFIX, BRIDGE_SCOPE_TELEGRAM_PREFIX, parseTelegramTargetFromBridgeScope } from '../core/bridge_scope.js';
 import { syncCodexLocalUsageToStore } from '../store/token_usage.js';
 import type { SelfUpdateRuntime } from '../update.js';
+import { DshUi } from '../dsh/ui.js';
 
 export interface UnifiedBridgeRuntimeStatus {
   running: boolean;
   connected: boolean;
   activeTurns: number;
+  dshPendingApprovals: number;
   botUsername: string | null;
   codexHome: string;
   codexAppServer?: CodexAppServerRuntimeStatus | undefined;
@@ -119,6 +121,7 @@ export class UnifiedBridgeCore {
   private readonly defaultBackendId: string;
   private readonly selfUpdater?: SelfUpdateRuntime | undefined;
   private readonly orchestrator: UnifiedChannelOrchestrator;
+  private readonly dshUi?: DshUi;
   private readonly watchers = new Map<string, AntigravityWatcher>();
   private readonly pendingAgyRenames = new Map<string, { conversationId: string }>();
   private readonly stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
@@ -238,7 +241,12 @@ export class UnifiedBridgeCore {
       });
     }
 
+    if (config.dsh) {
+      this.dshUi = new DshUi(config, store, logger, this.messaging);
+      initialBackends.push({ id: 'dsh', name: 'DeepSeek Harness (DSH)', engineType: 'dsh', adapter: this.dshUi.adapter });
+    }
     const allAdapters: IEngineAdapter[] = [this.adapter];
+    if (this.dshUi) allAdapters.push(this.dshUi.adapter);
     if (this.codexAdapter) allAdapters.push(this.codexAdapter);
     if (this.opencodeAdapter) allAdapters.push(this.opencodeAdapter);
 
@@ -251,9 +259,24 @@ export class UnifiedBridgeCore {
       adapters: allAdapters,
       backends: initialBackends,
       defaultBackendId: this.defaultBackendId,
+      ownsScope: scopeId => {
+        if (!scopeId.startsWith(BRIDGE_SCOPE_TELEGRAM_PREFIX)) return !config.tgMultiBotMode && !scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX);
+        const target = parseTelegramTargetFromBridgeScope(scopeId);
+        return target.botId ? target.botId === this.bot.identity : !config.tgMultiBotMode;
+      },
       backendProvider: () => this.getBackendDescriptors(),
       messaging: this.messaging,
       customUi: {
+        renderSetupMenu: async (scopeId, locale, messageId) => {
+          if (this.orchestrator.getBackendDescriptorForScope(scopeId).engineType !== 'dsh' || !this.dshUi) return false;
+          await this.dshUi.setup(scopeId, locale, this.orchestrator, messageId);
+          return true;
+        },
+        renderModelsMenu: async (scopeId, locale, messageId) => {
+          if (this.orchestrator.getBackendDescriptorForScope(scopeId).engineType !== 'dsh' || !this.dshUi) return false;
+          await this.dshUi.models(scopeId, locale, this.orchestrator, messageId);
+          return true;
+        },
         renderCustomStatus: (scopeId, locale) => this.renderCustomStatus(scopeId, locale),
         renderCustomSetupRows: (scopeId, locale) => this.renderCustomSetupRows(scopeId, locale),
         handleCustomCallback: (scopeId, data, locale, messageId, event) =>
@@ -267,6 +290,7 @@ export class UnifiedBridgeCore {
 
   private async getBackendDescriptors(): Promise<BackendDescriptor[]> {
     const list: BackendDescriptor[] = [];
+    if (this.dshUi) list.push({ id: 'dsh', name: 'DeepSeek Harness (DSH)', engineType: 'dsh', adapter: this.dshUi.adapter });
     const isCodexDefault = this.defaultBackendId === 'codex';
 
     const active = await this.auth.getActiveAccount();
@@ -388,6 +412,7 @@ export class UnifiedBridgeCore {
   async stop(): Promise<void> {
     this.clearSelfUpdateStatusPoll();
     await this.orchestrator.stop();
+    await this.dshUi?.stop();
     this.auth.stopKeepAlive();
     for (const [scopeId, watcher] of this.watchers.entries()) {
       watcher.stopped = true;
@@ -473,6 +498,7 @@ export class UnifiedBridgeCore {
       running: true,
       connected: isConnected,
       activeTurns: this.orchestrator.getActiveTurnsCount(),
+      dshPendingApprovals: this.dshUi?.pendingApprovals ?? 0,
       botUsername: this.bot.username,
       codexHome: this.config.codexHome ?? this.config.codexAuthDir ?? path.join(os.homedir(), '.codex'),
       ...(this.codexApp && typeof this.codexApp.getServerStatus === 'function' && this.codexApp.getServerStatus()
@@ -566,6 +592,7 @@ export class UnifiedBridgeCore {
 
   private async renderCustomStatus(scopeId: string, locale: AppLocale): Promise<string> {
     const activeBackend = this.orchestrator.getBackendDescriptorForScope(scopeId);
+    if (activeBackend.engineType === 'dsh' && this.dshUi) return this.dshUi.status(scopeId, locale);
     if (activeBackend.engineType === 'codex') {
       const codexHome = this.config.codexAuthDir ?? this.config.codexHome ?? path.join(os.homedir(), '.codex');
       let currentCodexAccount = 'default';
@@ -688,6 +715,7 @@ export class UnifiedBridgeCore {
 
   private async handleCustomInbound(event: TelegramTextEvent, locale: AppLocale): Promise<boolean> {
     const scopeId = event.scopeId;
+    if (this.orchestrator.getBackendDescriptorForScope(scopeId).engineType === 'dsh') return false;
 
     // Check for JSON token upload / document attachment
     const doc = event.attachments?.find((a) => a.kind === 'document');
@@ -878,6 +906,8 @@ export class UnifiedBridgeCore {
       return true;
     }
 
+    if (activeBackend.engineType === 'dsh' && this.dshUi) return this.dshUi.command(scopeId, cmd, args, locale, this.orchestrator);
+
     if (isCodex) {
       if (this.codexCore) {
         switch (cmd.toLowerCase()) {
@@ -1021,6 +1051,14 @@ export class UnifiedBridgeCore {
     messageId?: number,
     event?: TelegramCallbackEvent,
   ): Promise<boolean> {
+    if (this.dshUi && await this.dshUi.callback(scopeId, data, locale, this.orchestrator, event)) return true;
+    if (this.orchestrator.getBackendDescriptorForScope(scopeId).engineType === 'dsh') {
+      if (!['engine:setup:main', 'engine:setup:active_mode', 'engine:setup:new', 'engine:setup:backend'].includes(data) && !data.startsWith('engine:backend:')) {
+        if (event) await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '请重新打开 DSH 设置面板' : 'Open the DSH setup panel');
+        return true;
+      }
+      return false;
+    }
     if (this.codexCore && (
       data.startsWith('thread:') ||
       data.startsWith('auth:') ||

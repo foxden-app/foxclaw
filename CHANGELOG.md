@@ -2,6 +2,22 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.12.0 - 2026-10-05
+
+### 中文
+
+- 新增 **DeepSeek Harness (DSH) 后端**：通过 DSH 原生 ACP profile 接入，现有 Codex/Antigravity Bot 可使用 `/backend dsh` 切换，也支持 `DSH_BOT_TOKEN` 独立运行。
+- 新增 DSH 专用 Telegram 设置面板：原生模型与推理档位、只读/工作区写入/完全访问、工具审批、持久会话列表与恢复；隐藏 Codex 多账号、认证同步和 Fast tier 控件。
+- 支持 DSH 工具进度、最终回答、图片与 JSON 文件附件、排队、中断接管和新建会话。修复中断后的队列抢跑，以及服务重启时跨 Bot 恢复会话和队列的问题。
+- 新增 `/plugins` 配置查看入口及中英文接入文档；插件安装/移除沿用 DSH 终端命令。状态页明确标注 ACP 尚未提供的逐轮 token 统计，现有统一 Bot 的 `/update` 在 DSH 模式下继续可用。
+
+### English
+
+- Added a **DeepSeek Harness (DSH) backend** using the native ACP profile. Existing Codex/Antigravity bots can switch with `/backend dsh`; a dedicated bot can run with `DSH_BOT_TOKEN`.
+- Added DSH-specific Telegram settings for native models and reasoning levels, read-only/workspace-write/full-access presets, tool approvals, and persistent session listing/resume. Codex account, auth-sync, and Fast tier controls are omitted.
+- Added tool progress, final answers, image/JSON attachments, queueing, interruption, takeover, and new sessions. Fixed queue races after interruption and cross-bot session/queue recovery on service restart.
+- Added `/plugins` configuration inspection and bilingual setup documentation; package installation/removal stays in the DSH CLI. Status explicitly marks per-turn token counts as unavailable, and unified bots retain `/update` while using DSH.
+
 ## 0.11.1 - 2026-09-30
 
 ### 中文

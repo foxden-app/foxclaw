@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import dotenv from 'dotenv';
 import type { LogLevel } from './logger.js';
 import type { ApprovalPolicyValue, SandboxModeValue } from './types.js';
+import type { DshClientOptions } from './dsh/client.js';
 
 export const APP_HOME = path.join(process.env.HOME || os.homedir(), '.foxclaw');
 export const DEFAULT_STORE_PATH = path.join(APP_HOME, 'data', 'bridge.sqlite');
@@ -50,6 +51,8 @@ export function loadEnv(): void {
 }
 
 export interface AppConfig {
+  dsh?: DshClientOptions;
+  dshBotToken?: string | null;
   codexBotTokens: string[];
   antigravityBotTokens: string[];
   tgBotToken: string;
@@ -154,9 +157,13 @@ export function loadConfig(): AppConfig {
   const codexBotTokens = parseCommaSeparatedIds(process.env.CODEX_BOT_TOKENS || process.env.CODEX_BOT_TOKEN);
   const antigravityBotTokens = parseCommaSeparatedIds(process.env.ANTIGRAVITY_BOT_TOKENS || process.env.ANTIGRAVITY_BOT_TOKEN);
   const opencodeBotToken = optional('OPENCODE_BOT_TOKEN');
+  const dshBotToken = optional('DSH_BOT_TOKEN');
+  if (dshBotToken && [...codexBotTokens, ...antigravityBotTokens, opencodeBotToken].includes(dshBotToken)) {
+    throw new Error('DSH_BOT_TOKEN must use a different bot from Codex, Antigravity, and OpenCode');
+  }
 
-  if (codexBotTokens.length === 0 && antigravityBotTokens.length === 0) {
-    throw new Error('At least one Telegram bot token must be configured via CODEX_BOT_TOKENS or ANTIGRAVITY_BOT_TOKENS');
+  if (codexBotTokens.length === 0 && antigravityBotTokens.length === 0 && !dshBotToken) {
+    throw new Error('At least one Telegram bot token must be configured via CODEX_BOT_TOKENS, ANTIGRAVITY_BOT_TOKENS, or DSH_BOT_TOKEN');
   }
 
   validateCodexBotTokens(codexBotTokens);
@@ -170,12 +177,24 @@ export function loadConfig(): AppConfig {
     antigravityBotTokens[0] ||
     null;
 
-  const totalBots = codexBotTokens.length + antigravityBotTokens.length;
-  const tgBotTokens = codexBotTokens.length > 0 ? codexBotTokens : antigravityBotTokens;
-  const tgBotToken = (codexBotTokens[0] || antigravityBotTokens[0])!;
+  const totalBots = codexBotTokens.length + antigravityBotTokens.length + (dshBotToken ? 1 : 0);
+  const tgBotTokens = codexBotTokens.length > 0 ? codexBotTokens : antigravityBotTokens.length > 0 ? antigravityBotTokens : dshBotToken ? [dshBotToken] : [];
+  const tgBotToken = (codexBotTokens[0] || antigravityBotTokens[0] || dshBotToken)!;
   const antigravityBotToken = antigravityBotTokens[0] || null;
 
   const config: AppConfig = {
+    dshBotToken,
+    ...(boolEnv('DSH_ENABLED', Boolean(dshBotToken || optional('DSH_SOURCE_DIR') || optional('DSH_CLI_BIN'))) ? {
+      dsh: {
+        cliBin: optional('DSH_CLI_BIN') || resolveCommand('dsh') || 'dsh',
+        sourceDir: optional('DSH_SOURCE_DIR'),
+        home: optional('DSH_HOME'),
+        profile: optional('DSH_PROFILE') || 'acp',
+        patches: parseDshPatches(process.env.DSH_PATCHES),
+        runtimeDir: path.join(APP_HOME, 'runtime', 'dsh'),
+        startupTimeoutMs: Number(optional('DSH_STARTUP_TIMEOUT_MS') || 60000),
+      },
+    } : {}),
     codexBotTokens,
     antigravityBotTokens,
     tgBotToken,
@@ -253,6 +272,9 @@ export function loadConfig(): AppConfig {
     voiceTextLimit: intEnv('VOICE_TEXT_LIMIT', 2800),
     voiceTtsTimeoutMs: intEnv('VOICE_TTS_TIMEOUT_MS', 300_000),
   };
+  if (dshBotToken && !config.dsh) throw new Error('DSH_BOT_TOKEN requires DSH_ENABLED=true');
+  if (config.dsh && (!Number.isSafeInteger(config.dsh.startupTimeoutMs) || config.dsh.startupTimeoutMs <= 0)) throw new Error('DSH_STARTUP_TIMEOUT_MS must be a positive integer');
+  if (config.wxEnabled && codexBotTokens.length === 0 && antigravityBotTokens.length === 0) throw new Error('WX_ENABLED currently requires a Codex or Antigravity runtime alongside DSH');
   ensureAppDirs(config);
   return config;
 }
@@ -291,6 +313,14 @@ export function validateCodexBotTokens(tokens: readonly string[]): void {
     }
     seen.add(token);
   }
+}
+
+export function parseDshPatches(value?: string): string[] {
+  if (!value?.trim()) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { throw new Error('DSH_PATCHES must be a JSON array of patch paths'); }
+  if (!Array.isArray(parsed) || !parsed.every(item => typeof item === 'string' && item.trim().length > 0)) throw new Error('DSH_PATCHES must be a JSON array of patch paths');
+  return parsed.map(item => path.resolve(item));
 }
 
 export function validateOpencodeBotToken(token: string | null, codexTokens: readonly string[]): void {

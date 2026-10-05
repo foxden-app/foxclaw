@@ -4,7 +4,7 @@
 
 **A mobile Codex controller built for real programming workflows.**
 
-FoxClaw turns your phone into a practical web coding cockpit for local Codex, OpenCode, or Antigravity (AGY). Telegram or Weixin handles the chat interface, `codex app-server` / `opencode serve` / `agy` handles local execution, and you can send tasks, inspect progress, approve actions, switch sessions, and keep working without opening a laptop.
+FoxClaw turns your phone into a practical web coding cockpit for local Codex, OpenCode, Antigravity (AGY), or DeepSeek Harness (DSH). Telegram or Weixin handles the chat interface, each backend handles local execution, and you can send tasks, inspect progress, approve actions, switch sessions, and keep working without opening a laptop. DSH connects through Telegram, using a dedicated bot or backend switching in an existing bot.
 
 It is built for the moments when you leave your desk for lunch, commute, travel, use a treadmill, or take the kids to the park. You can step away from the keyboard while Codex keeps coding and sends progress, errors, approval requests, and final results back to your phone.
 
@@ -38,12 +38,13 @@ FoxClaw is more than message forwarding. It provides Telegram panels for Codex w
 - New to Node, Telegram bots, or Codex CLI? Use the [Beginner Install Guide](./docs/install-for-beginners.md).
 - Already installed and want the full command guide for `/help`, `/setup`, `/threads`, `/watch`, `/auth`, and auth rotation? Read the [User Manual](./docs/user-manual.md).
 - Want to sync the same legally owned ChatGPT auth candidate pool across multiple machines? Read the [Cross-Node Auth Sync Setup Guide](./docs/cross-node-auth-sync.md).
+- Want DeepSeek Harness with native models, reasoning, permissions, and plugin configuration? Read [DSH Backend Setup](./docs/dsh.md).
 - Want to see what changed in each release? Read the [Changelog](./CHANGELOG.md).
 - Maintaining a release? Use the [Release Runbook](./docs/release.md).
 - Already comfortable with Git, Node, and `.env` files? Use the quick setup below.
 - Something failed? Check [Troubleshooting](./docs/troubleshooting.md).
 
-The minimum install needs one or more Telegram bot tokens, your numeric Telegram user id, Node.js 24+, and a logged-in `codex` CLI. A first install usually takes 10–20 minutes. New installs should use `TG_BOT_TOKENS`; `TG_BOT_TOKEN` remains compatible with legacy single-runtime setups and can mark one multi-bot runtime as default/shared-terminal.
+The minimum install needs one or more Telegram bot tokens, your numeric Telegram user id, Node.js 24+, and a configured execution backend. Codex uses `CODEX_BOT_TOKENS`; standalone DSH uses `DSH_BOT_TOKEN` and does not require Codex installation or login. A first install usually takes 10–20 minutes.
 
 **30-second demo**: after FoxClaw is running, send `List files in DEFAULT_CWD` to your Telegram bot. FoxClaw asks local Codex to inspect that folder on your computer and sends the answer back to Telegram.
 
@@ -79,7 +80,7 @@ foxclaw start
 Fill `.env` before running `doctor` or `start`. Minimum private-chat config:
 
 ```dotenv
-TG_BOT_TOKENS=123456:telegram-token
+CODEX_BOT_TOKENS=123456:telegram-token
 TG_ALLOWED_USER_ID=123456789
 DEFAULT_CWD=/absolute/path/to/workspace
 DEFAULT_APPROVAL_POLICY=on-request

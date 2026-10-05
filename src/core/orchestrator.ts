@@ -8,7 +8,7 @@ import type { AppLocale, ReasoningEffortValue, AccessPresetValue, ActiveTurnMess
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
 import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
 import { parseCommand } from '../controller/commands.js';
-import { getTelegramCommands, getAntigravityTelegramCommands } from '../i18n.js';
+import { getTelegramCommands, getAntigravityTelegramCommands, getDshTelegramCommands } from '../i18n.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { chunkTelegramMessage } from '../telegram/text.js';
 import { stageInboundAttachments } from './attachments.js';
@@ -43,10 +43,13 @@ export interface UnifiedActiveTurn {
   stepIndex?: number;
   toolCount: number;
   currentTool?: string | null;
+  suppressQueueDrain?: boolean;
   startTime: number;
 }
 
 export interface EngineCustomUiHook {
+  renderSetupMenu?(scopeId: string, locale: AppLocale, messageId?: number): Promise<boolean>;
+  renderModelsMenu?(scopeId: string, locale: AppLocale, messageId?: number): Promise<boolean>;
   renderCustomStatus?(scopeId: string, locale: AppLocale): Promise<string | null>;
   renderCustomSetupRows?(scopeId: string, locale: AppLocale): Promise<InlineKeyboard>;
   handleCustomCallback?(scopeId: string, data: string, locale: AppLocale, messageId?: number, event?: TelegramCallbackEvent): Promise<boolean>;
@@ -67,6 +70,8 @@ export class UnifiedChannelOrchestrator {
   private readonly defaultBackendId: string;
   private readonly activeTurns = new Map<string, UnifiedActiveTurn>();
   private readonly stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
+  private readonly recoveryTimers = new Set<NodeJS.Timeout>();
+  private readonly ownsScope: (scopeId: string) => boolean;
   private readonly backendProvider?: (() => Promise<BackendDescriptor[]> | BackendDescriptor[]) | undefined;
 
   get adapter(): IEngineAdapter {
@@ -83,6 +88,7 @@ export class UnifiedChannelOrchestrator {
     backends?: BackendDescriptor[];
     backendProvider?: (() => Promise<BackendDescriptor[]> | BackendDescriptor[]) | undefined;
     defaultBackendId?: string;
+    ownsScope?: (scopeId: string) => boolean;
     messaging: TelegramMessagingPort;
     customUi?: EngineCustomUiHook | undefined;
   }) {
@@ -94,6 +100,7 @@ export class UnifiedChannelOrchestrator {
     this.queueManager = new TurnQueueManager();
     this.customUi = options.customUi;
     this.backendProvider = options.backendProvider;
+    this.ownsScope = options.ownsScope ?? (() => true);
 
     if (options.backends) {
       for (const b of options.backends) {
@@ -257,6 +264,10 @@ export class UnifiedChannelOrchestrator {
       );
     }
 
+    if (this.activeTurns.has(scopeId) && (targetDesc.engineType === 'dsh' || this.getBackendDescriptorForScope(scopeId).engineType === 'dsh')) {
+      throw new Error(locale === 'zh' ? '请先中断当前任务，再切换后端。' : 'Interrupt the active turn before switching backends.');
+    }
+
     if (targetDesc.onSelect) {
       await targetDesc.onSelect(scopeId);
     }
@@ -319,7 +330,7 @@ export class UnifiedChannelOrchestrator {
       }
     } else {
       this.store.clearBinding(scopeId);
-      const defaultEffort: ReasoningEffortValue = targetDesc.engineType === 'antigravity' ? 'high' : 'medium';
+      const defaultEffort: ReasoningEffortValue | null = targetDesc.engineType === 'dsh' ? null : targetDesc.engineType === 'antigravity' ? 'high' : 'medium';
       this.store.setChatSettings(scopeId, null, defaultEffort);
       this.store.setChatServiceTier(scopeId, null);
     }
@@ -327,24 +338,23 @@ export class UnifiedChannelOrchestrator {
     const isCodex = targetDesc.engineType === 'codex';
     const activeSettings = this.store.getChatSettings(scopeId);
     const modelText = activeSettings?.model ? `\`${activeSettings.model}\`` : (locale === 'zh' ? '引擎默认' : 'default');
-    const effortText = activeSettings?.reasoningEffort ?? (isCodex ? 'medium' : 'high');
+    const effortText = activeSettings?.reasoningEffort ?? (targetDesc.engineType === 'dsh' ? 'default' : isCodex ? 'medium' : 'high');
     const modeText = activeSettings?.activeTurnMessageMode ?? 'queue';
 
     const switchMsg =
       locale === 'zh'
         ? `🔄 **已切换至后端: ${targetDesc.name}** (\`${targetDesc.id}\`)\n\n` +
-          `• **引擎类型**: ${isCodex ? 'OpenAI Codex (App Server)' : 'Google Antigravity (AGY)'}\n` +
-          `• **绑定账号**: \`${targetDesc.account || '默认账号'}\`${targetDesc.details ? ` (${targetDesc.details})` : ''}\n` +
+          `• **引擎类型**: ${targetDesc.name}\n` +
+          (targetDesc.account ? `• **绑定账号**: \`${targetDesc.account}\`\n` : '') +
           `• **会话状态**: ${saved?.threadId ? `已恢复历史会话 (\`${saved.threadId.slice(0, 16)}…\`)\n• **工作目录**: \`${saved.cwd ?? this.config.defaultCwd}\`` : '新会话就绪 (发送消息将开启新会话)'}\n` +
           `• **记忆配置**: 模型 ${modelText} | 思考深度 \`${effortText}\` | 插话模式 \`${modeText}\`\n` +
-          `• **专属指令**: \`/models\` (${isCodex ? 'Codex模型' : 'Gemini模型'}), \`/auth\` (${isCodex ? 'OpenAI账号池' : 'Google授权'}), \`/threads\` (${isCodex ? 'Codex历史' : 'AGY历史'})\n\n` +
-          `⚡ **当前 Telegram Bot 已完全切换为 ${isCodex ? 'OpenAI Codex' : 'Google Antigravity'} 交互人格与执行引擎！**`
+          `• **操作**: \`/setup\` · \`/models\` · \`/threads\``
         : `🔄 **Switched to Backend: ${targetDesc.name}** (\`${targetDesc.id}\`)\n\n` +
-          `• **Engine**: ${isCodex ? 'OpenAI Codex (App Server)' : 'Google Antigravity (AGY)'}\n` +
-          `• **Account**: \`${targetDesc.account || 'default'}\`${targetDesc.details ? ` (${targetDesc.details})` : ''}\n` +
+          `• **Engine**: ${targetDesc.name}\n` +
+          (targetDesc.account ? `• **Account**: \`${targetDesc.account}\`\n` : '') +
           `• **Thread**: ${saved?.threadId ? `Restored (\`${saved.threadId.slice(0, 16)}…\`)\n• **Directory**: \`${saved.cwd ?? this.config.defaultCwd}\`` : 'Ready (next prompt starts new thread)'}\n` +
           `• **Restored Settings**: Model ${modelText} | Effort \`${effortText}\` | Message Mode \`${modeText}\`\n\n` +
-          `⚡ **Telegram Bot is now fully operated by ${isCodex ? 'OpenAI Codex' : 'Google Antigravity'}!**`;
+          `• **Controls**: \`/setup\` · \`/models\` · \`/threads\``;
 
     try {
       await this.sendMessage(scopeId, switchMsg);
@@ -355,7 +365,7 @@ export class UnifiedChannelOrchestrator {
     try {
       if (scopeId.startsWith(BRIDGE_SCOPE_TELEGRAM_PREFIX)) {
         const target = parseTelegramTargetFromBridgeScope(scopeId);
-        const cmds = isCodex ? getTelegramCommands(locale) : getAntigravityTelegramCommands(locale);
+        const cmds = targetDesc.engineType === 'dsh' ? getDshTelegramCommands(locale) : isCodex ? getTelegramCommands(locale) : getAntigravityTelegramCommands(locale);
         await this.bot.setChatCommands(target.chatId, cmds);
       }
     } catch (err) {
@@ -412,7 +422,8 @@ export class UnifiedChannelOrchestrator {
 
     // Requeue any interrupted turns from previous crash/restart
     try {
-      const requeued = this.store.requeueInterruptedQueuedTurnInputs();
+      const scopes = new Set(this.store.listQueuedTurnInputs().filter(input => this.ownsScope(input.scopeId)).map(input => input.scopeId));
+      const requeued = [...scopes].reduce((count, scopeId) => count + this.store.requeueInterruptedQueuedTurnInputs(scopeId), 0);
       if (requeued > 0) {
         this.logger.info('orchestrator.requeued_interrupted_turns', { count: requeued });
       }
@@ -427,6 +438,7 @@ export class UnifiedChannelOrchestrator {
         backendIds.add(desc.adapter.id);
       }
       const activePreviews = this.store.listActiveTurnPreviews().filter((p) => {
+        if (!this.ownsScope(p.scopeId)) return false;
         for (const bId of backendIds) {
           if (p.turnId.startsWith(`${bId}_`)) return true;
         }
@@ -473,6 +485,7 @@ export class UnifiedChannelOrchestrator {
           : (locale === 'zh' ? '请继续完成上一步未完成的任务。' : 'Please continue and complete the unfinished task from previous step.');
 
         const resumeTimer = setTimeout(() => {
+          this.recoveryTimers.delete(resumeTimer);
           this.startPromptTurn(fakeEvent, resumePrompt, locale, {
             reuseMessageId: prev.messageId,
             forcedThreadId: prev.threadId || undefined,
@@ -483,12 +496,14 @@ export class UnifiedChannelOrchestrator {
             });
           });
         }, 1500);
+        this.recoveryTimers.add(resumeTimer);
         resumeTimer?.unref?.();
       }
 
       // Check for queued turns on scopes without active previews
       const queuedInputs = this.store.listQueuedTurnInputs();
       for (const q of queuedInputs) {
+        if (!this.ownsScope(q.scopeId)) continue;
         if (!recoveredScopes.has(q.scopeId) && !this.activeTurns.has(q.scopeId)) {
           recoveredScopes.add(q.scopeId);
           const locale = this.store.getChatSettings(q.scopeId)?.locale || 'zh';
@@ -505,10 +520,12 @@ export class UnifiedChannelOrchestrator {
             replyToBot: false,
           };
           const drainTimer = setTimeout(() => {
+            this.recoveryTimers.delete(drainTimer);
             this.drainNextQueuedTurn(fakeEvent, locale).catch((err) => {
               this.logger.warn('orchestrator.auto_drain_failed', { scopeId: q.scopeId, error: String(err) });
             });
           }, 2000);
+          this.recoveryTimers.add(drainTimer);
           drainTimer?.unref?.();
         }
       }
@@ -519,9 +536,14 @@ export class UnifiedChannelOrchestrator {
 
   async stop(): Promise<void> {
     this.bot.stop();
+    for (const timer of this.stalePanelDeleteTimers.values()) clearTimeout(timer);
+    this.stalePanelDeleteTimers.clear();
+    for (const timer of this.recoveryTimers) clearTimeout(timer);
+    this.recoveryTimers.clear();
     for (const [scopeId, turn] of this.activeTurns.entries()) {
       if (turn.flushTimer) clearTimeout(turn.flushTimer);
       if (turn.typingTimer) clearInterval(turn.typingTimer);
+      turn.suppressQueueDrain = true;
       turn.execution.cancel();
       this.activeTurns.delete(scopeId);
     }
@@ -811,7 +833,7 @@ export class UnifiedChannelOrchestrator {
     let effectivePrompt = prompt;
     let stagedAttachments: StagedTelegramAttachment[] | undefined;
     if (event.attachments && event.attachments.length > 0) {
-      const nonDocJson = event.attachments.filter(
+      const nonDocJson = this.getAdapterForScope(scopeId).id === 'dsh' ? event.attachments : event.attachments.filter(
         (a) => !(a.kind === 'document' && (a.fileName?.endsWith('.json') || a.mimeType?.includes('json'))),
       );
       if (nonDocJson.length > 0) {
@@ -824,7 +846,7 @@ export class UnifiedChannelOrchestrator {
         );
         if (staged.length > 0) {
           stagedAttachments = staged;
-          effectivePrompt = buildAttachmentPrompt(prompt, staged);
+          effectivePrompt = this.getAdapterForScope(scopeId).id === 'dsh' ? prompt : buildAttachmentPrompt(prompt, staged);
         }
       }
     }
@@ -836,7 +858,9 @@ export class UnifiedChannelOrchestrator {
       if (mode === 'steer') {
         const active = this.activeTurns.get(scopeId);
         if (active) {
+          if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
           active.execution.cancel();
+          if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
           if (active.typingTimer) clearInterval(active.typingTimer);
           if (active.flushTimer) clearTimeout(active.flushTimer);
           this.activeTurns.delete(scopeId);
@@ -896,6 +920,7 @@ export class UnifiedChannelOrchestrator {
 
   private async drainNextQueuedTurn(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
     const scopeId = event.scopeId;
+    if (this.activeTurns.has(scopeId)) return;
     try {
       const nextQueued = this.store.peekQueuedTurnInput(scopeId);
       if (!nextQueued) return;
@@ -948,7 +973,7 @@ export class UnifiedChannelOrchestrator {
     const threadId = options?.forcedThreadId ?? binding?.threadId ?? null;
     const model = settings?.model || 'default';
     const isBoost = settings?.serviceTier === 'boost';
-    const effort = isBoost ? 'high' : (settings?.reasoningEffort ?? 'high');
+    const effort = isBoost ? 'high' : (settings?.reasoningEffort ?? (adapter.id === 'dsh' ? null : 'high'));
 
     const effectivePrompt = isBoost && !prompt.startsWith('[Boost Mode:')
       ? `[Boost Mode: Proceed with deep thinking, strategic planning, multiple perspectives, and rigorous verification.]\n\n${prompt}`
@@ -1152,7 +1177,7 @@ export class UnifiedChannelOrchestrator {
 
           const chunks = combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
           await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
-          await this.drainNextQueuedTurn(event, locale).catch(() => {});
+          if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
@@ -1226,7 +1251,7 @@ export class UnifiedChannelOrchestrator {
                 : '';
             const chunks = combineSummaryAndResponse(foldedTools, finalText + warningNote);
             await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
-            await this.drainNextQueuedTurn(event, locale).catch(() => {});
+            if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
             return;
           }
 
@@ -1235,7 +1260,7 @@ export class UnifiedChannelOrchestrator {
             activeTurn.messageId,
             `❌ **${adapter.name} 错误**:\n\`\`\`\n${errorText}\n\`\`\``,
           );
-          await this.drainNextQueuedTurn(event, locale).catch(() => {});
+          if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
@@ -1244,7 +1269,7 @@ export class UnifiedChannelOrchestrator {
           activeTurn.messageId,
           activeTurn.accumulatedText || '⚠️ 执行结束',
         );
-        await this.drainNextQueuedTurn(event, locale).catch(() => {});
+        if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
       } catch (fatalErr) {
         this.logger.error('orchestrator.turn_result_unhandled', { error: String(fatalErr) });
       }
@@ -1308,7 +1333,7 @@ export class UnifiedChannelOrchestrator {
             `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeTelegramHtml(err.message.slice(0, 120))})</i>`;
           const chunks = combineSummaryAndResponse(foldedTools, fullAnswer);
           await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
-          await this.drainNextQueuedTurn(event, locale).catch(() => {});
+          if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
@@ -1317,7 +1342,7 @@ export class UnifiedChannelOrchestrator {
           activeTurn.messageId,
           `❌ **执行异常**:\n\`\`\`\n${err.message}\n\`\`\``,
         );
-        await this.drainNextQueuedTurn(event, locale).catch(() => {});
+        if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
       } catch (fatalErr) {
         this.logger.error('orchestrator.turn_error_unhandled', { error: String(fatalErr) });
       }
@@ -1428,7 +1453,9 @@ export class UnifiedChannelOrchestrator {
     }
     const active = this.activeTurns.get(scopeId);
     if (active) {
+      if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
       active.execution.cancel();
+      if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
       if (active.typingTimer) clearInterval(active.typingTimer);
       if (active.flushTimer) clearTimeout(active.flushTimer);
       this.activeTurns.delete(scopeId);
@@ -1446,7 +1473,9 @@ export class UnifiedChannelOrchestrator {
     const active = this.activeTurns.get(scopeId);
     const queuedCount = this.store.countQueuedTurnInputs(scopeId);
     if (active) {
+      if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
       active.execution.cancel();
+      if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
       if (active.flushTimer) clearTimeout(active.flushTimer);
       if (active.typingTimer) clearInterval(active.typingTimer);
       this.activeTurns.delete(scopeId);
@@ -1515,7 +1544,9 @@ export class UnifiedChannelOrchestrator {
 
     const active = this.activeTurns.get(scopeId);
     if (active) {
+      if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
       active.execution.cancel();
+      if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
       if (active.typingTimer) clearInterval(active.typingTimer);
       if (active.flushTimer) clearTimeout(active.flushTimer);
       this.activeTurns.delete(scopeId);
@@ -1547,6 +1578,9 @@ export class UnifiedChannelOrchestrator {
     const tokenLine = formatTokenUsageSummary(totalUsage, locale);
     const allUsages = this.store.getAllBackendTokenUsages();
     const breakdown = formatBackendTokenUsageBreakdown(allUsages);
+    const usageText = backendDesc.engineType === 'dsh'
+      ? (locale === 'zh' ? '• **Token 消耗**: DSH ACP 未提供逐轮统计\n' : '• **Token usage**: Per-turn counts are not exposed by DSH ACP\n')
+      : `${tokenLine}${breakdown}\n`;
 
     const text =
       locale === 'zh'
@@ -1554,7 +1588,7 @@ export class UnifiedChannelOrchestrator {
           `• **当前引擎**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **状态**: ${isBusy ? '⚡ 正在执行任务' : '💤 空闲'}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
-          `${tokenLine}${breakdown}\n` +
+          usageText +
           `• **绑定会话**: \`${binding?.threadId || '(新会话)'}\`\n` +
           `• **工作目录**: \`${binding?.cwd || this.config.defaultCwd}\`` +
           (customStatus ? `\n${customStatus}` : '')
@@ -1562,7 +1596,7 @@ export class UnifiedChannelOrchestrator {
           `• **Engine**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **State**: ${isBusy ? '⚡ Executing' : '💤 Idle'}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
-          `${tokenLine}${breakdown}\n` +
+          usageText +
           `• **Thread**: \`${binding?.threadId || '(new)'}\`\n` +
           `• **Directory**: \`${binding?.cwd || this.config.defaultCwd}\`` +
           (customStatus ? `\n${customStatus}` : '');
@@ -1570,7 +1604,7 @@ export class UnifiedChannelOrchestrator {
     const keyboard: InlineKeyboard = [
       [
         { text: '⚙️ 控制面板', callback_data: 'engine:setup:main' },
-        { text: '🧠 切换模型', callback_data: 'engine:setup:models' },
+        { text: '🧠 切换模型', callback_data: backendDesc.engineType === 'dsh' ? 'dsh:models' : 'engine:setup:models' },
       ],
     ];
 
@@ -1586,6 +1620,7 @@ export class UnifiedChannelOrchestrator {
   }
 
   async sendSetupMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
+    if (await this.customUi?.renderSetupMenu?.(scopeId, locale, editMessageId)) return;
     const settings = this.store.getChatSettings(scopeId);
     const mode = settings?.activeTurnMessageMode ?? 'queue';
     const isBoost = settings?.serviceTier === 'boost';
@@ -1616,7 +1651,7 @@ export class UnifiedChannelOrchestrator {
     const keyboard: InlineKeyboard = [];
 
     // 1. Model choices (Codex style)
-    const models = await adapter.listModels();
+    const models = await adapter.listModels(scopeId);
     const modelButtons: InlineKeyboard[0] = [
       {
         text: `${!currentModel || currentModel === 'default' ? '• ' : ''}${locale === 'zh' ? '默认模型' : 'Default'}`,
@@ -1697,10 +1732,11 @@ export class UnifiedChannelOrchestrator {
   }
 
   async sendModelsMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
+    if (await this.customUi?.renderModelsMenu?.(scopeId, locale, editMessageId)) return;
     const settings = this.store.getChatSettings(scopeId);
     const currentModel = settings?.model;
     const adapter = this.getAdapterForScope(scopeId);
-    const models = await adapter.listModels();
+    const models = await adapter.listModels(scopeId);
 
     const keyboard: InlineKeyboard = [];
     for (let i = 0; i < models.length; i += 2) {

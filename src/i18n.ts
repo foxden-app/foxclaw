@@ -1640,3 +1640,16 @@ export function getAntigravityTelegramCommands(locale: AppLocale): Array<{ comma
         { command: 'interrupt', description: 'Stop active turn' },
       ];
 }
+
+export function getDshTelegramCommands(locale: AppLocale): Array<{ command: string; description: string }> {
+  const descriptions = locale === 'zh' ? {
+    help: 'DSH 命令', setup: 'DSH 设置', backend: '切换后端', new: '新建会话', threads: '持久会话列表', open: '打开会话',
+    models: '模型列表', model: '选择模型', effort: '推理档位', permissions: '权限设置', plugins: '插件配置',
+    active: '插话或排队', queue: '排队下一轮', steer: '中断并接管', status: '运行状态', interrupt: '中断任务',
+  } : {
+    help: 'DSH commands', setup: 'DSH settings', backend: 'Switch backend', new: 'New session', threads: 'Persistent sessions', open: 'Open session',
+    models: 'Models', model: 'Select model', effort: 'Reasoning effort', permissions: 'Permissions', plugins: 'Plugin configuration',
+    active: 'Steer or queue', queue: 'Queue next turn', steer: 'Interrupt and steer', status: 'Runtime status', interrupt: 'Stop task',
+  };
+  return Object.entries(descriptions).map(([command, description]) => ({ command, description }));
+}

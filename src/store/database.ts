@@ -549,6 +549,14 @@ export class BridgeStore {
     this.setChatSettings(chatId, current?.model ?? null, effort);
   }
 
+  /** Persist an adapter-advertised reasoning id without imposing Codex's vocabulary. */
+  setChatEngineEffort(chatId: string, effort: string | null): void {
+    const current = this.getChatSettings(chatId);
+    this.writeChatSettings(chatId, current?.model ?? null, effort, current?.locale ?? null,
+      current?.accessPreset ?? null, current?.collaborationMode ?? null, current?.serviceTier ?? null,
+      current?.activeTurnMessageMode ?? null, current?.activeBackendId ?? null);
+  }
+
   setChatLocale(chatId: string, locale: AppLocale): void {
     const current = this.getChatSettings(chatId);
     this.writeChatSettings(
@@ -1090,12 +1098,12 @@ export class BridgeStore {
     return Number(result.changes ?? 0);
   }
 
-  requeueInterruptedQueuedTurnInputs(): number {
+  requeueInterruptedQueuedTurnInputs(scopeId?: string): number {
     const result = this.db.prepare(`
       UPDATE queued_turn_inputs
       SET status = 'queued', error = NULL, updated_at = ?, resolved_at = NULL
-      WHERE status = 'processing'
-    `).run(Date.now());
+      WHERE status = 'processing'${scopeId ? ' AND scope_id = ?' : ''}
+    `).run(Date.now(), ...(scopeId ? [scopeId] : []));
     return Number(result.changes ?? 0);
   }
 
@@ -1376,7 +1384,7 @@ export class BridgeStore {
   private writeChatSettings(
     chatId: string,
     model: string | null,
-    reasoningEffort: ReasoningEffortValue | null,
+    reasoningEffort: string | null,
     locale: AppLocale | null,
     accessPreset: AccessPresetValue | null,
     collaborationMode: CollaborationModeValue | null,

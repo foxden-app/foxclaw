@@ -445,7 +445,7 @@ async function runSendVoiceCli(): Promise<void> {
   }
 
   const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
-  const allTokens = [...config.codexBotTokens, ...config.antigravityBotTokens];
+  const allTokens = [...config.codexBotTokens, ...config.antigravityBotTokens, ...(config.dshBotToken ? [config.dshBotToken] : [])];
   const { botId, botToken } = resolveTelegramVoiceTarget(allTokens, inferredBotId);
   const { BridgeStore } = await import('./store/database.js');
   const store = new BridgeStore(config.storePath);
@@ -499,7 +499,7 @@ async function runSendMediaCli(): Promise<void> {
   const plan = planTelegramOutboundMedia(filePath);
 
   const inferredBotId = parsed.botId ?? inferTelegramBotId(process.env.CODEX_HOME) ?? inferTelegramBotId(config.codexHome);
-  const allTokens = [...config.codexBotTokens, ...config.antigravityBotTokens];
+  const allTokens = [...config.codexBotTokens, ...config.antigravityBotTokens, ...(config.dshBotToken ? [config.dshBotToken] : [])];
   const { botId, botToken } = resolveTelegramVoiceTarget(allTokens, inferredBotId);
   const { BridgeStore } = await import('./store/database.js');
   const store = new BridgeStore(config.storePath);
@@ -730,6 +730,7 @@ async function runServeCli(): Promise<void> {
     { AuthCandidateMirror },
     { CrossNodeAuthSync },
     { OpencodeTelegramRuntime },
+    { DshTelegramRuntime },
     { UnifiedBridgeCore },
     { AntigravityAppClient },
     { AntigravityAuthManager, linkAntigravityAuthTokens },
@@ -749,6 +750,7 @@ async function runServeCli(): Promise<void> {
     import('./auth/mirror.js'),
     import('./auth/cross_node_sync.js'),
     import('./opencode/runtime.js'),
+    import('./dsh/runtime.js'),
     import('./antigravity/controller.js'),
     import('./antigravity/client.js'),
     import('./antigravity/auth.js'),
@@ -770,11 +772,47 @@ async function runServeCli(): Promise<void> {
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
+  let activeDshRuntime: InstanceType<typeof DshTelegramRuntime> | null = null;
   let sharedCodexApp: InstanceType<typeof CodexAppClient> | null = null;
   let sharedAntigravityApp: InstanceType<typeof AntigravityAppClient> | null = null;
   let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    if (config.dshBotToken) {
+      activeDshRuntime = new DshTelegramRuntime(config, store, logger);
+      await activeDshRuntime.start();
+      logger.info('dsh.bridge.started', activeDshRuntime.getRuntimeStatus());
+    }
+    if (config.opencodeBotToken) {
+      activeOpencodeRuntime = new OpencodeTelegramRuntime(config, store, logger);
+      await activeOpencodeRuntime.start();
+      logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
+    }
+    if (config.dshBotToken && config.codexBotTokens.length === 0 && config.antigravityBotTokens.length === 0) {
+      const writeDshStatus = (running = true): void => {
+        const status = activeDshRuntime!.getRuntimeStatus();
+        writeRuntimeStatus(config.statusPath, {
+          running, connected: running && status.connected, userAgent: 'DSH ACP', botUsername: status.username,
+          currentBindings: store!.countBindings(), pendingApprovals: status.pendingApprovals, pendingUserInputs: 0, queuedTurns: store!.countQueuedTurnInputs(),
+          activeTurns: running ? status.activeTurns + (activeOpencodeRuntime?.getRuntimeStatus().activeTurns ?? 0) : 0, lastError: null, updatedAt: new Date().toISOString(),
+          channels: { telegram: running, weixin: false }, bots: [{ ...status, connected: running && status.connected }, ...(activeOpencodeRuntime ? [{ id: 'opencode', username: activeOpencodeRuntime.getRuntimeStatus().botUsername, connected: running && activeOpencodeRuntime.getRuntimeStatus().connected, activeTurns: activeOpencodeRuntime.getRuntimeStatus().activeTurns }] : [])],
+        });
+      };
+      writeDshStatus();
+      const timer = setInterval(writeDshStatus, 5000);
+      const shutdown = async (): Promise<void> => {
+        clearInterval(timer);
+        await activeDshRuntime!.stop();
+        await activeOpencodeRuntime?.stop();
+        writeDshStatus(false);
+        store!.close();
+        processLock.release();
+        process.exit(0);
+      };
+      process.on('SIGINT', () => void shutdown());
+      process.on('SIGTERM', () => void shutdown());
+      return;
+    }
     const selfUpdater = createSelfUpdateRuntime({
       entryPoint,
       nodePath: process.execPath,
@@ -798,12 +836,7 @@ async function runServeCli(): Promise<void> {
         codexApiProviderOverrides,
       );
     }
-    if (config.opencodeBotToken) {
-      activeOpencodeRuntime = new OpencodeTelegramRuntime(config, store, logger);
-      await activeOpencodeRuntime.start();
-      logger.info('opencode.bridge.started', activeOpencodeRuntime.getRuntimeStatus());
-    }
-    const totalBots = config.codexBotTokens.length + config.antigravityBotTokens.length;
+    const totalBots = config.codexBotTokens.length + config.antigravityBotTokens.length + (config.dshBotToken ? 1 : 0);
     const namespacedScopes = totalBots > 1;
 
     type RuntimeSeed = {
@@ -1012,17 +1045,17 @@ async function runServeCli(): Promise<void> {
           ...(first?.codexAppServer ? { codexAppServer: first.codexAppServer } : {}),
           botUsername: first?.botUsername ?? null,
           currentBindings: store!.countBindings(),
-          pendingApprovals: store!.countPendingApprovals(),
+          pendingApprovals: store!.countPendingApprovals() + statuses.reduce((sum, status) => sum + status.dshPendingApprovals, 0) + (activeDshRuntime?.getRuntimeStatus().pendingApprovals ?? 0),
           pendingUserInputs: store!.countPendingUserInputs(),
           queuedTurns: store!.countQueuedTurnInputs(),
           activeTurns: statuses.reduce((sum, status) => sum + status.activeTurns, 0)
-            + (weixinStatus?.activeTurns ?? 0),
+            + (weixinStatus?.activeTurns ?? 0) + (activeDshRuntime?.getRuntimeStatus().activeTurns ?? 0),
           lastError: statuses.find((status) => status.lastError)?.lastError
             ?? weixinStatus?.lastError
             ?? null,
           updatedAt: new Date().toISOString(),
           channels: { telegram: running, weixin: running && config.wxEnabled },
-          bots: runtimes.map((runtime, index) => ({
+          bots: [...runtimes.map((runtime, index) => ({
             id: runtime.id,
             username: statuses[index]?.botUsername ?? runtime.bot.username,
             connected: running && Boolean(statuses[index]?.connected),
@@ -1032,7 +1065,7 @@ async function runServeCli(): Promise<void> {
             codexHome: statuses[index]?.codexHome ?? runtime.home,
             antigravityHome: runtime.antigravityHome,
             ...(statuses[index]?.codexAppServer ? { codexAppServer: statuses[index].codexAppServer } : {}),
-          })),
+          })), ...(activeDshRuntime ? [activeDshRuntime.getRuntimeStatus()] : [])],
           ...(weixinStatus ? {
             weixinRuntime: {
               connected: running && weixinStatus.connected,
@@ -1047,6 +1080,7 @@ async function runServeCli(): Promise<void> {
         });
       };
       const authSyncLocalIdle = (): boolean => runtimes.every((runtime) => runtime.core.isIdleForServiceUpdate())
+          && (activeDshRuntime?.getRuntimeStatus().activeTurns ?? 0) === 0
           && (!activeWeixinCore || activeWeixinCore.isIdleForServiceUpdate())
           && mirror.isIdle();
       const clusterUpdateScheduler = createClusterUpdateScheduler({
@@ -1098,7 +1132,7 @@ async function runServeCli(): Promise<void> {
         statusUpdated: (): void => writeAggregateStatus(),
         getServiceStatus: async () => ({
           currentVersion: readPackageVersion(),
-          bots: await Promise.all(runtimes.map(async (runtime) => {
+          bots: [...await Promise.all(runtimes.map(async (runtime) => {
             const status = runtime.core.getRuntimeStatus();
             return {
               id: runtime.id,
@@ -1110,7 +1144,7 @@ async function runServeCli(): Promise<void> {
               codexHome: status.codexHome ?? runtime.home,
               ...(status.codexAppServer ? { codexAppServer: status.codexAppServer } : {}),
             };
-          })),
+          })), ...(activeDshRuntime ? [activeDshRuntime.getRuntimeStatus()] : [])],
           ...(activeWeixinCore ? {
             weixinRuntime: {
               connected: activeWeixinCore.getRuntimeStatus().connected,
@@ -1291,6 +1325,7 @@ async function runServeCli(): Promise<void> {
         await activeWeixinCore?.stop();
         await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
         await activeOpencodeRuntime?.stop();
+        await activeDshRuntime?.stop();
         writeAggregateStatus(false);
         const allManaged = [...managedApps, ...(sharedCodexApp ? [sharedCodexApp] : [])];
         await Promise.all(allManaged.map((app) => app.stop({ terminateServer: true }).catch((error) => {
@@ -1311,6 +1346,7 @@ async function runServeCli(): Promise<void> {
     await activeWeixinCore?.stop().catch(() => {});
     await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
     await activeOpencodeRuntime?.stop().catch(() => {});
+    await activeDshRuntime?.stop().catch(() => {});
     await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
     store?.close();
     processLock.release();
@@ -1924,10 +1960,22 @@ async function configureEnvInteractively(envPath: string, existed: boolean): Pro
       skipped.push('TG_ALLOWED_USER_ID');
     }
 
+    const dshToken = sanitizeEnvInput(await rl.question('DeepSeek Harness Telegram bot token (DSH_BOT_TOKEN) [optional]: '));
+    if (dshToken) {
+      updates.DSH_BOT_TOKEN = dshToken;
+      if (!codexTokens && !existed) {
+        updates.CODEX_BOT_TOKENS = '';
+        skipped.splice(skipped.indexOf('CODEX_BOT_TOKENS'), 1);
+      }
+      const dshSource = sanitizeEnvInput(await rl.question('DeepSeek Harness source directory (DSH_SOURCE_DIR) [Enter to use installed dsh]: '));
+      if (dshSource) updates.DSH_SOURCE_DIR = normalizeUserPath(dshSource);
+      if (!/^\d+:[A-Za-z0-9_-]+$/.test(dshToken)) warnings.push('DSH_BOT_TOKEN does not look like a standard Telegram bot token.');
+    }
+
     const cwdDefault = defaultInitCwd();
     const cwdPrompt = cwdDefault
-      ? `Default Codex workspace (DEFAULT_CWD) [${cwdDefault}]: `
-      : 'Default Codex workspace (DEFAULT_CWD): ';
+      ? `Default workspace (DEFAULT_CWD) [${cwdDefault}]: `
+      : 'Default workspace (DEFAULT_CWD): ';
     const cwdAnswer = sanitizeEnvInput(await rl.question(cwdPrompt));
     const cwd = cwdAnswer ? normalizeUserPath(cwdAnswer) : cwdDefault;
     if (cwd) {
@@ -2142,13 +2190,22 @@ function runDoctorChecks(): boolean {
     ...(process.env.ANTIGRAVITY_BOT_TOKENS ?? '').split(','),
     process.env.ANTIGRAVITY_BOT_TOKEN ?? '',
   ].map((value) => value.trim()).filter(Boolean);
+  const dshToken = process.env.DSH_BOT_TOKEN?.trim();
+  const dshFlag = process.env.DSH_ENABLED;
+  const dshEnabled = dshFlag ? dshFlag !== 'false' && dshFlag !== '0' : Boolean(dshToken || process.env.DSH_SOURCE_DIR?.trim() || process.env.DSH_CLI_BIN?.trim());
 
   const checks: Array<[string, boolean]> = [
     ['node >= 24', Number(process.versions.node.split('.')[0]) >= 24],
-    ['codex cli available', hasConfiguredCommand(configuredCodexBin, 'codex')],
-    ['telegram bot token(s) configured', codexTokens.length > 0 || antigravityTokens.length > 0],
+    ['telegram bot token(s) configured', codexTokens.length > 0 || antigravityTokens.length > 0 || Boolean(dshToken)],
     ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
   ];
+  if (codexTokens.length > 0 || process.env.WX_ENABLED === 'true' || process.env.WX_ENABLED === '1') checks.push(['codex cli available', hasConfiguredCommand(configuredCodexBin, 'codex')]);
+  if (dshEnabled) {
+    const source = process.env.DSH_SOURCE_DIR?.trim();
+    checks.push(['DSH CLI available', source ? fs.existsSync(path.join(path.resolve(source), 'apps/cli/src/bin.ts')) : hasConfiguredCommand(process.env.DSH_CLI_BIN, 'dsh')]);
+    if (dshToken) checks.push(['DSH uses an independent Telegram bot', ![...codexTokens, ...antigravityTokens, process.env.OPENCODE_BOT_TOKEN?.trim()].includes(dshToken)]);
+  }
+  if (dshToken) checks.push(['DSH backend enabled for its Telegram bot', dshEnabled]);
   if (process.env.OPENCODE_BOT_TOKEN?.trim()) {
     const configuredOpencodeBin = process.env.OPENCODE_CLI_BIN;
     checks.push(['opencode cli available', hasConfiguredCommand(configuredOpencodeBin, 'opencode')]);

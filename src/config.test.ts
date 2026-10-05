@@ -10,10 +10,61 @@ import {
   validateOpencodeBotToken,
   validateAntigravityBotToken,
   validateAntigravityBotTokens,
+  parseDshPatches,
+  loadEnv,
 } from './config.js';
 
 test('selectDefaultRuntimeBotToken marks a token already present in tokens list', () => {
   assert.equal(selectDefaultRuntimeBotToken(['iso-a', 'shared', 'iso-b'], 'shared'), 'shared');
+});
+
+function withDshEnv(overrides: Record<string, string>, run: () => void): void {
+  loadEnv();
+  const names = ['TG_BOT_TOKEN', 'TG_BOT_TOKENS', 'CODEX_BOT_TOKEN', 'CODEX_BOT_TOKENS', 'ANTIGRAVITY_BOT_TOKEN', 'ANTIGRAVITY_BOT_TOKENS', 'OPENCODE_BOT_TOKEN', 'DSH_BOT_TOKEN', 'DSH_ENABLED', 'DSH_SOURCE_DIR', 'DSH_CLI_BIN', 'DSH_HOME', 'DSH_PROFILE', 'DSH_PATCHES', 'DSH_STARTUP_TIMEOUT_MS', 'TG_ALLOWED_USER_ID', 'WX_ENABLED'];
+  const saved = new Map(names.map(name => [name, process.env[name]]));
+  try {
+    for (const name of names) delete process.env[name];
+    Object.assign(process.env, { DSH_BOT_TOKEN: 'dsh-test', TG_ALLOWED_USER_ID: '1', WX_ENABLED: 'false' }, overrides);
+    run();
+  } finally {
+    for (const [name, value] of saved) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+}
+
+test('DSH can run independently or be enabled on an existing bot', () => {
+  withDshEnv({ DSH_SOURCE_DIR: '/source/dsh', DSH_HOME: '/home/dsh', DSH_PATCHES: '["/patch.yml"]' }, () => {
+    const config = loadConfig();
+    assert.deepEqual(config.codexBotTokens, []);
+    assert.deepEqual(config.antigravityBotTokens, []);
+    assert.equal(config.tgBotToken, 'dsh-test');
+    assert.deepEqual(config.tgBotTokens, ['dsh-test']);
+    assert.equal(config.dsh?.sourceDir, '/source/dsh');
+    assert.equal(config.dsh?.home, '/home/dsh');
+    assert.deepEqual(config.dsh?.patches, ['/patch.yml']);
+    assert.equal(config.dsh?.profile, 'acp');
+  });
+  withDshEnv({ DSH_BOT_TOKEN: '', CODEX_BOT_TOKENS: 'codex-test', DSH_ENABLED: 'true' }, () => {
+    assert.ok(loadConfig().dsh);
+  });
+  withDshEnv({ DSH_BOT_TOKEN: '', CODEX_BOT_TOKENS: 'codex-test', DSH_ENABLED: 'false', DSH_SOURCE_DIR: '/source' }, () => {
+    assert.equal(loadConfig().dsh, undefined);
+  });
+});
+
+test('DSH rejects bot collisions, disabled standalone runtime and invalid startup timeouts', () => {
+  for (const name of ['CODEX_BOT_TOKENS', 'ANTIGRAVITY_BOT_TOKENS', 'OPENCODE_BOT_TOKEN']) {
+    withDshEnv({ [name]: 'dsh-test' }, () => assert.throws(() => loadConfig(), /DSH_BOT_TOKEN must use a different bot/));
+  }
+  withDshEnv({ DSH_ENABLED: 'false' }, () => assert.throws(() => loadConfig(), /DSH_ENABLED/));
+  for (const timeout of ['0', '-1', 'bad', '1.5']) {
+    withDshEnv({ DSH_STARTUP_TIMEOUT_MS: timeout }, () => assert.throws(() => loadConfig(), /DSH_STARTUP_TIMEOUT_MS/));
+  }
+});
+
+test('DSH patches require explicit JSON paths', () => {
+  assert.deepEqual(parseDshPatches(undefined), []);
+  assert.deepEqual(parseDshPatches('["/one.yml", "/two.yml"]'), ['/one.yml', '/two.yml']);
+  for (const value of ['one.yml', '{}', '[1]', '[""]']) assert.throws(() => parseDshPatches(value), /DSH_PATCHES/);
 });
 
 test('selectDefaultRuntimeBotToken ignores token outside configured tokens', () => {

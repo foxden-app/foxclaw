@@ -67,7 +67,7 @@ export interface EngineTurnErrorContext {
 export interface IEngineAdapter {
   readonly id: string;
   readonly name: string;
-  listModels(): Promise<EngineModel[]>;
+  listModels(scopeId?: string): Promise<EngineModel[]>;
   executeTurn(request: EngineTurnRequest): EngineTurnExecution;
   preflightTurn?(request: EngineTurnRequest): Promise<void>;
   handleTurnError?(context: EngineTurnErrorContext): Promise<boolean>;

@@ -4,7 +4,7 @@
 
 **狸爪：一个更适配编程需求的移动端 Codex 控制器。**
 
-FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex、OpenCode 或 Antigravity (AGY)，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，`codex app-server` / `opencode serve` / `agy` 负责本地执行；你发任务、看进度、批审批、切线程，Agent 在电脑上继续写代码。
+FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex、OpenCode、Antigravity (AGY) 或 DeepSeek Harness (DSH)，把移动端变成一个真正能用的 web coding 入口。Telegram 或微信负责交互，各后端负责本地执行；你发任务、看进度、批审批、切线程，Agent 在电脑上继续写代码。DSH 通过 Telegram 接入，支持独立 Bot 或在现有 Bot 中切换。
 
 这适合你离开办公桌去吃饭、在旅途中、在跑步机上，或者陪小孩逛公园的时候继续工作。人可以离开电脑，Codex 不必停；它会把关键进展、错误、审批请求和最终结果同步回手机。
 
@@ -38,12 +38,13 @@ FoxClaw（狸爪）的目标很直接：让你用手机控制本机的 Codex、O
 - 对 Node、Telegram 机器人、Codex CLI 不太熟？看 [新手安装指南](./docs/zh/install-for-beginners.md)。
 - 已经装好，想系统了解 `/help`、`/setup`、`/threads`、`/watch`、`/auth` 和账号轮转？看 [用户手册](./docs/zh/user-manual.md)。
 - 想把同一组合法 ChatGPT auth 候选同步到多台机器？看 [跨节点 auth 同步配置指南](./docs/zh/cross-node-auth-sync.md)。
+- 想接入 DeepSeek Harness，切换模型、推理档位、权限或查看插件配置？看 [DSH 后端配置](./docs/zh/dsh.md)。
 - 想了解每个版本改了什么？看 [更新日志](./CHANGELOG.md)。
 - 维护者准备发版？看 [发布 runbook](./docs/zh/release.md)。
 - Git、Node、`.env` 都玩得转？直接往下看快速设置。
 - 卡住了？看 [故障排查](./docs/zh/troubleshooting.md)。
 
-最低要求：一个或多个 Telegram bot token、你的 Telegram 数字用户 ID、Node.js 24+、一份已登录的 `codex` CLI。首次安装大约 10–20 分钟。新安装请使用 `TG_BOT_TOKENS`；`TG_BOT_TOKEN` 兼容旧的单 runtime 配置，也可在多 bot 模式中标记一个“默认/终端共享”bot。
+最低要求：一个或多个 Telegram bot token、你的 Telegram 数字用户 ID、Node.js 24+，以及已配置的执行后端。Codex 使用 `CODEX_BOT_TOKENS`；DSH 独立运行使用 `DSH_BOT_TOKEN`，无需安装或登录 Codex。首次安装大约 10–20 分钟。
 
 **30 秒体验**：启动 FoxClaw 后，给你的 Telegram 机器人发一句 `List files in DEFAULT_CWD`。Codex 会在本地检查那个目录，然后把结果发回 Telegram。
 
@@ -79,7 +80,7 @@ foxclaw start
 跑 `doctor` 或 `start` 之前先把 `.env` 填好。私聊模式最小配置：
 
 ```dotenv
-TG_BOT_TOKENS=123456:telegram-token
+CODEX_BOT_TOKENS=123456:telegram-token
 TG_ALLOWED_USER_ID=123456789
 DEFAULT_CWD=/absolute/path/to/workspace
 DEFAULT_APPROVAL_POLICY=on-request
