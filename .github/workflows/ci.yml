@@ -16,11 +16,12 @@ jobs:
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git -c protocol.version=2 fetch --no-tags --depth=1 origin "+${GITHUB_REF}:refs/remotes/origin/checkout"
           git checkout --detach refs/remotes/origin/checkout
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-      - run: npm install
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test

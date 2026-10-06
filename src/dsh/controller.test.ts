@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fakeDsh } from './test_support.js';
-import { UnifiedBridgeCore } from '../antigravity/controller.js';
+import { UnifiedBridgeCore } from '../bridge/unified_bridge.js';
+import { createDshBackend } from './backend.js';
 import { BridgeStore } from '../store/database.js';
 import { Logger } from '../logger.js';
 import type { AppConfig } from '../config.js';
@@ -18,10 +19,12 @@ test('DSH on a unified bot retains the service self-update command', async () =>
   const messages: string[] = [];
   const launches: Array<{ scope: string; locale: string }> = [];
   const config = { dsh: fixture.options, defaultCwd: fixture.root, antigravityAuthDir: authDir, antigravityCliBin: 'agy', antigravityDefaultModel: 'default' } as AppConfig;
+  const messaging = { sendRichMarkdown: async (_scope: string, text: string) => { messages.push(text); return 1; } } as TelegramMessagingPort;
+  const logger = new Logger('error', path.join(fixture.root, 'test.log'));
   const core = new UnifiedBridgeCore(config, store, new Logger('error', path.join(fixture.root, 'test.log')),
     { stop: () => {}, username: 'FixtureBot' } as TelegramGateway, undefined, undefined,
-    { sendRichMarkdown: async (_scope: string, text: string) => { messages.push(text); return 1; } } as TelegramMessagingPort,
-    { defaultBackendId: 'dsh', selfUpdater: {
+    messaging,
+    { defaultBackendId: 'dsh', backends: [createDshBackend(config, store, logger, messaging)], selfUpdater: {
       readStatus: async () => null, clearStatus: async () => {},
       launch: async (scope, locale) => { launches.push({ scope, locale }); },
     } });

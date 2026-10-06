@@ -28,10 +28,14 @@ async function setup(ownsScope?: (scopeId: string) => boolean) {
   const ui = new DshUi(config, store, logger, messaging);
   const orchestrator: UnifiedChannelOrchestrator = new UnifiedChannelOrchestrator({ config, store, logger, messaging, adapter: ui.adapter, bot: { start: async () => {}, stop: () => {}, username: 'FixtureBot' } as TelegramGateway,
     ...(ownsScope ? { ownsScope } : {}),
-    customUi: {
+    backends: [{ id: 'dsh', name: ui.adapter.name, engineType: 'dsh', adapter: ui.adapter,
+      defaults: { reasoningEffort: null, supportedReasoningEfforts: [], boost: false, tokenUsage: false },
+      createUi: () => ({
       handleCustomCommand: (scope, command, args, locale) => ui.command(scope, command, args, locale, orchestrator),
       renderCustomStatus: async (scope, locale) => ui.status(scope, locale),
-    },
+      renderModelsMenu: async (scope, locale, messageId) => { await ui.models(scope, locale, orchestrator, messageId); return true; },
+      handleCustomCallback: (scope, data, locale, _messageId, event) => ui.callback(scope, data, locale, orchestrator, event),
+    }) }],
   });
   const event = { callbackQueryId: 'real-query-id', messageId: 1 } as TelegramCallbackEvent;
   const callback = (scope: string, data: string) => ui.callback(scope, data, 'en', orchestrator, event);
@@ -45,7 +49,7 @@ test('DSH panel uses native models/efforts, persists choices and rejects foreign
     assert.doesNotMatch(JSON.stringify(f.messages.at(-1)), /account|quota|auth|boost|Fast tier/i);
     await f.orchestrator.sendStatus('a', 'en');
     assert.match(f.messages.at(-1)!.text, /Per-turn counts are not exposed/);
-    assert.ok(f.messages.at(-1)!.keyboard.flat().some(button => button.callback_data === 'dsh:models'));
+    assert.ok(f.messages.at(-1)!.keyboard.flat().some(button => button.callback_data === 'engine:setup:models'));
     await f.ui.models('a', 'en', f.orchestrator);
     const model = f.messages.at(-1)!.keyboard.flat().find(button => button.text === 'Long model')!;
     assert.ok(model);
@@ -68,14 +72,15 @@ test('DSH panel uses native models/efforts, persists choices and rejects foreign
     assert.equal(await f.callback('a', 'engine:setup:boost'), true);
     assert.match(f.answers.at(-1)!.text, /Open DSH settings/);
     f.store.setActiveBackend('a', 'codex');
-    f.orchestrator.registerBackend({ id: 'codex', engineType: 'codex', name: 'Codex', adapter: f.ui.adapter });
+    f.orchestrator.registerBackend({ id: 'codex', engineType: 'codex', name: 'Codex', adapter: f.ui.adapter, defaults: { reasoningEffort: 'medium', supportedReasoningEfforts: ['low', 'medium', 'high'], boost: true, tokenUsage: true } });
     await f.callback('a', model.callback_data);
     assert.match(f.answers.at(-1)!.text, /Switch to DSH/);
   } finally { await f.dispose(); }
 });
 
+let inboundMessageId = 0;
 function textEvent(text: string): TelegramTextEvent {
-  return { scopeId: 'a', chatId: '1', topicId: null, chatType: 'private', userId: '1', messageId: 1, text, attachments: [], entities: [], replyToBot: false };
+  return { scopeId: 'a', chatId: '1', topicId: null, chatType: 'private', userId: '1', messageId: ++inboundMessageId, text, attachments: [], entities: [], replyToBot: false };
 }
 
 async function until(predicate: () => boolean): Promise<void> {
@@ -93,8 +98,10 @@ test('DSH crash recovery leaves other bots previews and processing queues untouc
         createdAt: Date.now(), updatedAt: Date.now(), resolvedAt: null });
     }
     await f.orchestrator.start();
-    assert.deepEqual(f.store.listActiveTurnPreviews().map(preview => preview.scopeId), ['other-bot']);
-    assert.equal(f.store.listQueuedTurnInputs('a')[0]?.status, 'queued');
+    assert.deepEqual(f.store.listActiveTurnPreviews().map(preview => preview.scopeId), ['a', 'other-bot']);
+    assert.equal(f.store.taskJournal.listUnfinished('a')[0]?.state, 'awaiting_confirmation');
+    assert.equal(f.store.taskJournal.listUnfinished('other-bot').length, 0);
+    assert.equal(f.store.listQueuedTurnInputs('a')[0]?.status, 'processing');
     assert.equal(f.store.listQueuedTurnInputs('other-bot')[0]?.status, 'processing');
     await f.orchestrator.stop();
     assert.equal(f.orchestrator.getActiveTurnsCount(), 0);
@@ -107,7 +114,7 @@ test('DSH interrupt and steer preserve queued work, and backend switching restor
     const state = await f.ui.adapter.sessionForScope('a');
     let tools = 0;
     state.client.on('update', notification => { if (notification.update.sessionUpdate === 'tool_call') tools++; });
-    f.orchestrator.registerBackend({ id: 'codex', engineType: 'codex', name: 'Codex', adapter: f.ui.adapter });
+    f.orchestrator.registerBackend({ id: 'codex', engineType: 'codex', name: 'Codex', adapter: f.ui.adapter, defaults: { reasoningEffort: 'medium', supportedReasoningEfforts: ['low', 'medium', 'high'], boost: true, tokenUsage: true } });
     await f.orchestrator.handleText(textEvent('wait'));
     await until(() => tools === 1);
     await f.orchestrator.handleText(textEvent('queued task'));
@@ -151,7 +158,7 @@ test('DSH routes photos natively and retains JSON documents as attachments', { t
     await until(() => f.messages.some(message => message.text.includes('"images":1')));
     const final = f.messages.findLast(message => message.text.includes('"images":1'))!.text;
     assert.match(final, /document.json/);
-    assert.equal((final.match(/Telegram attachments:/g) ?? []).length, 1);
+    assert.equal((final.match(/Attachments:/g) ?? []).length, 1);
     assert.doesNotMatch(final, /PRIVATE REASONING/);
   } finally { await f.dispose(); }
 });

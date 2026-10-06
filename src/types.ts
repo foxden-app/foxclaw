@@ -19,7 +19,7 @@ export interface ChatSessionSettings {
   /** Bridge scope id (e.g. `telegram:…`). */
   chatId: string;
   model: string | null;
-  reasoningEffort: ReasoningEffortValue | null;
+  reasoningEffort: string | null;
   locale: AppLocale | null;
   accessPreset: AccessPresetValue | null;
   collaborationMode: CollaborationModeValue | null;

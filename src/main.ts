@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { RuntimeSupervisor } from './core/runtime_supervisor.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -731,6 +732,7 @@ async function runServeCli(): Promise<void> {
     { CrossNodeAuthSync },
     { OpencodeTelegramRuntime },
     { DshTelegramRuntime },
+    { createDshBackend },
     { UnifiedBridgeCore },
     { AntigravityAppClient },
     { AntigravityAuthManager, linkAntigravityAuthTokens },
@@ -751,7 +753,8 @@ async function runServeCli(): Promise<void> {
     import('./auth/cross_node_sync.js'),
     import('./opencode/runtime.js'),
     import('./dsh/runtime.js'),
-    import('./antigravity/controller.js'),
+    import('./dsh/backend.js'),
+    import('./bridge/unified_bridge.js'),
     import('./antigravity/client.js'),
     import('./antigravity/auth.js'),
   ]);
@@ -764,11 +767,13 @@ async function runServeCli(): Promise<void> {
   const authNotificationAggregator = createAuthRefreshNotificationAggregator(logger);
   attachIlinkRuntimeFromBridgeLogger(logger, config.wxIlinkRouteTag);
   const processLock = acquireProcessLock(config.lockPath);
+  const supervisor = new RuntimeSupervisor();
+  supervisor.register('process-lock', { stop: () => processLock.release() });
   let store: InstanceType<typeof BridgeStore> | null = null;
   let weixinAdapter: InstanceType<typeof WeixinChannelAdapter> | null = null;
   let activeWeixinCore: InstanceType<typeof BridgeSessionCore> | null = null;
-  let activeTelegramAdapters: Array<InstanceType<typeof TelegramChannelAdapter>> = [];
-  let managedApps: Array<InstanceType<typeof CodexAppClient>> = [];
+  const activeTelegramAdapters: Array<InstanceType<typeof TelegramChannelAdapter>> = [];
+  const managedApps: Array<InstanceType<typeof CodexAppClient>> = [];
   let activeAuthMirror: InstanceType<typeof AuthCandidateMirror> | null = null;
   let activeAuthSync: InstanceType<typeof CrossNodeAuthSync> | null = null;
   let activeOpencodeRuntime: InstanceType<typeof OpencodeTelegramRuntime> | null = null;
@@ -778,6 +783,21 @@ async function runServeCli(): Promise<void> {
   let sharedAntigravityAuth: InstanceType<typeof AntigravityAuthManager> | null = null;
   try {
     store = new BridgeStore(config.storePath);
+    supervisor.register('store', { stop: () => store?.close() });
+    supervisor.register('native-apps', { stop: async () => {
+      const apps = new Set([...managedApps, ...(sharedCodexApp ? [sharedCodexApp] : [])]);
+      const results = await Promise.allSettled([...apps].map(app => app.stop({ terminateServer: true })));
+      for (const result of results) if (result.status === 'rejected') logger.warn('codex.app-server.stop_failed', { error: serializeError(result.reason) });
+    } });
+    supervisor.register('channels-and-sync', { stop: async () => {
+      const failures: unknown[] = [];
+      const cleanups = [() => authNotificationAggregator.flushAll(), () => activeAuthSync?.stop(), () => activeAuthMirror?.stop(),
+        () => weixinAdapter?.stop(), () => activeWeixinCore?.stop({ keepTransports: true }),
+        ...activeTelegramAdapters.map(adapter => () => adapter.stop()),
+        () => activeOpencodeRuntime?.stop(), () => activeDshRuntime?.stop()];
+      for (const cleanup of cleanups) try { await cleanup(); } catch (error) { failures.push(error); }
+      if (failures.length) throw new AggregateError(failures, 'Runtime cleanup failed');
+    } });
     if (config.dshBotToken) {
       activeDshRuntime = new DshTelegramRuntime(config, store, logger);
       await activeDshRuntime.start();
@@ -800,15 +820,14 @@ async function runServeCli(): Promise<void> {
       };
       writeDshStatus();
       const timer = setInterval(writeDshStatus, 5000);
-      const shutdown = async (): Promise<void> => {
+      let shutdownPromise: Promise<void> | null = null;
+      const shutdown = (): Promise<void> => shutdownPromise ??= (async () => {
         clearInterval(timer);
-        await activeDshRuntime!.stop();
-        await activeOpencodeRuntime?.stop();
         writeDshStatus(false);
-        store!.close();
-        processLock.release();
+        const failures = await supervisor.stop();
+        for (const failure of failures) logger.warn('bridge.shutdown_failed', { resource: failure.name, error: serializeError(failure.error) });
         process.exit(0);
-      };
+      })();
       process.on('SIGINT', () => void shutdown());
       process.on('SIGTERM', () => void shutdown());
       return;
@@ -937,6 +956,8 @@ async function runServeCli(): Promise<void> {
             ],
           );
 
+      managedApps.push(codexApp);
+
       // Antigravity environment
       const isAntigravityDefault = backend === 'antigravity' && isDefaultRuntimeForBackend;
       let antigravityHome: string;
@@ -1023,9 +1044,8 @@ async function runServeCli(): Promise<void> {
           },
         },
       );
-      await mirror.initialize();
       activeAuthMirror = mirror;
-      managedApps = seeds.map((runtime) => runtime.app);
+      await mirror.initialize();
       const lastSelfUpdatePath = path.join(APP_HOME, 'runtime', 'last-self-update.json');
       let lastSelfUpdate = readSelfUpdateStatus(lastSelfUpdatePath);
       const runtimes: Runtime[] = [];
@@ -1045,7 +1065,7 @@ async function runServeCli(): Promise<void> {
           ...(first?.codexAppServer ? { codexAppServer: first.codexAppServer } : {}),
           botUsername: first?.botUsername ?? null,
           currentBindings: store!.countBindings(),
-          pendingApprovals: store!.countPendingApprovals() + statuses.reduce((sum, status) => sum + status.dshPendingApprovals, 0) + (activeDshRuntime?.getRuntimeStatus().pendingApprovals ?? 0),
+          pendingApprovals: store!.countPendingApprovals() + statuses.reduce((sum, status) => sum + status.pendingApprovals, 0) + (activeDshRuntime?.getRuntimeStatus().pendingApprovals ?? 0),
           pendingUserInputs: store!.countPendingUserInputs(),
           queuedTurns: store!.countQueuedTurnInputs(),
           activeTurns: statuses.reduce((sum, status) => sum + status.activeTurns, 0)
@@ -1194,10 +1214,13 @@ async function runServeCli(): Promise<void> {
             antigravityApp: seed.antigravityApp,
             antigravityAuth: seed.antigravityAuth,
             defaultBackendId: seed.defaultBackend,
+            backends: seed.config.dsh ? [createDshBackend(seed.config, store, logger, telegramMessaging)] : [],
             selfUpdater,
           },
         );
-        runtimes.push({ ...seed, core, telegram: new TelegramChannelAdapter(core) });
+        const telegram = new TelegramChannelAdapter(core);
+        activeTelegramAdapters.push(telegram);
+        runtimes.push({ ...seed, core, telegram });
       }
       if (config.wxEnabled) {
         const weixinApp = new CodexAppClient(
@@ -1210,6 +1233,7 @@ async function runServeCli(): Promise<void> {
           null,
           codexApiProviderOverrides,
         );
+        managedApps.push(weixinApp);
         const outbound = new BridgeMessagingRouter(
           new TelegramMessagingPort(seeds[0]!.bot),
           new WeixinMessagingPort(store, (id) => loadWeixinAccount(config.weixinAccountsDir, id)),
@@ -1225,10 +1249,9 @@ async function runServeCli(): Promise<void> {
           coordinator,
           false,
         );
-        managedApps.push(weixinApp);
         weixinAdapter = new WeixinChannelAdapter(activeWeixinCore, store, config, logger);
       }
-      activeTelegramAdapters = runtimes.map((runtime) => runtime.telegram);
+
 
       if (config.authSyncEnabled) {
         const authSyncTransportBot = seeds[0]!;
@@ -1316,40 +1339,20 @@ async function runServeCli(): Promise<void> {
       writeAggregateStatus();
       logger.info('bridge.started', { bots: runtimes.map((runtime) => runtime.id) });
 
-      const shutdown = async (signal: string): Promise<void> => {
+      let shutdownPromise: Promise<void> | null = null;
+      const shutdown = (signal: string): Promise<void> => shutdownPromise ??= (async () => {
         logger.info('bridge.shutting_down', { signal });
-        await authNotificationAggregator.flushAll();
-        authSync?.stop();
-        mirror.stop();
-        await weixinAdapter?.stop();
-        await activeWeixinCore?.stop();
-        await Promise.all(runtimes.map((runtime) => runtime.telegram.stop()));
-        await activeOpencodeRuntime?.stop();
-        await activeDshRuntime?.stop();
         writeAggregateStatus(false);
-        const allManaged = [...managedApps, ...(sharedCodexApp ? [sharedCodexApp] : [])];
-        await Promise.all(allManaged.map((app) => app.stop({ terminateServer: true }).catch((error) => {
-          logger.warn('codex.app-server.stop_failed', { error: serializeError(error) });
-        })));
-        store?.close();
-        processLock.release();
+        const failures = await supervisor.stop();
+        for (const failure of failures) logger.warn('bridge.shutdown_failed', { resource: failure.name, error: serializeError(failure.error) });
         process.exit(0);
-      };
+      })();
 
       process.on('SIGINT', () => void shutdown('SIGINT'));
       process.on('SIGTERM', () => void shutdown('SIGTERM'));
   } catch (error) {
-    await authNotificationAggregator.flushAll().catch(() => {});
-    activeAuthSync?.stop();
-    activeAuthMirror?.stop();
-    await weixinAdapter?.stop().catch(() => {});
-    await activeWeixinCore?.stop().catch(() => {});
-    await Promise.allSettled(activeTelegramAdapters.map((adapter) => adapter.stop()));
-    await activeOpencodeRuntime?.stop().catch(() => {});
-    await activeDshRuntime?.stop().catch(() => {});
-    await Promise.allSettled(managedApps.map((app) => app.stop({ terminateServer: true })));
-    store?.close();
-    processLock.release();
+    const failures = await supervisor.stop();
+    for (const failure of failures) logger.warn('bridge.shutdown_failed', { resource: failure.name, error: serializeError(failure.error) });
     throw error;
   }
 }

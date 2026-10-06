@@ -135,7 +135,7 @@ test('UnifiedChannelOrchestrator manages active turn, streaming preview, steer a
     });
 
     // Wait for drained turn to become active
-    for (let i = 0; i < 50 && orchestrator.getActiveTurnsCount() === 0; i++) {
+    for (let i = 0; i < 500 && (executedRequest as unknown as EngineTurnRequest)?.prompt !== 'Second task'; i++) {
       await new Promise((r) => setTimeout(r, 10));
     }
 
@@ -582,7 +582,8 @@ test('UnifiedChannelOrchestrator rescues substantive response text when turn end
       conversationId: 'conv-rescue',
     });
 
-    // Verify the edited message contains the substantive answer and execution summary, NOT an error box
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // Verify the edited message contains the substantive answer and execution summary.
     const lastEdit = editedMessages[editedMessages.length - 1];
     assert.ok(lastEdit);
     assert.ok(lastEdit.text.includes(substantiveAnswer), 'Should preserve substantive answer');
@@ -787,7 +788,7 @@ test('UnifiedChannelOrchestrator setup menu: model and reasoning effort are not 
   }
 });
 
-test('orchestrator recovers interrupted turn after restart, preserves threadId and reuses preview message', async () => {
+test('legacy interrupted previews require confirmation, preserve threadId and reuse their message', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'foxclaw-orch-restart-'));
   const dbPath = path.join(tempDir, 'test.sqlite');
   const store = new BridgeStore(dbPath);
@@ -816,7 +817,7 @@ test('orchestrator recovers interrupted turn after restart, preserves threadId a
   const editedMessages: Array<{ messageId: number; text: string }> = [];
 
   const mockMessaging = {
-    sendMessage: async (_scopeId: string, text: string) => {
+    sendRichMarkdown: async (_scopeId: string, text: string) => {
       sentMessages.push({ text });
       return 999;
     },
@@ -853,11 +854,12 @@ test('orchestrator recovers interrupted turn after restart, preserves threadId a
 
     await orchestrator.start();
 
-    // Wait for the restart auto-resume timer (1500ms + margin)
-    await new Promise((resolve) => setTimeout(resolve, 1700));
+    assert.equal(executedRequest, null);
+    assert.equal(store.taskJournal.listUnfinished(scopeId)[0]?.state, 'awaiting_confirmation');
+    await orchestrator.handleText({ scopeId, chatId: scopeId, topicId: null, chatType: 'private', userId: 'u1', messageId: 1, text: '/recover continue', attachments: [], entities: [], replyToBot: false });
 
     // Verify auto-resume executed with the preserved threadId and in-place message reuse
-    assert.ok(executedRequest, 'An auto-resume turn should have been executed');
+    assert.ok(executedRequest, 'The confirmed continuation should execute');
     assert.equal((executedRequest as any).threadId, 'conv-resumed-uuid-1', 'Should preserve the original threadId');
     assert.equal(store.getBinding(scopeId)?.threadId, 'conv-resumed-uuid-1', 'Scope binding should be updated to resumed threadId');
 

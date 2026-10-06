@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import type { ContentBlock, SessionConfigSelectOption } from '@agentclientprotocol/sdk';
 import type { IEngineAdapter, EngineModel, EngineTurnRequest, EngineTurnExecution, EngineTurnResult, EngineToolEvent } from '../core/engine_spi.js';
 import type { AccessPresetValue } from '../types.js';
-import { buildAttachmentPrompt, isNativeImageAttachment } from '../telegram/media.js';
+import { buildAttachmentPrompt, isNativeImageAttachment } from '../core/attachment_files.js';
 import { DshClient, type SessionConfigOption, type SessionNotification } from './client.js';
 
 export function optionChoices(option?: SessionConfigOption): SessionConfigSelectOption[] {
@@ -122,7 +122,7 @@ export class DshEngineAdapter implements IEngineAdapter {
     let finalMessageId: string | undefined;
     const tools = new Map<string, string>();
     const onUpdate = (notification: SessionNotification): void => {
-      if (notification.sessionId !== state?.sessionId) return;
+      if (cancelled || notification.sessionId !== state?.sessionId) return;
       const update = notification.update;
       if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
         if (update.messageId && update.messageId !== finalMessageId) { finalMessageId = update.messageId; finalMessage = ''; }
@@ -170,11 +170,17 @@ export class DshEngineAdapter implements IEngineAdapter {
     };
     queueMicrotask(() => { void run(); });
     return {
-      cancel: () => {
-        if (finished || cancelled) return;
+      cancel: async () => {
+        if (finished || cancelled) { await promise; return; }
         cancelled = true;
         state?.client.cancelPermissions?.();
-        if (state?.client.connected) void state.client.agent.notify('session/cancel', { sessionId: state.sessionId }).catch(() => {});
+        if (state?.client.connected) await state.client.agent.notify('session/cancel', { sessionId: state.sessionId }).catch(() => {});
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([promise, new Promise<void>(resolve => { timer = setTimeout(resolve, 5000); })]);
+          if (!finished) await this.clients.get(request.scopeId)?.stop();
+          await promise;
+        } finally { if (timer) clearTimeout(timer); }
       },
       waitForResult: () => promise,
       on: (event: string, listener: (...args: any[]) => void) => { emitter.on(event, listener); },

@@ -16,38 +16,40 @@
 
 ```bash
 git status --short --branch
-npm pkg get name version
-npm view @foxden-app/foxclaw version
+node -p "require('./package.json').name + '@' + require('./package.json').version"
+pnpm view @foxden-app/foxclaw version
 git tag --list 'v*' --sort=-v:refname | head
 ```
 
 确认目标版本还没有发布，也没有远端 tag：
 
 ```bash
-npm view @foxden-app/foxclaw@0.5.10 version 2>/dev/null || true
+pnpm view @foxden-app/foxclaw@0.5.10 version 2>/dev/null || true
 git ls-remote --tags origin refs/tags/v0.5.10
 ```
+
+使用 `packageManager` 固定的 pnpm 版本，以 `pnpm install --frozen-lockfile` 安装依赖。发布流水线仅在 registry 鉴权和发布步骤使用 npm。
 
 运行与发布 workflow 对齐的本地校验：
 
 ```bash
-npm run lint
-npm run typecheck
-npm test
-npm pack --dry-run
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm pack --pack-destination /tmp/foxclaw-release
 git diff --check
 ```
 
-`npm pack --dry-run` 会执行 `prepack` 构建，并列出 npm 包内容。确认输出里有 `CHANGELOG.md`。
+`pnpm pack` 会执行 `prepack` 构建并创建发布包。使用 `tar -tzf /tmp/foxclaw-release/*.tgz` 检查包含 `CHANGELOG.md`。
 
 ## 准备版本
 
-1. 更新 `package.json` 和 `package-lock.json` 的版本号。
+1. 更新 `package.json` 和 `pnpm-lock.yaml` 的版本号。
 2. 在 `CHANGELOG.md` 顶部新增版本条目，包含 `### 中文` 和 `### English` 小节。
 3. 提交发布 commit，推荐格式：
 
 ```bash
-git add package.json package-lock.json CHANGELOG.md
+git add package.json pnpm-lock.yaml CHANGELOG.md
 git commit -m "发布 0.5.10：一句话说明"
 ```
 
@@ -71,7 +73,7 @@ gh run watch <run-id> --repo foxden-app/foxclaw --exit-status
 成功后确认 npm 和 GitHub Release：
 
 ```bash
-npm view @foxden-app/foxclaw version
+pnpm view @foxden-app/foxclaw version
 gh release view v0.5.10 --repo foxden-app/foxclaw --json tagName,name,url,publishedAt,isDraft,isPrerelease
 ```
 

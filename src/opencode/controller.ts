@@ -190,7 +190,7 @@ export class OpencodeBridgeCore {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    this.bot.stop();
+    await this.bot.stop();
     for (const turn of this.activeTurns.values()) this.clearTurnTimers(turn);
     for (const watch of this.watchers.values()) {
       if (watch.flushTimer) clearTimeout(watch.flushTimer);

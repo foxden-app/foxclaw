@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import fs from 'node:fs';
 import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
@@ -20,32 +21,10 @@ export interface TelegramRemoteFile {
 
 const DEFAULT_API_BASE_URL = 'https://api.telegram.org';
 
-export function isTransientNetworkError(err: unknown): boolean {
-  if (!err) return false;
-  const msg = String((err as any).message || err).toLowerCase();
-  return (
-    msg.includes('client network socket disconnected') ||
-    msg.includes('econnreset') ||
-    msg.includes('etimedout') ||
-    msg.includes('eai_again') ||
-    msg.includes('enotfound') ||
-    msg.includes('econnrefused') ||
-    msg.includes('socket hang up') ||
-    msg.includes('timed out') ||
-    msg.includes('timeout') ||
-    msg.includes('network socket disconnected') ||
-    msg.includes('network error') ||
-    msg.includes('fetch failed') ||
-    msg.includes('und_err_') ||
-    msg.includes('read tcp') ||
-    msg.includes('connection timed out') ||
-    msg.includes('broken pipe') ||
-    msg.includes('ehostunreach') ||
-    msg.includes('enetunreach')
-  );
-}
+export { isTransientNetworkError } from '../core/network_errors.js';
+import { isTransientNetworkError } from '../core/network_errors.js';
 
-function callTelegramApiOnce<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
+function callTelegramApiOnce<T>(botToken: string, method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<TelegramApiResult<T>> {
   const payload = JSON.stringify(body);
   const endpoint = telegramApiUrl(botToken, method);
   return new Promise<TelegramApiResult<T>>((resolve, reject) => {
@@ -55,7 +34,7 @@ function callTelegramApiOnce<T>(botToken: string, method: string, body: Record<s
         'content-type': 'application/json',
         'content-length': Buffer.byteLength(payload),
       },
-      signal: AbortSignal.timeout(telegramApiTimeoutMs(false)),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(telegramApiTimeoutMs(false))]) : AbortSignal.timeout(telegramApiTimeoutMs(false)),
     }, (response) => {
       response.on('error', reject);
       const chunks: Buffer[] = [];
@@ -80,16 +59,18 @@ function callTelegramApiOnce<T>(botToken: string, method: string, body: Record<s
   });
 }
 
-export async function callTelegramApi<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<TelegramApiResult<T>> {
+export async function callTelegramApi<T>(botToken: string, method: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<TelegramApiResult<T>> {
   const maxAttempts = method === 'getUpdates' ? 1 : 4;
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await callTelegramApiOnce<T>(botToken, method, body);
+      signal?.throwIfAborted();
+      return await callTelegramApiOnce<T>(botToken, method, body, signal);
     } catch (err) {
+      signal?.throwIfAborted();
       lastError = err;
       if (attempt < maxAttempts && isTransientNetworkError(err)) {
-        await new Promise((r) => setTimeout(r, Math.min(3000, 500 * Math.pow(2, attempt - 1))));
+        await delay(Math.min(3000, 500 * Math.pow(2, attempt - 1)), undefined, { signal });
         continue;
       }
       throw err;

@@ -8,15 +8,16 @@ import type {
   EngineToolEvent,
 } from '../core/engine_spi.js';
 import type { CodexAppClient } from './client.js';
-import { normalizeTurnActivityEvent } from '../controller/activity.js';
-import { buildAttachmentPrompt } from '../telegram/media.js';
-import type { SandboxModeValue } from '../types.js';
+import { normalizeTurnActivityEvent } from './activity.js';
+import { buildAttachmentPrompt } from '../core/attachment_files.js';
+import { resolveAccessMode } from '../core/access.js';
+import type { SandboxModeValue, ApprovalPolicyValue } from '../types.js';
 
 export class CodexEngineAdapter implements IEngineAdapter {
   readonly id: string;
   readonly name: string;
   private readonly defaultModel: string | undefined;
-  private readonly defaultApprovalPolicy: string;
+  private readonly defaultApprovalPolicy: ApprovalPolicyValue;
   private readonly defaultSandboxMode: SandboxModeValue;
 
   constructor(
@@ -25,7 +26,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
       id?: string;
       name?: string;
       defaultModel?: string | undefined;
-      defaultApprovalPolicy?: string;
+      defaultApprovalPolicy?: ApprovalPolicyValue;
       defaultSandboxMode?: SandboxModeValue;
     } = {},
   ) {
@@ -44,15 +45,8 @@ export class CodexEngineAdapter implements IEngineAdapter {
         name: m.displayName || m.id,
         description: m.description,
         isDefault: m.isDefault || m.id === this.defaultModel,
+        supportedReasoningEfforts: m.supportedReasoningEfforts,
       }));
-      if (!list.some((m) => m.id === 'gpt-6-sol')) {
-        list.push({
-          id: 'gpt-6-sol',
-          name: 'GPT-6-Sol',
-          description: 'Next-generation flagship model with deep reasoning',
-          isDefault: false,
-        });
-      }
       return list;
     } catch {
       return [];
@@ -61,9 +55,11 @@ export class CodexEngineAdapter implements IEngineAdapter {
 
   executeTurn(request: EngineTurnRequest): EngineTurnExecution {
     const emitter = new EventEmitter();
+    const access = resolveAccessMode({ defaultApprovalPolicy: this.defaultApprovalPolicy, defaultSandboxMode: this.defaultSandboxMode }, { accessPreset: request.accessPreset ?? 'default' });
     let threadId = request.threadId;
     let turnId: string | null = null;
     let cancelled = false;
+    const earlyNotifications: any[] = [];
 
     let promptText = request.prompt;
     if (request.stagedAttachments && request.stagedAttachments.length > 0 && !request.prompt.includes('Telegram attachments:')) {
@@ -82,6 +78,13 @@ export class CodexEngineAdapter implements IEngineAdapter {
     };
 
     const onNotification = (msg: any) => {
+      if (cancelled || finalResult || turnError) return;
+      if (threadId && msg.params?.threadId && msg.params.threadId !== threadId) return;
+      if (!turnId) {
+        earlyNotifications.push(msg);
+        if (earlyNotifications.length > 1000) earlyNotifications.shift();
+        return;
+      }
       try {
         const ev = normalizeTurnActivityEvent(msg);
         if (!ev) return;
@@ -120,6 +123,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
 
     const cleanup = () => {
       this.client.off('notification', onNotification);
+      earlyNotifications.length = 0;
     };
 
     this.client.on('notification', onNotification);
@@ -135,8 +139,8 @@ export class CodexEngineAdapter implements IEngineAdapter {
           const session = await this.client.startThread({
             cwd: request.cwd,
             model: effectiveModel,
-            approvalPolicy: this.defaultApprovalPolicy,
-            sandboxMode: this.defaultSandboxMode,
+            approvalPolicy: access.approvalPolicy,
+            sandboxMode: access.sandboxMode,
           });
           threadId = session.thread.threadId;
         } else {
@@ -144,7 +148,8 @@ export class CodexEngineAdapter implements IEngineAdapter {
             await this.client.resumeThread({
               threadId,
               cwd: request.cwd,
-              approvalPolicy: this.defaultApprovalPolicy,
+              approvalPolicy: access.approvalPolicy,
+              sandboxMode: access.sandboxMode,
             });
           } catch {
             // thread might already be active on server
@@ -160,6 +165,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
           throw new Error('Failed to resolve or create Codex thread for turn');
         }
 
+        emitter.emit('conversation', threadId);
         let turn: { id: string };
         try {
           turn = await this.client.startTurn({
@@ -170,8 +176,8 @@ export class CodexEngineAdapter implements IEngineAdapter {
             effort: (request.effort as any) ?? null,
             serviceTier: request.serviceTier ?? undefined,
             collaborationMode: null,
-            approvalPolicy: this.defaultApprovalPolicy,
-            sandboxMode: this.defaultSandboxMode,
+            approvalPolicy: access.approvalPolicy,
+            sandboxMode: access.sandboxMode,
           });
         } catch (turnErr) {
           const errMsg = String(turnErr);
@@ -181,13 +187,16 @@ export class CodexEngineAdapter implements IEngineAdapter {
             errMsg.includes('stale') ||
             errMsg.includes('invalid thread')
           ) {
+            if (cancelled) throw turnErr;
             const session = await this.client.startThread({
               cwd: request.cwd,
               model: effectiveModel,
-              approvalPolicy: this.defaultApprovalPolicy,
-              sandboxMode: this.defaultSandboxMode,
+              approvalPolicy: access.approvalPolicy,
+              sandboxMode: access.sandboxMode,
             });
             threadId = session.thread.threadId;
+            if (cancelled) { cleanup(); return; }
+            emitter.emit('conversation', threadId);
             turn = await this.client.startTurn({
               threadId,
               input: [{ type: 'text', text: promptText, text_elements: [] }],
@@ -196,8 +205,8 @@ export class CodexEngineAdapter implements IEngineAdapter {
               effort: (request.effort as any) ?? null,
               serviceTier: request.serviceTier ?? undefined,
               collaborationMode: null,
-              approvalPolicy: this.defaultApprovalPolicy,
-              sandboxMode: this.defaultSandboxMode,
+              approvalPolicy: access.approvalPolicy,
+              sandboxMode: access.sandboxMode,
             });
           } else {
             throw turnErr;
@@ -205,6 +214,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
         }
 
         turnId = turn.id;
+        for (const notification of earlyNotifications.splice(0)) onNotification(notification);
       } catch (err) {
         cleanup();
         turnError = err instanceof Error ? err : new Error(String(err));
@@ -213,15 +223,24 @@ export class CodexEngineAdapter implements IEngineAdapter {
       }
     };
 
-    void run();
+    const running = run();
+    let cancelling: Promise<void> | undefined;
 
     return {
-      turnId: turnId ?? undefined,
+      get turnId() { return turnId ?? undefined; },
       cancel: () => {
-        cancelled = true;
-        if (threadId && turnId) {
-          void this.client.interruptTurn(threadId, turnId).catch(() => {});
-        }
+        if (finalResult) return Promise.resolve();
+        cancelling ??= (async () => {
+          cancelled = true;
+          await running;
+          if (finalResult) return;
+          if (threadId && turnId) await this.client.interruptTurn(threadId, turnId);
+          cleanup();
+          finalResult = { kind: 'result', status: 'INTERRUPTED', response: accumulatedResponse, conversationId: threadId };
+          emitter.emit('result', finalResult);
+          resolveWaiters(finalResult);
+        })();
+        return cancelling.catch(error => { cancelling = undefined; throw error; });
       },
       waitForResult: async () => {
         if (finalResult) return finalResult;

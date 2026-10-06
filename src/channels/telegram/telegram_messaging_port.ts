@@ -1,3 +1,9 @@
+import { TelegramTaskPreviews } from '../../telegram/task_preview.js';
+import { telegramTaskResult } from '../../telegram/task_result.js';
+import type { AppConfig } from '../../config.js';
+import type { ChannelTextEvent } from '../../core/channel_events.js';
+import { parseCommand } from '../../controller/commands.js';
+import { isDefaultTelegramScope, resolveTelegramAddressing } from '../../telegram/addressing.js';
 import { parseTelegramTargetFromBridgeScope } from '../../core/bridge_scope.js';
 import type { ChannelPort } from '../../core/channel_port.js';
 import type { TelegramGateway } from '../../telegram/gateway.js';
@@ -10,7 +16,25 @@ export type InlineKeyboard = Array<Array<{ text: string; callback_data: string }
  * Telegram outbound operations addressed by bridge scope id (`telegram:…`).
  */
 export class TelegramMessagingPort implements ChannelPort {
-  constructor(private readonly gateway: TelegramGateway) {}
+  private readonly taskPreviews: TelegramTaskPreviews;
+  constructor(private readonly gateway: TelegramGateway) { this.taskPreviews = new TelegramTaskPreviews(gateway); }
+  beginTaskPreview(scopeId: string, taskId: string, text: string, reuseMessageId = 0) { return this.taskPreviews.begin(scopeId, taskId, text, reuseMessageId); }
+  updateTaskPreview(scopeId: string, taskId: string, messageId: number, html: string) { return this.taskPreviews.update(scopeId, taskId, messageId, html); }
+  endTaskPreview(scopeId: string, taskId: string) { return this.taskPreviews.end(scopeId, taskId); }
+
+  readonly capabilities = { editableMessages: true, inlineActions: true, maxMessageLength: 4000 };
+
+  resolveIncoming(event: ChannelTextEvent, config: AppConfig, username?: string | null) {
+    return resolveTelegramAddressing({ text: event.text, attachmentsCount: event.attachments.length,
+      entities: event.entities, command: parseCommand(event.text), botUsername: username ?? null,
+      isDefaultTopic: isDefaultTelegramScope({ chatType: event.chatType, allowedChatId: config.tgAllowedChatId ?? null,
+        allowedTopicId: config.tgAllowedTopicId ?? null, topicId: event.topicId, requireExplicitGroupAddressing: false }), replyToBot: event.replyToBot });
+  }
+
+  async setScopeCommands(scopeId: string, commands: Array<{ command: string; description: string }>): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(scopeId);
+    await this.gateway.setChatCommands(target.chatId, commands);
+  }
 
   async sendPlain(
     bridgeScopeId: string,
@@ -52,7 +76,7 @@ export class TelegramMessagingPort implements ChannelPort {
     const target = parseTelegramTargetFromBridgeScope(bridgeScopeId);
     return this.gateway.sendRichMessage(
       target.chatId,
-      telegramRichMarkdown(markdown, { skipEntityDetection: true }),
+      telegramTaskResult(markdown),
       inlineKeyboard,
       target.topicId,
     );
@@ -114,7 +138,7 @@ export class TelegramMessagingPort implements ChannelPort {
     await this.gateway.editRichMessage(
       target.chatId,
       messageId,
-      telegramRichMarkdown(markdown, { skipEntityDetection: true }),
+      telegramTaskResult(markdown),
       inlineKeyboard,
     );
   }

@@ -1,6 +1,6 @@
 import type { AppLocale } from '../types.js';
 import { formatMetricTokenCount } from '../store/token_usage.js';
-import { chunkTelegramMessage } from '../telegram/text.js';
+import { chunkMessage } from './message_text.js';
 
 export interface StreamPreviewState {
   toolLines: string[];
@@ -114,7 +114,16 @@ export function buildFoldedToolsSummary(options: FoldedToolsSummaryOptions): str
         : '';
       previewLines = [...head, omittedNote, ...tail].filter(Boolean);
     }
-    toolDetailSection = `\n\n<i>${locale === 'zh' ? '工具调用记录:' : 'Tool calls:'}</i>\n${previewLines.join('\n')}`;
+    // Keep whole formatted lines within the summary budget; never slice through tags/entities.
+    const bounded: string[] = [];
+    let budget = 1500;
+    for (const line of [...previewLines].reverse()) {
+      if (line.length + 1 > budget) continue;
+      bounded.unshift(line); budget -= line.length + 1;
+    }
+    const omittedBySize = previewLines.length - bounded.length;
+    if (omittedBySize) bounded.unshift(`<i>${locale === 'zh' ? `另有 ${omittedBySize} 项记录已收起` : `${omittedBySize} additional entries omitted`}</i>`);
+    toolDetailSection = `\n\n<i>${locale === 'zh' ? '工具调用记录:' : 'Tool calls:'}</i>\n${bounded.join('\n')}`;
   }
 
   return `<blockquote expandable>${header}${usageLine}${toolDetailSection}</blockquote>\n\n`;
@@ -127,7 +136,7 @@ export function combineSummaryAndResponse(
 ): string[] {
   const content = (responseText || '(无输出 / No output)').trim();
   if (!foldedSummary) {
-    return chunkTelegramMessage(content, limit);
+    return chunkMessage(content, limit);
   }
 
   const combined = `${foldedSummary}${content}`;
@@ -143,20 +152,20 @@ export function combineSummaryAndResponse(
     if (splitAt >= Math.floor(remainingInFirstChunk / 3)) {
       const firstChunkText = content.slice(0, splitAt + 1).trim();
       const rest = content.slice(splitAt + 1).trim();
-      const restChunks = chunkTelegramMessage(rest, limit);
+      const restChunks = chunkMessage(rest, limit);
       return [`${foldedSummary}${firstChunkText}`, ...restChunks];
     }
   }
 
   // If foldedSummary takes up most of the message or no clean paragraph break was found,
   // foldedSummary gets its own clean message, and responseText is chunked independently.
-  const responseChunks = chunkTelegramMessage(content, limit);
+  const responseChunks = chunkMessage(content, limit);
   return [foldedSummary.trim(), ...responseChunks];
 }
 
 export function renderStreamPreviewContent(state: StreamPreviewState): string {
   const parts: string[] = [];
-  const name = state.engineName || 'AI';
+  const name = escapeTelegramHtml(state.engineName || 'AI');
 
   const roundText = state.stepIndex && state.stepIndex > 0 ? `第 ${state.stepIndex} 轮` : '';
   const toolText = typeof state.toolCount === 'number' && state.toolCount > 0 ? `累计执行 ${state.toolCount} 次工具` : '';
@@ -177,7 +186,7 @@ export function renderStreamPreviewContent(state: StreamPreviewState): string {
   }
 
   if (state.toolLines.length > 0) {
-    const recent = state.toolLines.slice(-6);
+    const recent = state.toolLines.slice(-3);
     parts.push(
       `<blockquote expandable>🛠️ <b>正在调用工具 (${state.toolLines.length} 项)</b>\n${recent.join('\n')}</blockquote>`,
     );
@@ -185,8 +194,8 @@ export function renderStreamPreviewContent(state: StreamPreviewState): string {
   }
 
   if (state.accumulatedText) {
-    const preview = state.accumulatedText.slice(-3000);
-    parts.push(preview);
+    const preview = state.accumulatedText.slice(-1000);
+    parts.push(escapeTelegramHtml(preview));
   } else {
     parts.push(state.isBoost ? `🚀 ${name} (Boost 模式) 正在深度思考中…` : `⏳ ${name} 正在思考中…`);
   }

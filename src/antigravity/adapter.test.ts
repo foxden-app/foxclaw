@@ -92,7 +92,7 @@ test('AntigravityEngineAdapter converts models and maps turn lifecycle events to
 
   // Verify prompt was wrapped with attachments
   assert.ok(executedOptions);
-  assert.ok((executedOptions as any).prompt.includes('Telegram attachments'));
+  assert.ok((executedOptions as any).prompt.includes('Attachments:'));
   assert.ok((executedOptions as any).prompt.includes('/tmp/photo.jpg'));
 
   // Emit mock events

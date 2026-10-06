@@ -138,8 +138,8 @@ test('OpencodeEngineAdapter executeTurn runs turn, streams deltas and tools, and
   assert.deepEqual(deltas, ['Hello ', 'World!']);
   assert.deepEqual(tools, ['bash']);
 
-  execution.cancel();
-  assert.ok(abortCalled);
+  await execution.cancel();
+  assert.equal(abortCalled, false); // Completed sessions must not abort a later turn.
 });
 
 test('OpencodeEngineAdapter handles error event and emits error', async () => {
@@ -186,4 +186,16 @@ test('OpencodeEngineAdapter handles error event and emits error', async () => {
   assert.equal(res.response, 'Process crashed');
   assert.ok(errorEmitted);
   assert.equal((errorEmitted as Error).message, 'Process crashed');
+});
+
+test('OpenCode cancellation during session creation settles waiters and starts no prompt', async () => {
+  const client = new EventEmitter() as any; let release!: (value: any) => void;
+  const session = new Promise<any>(resolve => { release = resolve; }); let prompts = 0;
+  client.getClient = () => ({ session: { create: () => session, promptAsync: async () => { prompts++; return { data: {} }; }, abort: async () => ({ data: {} }) } });
+  const execution = new OpencodeEngineAdapter(client).executeTurn({ scopeId: 'scope', prompt: 'work', threadId: null, cwd: '/tmp', model: 'default', locale: 'en' });
+  const result = execution.waitForResult(); const cancelled = execution.cancel();
+  release({ data: { id: 'created-session' } }); await cancelled;
+  assert.equal(prompts, 0);
+  assert.equal((await result)?.status, 'INTERRUPTED');
+  assert.equal(client.listenerCount('event'), 0);
 });

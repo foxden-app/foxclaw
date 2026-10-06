@@ -1,6 +1,6 @@
 {
   "name": "@foxden-app/foxclaw",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Foxden local execution claw for controlling Codex, OpenCode, Antigravity, and DeepSeek Harness from trusted chat interfaces.",
   "type": "module",
   "main": "dist/main.js",
@@ -35,7 +35,7 @@
   },
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "pnpm clean && tsc -p tsconfig.build.json",
     "dev": "tsx src/main.ts serve",
     "serve": "node dist/main.js serve",
     "start-service": "node dist/main.js start",
@@ -52,7 +52,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "node --test --import tsx $(find src -name '*.test.ts' -print)",
-    "prepack": "npm run build"
+    "prepack": "pnpm build"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
@@ -67,5 +67,6 @@
     "tsx": "^4.19.3",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.58.0"
-  }
+  },
+  "packageManager": "pnpm@10.33.2"
 }

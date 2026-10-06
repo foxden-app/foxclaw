@@ -16,38 +16,40 @@ Check the worktree and remote state:
 
 ```bash
 git status --short --branch
-npm pkg get name version
-npm view @foxden-app/foxclaw version
+node -p "require('./package.json').name + '@' + require('./package.json').version"
+pnpm view @foxden-app/foxclaw version
 git tag --list 'v*' --sort=-v:refname | head
 ```
 
 Confirm the target version and remote tag do not already exist:
 
 ```bash
-npm view @foxden-app/foxclaw@0.5.10 version 2>/dev/null || true
+pnpm view @foxden-app/foxclaw@0.5.10 version 2>/dev/null || true
 git ls-remote --tags origin refs/tags/v0.5.10
 ```
+
+Use the version pinned in `packageManager` and install with `pnpm install --frozen-lockfile`. npm is used only by the publishing workflow for registry authentication and publication.
 
 Run the same local checks as the publish workflow:
 
 ```bash
-npm run lint
-npm run typecheck
-npm test
-npm pack --dry-run
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm pack --pack-destination /tmp/foxclaw-release
 git diff --check
 ```
 
-`npm pack --dry-run` runs `prepack` and lists the package contents. Confirm `CHANGELOG.md` is included.
+`pnpm pack` runs `prepack` and creates the release archive. Inspect it with `tar -tzf /tmp/foxclaw-release/*.tgz` and confirm `CHANGELOG.md` is included.
 
 ## Prepare The Version
 
-1. Update `package.json` and `package-lock.json`.
+1. Update `package.json` and `pnpm-lock.yaml`.
 2. Add a new top entry to `CHANGELOG.md` with both `### 中文` and `### English` sections.
 3. Commit the release metadata:
 
 ```bash
-git add package.json package-lock.json CHANGELOG.md
+git add package.json pnpm-lock.yaml CHANGELOG.md
 git commit -m "发布 0.5.10：short release summary"
 ```
 
@@ -71,7 +73,7 @@ gh run watch <run-id> --repo foxden-app/foxclaw --exit-status
 After success, verify npm and GitHub Releases:
 
 ```bash
-npm view @foxden-app/foxclaw version
+pnpm view @foxden-app/foxclaw version
 gh release view v0.5.10 --repo foxden-app/foxclaw --json tagName,name,url,publishedAt,isDraft,isPrerelease
 ```
 

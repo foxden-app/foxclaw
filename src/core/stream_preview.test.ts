@@ -148,3 +148,15 @@ test('combineSummaryAndResponse guarantees folded summary is never torn or leake
     assert.ok(!chunks[i]!.includes('<code>test</code>'));
   }
 });
+
+
+test('large formatted tool summaries stay bounded and are never split into broken HTML', () => {
+  const tools = Array.from({ length: 25 }, (_, i) => `<code>tool_${i}</code> · ${'&lt;'.repeat(180)}`);
+  const folded = buildFoldedToolsSummary({ toolLines: tools, toolCount: 25, durationSeconds: 45 });
+  assert.ok(folded.length < 2000);
+  assert.match(folded, /另有/);
+  const chunks = combineSummaryAndResponse(folded, 'answer');
+  assert.equal(chunks.length, 1);
+  assert.equal((chunks[0]!.match(/<blockquote expandable>/g) ?? []).length, 1);
+  assert.equal((chunks[0]!.match(/<\/blockquote>/g) ?? []).length, 1);
+});

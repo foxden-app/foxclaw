@@ -1,3 +1,4 @@
+import http from 'node:http';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseTelegramBotId, TelegramGateway, type TelegramTextEvent } from './gateway.js';
@@ -217,4 +218,86 @@ test('TelegramGateway namespaces scopes by bot identity in multi-bot mode', asyn
   });
 
   assert.equal(events[0]?.scopeId, 'telegram:bot777:99::root');
+});
+
+
+test('stopping Telegram polling aborts an outstanding request before store shutdown', async (t) => {
+  const previousBase = process.env.TELEGRAM_BOT_API_BASE_URL;
+  let enter!: () => void;
+  const polling = new Promise<void>(resolve => { enter = resolve; });
+  let pending: http.ServerResponse | null = null;
+  const server = http.createServer((request, response) => {
+    if (request.url?.endsWith('/getUpdates')) { pending = response; enter(); return; }
+    response.end(JSON.stringify({ ok: true, result: request.url?.endsWith('/getMe') ? { id: 123, username: 'fixture' } : true }));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.TELEGRAM_BOT_API_BASE_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(() => { server.closeAllConnections(); server.close(); if (previousBase === undefined) delete process.env.TELEGRAM_BOT_API_BASE_URL; else process.env.TELEGRAM_BOT_API_BASE_URL = previousBase; });
+  let writes = 0;
+  const gateway = new TelegramGateway('123:fixture', '42', null, 1000, { ...storeStub, setTelegramOffset: () => { writes++; } } as any, loggerStub as any);
+  t.after(() => gateway.stop());
+  await gateway.start();
+  await polling;
+  await gateway.stop();
+  (pending as http.ServerResponse | null)?.end(JSON.stringify({ ok: true, result: [{ update_id: 1 }] }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes, 0);
+});
+
+
+test('native stop updates require a matching private chat, topic and registered generation', async () => {
+  const gateway = new TelegramGateway('123:fixture', '42', null, 1000, storeStub as any, loggerStub as any, true);
+  const stops: any[] = [];
+  gateway.setInboundConsumer(async (_id, inbound) => { stops.push(inbound); });
+  gateway.registerGeneration(17, 'telegram:bot123:42::root', 'task', '42', null);
+  const update = (id: number, chatId = 42, type = 'private', topicId?: number) => ({ update_id: 1, stopped_message_generation: { chat: { id: chatId, type }, draft_id: id, ...(topicId ? { message_thread_id: topicId } : {}) } });
+  await (gateway as any).handleUpdate(update(18));
+  await (gateway as any).handleUpdate(update(17, 43));
+  await (gateway as any).handleUpdate(update(17, 42, 'group'));
+  await (gateway as any).handleUpdate(update(17, 42, 'private', 5));
+  assert.equal(stops.length, 0);
+  await (gateway as any).handleUpdate(update(17));
+  assert.deepEqual(stops[0], { kind: 'stop', event: { scopeId: 'telegram:bot123:42::root', taskId: 'task' } });
+  gateway.releaseGeneration(17);
+  await (gateway as any).handleUpdate(update(17));
+  assert.equal(stops.length, 1);
+});
+
+
+test('stoppable rich draft serializes native flags and polling acknowledges only after durable intake', async t => {
+  const previousBase = process.env.TELEGRAM_BOT_API_BASE_URL;
+  const requests: Array<{ method: string; body: any }> = [];
+  const server = http.createServer((request, response) => {
+    let raw = '';
+    request.on('data', chunk => { raw += chunk; });
+    request.on('end', () => {
+      const method = request.url!.split('/').at(-1)!;
+      requests.push({ method, body: JSON.parse(raw) });
+      response.end(JSON.stringify({ ok: true, result: method === 'getUpdates'
+        ? [{ update_id: 9, message: { message_id: 7, from: { id: 42 }, chat: { id: 42, type: 'private' }, text: 'recover me' } }]
+        : true }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.TELEGRAM_BOT_API_BASE_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(() => { server.closeAllConnections(); server.close(); if (previousBase === undefined) delete process.env.TELEGRAM_BOT_API_BASE_URL; else process.env.TELEGRAM_BOT_API_BASE_URL = previousBase; });
+  const offsets: number[] = [];
+  const gateway = new TelegramGateway('123:secret', '42', null, 1000, { ...storeStub, setTelegramOffset: (_key: string, offset: number) => { offsets.push(offset); } } as any, loggerStub as any);
+  await gateway.sendRichMessageDraft('42', 101, { text: 'working' } as any, 5, true);
+  assert.equal(requests[0]!.body.can_stop, true);
+  assert.equal(requests[0]!.body.keep_on_stop, true);
+  assert.equal(requests[0]!.body.message_thread_id, 5);
+  (gateway as any).resolveBotIdentity = async () => {};
+  (gateway as any).registerCommands = async () => {};
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  gateway.setInboundConsumer(async () => { entered(); await gate; (gateway as any).running = false; });
+  await gateway.start(); await started;
+  assert.deepEqual(offsets, [], 'Transport must not acknowledge while intake is incomplete');
+  release(); await (gateway as any).polling;
+  assert.deepEqual(offsets, [9]);
+  assert.ok(requests.find(r => r.method === 'getUpdates')!.body.allowed_updates.includes('stopped_message_generation'));
+  await gateway.stop();
 });

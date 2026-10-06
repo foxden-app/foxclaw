@@ -1,6 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { ChannelInbox } from './channel_inbox.js';
+import { TaskJournal } from './task_journal.js';
 import type {
   AccessPresetValue,
   ActiveTurnMessageMode,
@@ -15,7 +17,6 @@ import type {
   PendingApprovalRecord,
   QueuedTurnInputRecord,
   QueuedTurnInputStatus,
-  ReasoningEffortValue,
   ThreadBinding,
 } from '../types.js';
 import { migrateLegacyBridgeScopeIds } from './migrate_bridge_scope.js';
@@ -80,10 +81,14 @@ export type CodexAuthCandidateState = 'active' | 'needs_repair';
 
 export class BridgeStore {
   private db: DatabaseSync;
+  readonly taskJournal: TaskJournal;
+  readonly channelInbox: ChannelInbox;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    this.taskJournal = new TaskJournal(this.db);
+    this.channelInbox = new ChannelInbox(this.db);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS telegram_offsets (
         bot_key TEXT PRIMARY KEY,
@@ -512,7 +517,7 @@ export class BridgeStore {
     return {
       chatId: String(row.chat_id),
       model: row.model === null ? null : String(row.model),
-      reasoningEffort: row.reasoning_effort === null ? null : String(row.reasoning_effort) as ReasoningEffortValue,
+      reasoningEffort: row.reasoning_effort === null ? null : String(row.reasoning_effort),
       locale: row.locale === null ? null : String(row.locale) as AppLocale,
       accessPreset: row.access_preset === null ? null : String(row.access_preset) as AccessPresetValue,
       collaborationMode: normalizeCollaborationMode(row.collaboration_mode),
@@ -523,7 +528,7 @@ export class BridgeStore {
     };
   }
 
-  setChatSettings(chatId: string, model: string | null, reasoningEffort: ReasoningEffortValue | null, locale?: AppLocale | null): void {
+  setChatSettings(chatId: string, model: string | null, reasoningEffort: string | null, locale?: AppLocale | null): void {
     const current = this.getChatSettings(chatId);
     const nextLocale = locale === undefined ? current?.locale ?? null : locale;
     this.writeChatSettings(
@@ -544,17 +549,14 @@ export class BridgeStore {
     this.setChatSettings(chatId, model, current?.reasoningEffort ?? null);
   }
 
-  setChatEffort(chatId: string, effort: ReasoningEffortValue | null): void {
+  setChatEffort(chatId: string, effort: string | null): void {
     const current = this.getChatSettings(chatId);
     this.setChatSettings(chatId, current?.model ?? null, effort);
   }
 
   /** Persist an adapter-advertised reasoning id without imposing Codex's vocabulary. */
   setChatEngineEffort(chatId: string, effort: string | null): void {
-    const current = this.getChatSettings(chatId);
-    this.writeChatSettings(chatId, current?.model ?? null, effort, current?.locale ?? null,
-      current?.accessPreset ?? null, current?.collaborationMode ?? null, current?.serviceTier ?? null,
-      current?.activeTurnMessageMode ?? null, current?.activeBackendId ?? null);
+    this.setChatEffort(chatId, effort);
   }
 
   setChatLocale(chatId: string, locale: AppLocale): void {

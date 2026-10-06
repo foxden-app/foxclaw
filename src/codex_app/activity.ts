@@ -1,0 +1,523 @@
+import type { JsonRpcNotification } from './client.js';
+
+export interface RawExecCommandEvent {
+  callId: string;
+  turnId: string;
+  command: string[];
+  cwd: string | null;
+  parsedCmd: any[];
+}
+
+export type TurnActivityState =
+  | 'thinking'
+  | 'reading'
+  | 'searching'
+  | 'editing'
+  | 'running_command'
+  | 'approval_waiting'
+  | 'completed'
+  | 'interrupted';
+
+export type TurnOutputKind = 'commentary' | 'final_answer' | 'tool_summary' | 'error';
+
+export type TurnActivityEvent =
+  | {
+      kind: 'user_message';
+      turnId: string;
+      text: string;
+    }
+  | {
+      kind: 'agent_message_started';
+      turnId: string;
+      itemId: string;
+      phase: string | null;
+      outputKind: TurnOutputKind;
+      isPlan?: boolean;
+    }
+  | {
+      kind: 'agent_message_delta';
+      turnId: string;
+      itemId: string;
+      delta: string;
+      outputKind: TurnOutputKind;
+      isPlan?: boolean;
+    }
+  | {
+      kind: 'agent_message_completed';
+      turnId: string;
+      itemId: string;
+      phase: string | null;
+      text: string | null;
+      outputKind: TurnOutputKind;
+      isPlan?: boolean;
+    }
+  | {
+      kind: 'reasoning_started';
+      turnId: string;
+      state: 'thinking';
+    }
+  | {
+      kind: 'reasoning_completed';
+      turnId: string;
+      state: 'thinking';
+    }
+  | {
+      kind: 'tool_started';
+      turnId: string;
+      exec: RawExecCommandEvent;
+      state: TurnActivityState;
+    }
+  | {
+      kind: 'tool_completed';
+      turnId: string;
+      exec: RawExecCommandEvent;
+      state: TurnActivityState;
+    }
+  | {
+      kind: 'turn_completed';
+      turnId: string;
+      state: 'completed' | 'interrupted';
+    };
+
+export function normalizeTurnActivityEvent(notification: JsonRpcNotification): TurnActivityEvent | null {
+  switch (notification.method) {
+    case 'item/started':
+      return normalizeStartedEvent(notification.params);
+    case 'item/agentMessage/delta':
+      return normalizeAgentDeltaEvent(notification.params);
+    case 'item/plan/delta':
+      return normalizePlanDeltaEvent(notification.params);
+    case 'item/completed':
+      return normalizeCompletedEvent(notification.params);
+    case 'turn/plan/updated':
+      return normalizePlanUpdatedEvent(notification.params);
+    case 'codex/event/exec_command_begin':
+      return normalizeToolEvent(notification.params, 'tool_started');
+    case 'codex/event/exec_command_end':
+      return normalizeToolEvent(notification.params, 'tool_completed');
+    case 'turn/completed': {
+      const turnId = extractTurnId(notification.params);
+      if (!turnId) return null;
+      return {
+        kind: 'turn_completed',
+        turnId,
+        state: 'completed',
+      };
+    }
+    case 'turn/interrupted':
+    case 'turn/aborted': {
+      const turnId = extractTurnId(notification.params);
+      if (!turnId) return null;
+      return {
+        kind: 'turn_completed',
+        turnId,
+        state: 'interrupted',
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function normalizeStartedEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  if (!turnId) return null;
+  const item = params?.item;
+  const itemType = normalizeEventItemType(item);
+  if (itemType === 'reasoning') {
+    return {
+      kind: 'reasoning_started',
+      turnId,
+      state: 'thinking',
+    };
+  }
+  const toolEvent = normalizeThreadItemToolEvent(params, 'tool_started');
+  if (toolEvent) {
+    return toolEvent;
+  }
+  if (!isRelayableTextItemType(itemType)) {
+    return null;
+  }
+  const itemId = extractItemId(item);
+  if (!itemId) return null;
+  const phase = itemType === 'plan' ? 'commentary' : extractAgentPhase(item);
+  return {
+    kind: 'agent_message_started',
+    turnId,
+    itemId,
+    phase,
+    outputKind: outputKindForItemType(itemType, phase, false),
+    isPlan: itemType === 'plan',
+  };
+}
+
+function normalizeAgentDeltaEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  const delta = extractAgentDeltaText(params);
+  const itemId = extractItemId(params);
+  if (!turnId || !delta || !itemId) {
+    return null;
+  }
+  const phase = extractAgentPhase(params);
+  return {
+    kind: 'agent_message_delta',
+    turnId,
+    itemId,
+    delta,
+    outputKind: classifyAgentOutput(phase, false),
+  };
+}
+
+function normalizePlanDeltaEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  const delta = extractAgentDeltaText(params);
+  const itemId = extractItemId(params);
+  if (!turnId || !delta || !itemId) {
+    return null;
+  }
+  return {
+    kind: 'agent_message_delta',
+    turnId,
+    itemId,
+    delta,
+    outputKind: 'commentary',
+    isPlan: true,
+  };
+}
+
+function normalizeCompletedEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  if (!turnId) return null;
+  const item = params?.item;
+  const itemType = normalizeEventItemType(item);
+  if (itemType === 'reasoning') {
+    return {
+      kind: 'reasoning_completed',
+      turnId,
+      state: 'thinking',
+    };
+  }
+  const toolEvent = normalizeThreadItemToolEvent(params, 'tool_completed');
+  if (toolEvent) {
+    return toolEvent;
+  }
+  if (!isRelayableTextItemType(itemType)) {
+    return null;
+  }
+  const itemId = extractItemId(item);
+  if (!itemId) return null;
+  const phase = itemType === 'plan' ? 'commentary' : extractAgentPhase(item);
+  return {
+    kind: 'agent_message_completed',
+    turnId,
+    itemId,
+    phase,
+    text: extractCompletedAgentText(params),
+    outputKind: outputKindForItemType(itemType, phase, true),
+    isPlan: itemType === 'plan',
+  };
+}
+
+function normalizePlanUpdatedEvent(params: any): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  if (!turnId) {
+    return null;
+  }
+  const text = formatPlanUpdateText(params);
+  if (!text) {
+    return null;
+  }
+  return {
+    kind: 'agent_message_completed',
+    turnId,
+    itemId: `${turnId}:plan`,
+    phase: 'commentary',
+    text,
+    outputKind: 'commentary',
+    isPlan: true,
+  };
+}
+
+function normalizeToolEvent(
+  params: any,
+  kind: 'tool_started' | 'tool_completed',
+): TurnActivityEvent | null {
+  const exec = extractRawExecCommandEvent(params);
+  if (!exec) {
+    return null;
+  }
+  return {
+    kind,
+    turnId: exec.turnId,
+    exec,
+    state: inferToolActivityState(exec),
+  };
+}
+
+function normalizeThreadItemToolEvent(
+  params: any,
+  kind: 'tool_started' | 'tool_completed',
+): TurnActivityEvent | null {
+  const turnId = extractTurnId(params);
+  const item = params?.item;
+  const itemId = extractItemId(item);
+  const itemType = normalizeEventItemType(item);
+  if (!turnId || !itemId || !itemType) {
+    return null;
+  }
+
+  let command: string[] = [];
+  let cwd: string | null = null;
+  let parsedCmd: any[] = [];
+  switch (itemType) {
+    case 'commandexecution':
+      command = typeof item.command === 'string' ? [item.command] : [];
+      cwd = typeof item.cwd === 'string' ? item.cwd : null;
+      parsedCmd = normalizeCommandActions(item.commandActions);
+      break;
+    case 'filechange':
+      parsedCmd = normalizeFileChanges(item.changes);
+      break;
+    case 'websearch':
+      parsedCmd = [{
+        type: 'search',
+        query: typeof item.query === 'string' ? item.query : '',
+        path: null,
+      }];
+      break;
+    case 'imageview':
+      parsedCmd = [{ type: 'read', path: typeof item.path === 'string' ? item.path : null }];
+      break;
+    case 'mcptoolcall':
+      command = [`MCP ${String(item.server ?? 'server')}/${String(item.tool ?? 'tool')}`];
+      break;
+    case 'dynamictoolcall':
+      command = [`Tool ${item.namespace ? `${String(item.namespace)}/` : ''}${String(item.tool ?? 'tool')}`];
+      break;
+    case 'collabagenttoolcall':
+      command = [`Agent ${String(item.tool ?? 'operation')}`];
+      break;
+    case 'imagegeneration':
+      command = ['Image generation'];
+      break;
+    default:
+      return null;
+  }
+
+  const exec: RawExecCommandEvent = {
+    callId: itemId,
+    turnId,
+    command,
+    cwd,
+    parsedCmd,
+  };
+  return {
+    kind,
+    turnId,
+    exec,
+    state: inferToolActivityState(exec),
+  };
+}
+
+function normalizeCommandActions(value: unknown): any[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry: any) => {
+    const type = typeof entry?.type === 'string' ? entry.type : '';
+    if (type === 'listFiles') {
+      return { ...entry, type: 'list_files' };
+    }
+    return entry;
+  });
+}
+
+function normalizeFileChanges(value: unknown): any[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((entry: any) => ({
+    type: 'apply_patch',
+    path: typeof entry?.path === 'string' ? entry.path : null,
+  }));
+}
+
+export function classifyAgentOutput(phase: string | null, completed: boolean): TurnOutputKind {
+  if (!phase) {
+    return completed ? 'final_answer' : 'commentary';
+  }
+  const normalized = phase.replace(/[^a-z]/gi, '').toLowerCase();
+  if (normalized === 'final' || normalized === 'finalanswer' || normalized === 'answer' || normalized === 'response') {
+    return 'final_answer';
+  }
+  return 'commentary';
+}
+
+export function inferToolActivityState(event: RawExecCommandEvent): TurnActivityState {
+  const parsedTypes = (event.parsedCmd ?? [])
+    .map((entry: any) => (typeof entry?.type === 'string' ? entry.type : ''))
+    .filter(Boolean);
+  if (parsedTypes.includes('search')) {
+    return 'searching';
+  }
+  if (parsedTypes.includes('read') || parsedTypes.includes('list_files')) {
+    return 'reading';
+  }
+  if (parsedTypes.some(type => ['write', 'edit', 'apply_patch', 'move', 'copy', 'delete', 'mkdir'].includes(type))) {
+    return 'editing';
+  }
+  return 'running_command';
+}
+
+function extractRawExecCommandEvent(params: any): RawExecCommandEvent | null {
+  const msg = params?.msg;
+  if (!msg || typeof msg !== 'object') {
+    return null;
+  }
+  const callId = typeof msg.call_id === 'string' ? msg.call_id : null;
+  const turnId = typeof msg.turn_id === 'string' ? msg.turn_id : null;
+  if (!callId || !turnId) {
+    return null;
+  }
+  return {
+    callId,
+    turnId,
+    command: Array.isArray(msg.command) ? msg.command.map((entry: unknown) => String(entry)) : [],
+    cwd: msg.cwd ? String(msg.cwd) : null,
+    parsedCmd: Array.isArray(msg.parsed_cmd) ? msg.parsed_cmd : [],
+  };
+}
+
+function extractTurnId(params: any): string | null {
+  const candidates = [
+    params?.turnId,
+    params?.turn_id,
+    params?.turn?.id,
+    params?.turn?.turnId,
+    params?.item?.turnId,
+    params?.item?.turn_id,
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== null && candidate !== undefined && String(candidate).trim()) {
+      return String(candidate);
+    }
+  }
+  return null;
+}
+
+function extractItemId(value: any): string | null {
+  const candidates = [
+    value?.itemId,
+    value?.item_id,
+    value?.id,
+    value?.item?.id,
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== null && candidate !== undefined && String(candidate).trim()) {
+      return String(candidate);
+    }
+  }
+  return null;
+}
+
+function extractAgentPhase(value: any): string | null {
+  const phase = value?.phase ?? value?.item?.phase ?? null;
+  return typeof phase === 'string' && phase.trim() ? phase : null;
+}
+
+function extractAgentDeltaText(params: any): string | null {
+  const candidates = [
+    params?.delta,
+    params?.textDelta,
+    params?.contentDelta,
+    params?.text,
+  ];
+  for (const candidate of candidates) {
+    const text = extractTextCandidate(candidate);
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function extractCompletedAgentText(params: any): string | null {
+  const itemType = normalizeEventItemType(params?.item ?? params);
+  if (!isRelayableTextItemType(itemType)) {
+    return null;
+  }
+  const item = params?.item ?? params;
+  const directText = extractTextCandidate(item?.text)
+    ?? extractTextCandidate(item?.content)
+    ?? extractTextCandidate(item?.value);
+  if (directText !== null) {
+    return directText;
+  }
+  return '';
+}
+
+function isRelayableTextItemType(itemType: string | null): boolean {
+  return itemType === 'agentmessage' || itemType === 'assistantmessage' || itemType === 'plan';
+}
+
+function outputKindForItemType(itemType: string | null, phase: string | null, completed: boolean): TurnOutputKind {
+  if (itemType === 'plan') {
+    return 'commentary';
+  }
+  return classifyAgentOutput(phase, completed);
+}
+
+function formatPlanUpdateText(params: any): string | null {
+  const lines: string[] = [];
+  const explanation = extractTextCandidate(params?.explanation);
+  if (explanation) {
+    lines.push(explanation);
+  }
+  const plan = Array.isArray(params?.plan) ? params.plan : [];
+  for (const entry of plan) {
+    const step = extractTextCandidate(entry?.step);
+    if (!step) {
+      continue;
+    }
+    const status = typeof entry?.status === 'string' && entry.status ? ` [${entry.status}]` : '';
+    lines.push(`- ${step}${status}`);
+  }
+  return lines.join('\n').trim() || null;
+}
+
+function normalizeEventItemType(value: any): string | null {
+  const raw = value?.type ?? value?.itemType ?? value?.item_type ?? value?.kind;
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  return raw.replace(/[^a-z]/gi, '').toLowerCase();
+}
+
+function extractTextCandidate(value: any): string | null {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  for (const key of ['text', 'delta', 'content', 'value']) {
+    const candidate = value[key];
+    if (typeof candidate === 'string') {
+      return candidate;
+    }
+  }
+  for (const key of ['parts', 'segments', 'content']) {
+    const candidate = value[key];
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+    const text = candidate
+      .map((entry) => extractTextCandidate(entry))
+      .filter((entry): entry is string => entry !== null)
+      .join('');
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}

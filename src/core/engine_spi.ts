@@ -1,23 +1,26 @@
-import type { StagedTelegramAttachment } from '../telegram/media.js';
-import type { AppLocale } from '../types.js';
+import type { StagedAttachment } from './attachment_types.js';
+import type { AppLocale, AccessPresetValue } from '../types.js';
+import type { BackendUi, BackendUiHost } from './backend_ui.js';
 
 export interface EngineModel {
   id: string;
   name: string;
   description?: string | undefined;
   isDefault?: boolean | undefined;
+  supportedReasoningEfforts?: string[] | undefined;
 }
 
 export interface EngineTurnRequest {
   scopeId: string;
   prompt: string;
-  stagedAttachments?: StagedTelegramAttachment[] | undefined;
+  stagedAttachments?: StagedAttachment[] | undefined;
   threadId: string | null;
   cwd: string;
   model: string;
   effort?: string | null | undefined;
   serviceTier?: string | null | undefined;
   locale: AppLocale;
+  accessPreset?: AccessPresetValue | undefined;
 }
 
 export interface EngineToolEvent {
@@ -45,7 +48,8 @@ export interface EngineTurnResult {
 
 export interface EngineTurnExecution {
   turnId?: string | undefined;
-  cancel(): void;
+  /** A returned promise resolves after the native backend has released the turn. */
+  cancel(): void | Promise<void>;
   waitForResult(): Promise<EngineTurnResult | null>;
   on(event: 'delta', listener: (text: string) => void): void;
   on(event: 'tool', listener: (tool: EngineToolEvent) => void): void;
@@ -82,5 +86,13 @@ export interface BackendDescriptor {
   details?: string | undefined;
   isDefault?: boolean | undefined;
   onSelect?: (scopeId: string) => Promise<void>;
+  defaults?: {
+    reasoningEffort: string | null;
+    supportedReasoningEfforts: readonly string[];
+    boost: boolean;
+    tokenUsage: boolean;
+  };
+  commands?: (locale: AppLocale) => Array<{ command: string; description: string }>;
+  createUi?: (host: BackendUiHost) => BackendUi;
 }
 

@@ -2,6 +2,26 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.0 - 2026-10-06
+
+### 中文
+
+- **Telegram 主任务减少刷屏**：Codex、Antigravity、DSH 统一任务使用单条进度卡；私聊优先使用可停止的临时草稿，群聊编辑同一消息。完成后显示回答并折叠执行摘要，长摘要按完整记录限长。
+- **停止操作绑定具体任务**：原生停止事件与卡片按钮验证会话、主题及任务编号，旧按钮不会误停新任务；等待后端取消完成，保留已生成内容与排队任务。
+- **任务恢复覆盖入站到交付**：增加持久收件箱、原始输入与执行配置快照、事务队列及结果交付游标。结果已知时只补发消息；执行结果未知时暂停并通过 `/recover continue|retry|cancel` 确认，避免自动重复工具操作。
+- **后端与通道边界重构**：后端定义统一注册执行器、默认设置及原生面板；执行器使用通用入站和附件契约。DSH 保留原生模型、推理档位、权限与插件入口；微信增加 `/choose` 文字菜单。
+- **资源退出与竞态修复**：统一登记共享客户端、数据库和进程锁；关闭时等待取消、交付、审批及后台操作，覆盖部分启动失败。修复 Codex 控制面重复渲染、旧任务回调污染与队列抢跑。
+- 仓库依赖安装、构建和 CI 统一使用 pnpm。上述验收范围是 Telegram 的 Codex / AGY / DSH 统一任务路径；微信存量执行路径、独立 OpenCode 和外部观察展示尚未完整迁移。
+
+### English
+
+- **Less Telegram message noise**: unified Codex, Antigravity and DSH tasks update one progress card. Private chats prefer stoppable temporary drafts; groups edit the same message. Final answers include a collapsed execution summary with bounded complete records.
+- **Task-specific stopping**: native stop events and card actions validate scope, topic and task identity. Stale actions cannot stop replacement tasks; cancellation waits for the backend and preserves partial output and queued tasks.
+- **Recovery from intake to delivery**: added a durable inbox, original input/configuration snapshots, transactional queue updates and saved delivery cursors. Known results are redelivered without rerunning tools; unknown outcomes pause for `/recover continue|retry|cancel` confirmation.
+- **Backend and channel boundaries**: registered backend definitions own execution defaults and native panels; executors consume shared inbound/attachment contracts. DSH retains native models, reasoning, permissions and plugin inspection. Weixin adds `/choose` text menus.
+- **Owned resource shutdown and race fixes**: registered clients, database and process lock are cleaned up in dependency order, waiting for cancellations, deliveries, approvals and background work. Fixed duplicate Codex rendering, stale task callbacks and queue races.
+- Dependency installation, builds and CI now use pnpm. Acceptance covers the unified Telegram Codex / AGY / DSH path; legacy Weixin execution, standalone OpenCode and external observation presentation remain outside that migration.
+
 ## 0.12.0 - 2026-10-05
 
 ### 中文

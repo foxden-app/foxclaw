@@ -133,6 +133,11 @@ export class AntigravityAuthManager {
   private readonly quotaCache = new Map<string, AntigravityQuotaSnapshot>();
   private readonly pausedAccounts = new Set<string>();
   private keepAliveTimer: NodeJS.Timeout | undefined;
+  private keepAliveWork: Promise<void> | null = null;
+  private keepAliveCheck(): Promise<void> {
+    return this.keepAliveWork ??= this.runKeepAliveCheck().finally(() => { this.keepAliveWork = null; });
+  }
+  private keepAliveInitialTimer: NodeJS.Timeout | undefined;
 
   constructor(authDir?: string, logger?: Logger, fetchFn: typeof fetch = fetch) {
     this.authDir = authDir || path.join(os.homedir(), '.gemini', 'antigravity-cli');
@@ -1012,23 +1017,29 @@ export class AntigravityAuthManager {
   startKeepAlive(intervalMs = 30 * 60 * 1000): void {
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
     this.keepAliveTimer = setInterval(() => {
-      this.runKeepAliveCheck().catch((err) => {
+      this.keepAliveCheck().catch((err) => {
         this.logger?.warn('antigravity.auth.keepalive_error', { error: String(err) });
       });
     }, intervalMs);
     this.keepAliveTimer?.unref?.();
 
-    const initialTimer = setTimeout(() => {
-      this.runKeepAliveCheck().catch(() => {});
+    if (this.keepAliveInitialTimer) clearTimeout(this.keepAliveInitialTimer);
+    this.keepAliveInitialTimer = setTimeout(() => {
+      this.keepAliveInitialTimer = undefined;
+      this.keepAliveCheck().catch(() => {});
     }, 3000);
-    initialTimer?.unref?.();
+    this.keepAliveInitialTimer?.unref?.();
   }
 
-  stopKeepAlive(): void {
+  async stopKeepAlive(): Promise<void> {
+    if (this.keepAliveInitialTimer) clearTimeout(this.keepAliveInitialTimer);
+    this.keepAliveInitialTimer = undefined;
     if (this.keepAliveTimer) {
       clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = undefined;
     }
+
+    await this.keepAliveWork?.catch(() => {});
   }
 
   async runKeepAliveCheck(): Promise<void> {

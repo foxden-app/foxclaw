@@ -4,24 +4,23 @@ import type { Logger } from '../logger.js';
 import {
   planAttachmentStoragePath,
   isNativeImageAttachment,
-  TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES,
-  type StagedTelegramAttachment,
-  type TelegramInboundAttachment,
-} from '../telegram/media.js';
+  DEFAULT_REMOTE_DOWNLOAD_LIMIT_BYTES,
+} from './attachment_files.js';
+import type { StagedAttachment, InboundAttachment } from './attachment_types.js';
 
-export interface TelegramFileDownloader {
+export interface AttachmentDownloader {
   getFile(fileId: string): Promise<{ file_id: string; file_path?: string; file_size?: number }>;
   downloadResolvedFile(filePath: string, destination: string): Promise<unknown>;
 }
 
 export async function stageInboundAttachments(
-  downloader: TelegramFileDownloader,
+  downloader: AttachmentDownloader,
   cwd: string,
   threadId: string,
-  attachments: readonly TelegramInboundAttachment[],
+  attachments: readonly InboundAttachment[],
   logger?: Logger,
-): Promise<StagedTelegramAttachment[]> {
-  const staged: StagedTelegramAttachment[] = [];
+): Promise<StagedAttachment[]> {
+  const staged: StagedAttachment[] = [];
   for (const attachment of attachments) {
     try {
       if (attachment.localPath) {
@@ -48,7 +47,7 @@ export async function stageInboundAttachments(
 
       const remoteFile = await downloader.getFile(attachment.fileId);
       const resolvedSize = attachment.fileSize ?? remoteFile.file_size ?? null;
-      if (resolvedSize !== null && resolvedSize > TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES) {
+      if (resolvedSize !== null && resolvedSize > DEFAULT_REMOTE_DOWNLOAD_LIMIT_BYTES) {
         logger?.warn('attachments.too_large', {
           fileId: attachment.fileId,
           size: resolvedSize,
@@ -78,3 +77,6 @@ export async function stageInboundAttachments(
   }
   return staged;
 }
+
+/** Compatibility for existing attachment clients. */
+export type TelegramFileDownloader = AttachmentDownloader;

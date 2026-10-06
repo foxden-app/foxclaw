@@ -416,6 +416,8 @@ function createControllerRig(selfUpdater: SelfUpdateRuntime | null = null, coord
   const appEvents = new EventEmitter();
   const app = {
     on: appEvents.on.bind(appEvents),
+    off: appEvents.off.bind(appEvents),
+    listenerCount: appEvents.listenerCount.bind(appEvents),
     emit: appEvents.emit.bind(appEvents),
     start: async () => {},
     isConnected: () => true,
@@ -7201,4 +7203,56 @@ test('weixin text fallback commands resolve approval, answers, plan implementati
     requestId: 'mcp-1',
     result: { action: 'accept', content: { issue: 'ABC-1' }, _meta: null },
   });
+});
+
+
+test('shared Codex control plane subscribes once, isolates approvals and leaves execution recovery to the orchestrator', async (t) => {
+  const rig = createControllerRig();
+  t.after(async () => { await rig.controller.stopControlPlane(); rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  rig.controller.attachExecutionHost({ ownsScope: scope => scope === 'telegram:99::root', hasExecutingTasks: () => false });
+  rig.store.setBinding('telegram:99::root', 'owned', rig.tempDir);
+  rig.store.setBinding('telegram:100::root', 'foreign', rig.tempDir);
+  rig.store.saveActiveTurnPreview({ scopeId: 'telegram:99::root', turnId: 'codex_saved', threadId: 'owned', messageId: 7 });
+  await rig.controller.startControlPlane();
+  await rig.controller.startControlPlane();
+  assert.equal(rig.app.listenerCount('serverRequest'), 1);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+  assert.equal((rig.controller as any).activeTurns.size, 0);
+  rig.app.emit('notification', { method: 'turn/started', params: { threadId: 'owned', turn: { id: 'native-turn' } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((rig.controller as any).activeTurns.size, 0, 'Control plane must never start a second renderer for an orchestrated turn');
+  rig.app.emit('serverRequest', { id: 'foreign-approval', method: 'item/permissions/requestApproval', params: { threadId: 'foreign', turnId: 'turn', itemId: 'item', permissions: { network: { enabled: true } } } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rig.controller.getPendingApprovalCount(), 0);
+  rig.app.emit('serverRequest', { id: 'owned-approval', method: 'item/permissions/requestApproval', params: { threadId: 'owned', turnId: 'turn', itemId: 'item', permissions: { network: { enabled: true } } } });
+  for (let i = 0; i < 50 && !rig.sentMessages.length; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(rig.controller.getPendingApprovalCount(), 1);
+  assert.ok(rig.sentMessages.length);
+  await rig.controller.stopControlPlane();
+  assert.equal(rig.app.listenerCount('serverRequest'), 0);
+  assert.equal(rig.app.listenerCount('notification'), 0);
+  assert.equal(rig.store.listActiveTurnPreviews().length, 1);
+});
+
+
+test('control plane shutdown waits for an in-flight native approval before releasing its state', async t => {
+  const rig = createControllerRig();
+  t.after(async () => { await rig.controller.stopControlPlane(); rig.store.close(); fs.rmSync(rig.tempDir, { recursive: true, force: true }); });
+  rig.controller.attachExecutionHost({ ownsScope: () => true, hasExecutingTasks: () => false });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  (rig.controller as any).handleServerRequest = async () => { entered(); await gate; rig.store.setBinding('telegram:99::root', 'approved', rig.tempDir); };
+  await rig.controller.startControlPlane();
+  rig.app.emit('serverRequest', { id: 'slow-approval', method: 'test' });
+  await started;
+  let stopped = false;
+  const stopping = rig.controller.stopControlPlane().then(() => { stopped = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.equal(rig.app.listenerCount('serverRequest'), 0);
+  release(); await stopping;
+  assert.equal(rig.store.getBinding('telegram:99::root')?.threadId, 'approved');
+  assert.equal((rig.controller as any).controlOperations.size, 0);
 });

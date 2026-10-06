@@ -5,10 +5,10 @@ import { randomBytes } from 'node:crypto';
 import type { AppConfig } from '../config.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
-import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
+import type { ChannelPort, ChannelInlineKeyboard } from '../core/channel_port.js';
 import type { AppLocale, AccessPresetValue } from '../types.js';
-import type { TelegramCallbackEvent } from '../telegram/gateway.js';
-import type { UnifiedChannelOrchestrator } from '../core/orchestrator.js';
+import type { ChannelCallbackEvent } from '../core/channel_events.js';
+import type { BackendUiHost } from '../core/backend_ui.js';
 import { DshClient, type RequestPermissionRequest, type RequestPermissionResponse } from './client.js';
 import { DshEngineAdapter } from './adapter.js';
 
@@ -22,7 +22,7 @@ export class DshUi {
 
   get pendingApprovals(): number { return this.approvals.size; }
 
-  constructor(private readonly config: AppConfig, private readonly store: BridgeStore, private readonly logger: Logger, private readonly messaging: TelegramMessagingPort) {
+  constructor(private readonly config: AppConfig, private readonly store: BridgeStore, private readonly logger: Logger, private readonly messaging: ChannelPort) {
     if (!config.dsh) throw new Error('DSH backend is not configured');
     const dsh = config.dsh;
     this.adapter = new DshEngineAdapter({
@@ -60,18 +60,18 @@ export class DshUi {
     return { text, callback_data: `dsh:a:${key}` };
   }
 
-  private async panel(scopeId: string, text: string, keyboard: InlineKeyboard, orchestrator: UnifiedChannelOrchestrator, messageId?: number): Promise<void> {
+  private async panel(scopeId: string, text: string, keyboard: ChannelInlineKeyboard, orchestrator: BackendUiHost, messageId?: number): Promise<void> {
     if (messageId) await orchestrator.editMessage(scopeId, messageId, text, keyboard);
     else messageId = await orchestrator.sendMessage(scopeId, text, keyboard);
     orchestrator.scheduleStalePanelDeletion(scopeId, messageId);
   }
 
-  async setup(scopeId: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator, messageId?: number): Promise<void> {
+  async setup(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number): Promise<void> {
     const settings = this.store.getChatSettings(scopeId);
     const binding = this.store.getBinding(scopeId);
     const access = settings?.accessPreset ?? this.defaultAccess();
     const mode = settings?.activeTurnMessageMode ?? 'queue';
-    const rows: InlineKeyboard = [
+    const rows: ChannelInlineKeyboard = [
       [{ text: this.copy(locale, '🎯 模型', '🎯 Model'), callback_data: 'dsh:models' }, { text: this.copy(locale, '🧠 推理档位', '🧠 Reasoning'), callback_data: 'dsh:efforts' }],
       ['read-only', 'default', 'full-access'].map(value => this.button(scopeId, 'access', value, `${access === value ? '✓ ' : ''}${this.copy(locale, value === 'read-only' ? '只读' : value === 'default' ? '工作区写入' : '完全访问', value)}`)),
       [{ text: this.copy(locale, '📁 会话', '📁 Sessions'), callback_data: 'dsh:threads' }, { text: this.copy(locale, '🧩 插件配置', '🧩 Plugins'), callback_data: 'dsh:plugins' }],
@@ -82,25 +82,25 @@ export class DshUi {
     await this.panel(scopeId, `⚙️ **DeepSeek Harness**\n\n${this.copy(locale, '模型', 'Model')}: \`${settings?.model ?? 'default'}\`\n${this.copy(locale, '推理档位', 'Reasoning')}: \`${settings?.reasoningEffort ?? 'default'}\`\n${this.copy(locale, '权限', 'Access')}: \`${access}\`\n${this.copy(locale, '会话', 'Session')}: \`${binding?.threadId || 'new'}\`\n${this.copy(locale, '工作目录', 'Directory')}: \`${binding?.cwd || this.config.defaultCwd}\``, rows, orchestrator, messageId);
   }
 
-  async models(scopeId: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator, messageId?: number): Promise<void> {
+  async models(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number): Promise<void> {
     const models = await this.adapter.listModels(scopeId);
     const current = this.store.getChatSettings(scopeId)?.model;
     const buttons = [this.button(scopeId, 'model', '', this.copy(locale, '默认模型', 'Default model')), ...models.map(model => this.button(scopeId, 'model', model.id, `${model.id === current ? '✓ ' : ''}${model.name}`))];
-    const rows: InlineKeyboard = [];
+    const rows: ChannelInlineKeyboard = [];
     for (let index = 0; index < buttons.length; index += 2) rows.push(buttons.slice(index, index + 2));
     rows.push([{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }]);
     await this.panel(scopeId, this.copy(locale, '🎯 **DSH 模型**', '🎯 **DSH models**'), rows, orchestrator, messageId);
   }
 
-  private async efforts(scopeId: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator, messageId?: number): Promise<void> {
+  private async efforts(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number): Promise<void> {
     const choices = await this.adapter.listEfforts(scopeId);
-    const rows: InlineKeyboard = [[this.button(scopeId, 'effort', '', this.copy(locale, '默认档位', 'Default effort'))]];
+    const rows: ChannelInlineKeyboard = [[this.button(scopeId, 'effort', '', this.copy(locale, '默认档位', 'Default effort'))]];
     for (const choice of choices) rows.push([this.button(scopeId, 'effort', choice.value, choice.name)]);
     rows.push([{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }]);
     await this.panel(scopeId, choices.length ? this.copy(locale, '🧠 **当前模型的推理档位**', '🧠 **Reasoning for this model**') : this.copy(locale, '当前模型未提供可切换的推理档位。', 'This model exposes no reasoning selector.'), rows, orchestrator, messageId);
   }
 
-  private async selectModel(scopeId: string, value: string, orchestrator: UnifiedChannelOrchestrator): Promise<void> {
+  private async selectModel(scopeId: string, value: string, orchestrator: BackendUiHost): Promise<void> {
     await this.adapter.selectModel(scopeId, value || null);
     this.store.setChatModel(scopeId, value || null);
     this.store.setChatEffort(scopeId, null);
@@ -108,13 +108,13 @@ export class DshUi {
     orchestrator.syncCurrentBackendSettings(scopeId);
   }
 
-  private async selectEffort(scopeId: string, value: string, orchestrator: UnifiedChannelOrchestrator): Promise<void> {
+  private async selectEffort(scopeId: string, value: string, orchestrator: BackendUiHost): Promise<void> {
     await this.adapter.selectEffort(scopeId, value || null);
     this.store.setChatEngineEffort(scopeId, value || null);
     orchestrator.syncCurrentBackendSettings(scopeId);
   }
 
-  private async selectAccess(scopeId: string, value: string, orchestrator: UnifiedChannelOrchestrator): Promise<void> {
+  private async selectAccess(scopeId: string, value: string, orchestrator: BackendUiHost): Promise<void> {
     if (value !== 'read-only' && value !== 'default' && value !== 'full-access') throw new Error('Use read-only, default, or full-access');
     if (orchestrator.hasActiveTurn(scopeId)) throw new Error('Interrupt the active turn before changing DSH permissions');
     await this.adapter.setAccess(scopeId, value);
@@ -122,15 +122,15 @@ export class DshUi {
     orchestrator.syncCurrentBackendSettings(scopeId);
   }
 
-  private async threads(scopeId: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator, messageId?: number, cursor?: string): Promise<void> {
+  private async threads(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number, cursor?: string): Promise<void> {
     const page = await this.adapter.listSessions(scopeId, cursor);
-    const rows: InlineKeyboard = page.sessions.map(session => [this.button(scopeId, 'open', session.sessionId, (session.title || session.sessionId).slice(0, 60), session.cwd)]);
+    const rows: ChannelInlineKeyboard = page.sessions.map(session => [this.button(scopeId, 'open', session.sessionId, (session.title || session.sessionId).slice(0, 60), session.cwd)]);
     if (page.nextCursor) rows.push([this.button(scopeId, 'page', page.nextCursor, this.copy(locale, '下一页', 'Next page'))]);
     rows.push([{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }]);
     await this.panel(scopeId, this.copy(locale, '📁 **DSH 持久会话**', '📁 **Persistent DSH sessions**'), rows, orchestrator, messageId);
   }
 
-  private async open(scopeId: string, id: string, cwd: string | undefined, orchestrator: UnifiedChannelOrchestrator): Promise<void> {
+  private async open(scopeId: string, id: string, cwd: string | undefined, orchestrator: BackendUiHost): Promise<void> {
     if (orchestrator.hasActiveTurn(scopeId)) throw new Error('Interrupt the active turn before opening another DSH session');
     if (!cwd) {
       let cursor: string | undefined;
@@ -152,7 +152,7 @@ export class DshUi {
     orchestrator.syncCurrentBackendSettings(scopeId);
   }
 
-  private async plugins(scopeId: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator): Promise<void> {
+  private async plugins(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost): Promise<void> {
     const dsh = this.config.dsh!;
     const home = dsh.home || process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
     let dependencies: Record<string, unknown> = {};
@@ -163,7 +163,7 @@ export class DshUi {
     await orchestrator.sendMessage(scopeId, `🧩 **DSH ${this.copy(locale, '插件配置', 'plugin configuration')}**\n\nProfile: \`${dsh.profile}\`\n${Object.entries(dependencies).map(([name, version]) => `• ${name}: ${String(version)}`).join('\n') || this.copy(locale, 'Profile 尚未初始化或没有显式依赖。', 'Profile is not initialized or has no explicit dependencies.')}\n• foxclaw-permissions\n\n${this.copy(locale, '已配置补丁', 'Configured patches')}:\n${dsh.patches.map(patch => `• ${patch}`).join('\n') || '—'}\n\n${this.copy(locale, '安装/移除插件请在终端执行，随后重启 foxclaw', 'Install/remove plugins in a terminal, then restart foxclaw')}:\n\`dsh plugin --profile ${dsh.profile} add <package>\`\n\`dsh plugin --profile ${dsh.profile} remove <package>\``);
   }
 
-  async command(scopeId: string, command: string, args: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator): Promise<boolean> {
+  async command(scopeId: string, command: string, args: string, locale: AppLocale, orchestrator: BackendUiHost): Promise<boolean> {
     try {
       switch (command) {
         case 'setup': await this.setup(scopeId, locale, orchestrator); return true;
@@ -184,10 +184,10 @@ export class DshUi {
     } catch (error) { await orchestrator.sendMessage(scopeId, `⚠️ ${error instanceof Error ? error.message : String(error)}`); return true; }
   }
 
-  async callback(scopeId: string, data: string, locale: AppLocale, orchestrator: UnifiedChannelOrchestrator, event?: TelegramCallbackEvent): Promise<boolean> {
+  async callback(scopeId: string, data: string, locale: AppLocale, orchestrator: BackendUiHost, event?: ChannelCallbackEvent): Promise<boolean> {
     const answer = (text = '') => this.messaging.answerCallback(event?.callbackQueryId ?? '', text);
     if (!data.startsWith('dsh:')) {
-      if (orchestrator.getBackendDescriptorForScope(scopeId).engineType === 'dsh' && data.startsWith('engine:') && !['engine:setup:main', 'engine:setup:active_mode', 'engine:setup:new', 'engine:setup:backend'].includes(data) && !data.startsWith('engine:backend:')) {
+      if (orchestrator.getBackendDescriptorForScope(scopeId).engineType === 'dsh' && data.startsWith('engine:') && !['engine:setup:main', 'engine:setup:models', 'engine:setup:active_mode', 'engine:setup:new', 'engine:setup:backend'].includes(data) && !data.startsWith('engine:backend:')) {
         await answer(this.copy(locale, '请重新打开 DSH 设置', 'Open DSH settings again'));
         return true;
       }

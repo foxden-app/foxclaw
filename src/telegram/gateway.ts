@@ -1,3 +1,5 @@
+import type { ChannelInbound } from '../core/channel_events.js';
+import { setTimeout as delay } from 'node:timers/promises';
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import { callTelegramApi, callTelegramMultipartApi, downloadTelegramFile, getTelegramFile, type TelegramRemoteFile } from './api.js';
@@ -60,6 +62,7 @@ interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
   callback_query?: TelegramCallbackQuery;
+  stopped_message_generation?: { chat: TelegramChat; draft_id: number; message_thread_id?: number };
 }
 
 interface GetMeResult {
@@ -71,20 +74,8 @@ interface SendMessageResult {
   message_id: number;
 }
 
-export interface TelegramTextEvent {
-  chatId: string;
-  topicId: number | null;
-  scopeId: string;
-  chatType: string;
-  userId: string;
-  text: string;
-  messageId: number;
-  mediaGroupId?: string | null;
-  attachments: TelegramInboundAttachment[];
-  entities: TelegramMessageEntity[];
-  replyToBot: boolean;
-  languageCode?: string;
-}
+export type { ChannelTextEvent as TelegramTextEvent } from '../core/channel_events.js';
+import type { ChannelTextEvent as TelegramTextEvent } from '../core/channel_events.js';
 
 export interface TelegramPeerDocumentEvent {
   chatId: string;
@@ -95,19 +86,28 @@ export interface TelegramPeerDocumentEvent {
   attachment: TelegramInboundAttachment;
 }
 
-export interface TelegramCallbackEvent {
-  chatId: string;
-  topicId: number | null;
-  scopeId: string;
-  userId: string;
-  data: string;
-  callbackQueryId: string;
-  messageId: number;
-  languageCode?: string;
-}
+export type { ChannelCallbackEvent as TelegramCallbackEvent } from '../core/channel_events.js';
+import type { ChannelCallbackEvent as TelegramCallbackEvent } from '../core/channel_events.js';
 
 export class TelegramGateway extends EventEmitter {
+  private inboundConsumer: ((id: string, inbound: ChannelInbound) => Promise<void>) | null = null;
+  private readonly generations = new Map<number, { scopeId: string; taskId: string; chatId: string; topicId: number | null }>();
+  setInboundConsumer(consumer: (id: string, inbound: ChannelInbound) => Promise<void>): () => void {
+    if (this.inboundConsumer && this.inboundConsumer !== consumer) throw new Error('Telegram inbound consumer already owned');
+    this.inboundConsumer = consumer;
+    return () => { if (this.inboundConsumer === consumer) this.inboundConsumer = null; };
+  }
+  registerGeneration(draftId: number, scopeId: string, taskId: string, chatId: string, topicId: number | null): void {
+    this.generations.set(draftId, { scopeId, taskId, chatId, topicId });
+  }
+  releaseGeneration(draftId: number): void { this.generations.delete(draftId); }
+  private async dispatchInbound(updateId: number, inbound: ChannelInbound): Promise<void> {
+    if (this.inboundConsumer) await this.inboundConsumer(`${this.botKey}:${updateId}`, inbound);
+    else this.emit(inbound.kind, inbound.event);
+  }
   private running = false;
+  private polling: Promise<void> | null = null;
+  private pollAbort: AbortController | null = null;
   private botKey: string;
   private botUsername: string | null = null;
   private botUserId: number | null = null;
@@ -155,12 +155,17 @@ export class TelegramGateway extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.running) return;
+    await this.polling;
     this.running = true;
-    void this.pollLoop();
+    this.pollAbort = new AbortController();
+    this.polling = this.pollLoop();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
+    this.pollAbort?.abort();
+    await this.polling;
+    this.generations.clear();
   }
 
   async sendMessage(
@@ -272,11 +277,13 @@ export class TelegramGateway extends EventEmitter {
     draftId: number,
     richMessage: TelegramInputRichMessage,
     messageThreadId?: number | null,
+    canStop = false,
   ): Promise<void> {
     const result = await callTelegramApi<boolean>(this.botToken, 'sendRichMessageDraft', {
       chat_id: chatId,
       draft_id: draftId,
       rich_message: richMessage,
+      ...(canStop ? { can_stop: true, keep_on_stop: true } : {}),
       ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
     });
     if (!result.ok) {
@@ -401,8 +408,8 @@ export class TelegramGateway extends EventEmitter {
     return downloadTelegramFile(this.botToken, remoteFilePath, destinationPath);
   }
 
-  private async resolveBotIdentity(required = false): Promise<void> {
-    const result = await callTelegramApi<GetMeResult>(this.botToken, 'getMe', {});
+  private async resolveBotIdentity(required = false, signal?: AbortSignal): Promise<void> {
+    const result = await callTelegramApi<GetMeResult>(this.botToken, 'getMe', {}, signal);
     if (result.ok && result.result) {
       this.botKey = `telegram:bot${result.result.id}`;
       this.botUserId = result.result.id;
@@ -414,18 +421,18 @@ export class TelegramGateway extends EventEmitter {
     }
   }
 
-  private async registerCommands(): Promise<void> {
+  private async registerCommands(signal?: AbortSignal): Promise<void> {
     await callTelegramApi(this.botToken, 'setMyCommands', {
       commands: this.commandProvider('zh'),
-    });
+    }, signal);
     await callTelegramApi(this.botToken, 'setMyCommands', {
       commands: this.commandProvider('en'),
       language_code: 'en',
-    });
+    }, signal);
     await callTelegramApi(this.botToken, 'setMyCommands', {
       commands: this.commandProvider('zh'),
       language_code: 'zh',
-    });
+    }, signal);
   }
 
   async setChatCommands(chatId: number | string, commands: Array<{ command: string; description: string }>): Promise<void> {
@@ -441,11 +448,13 @@ export class TelegramGateway extends EventEmitter {
 
   private async pollLoop(): Promise<void> {
     let remoteInitialized = false;
+    const signal = this.pollAbort?.signal;
     while (this.running) {
       try {
         if (!remoteInitialized) {
-          await this.resolveBotIdentity(true);
-          await this.registerCommands();
+          await this.resolveBotIdentity(true, signal);
+          if (!this.running) return;
+          await this.registerCommands(signal);
           remoteInitialized = true;
           this.emit('remoteReady');
           if (!this.running) return;
@@ -454,25 +463,36 @@ export class TelegramGateway extends EventEmitter {
         const result = await callTelegramApi<TelegramUpdate[]>(this.botToken, 'getUpdates', {
           timeout: Math.max(1, Math.floor(this.pollIntervalMs / 1000)),
           offset,
-          allowed_updates: ['message', 'callback_query']
-        });
+          allowed_updates: ['message', 'callback_query', 'stopped_message_generation']
+        }, signal);
+        if (!this.running) return;
         if (!result.ok || !result.result) {
           this.logger.warn('telegram.getUpdates failed', result.description);
-          await sleep(this.pollIntervalMs);
+          await delay(this.pollIntervalMs, undefined, { signal }).catch(() => {});
           continue;
         }
         for (const update of result.result) {
-          this.store.setTelegramOffset(this.botKey, update.update_id);
+          if (!this.running) return;
           await this.handleUpdate(update);
+          this.store.setTelegramOffset(this.botKey, update.update_id);
         }
       } catch (error) {
+        if (!this.running) return;
         this.logger.error('telegram.pollLoop error', toErrorMeta(error));
-        await sleep(this.pollIntervalMs);
+        await delay(this.pollIntervalMs, undefined, { signal }).catch(() => {});
       }
     }
   }
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
+    const stopped = update.stopped_message_generation;
+    if (stopped) {
+      const generation = this.generations.get(stopped.draft_id);
+      // Native drafts are private-chat only; the private chat id identifies the authorized user.
+      if (!generation || stopped.chat.type !== 'private' || String(stopped.chat.id) !== this.allowedUserId || generation.chatId !== String(stopped.chat.id) || generation.topicId !== (stopped.message_thread_id ?? null)) return;
+      await this.dispatchInbound(update.update_id, { kind: 'stop', event: { scopeId: generation.scopeId, taskId: generation.taskId } });
+      return;
+    }
     if (update.message && update.message.from && this.isAllowedChat(update.message.chat)) {
       if (String(update.message.from.id) !== this.allowedUserId) {
         if (update.message.chat.type === 'private') {
@@ -502,7 +522,7 @@ export class TelegramGateway extends EventEmitter {
       const entities = update.message.text ? (update.message.entities ?? []) : (update.message.caption_entities ?? []);
       const replyToBot = this.botUserId !== null && update.message.reply_to_message?.from?.id === this.botUserId;
       if (text || attachments.length > 0) {
-        this.emit('text', {
+        await this.dispatchInbound(update.update_id, { kind: 'text', event: {
           chatId: String(update.message.chat.id),
           topicId,
           scopeId,
@@ -515,7 +535,7 @@ export class TelegramGateway extends EventEmitter {
           entities,
           replyToBot,
           ...(update.message.from.language_code ? { languageCode: update.message.from.language_code } : {}),
-        } satisfies TelegramTextEvent);
+        } satisfies TelegramTextEvent });
         if (update.message.chat.type === 'private' && this.identity) {
           this.store.rememberTelegramPrivateScope(this.identity, scopeId, String(update.message.chat.id));
         }
@@ -527,7 +547,7 @@ export class TelegramGateway extends EventEmitter {
       if (String(update.callback_query.from.id) !== this.allowedUserId) return;
       if (!this.isAllowedChat(update.callback_query.message.chat)) return;
       const topicId = update.callback_query.message.message_thread_id ?? null;
-      this.emit('callback', {
+      await this.dispatchInbound(update.update_id, { kind: 'callback', event: {
         chatId: String(update.callback_query.message.chat.id),
         topicId,
         scopeId: toTelegramBridgeScopeId(
@@ -539,7 +559,7 @@ export class TelegramGateway extends EventEmitter {
         callbackQueryId: update.callback_query.id,
         messageId: update.callback_query.message.message_id,
         ...(update.callback_query.from.language_code ? { languageCode: update.callback_query.from.language_code } : {}),
-      } satisfies TelegramCallbackEvent);
+      } satisfies TelegramCallbackEvent });
     }
   }
 
@@ -625,10 +645,6 @@ interface TelegramVideoNote {
   length?: number;
   duration?: number;
   file_size?: number;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export function parseTelegramBotId(botToken: string): number | null {

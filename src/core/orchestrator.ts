@@ -1,31 +1,29 @@
+import { ListenerScope } from './listener_scope.js';
+import { randomUUID } from 'node:crypto';
+import type { JournalTask } from '../store/task_journal.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { AppConfig } from '../config.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
-import type { AppLocale, ReasoningEffortValue, AccessPresetValue, ActiveTurnMessageMode } from '../types.js';
-import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
-import type { TelegramMessagingPort, InlineKeyboard } from '../channels/telegram/telegram_messaging_port.js';
+import type { AppLocale, AccessPresetValue, ActiveTurnMessageMode } from '../types.js';
+import type { ChannelGateway, ChannelPort, ChannelInlineKeyboard } from './channel_port.js';
+import type { ChannelTextEvent, ChannelCallbackEvent, ChannelInbound } from './channel_events.js';
 import { parseCommand } from '../controller/commands.js';
-import { getTelegramCommands, getAntigravityTelegramCommands, getDshTelegramCommands } from '../i18n.js';
-import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
-import { chunkTelegramMessage } from '../telegram/text.js';
+import { chunkMessage, escapeHtml } from './message_text.js';
 import { stageInboundAttachments } from './attachments.js';
-import { buildAttachmentPrompt, type StagedTelegramAttachment } from '../telegram/media.js';
-import { TurnQueueManager, type TurnMessageMode } from './turn_queue.js';
+import type { StagedAttachment } from './attachment_types.js';
+import type { TurnMessageMode } from './turn_queue.js';
+import { BackendRegistry } from './backend_registry.js';
+import { decodeQueuedEngineInput } from './queued_engine_input.js';
+import { ScopeOperations } from './scope_operations.js';
+import type { EngineCustomUiHook } from './backend_ui.js';
+export type { EngineCustomUiHook } from './backend_ui.js';
 import { renderStreamPreviewContent, buildFoldedToolsSummary, combineSummaryAndResponse } from './stream_preview.js';
-import { BRIDGE_SCOPE_TELEGRAM_PREFIX, BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope } from './bridge_scope.js';
-import { escapeTelegramHtml } from '../telegram/html.js';
 import { formatTokenUsageSummary, formatBackendTokenUsageBreakdown } from '../store/token_usage.js';
-import { isTransientNetworkError } from '../telegram/api.js';
-import type {
-  IEngineAdapter,
-  EngineTurnRequest,
-  EngineTurnExecution,
-  EngineTurnResult,
-  BackendDescriptor,
-} from './engine_spi.js';
+import { isTransientNetworkError } from './network_errors.js';
+import type { IEngineAdapter, EngineTurnExecution, EngineTurnResult, BackendDescriptor } from './engine_spi.js';
 
 export const STREAM_THROTTLE_MS = 700;
 export const TYPING_INTERVAL_MS = 4000;
@@ -45,28 +43,26 @@ export interface UnifiedActiveTurn {
   currentTool?: string | null;
   suppressQueueDrain?: boolean;
   startTime: number;
-}
-
-export interface EngineCustomUiHook {
-  renderSetupMenu?(scopeId: string, locale: AppLocale, messageId?: number): Promise<boolean>;
-  renderModelsMenu?(scopeId: string, locale: AppLocale, messageId?: number): Promise<boolean>;
-  renderCustomStatus?(scopeId: string, locale: AppLocale): Promise<string | null>;
-  renderCustomSetupRows?(scopeId: string, locale: AppLocale): Promise<InlineKeyboard>;
-  handleCustomCallback?(scopeId: string, data: string, locale: AppLocale, messageId?: number, event?: TelegramCallbackEvent): Promise<boolean>;
-  handleCustomCommand?(scopeId: string, command: string, args: string, locale: AppLocale, event?: TelegramTextEvent): Promise<boolean>;
-  handleCustomInbound?(event: TelegramTextEvent, locale: AppLocale): Promise<boolean>;
+  previewKey: string;
+  queueId?: string | undefined;
+  taskId: string;
+  settling?: boolean;
 }
 
 export class UnifiedChannelOrchestrator {
   readonly config: AppConfig;
   readonly store: BridgeStore;
   readonly logger: Logger;
-  readonly bot: TelegramGateway;
-  readonly messaging: TelegramMessagingPort;
-  readonly queueManager: TurnQueueManager;
+  readonly bot: ChannelGateway;
+  readonly messaging: ChannelPort;
   readonly customUi?: EngineCustomUiHook | undefined;
 
-  private readonly backends = new Map<string, BackendDescriptor>();
+  private readonly backends: BackendRegistry;
+  private readonly scopeOperations = new ScopeOperations();
+  private readonly messageOperations = new ScopeOperations();
+  private readonly settlements = new Set<Promise<void>>();
+  private stopped = false;
+  private readonly serviceUi?: EngineCustomUiHook | undefined;
   private readonly defaultBackendId: string;
   private readonly activeTurns = new Map<string, UnifiedActiveTurn>();
   private readonly stalePanelDeleteTimers = new Map<string, NodeJS.Timeout>();
@@ -82,22 +78,24 @@ export class UnifiedChannelOrchestrator {
     config: AppConfig;
     store: BridgeStore;
     logger: Logger;
-    bot: TelegramGateway;
+    bot: ChannelGateway;
     adapter?: IEngineAdapter;
     adapters?: Map<string, IEngineAdapter> | IEngineAdapter[];
     backends?: BackendDescriptor[];
     backendProvider?: (() => Promise<BackendDescriptor[]> | BackendDescriptor[]) | undefined;
     defaultBackendId?: string;
     ownsScope?: (scopeId: string) => boolean;
-    messaging: TelegramMessagingPort;
+    messaging: ChannelPort;
     customUi?: EngineCustomUiHook | undefined;
+    serviceUi?: EngineCustomUiHook | undefined;
   }) {
     this.config = options.config;
     this.store = options.store;
     this.logger = options.logger;
     this.bot = options.bot;
     this.messaging = options.messaging;
-    this.queueManager = new TurnQueueManager();
+    this.backends = new BackendRegistry(this);
+    this.serviceUi = options.serviceUi;
     this.customUi = options.customUi;
     this.backendProvider = options.backendProvider;
     this.ownsScope = options.ownsScope ?? (() => true);
@@ -134,6 +132,7 @@ export class UnifiedChannelOrchestrator {
 
     const firstId = Array.from(this.backends.keys())[0] ?? 'default';
     this.defaultBackendId = options.defaultBackendId ?? options.adapter?.id ?? firstId;
+    if (!this.backends.has(this.defaultBackendId)) throw new Error(`Default backend '${this.defaultBackendId}' is not registered`);
   }
 
   getAdapterForScope(scopeId: string): IEngineAdapter {
@@ -142,26 +141,16 @@ export class UnifiedChannelOrchestrator {
   }
 
   getBackendDescriptorForScope(scopeId: string): BackendDescriptor {
-    const activeBackendId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
-    return (
-      this.backends.get(activeBackendId) ??
-      this.backends.get(this.defaultBackendId) ?? {
-        id: activeBackendId,
-        name: activeBackendId,
-        engineType: activeBackendId,
-        adapter: this.adapter,
-      }
-    );
+    const id = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    const backend = this.backends.get(id);
+    if (!backend) throw new Error(`Backend '${id}' is unavailable; use /backend to select an available backend`);
+    return backend;
   }
 
   getAdapterForBackend(backendId: string): IEngineAdapter {
-    const desc = this.backends.get(backendId);
-    if (desc) return desc.adapter;
-    const fallback = this.backends.get(this.defaultBackendId) ?? Array.from(this.backends.values())[0];
-    if (!fallback) {
-      throw new Error(`No engine adapter available in orchestrator for backend '${backendId}'`);
-    }
-    return fallback.adapter;
+    const backend = this.backends.get(backendId);
+    if (!backend) throw new Error(`Backend '${backendId}' is unavailable`);
+    return backend.adapter;
   }
 
   registerBackend(desc: BackendDescriptor): void {
@@ -178,9 +167,7 @@ export class UnifiedChannelOrchestrator {
         for (const b of dynamicList) {
           list.push(b);
           seen.add(b.id);
-          if (!this.backends.has(b.id)) {
-            this.backends.set(b.id, b);
-          }
+          this.backends.set(b.id, b);
         }
       } catch (err) {
         this.logger.warn('orchestrator.backend_provider_failed', { error: String(err) });
@@ -224,7 +211,7 @@ export class UnifiedChannelOrchestrator {
   }
 
   scheduleStalePanelDeletion(scopeId: string, messageId: number): void {
-    if (this.config.telegramPanelTtlMs <= 0 || scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
+    if (this.config.telegramPanelTtlMs <= 0 || this.messaging.capabilities?.editableMessages === false) {
       return;
     }
     const key = `${scopeId}:${messageId}`;
@@ -244,7 +231,11 @@ export class UnifiedChannelOrchestrator {
     this.stalePanelDeleteTimers.set(key, timer);
   }
 
-  async switchBackend(
+  async switchBackend(scopeId: string, targetBackendId: string, locale: AppLocale) {
+    return this.scopeOperations.run(scopeId, () => this.switchBackendNow(scopeId, targetBackendId, locale));
+  }
+
+  private async switchBackendNow(
     scopeId: string,
     targetBackendId: string,
     locale: AppLocale,
@@ -264,8 +255,9 @@ export class UnifiedChannelOrchestrator {
       );
     }
 
-    if (this.activeTurns.has(scopeId) && (targetDesc.engineType === 'dsh' || this.getBackendDescriptorForScope(scopeId).engineType === 'dsh')) {
-      throw new Error(locale === 'zh' ? '请先中断当前任务，再切换后端。' : 'Interrupt the active turn before switching backends.');
+    if (this.stopped) throw new Error('Orchestrator is stopped');
+    if (this.activeTurns.has(scopeId) || (currentBackendId !== targetBackendId && (this.store.countQueuedTurnInputs(scopeId) > 0 || this.store.taskJournal.listUnfinished(scopeId).length > 0))) {
+      throw new Error(locale === 'zh' ? '请先中断当前任务并清空队列，再切换后端。' : 'Interrupt the active turn and clear its queue before switching backends.');
     }
 
     if (targetDesc.onSelect) {
@@ -314,8 +306,9 @@ export class UnifiedChannelOrchestrator {
       this.store.setChatSettings(
         scopeId,
         saved.model ?? null,
-        (saved.reasoningEffort as ReasoningEffortValue) ?? null,
+        null,
       );
+      this.store.setChatEngineEffort(scopeId, saved.reasoningEffort ?? null);
       if (saved.activeTurnMessageMode !== undefined && saved.activeTurnMessageMode !== null) {
         this.store.setChatActiveTurnMessageMode(
           scopeId,
@@ -330,15 +323,16 @@ export class UnifiedChannelOrchestrator {
       }
     } else {
       this.store.clearBinding(scopeId);
-      const defaultEffort: ReasoningEffortValue | null = targetDesc.engineType === 'dsh' ? null : targetDesc.engineType === 'antigravity' ? 'high' : 'medium';
-      this.store.setChatSettings(scopeId, null, defaultEffort);
+      this.store.setChatModel(scopeId, null);
+      this.store.setChatEngineEffort(scopeId, targetDesc.defaults?.reasoningEffort ?? null);
+      this.store.setChatAccessPreset(scopeId, null);
+      this.store.setChatCollaborationMode(scopeId, null);
       this.store.setChatServiceTier(scopeId, null);
     }
 
-    const isCodex = targetDesc.engineType === 'codex';
     const activeSettings = this.store.getChatSettings(scopeId);
     const modelText = activeSettings?.model ? `\`${activeSettings.model}\`` : (locale === 'zh' ? '引擎默认' : 'default');
-    const effortText = activeSettings?.reasoningEffort ?? (targetDesc.engineType === 'dsh' ? 'default' : isCodex ? 'medium' : 'high');
+    const effortText = activeSettings?.reasoningEffort ?? targetDesc.defaults?.reasoningEffort ?? 'default';
     const modeText = activeSettings?.activeTurnMessageMode ?? 'queue';
 
     const switchMsg =
@@ -363,11 +357,7 @@ export class UnifiedChannelOrchestrator {
     }
 
     try {
-      if (scopeId.startsWith(BRIDGE_SCOPE_TELEGRAM_PREFIX)) {
-        const target = parseTelegramTargetFromBridgeScope(scopeId);
-        const cmds = targetDesc.engineType === 'dsh' ? getDshTelegramCommands(locale) : isCodex ? getTelegramCommands(locale) : getAntigravityTelegramCommands(locale);
-        await this.bot.setChatCommands(target.chatId, cmds);
-      }
+      if (targetDesc.commands) await this.messaging.setScopeCommands?.(scopeId, targetDesc.commands(locale));
     } catch (err) {
       this.logger.warn('orchestrator.set_chat_commands_failed', { error: String(err) });
     }
@@ -387,8 +377,31 @@ export class UnifiedChannelOrchestrator {
     };
   }
 
+  private removeInboundConsumer: (() => void) | null = null;
+  private readonly intakeOperations = new ScopeOperations();
+  private async receiveInbound(id: string, inbound: ChannelInbound): Promise<void> {
+    if (this.stopped || !this.ownsScope(inbound.event.scopeId)) return;
+    if (!this.store.channelInbox.accept(id, inbound)) return;
+    await this.intakeOperations.run(id, async () => {
+      if (this.stopped) return;
+      if (!this.store.channelInbox.accept(id, inbound)) return;
+      if (inbound.kind === 'text') await this.handleText(inbound.event);
+      else if (inbound.kind === 'callback') await this.handleCallback(inbound.event);
+      else await this.stopTask(inbound.event.scopeId, inbound.event.taskId);
+      if (!this.stopped) this.store.channelInbox.complete(id);
+    });
+  }
+
+  private readonly inboundListeners = new ListenerScope();
+
   registerInboundHandlers(): void {
-    this.bot.on('text', (event) => {
+    this.inboundListeners.clear();
+    this.removeInboundConsumer?.();
+    if (this.bot.setInboundConsumer) {
+      this.removeInboundConsumer = this.bot.setInboundConsumer((id, inbound) => this.receiveInbound(id, inbound));
+      return;
+    }
+    this.inboundListeners.listen(this.bot, 'text', (event: ChannelTextEvent) => {
       this.handleText(event).catch((err) => {
         this.logger.error('orchestrator.inbound_text_error', {
           error: err instanceof Error ? err.message : String(err),
@@ -396,7 +409,7 @@ export class UnifiedChannelOrchestrator {
       });
     });
 
-    this.bot.on('callback', (event) => {
+    this.inboundListeners.listen(this.bot, 'callback', (event: ChannelCallbackEvent) => {
       this.handleCallback(event).catch((err) => {
         this.logger.error('orchestrator.inbound_callback_error', {
           error: err instanceof Error ? err.message : String(err),
@@ -405,7 +418,7 @@ export class UnifiedChannelOrchestrator {
     });
   }
 
-  dispatchInboundLikeTelegramText(event: TelegramTextEvent): void {
+  dispatchInboundLikeTelegramText(event: ChannelTextEvent): void {
     this.handleText(event).catch((err) => {
       this.logger.error('orchestrator.inbound_text_error', {
         error: err instanceof Error ? err.message : String(err),
@@ -414,151 +427,234 @@ export class UnifiedChannelOrchestrator {
   }
 
   async start(): Promise<void> {
+    this.stopped = false;
+    await this.restoreDurableTasks();
+    for (const pending of this.store.channelInbox.pending()) if (this.ownsScope(pending.inbound.event.scopeId)) {
+      await this.receiveInbound(pending.id, pending.inbound).catch(error => this.logger.warn('orchestrator.intake_recovery_failed', { id: pending.id, error: String(error) }));
+    }
     await this.bot.start();
     this.logger.info('orchestrator.started', {
       defaultEngine: this.adapter.id,
       backends: Array.from(this.backends.keys()),
     });
 
-    // Requeue any interrupted turns from previous crash/restart
-    try {
-      const scopes = new Set(this.store.listQueuedTurnInputs().filter(input => this.ownsScope(input.scopeId)).map(input => input.scopeId));
-      const requeued = [...scopes].reduce((count, scopeId) => count + this.store.requeueInterruptedQueuedTurnInputs(scopeId), 0);
-      if (requeued > 0) {
-        this.logger.info('orchestrator.requeued_interrupted_turns', { count: requeued });
-      }
-    } catch (err) {
-      this.logger.warn('orchestrator.requeue_interrupted_error', { error: String(err) });
+  }
+
+  private recoveryEvent(scopeId: string, messageId = 0): ChannelTextEvent {
+    return { scopeId, chatId: scopeId, topicId: null, chatType: 'private', userId: 'system', messageId,
+      text: '', attachments: [], entities: [], replyToBot: false };
+  }
+
+  private async showRecovery(task: JournalTask): Promise<void> {
+    const zh = task.request.locale === 'zh';
+    const actions: ChannelInlineKeyboard = [[
+      { text: zh ? '继续原任务' : 'Continue', callback_data: `engine:recover:continue:${task.id}` },
+      { text: zh ? '重新执行' : 'Retry', callback_data: `engine:recover:retry:${task.id}` },
+      { text: zh ? '放弃' : 'Cancel', callback_data: `engine:recover:cancel:${task.id}` },
+    ]];
+    await this.sendMessage(task.event.scopeId, zh
+      ? `⚠️ **任务执行结果待确认**\n任务: \`${task.id}\`\n${task.error ? `恢复失败: ${task.error}。` : '服务重启前可能已执行工具。'}原始输入与附件已保留，队列暂停。\n> ${task.sourcePrompt}\n\n/recover continue · /recover retry · /recover cancel`
+      : `⚠️ **Task outcome requires confirmation**\nTask: \`${task.id}\`\n${task.error ? `Recovery failed: ${task.error}.` : 'Tools may already have run before the restart.'} Input and attachments are preserved; the queue is paused.\n> ${task.sourcePrompt}\n\n/recover continue · /recover retry · /recover cancel`, actions);
+  }
+
+  private async restoreDurableTasks(): Promise<void> {
+    const tasks = this.store.taskJournal.listUnfinished().filter(task => this.ownsScope(task.event.scopeId));
+    // A queued journal entry proves the executor was never invoked, even if queue claiming was interrupted.
+    for (const task of tasks) if (task.state === 'queued' && task.queueId && this.store.getQueuedTurnInput(task.queueId)?.status === 'processing') {
+      this.store.updateQueuedTurnInputStatus(task.queueId, 'queued');
     }
-
-    // Crash recovery: check interrupted preview messages from before restart
-    try {
-      const backendIds = new Set(this.backends.keys());
-      for (const desc of this.backends.values()) {
-        backendIds.add(desc.adapter.id);
+    // Claim uncertainty synchronously before recovering messages or starting any queued work.
+    for (const task of tasks) if (task.state === 'running' && !task.result) {
+      this.store.taskJournal.update(task.id, 'awaiting_confirmation');
+    }
+    // Import pre-journal previews and processing queues conservatively; their outcome is unknown.
+    const journalScopes = new Set(tasks.filter(task => task.state !== 'queued').map(task => task.event.scopeId));
+    for (const preview of this.store.listActiveTurnPreviews()) {
+      if (!this.ownsScope(preview.scopeId) || journalScopes.has(preview.scopeId)) continue;
+      const backend = [...this.backends.values()].find(b => preview.turnId.startsWith(`${b.adapter.id}_`));
+      if (!backend) continue;
+      const locale = this.store.getChatSettings(preview.scopeId)?.locale ?? 'zh';
+      const queued = this.store.listQueuedTurnInputs(preview.scopeId).find(q => q.status === 'processing');
+      const input = queued ? decodeQueuedEngineInput(queued.inputJson, queued.sourceSummary) : null;
+      const event = this.recoveryEvent(preview.scopeId, preview.messageId);
+      const task = this.captureTask(event, input?.prompt ?? (locale === 'zh' ? '继续重启前的任务' : 'Continue the task interrupted by restart'), locale, input?.stagedAttachments, queued?.queueId ?? null);
+      this.store.taskJournal.update(task.id, 'running', { previewMessageId: preview.messageId, request: { ...task.request, threadId: preview.threadId || null } });
+      this.store.taskJournal.update(task.id, 'awaiting_confirmation');
+      journalScopes.add(preview.scopeId);
+    }
+    for (const queued of this.store.listQueuedTurnInputs()) {
+      if (!this.ownsScope(queued.scopeId) || queued.status !== 'processing' || this.store.taskJournal.forQueue(queued.queueId)) continue;
+      if (!this.backends.has(this.store.getActiveBackend(queued.scopeId) || this.defaultBackendId)) continue;
+      const input = decodeQueuedEngineInput(queued.inputJson, queued.sourceSummary);
+      const event = { ...this.recoveryEvent(queued.scopeId, queued.messageId ?? 0), chatId: queued.chatId, topicId: queued.topicId };
+      const locale = this.store.getChatSettings(queued.scopeId)?.locale ?? 'zh';
+      const task = this.captureTask(event, input.prompt, locale, input.stagedAttachments, queued.queueId);
+      this.store.taskJournal.update(task.id, 'running');
+      this.store.taskJournal.update(task.id, 'awaiting_confirmation');
+    }
+    for (let task of this.store.taskJournal.listUnfinished()) {
+      if (!this.ownsScope(task.event.scopeId)) continue;
+      if (task.state === 'running' && task.result) {
+        const text = task.result.response || task.result.error || (task.request.locale === 'zh' ? '任务已结束' : 'Task ended');
+        task = this.store.taskJournal.update(task.id, 'delivery_pending', { delivery: chunkMessage(text, this.messaging.capabilities?.maxMessageLength) });
       }
-      const activePreviews = this.store.listActiveTurnPreviews().filter((p) => {
-        if (!this.ownsScope(p.scopeId)) return false;
-        for (const bId of backendIds) {
-          if (p.turnId.startsWith(`${bId}_`)) return true;
-        }
-        return false;
-      });
-
-      const recoveredScopes = new Set<string>();
-
-      for (const prev of activePreviews) {
-        this.store.removeActiveTurnPreview(prev.turnId);
-        recoveredScopes.add(prev.scopeId);
-
-        // Bind existing threadId immediately so auto-resume continues in the exact same thread
-        if (prev.threadId) {
-          const currentBinding = this.store.getBinding(prev.scopeId);
-          this.store.setBinding(prev.scopeId, prev.threadId, currentBinding?.cwd ?? this.config.defaultCwd);
-        }
-
-        const locale = this.store.getChatSettings(prev.scopeId)?.locale || 'zh';
-
-        this.editMessage(
-          prev.scopeId,
-          prev.messageId,
-          locale === 'zh'
-            ? '🔄 **[Foxclaw 服务已重新加载/重启]**\n\n检测到上一轮任务执行被服务重启中断，正在自动继续执行…'
-            : '🔄 **[FoxClaw Service Reloaded / Restarted]**\n\nInterrupted turn detected. Resuming automatically…',
-        ).catch(() => {});
-
-        const fakeEvent: TelegramTextEvent = {
-          scopeId: prev.scopeId,
-          chatId: prev.scopeId,
-          topicId: null,
-          chatType: 'private',
-          userId: 'system',
-          messageId: prev.messageId,
-          text: '继续',
-          attachments: [],
-          entities: [],
-          replyToBot: false,
-        };
-
-        const resumePrompt = prev.threadId
-          ? (locale === 'zh' ? 'FoxClaw 服务重启中断，请在当前会话中从中断处继续完成刚才的工作。' : 'FoxClaw restarted while previous turn was running. Please resume and complete the work from where it left off.')
-          : (locale === 'zh' ? '请继续完成上一步未完成的任务。' : 'Please continue and complete the unfinished task from previous step.');
-
-        const resumeTimer = setTimeout(() => {
-          this.recoveryTimers.delete(resumeTimer);
-          this.startPromptTurn(fakeEvent, resumePrompt, locale, {
-            reuseMessageId: prev.messageId,
-            forcedThreadId: prev.threadId || undefined,
-          }).catch((err) => {
-            this.logger.warn('orchestrator.auto_resume_failed', {
-              scopeId: prev.scopeId,
-              error: String(err),
-            });
+      if (task.state === 'awaiting_confirmation') await this.showRecovery(task).catch(error => this.logger.warn('orchestrator.recovery_notice_failed', { taskId: task.id, error: String(error) }));
+      if (task.state === 'delivery_pending') {
+        try { await this.deliverTaskChunks(task.id); this.resolveDeliveredTask(task.id); }
+        catch (error) { this.logger.warn('orchestrator.delivery_retry_failed', { taskId: task.id, error: String(error) }); }
+      }
+      if (task.state === 'accepted') {
+        const timer = setTimeout(() => {
+          this.recoveryTimers.delete(timer);
+          void this.scopeOperations.run(task.event.scopeId, async () => {
+            if (this.stopped) return;
+            const attachments = task.request.stagedAttachments ?? await stageInboundAttachments(this.messaging, task.request.cwd, task.request.threadId || 'default', task.event.attachments, this.logger);
+            if (attachments.length !== task.event.attachments.length && !task.request.stagedAttachments) throw new Error('Recovery attachment staging failed');
+            this.store.taskJournal.update(task.id, 'accepted', { request: { ...task.request, stagedAttachments: attachments } });
+            if (this.activeTurns.has(task.event.scopeId) || this.recoveryBlocksScope(task.event.scopeId)) {
+              await this.enqueuePromptTurn(task.event, task.sourcePrompt, task.request.locale, attachments, task.id);
+            } else await this.executeTurn(task.event, task.sourcePrompt, task.request.locale, 0, attachments, { taskId: task.id, forcedThreadId: task.request.threadId ?? undefined });
+          }).catch(async error => {
+            this.logger.warn('orchestrator.accepted_recovery_failed', { taskId: task.id, error: String(error) });
+            if (!this.stopped && this.store.taskJournal.get(task.id)?.state === 'accepted') {
+              const waiting = this.store.taskJournal.update(task.id, 'awaiting_confirmation', { error: String(error) });
+              await this.showRecovery(waiting).catch(() => {});
+            }
           });
         }, 1500);
-        this.recoveryTimers.add(resumeTimer);
-        resumeTimer?.unref?.();
+        this.recoveryTimers.add(timer); timer.unref();
       }
+    }
+    const scopes = new Set(this.store.listQueuedTurnInputs().filter(input => this.ownsScope(input.scopeId)).map(input => input.scopeId));
+    for (const scopeId of scopes) {
+      const timer = setTimeout(() => {
+        this.recoveryTimers.delete(timer);
+        void this.drainNextQueuedTurn(this.recoveryEvent(scopeId), this.store.getChatSettings(scopeId)?.locale ?? 'zh')
+          .catch(error => this.logger.warn('orchestrator.queue_recovery_failed', { scopeId, error: String(error) }));
+      }, 2000);
+      this.recoveryTimers.add(timer); timer.unref();
+    }
+  }
 
-      // Check for queued turns on scopes without active previews
-      const queuedInputs = this.store.listQueuedTurnInputs();
-      for (const q of queuedInputs) {
-        if (!this.ownsScope(q.scopeId)) continue;
-        if (!recoveredScopes.has(q.scopeId) && !this.activeTurns.has(q.scopeId)) {
-          recoveredScopes.add(q.scopeId);
-          const locale = this.store.getChatSettings(q.scopeId)?.locale || 'zh';
-          const fakeEvent: TelegramTextEvent = {
-            scopeId: q.scopeId,
-            chatId: q.chatId,
-            topicId: q.topicId ?? null,
-            chatType: (q.chatType as any) || 'private',
-            userId: 'system',
-            messageId: q.messageId ?? 0,
-            text: q.sourceSummary,
-            attachments: [],
-            entities: [],
-            replyToBot: false,
-          };
-          const drainTimer = setTimeout(() => {
-            this.recoveryTimers.delete(drainTimer);
-            this.drainNextQueuedTurn(fakeEvent, locale).catch((err) => {
-              this.logger.warn('orchestrator.auto_drain_failed', { scopeId: q.scopeId, error: String(err) });
-            });
-          }, 2000);
-          this.recoveryTimers.add(drainTimer);
-          drainTimer?.unref?.();
-        }
+  private resolveDeliveredTask(taskId: string): void {
+    const task = this.store.taskJournal.get(taskId)!;
+    const status = task.result?.status ?? 'SUCCESS';
+    this.store.taskJournal.update(task.id, status === 'SUCCESS' ? 'completed' : status === 'INTERRUPTED' ? 'cancelled' : 'failed');
+    if (task.queueId) this.store.updateQueuedTurnInputStatus(task.queueId, status === 'SUCCESS' ? 'completed' : status === 'INTERRUPTED' ? 'cancelled' : 'failed', task.result?.error ?? null);
+    this.store.removeActiveTurnPreviewByMessage(task.event.scopeId, task.previewMessageId);
+  }
+
+  private async handleRecovery(scopeId: string, args: string, locale: AppLocale): Promise<void> {
+    await this.scopeOperations.run(scopeId, async () => {
+      const [action, id] = args.trim().split(/\s+/);
+      const tasks = this.store.taskJournal.listUnfinished(scopeId).filter(task => task.state === 'awaiting_confirmation' || task.state === 'delivery_pending');
+      const task = id ? tasks.find(task => task.id === id) : tasks.length === 1 ? tasks[0] : null;
+      if (!task || !['continue', 'retry', 'deliver', 'cancel'].includes(action ?? '')) {
+        await this.sendMessage(scopeId, tasks.length ? tasks.map(task => `\`${task.id}\` · ${task.state} · ${task.sourcePrompt}\n/recover continue|retry|deliver|cancel ${task.id}`).join('\n\n') : (locale === 'zh' ? '没有待恢复任务。' : 'No tasks to recover.'));
+        return;
       }
-    } catch (err) {
-      this.logger.warn('orchestrator.restore_active_turns_error', { error: String(err) });
+      if (this.activeTurns.has(scopeId)) { await this.sendMessage(scopeId, locale === 'zh' ? '请先结束当前任务。' : 'Finish the active task first.'); return; }
+      if (action === 'cancel') {
+        this.store.taskJournal.update(task.id, 'cancelled');
+        if (task.queueId) this.store.updateQueuedTurnInputStatus(task.queueId, 'cancelled');
+        this.store.removeActiveTurnPreviewByMessage(scopeId, task.previewMessageId);
+      } else if (task.state === 'delivery_pending') {
+        await this.deliverTaskChunks(task.id);
+        this.resolveDeliveredTask(task.id);
+      } else if (action === 'continue' || action === 'retry') {
+        if (!this.backends.has(task.backendId) || this.getBackendDescriptorForScope(scopeId).id !== task.backendId || (this.store.getBinding(scopeId)?.cwd || this.config.defaultCwd) !== task.request.cwd) {
+          await this.sendMessage(scopeId, locale === 'zh' ? '原后端或目录不可用，请恢复原配置或放弃任务。' : 'Restore the original backend/directory, or cancel this task.'); return;
+        }
+        const prompt = action === 'continue'
+          ? `${locale === 'zh' ? '服务重启前任务可能已执行部分操作。请检查当前状态，继续完成原任务，避免重复已完成的操作。' : 'This task may have partially executed before restart. Inspect current state and finish it, avoiding duplicate actions.'}\n\n${task.sourcePrompt}`
+          : task.sourcePrompt;
+        const stagedAttachments = task.request.stagedAttachments ?? await stageInboundAttachments(this.messaging, task.request.cwd, task.request.threadId || 'default', task.event.attachments, this.logger);
+        if (stagedAttachments.length !== task.event.attachments.length && !task.request.stagedAttachments) {
+          await this.sendMessage(scopeId, locale === 'zh' ? '附件恢复失败，请稍后重试或放弃任务。' : 'Attachment recovery failed. Retry later or cancel this task.'); return;
+        }
+        if (task.request.threadId) this.store.setBinding(scopeId, task.request.threadId, task.request.cwd);
+        this.store.taskJournal.update(task.id, 'accepted', { request: { ...task.request, prompt, stagedAttachments }, result: null, delivery: [], deliveredChunks: 0, error: null });
+        await this.executeTurn(task.event, prompt, locale, 0, stagedAttachments, { taskId: task.id, queueId: task.queueId ?? undefined, reuseMessageId: task.previewMessageId || undefined, forcedThreadId: task.request.threadId ?? undefined });
+      }
+    });
+    if (!this.stopped) await this.drainNextQueuedTurn(this.recoveryEvent(scopeId), locale);
+  }
+
+  async stopTask(scopeId: string, taskId: string): Promise<boolean> {
+    if (this.stopped || !this.ownsScope(scopeId)) return false;
+    return this.scopeOperations.run(scopeId, async () => {
+      const turn = this.activeTurns.get(scopeId);
+      if (!turn || turn.taskId !== taskId || turn.settling) return false;
+      await this.cancelActiveTurn(scopeId);
+      return true;
+    });
+  }
+
+  private async cancelActiveTurn(scopeId: string, preserveRecovery = false): Promise<void> {
+    const turn = this.activeTurns.get(scopeId);
+    if (!turn) return;
+    if (turn.settling) throw new Error('任务正在收尾，请等待结果交付完成。');
+    // Retain the slot until cancellation completes. A failed native cancellation must not permit overlap.
+    turn.suppressQueueDrain = true;
+    if (turn.flushTimer) clearTimeout(turn.flushTimer);
+    if (turn.typingTimer) clearInterval(turn.typingTimer);
+    await turn.execution.cancel();
+    await this.messageOperations.run(`${scopeId}:preview:${turn.taskId}`, () => this.messaging.endTaskPreview?.(scopeId, turn.taskId) ?? Promise.resolve());
+    if (!preserveRecovery && this.messaging.beginTaskPreview) {
+      const task = this.store.taskJournal.get(turn.taskId)!;
+      const folded = buildFoldedToolsSummary({ toolLines: turn.toolLines, toolCount: turn.toolCount, stepIndex: turn.stepIndex, startTime: turn.startTime, locale: task.request.locale });
+      const response = `${task.request.locale === 'zh' ? '🛑 已停止任务；排队任务保留。' : '🛑 Task stopped; queued tasks kept.'}${turn.accumulatedText.trim() ? `\n\n${turn.accumulatedText.trim()}` : ''}`;
+      this.store.taskJournal.update(turn.taskId, 'delivery_pending', { result: { kind: 'result', status: 'INTERRUPTED', response, conversationId: turn.threadId }, delivery: combineSummaryAndResponse(folded, response), deliveredChunks: 0, previewMessageId: turn.messageId });
+      try { await this.deliverTaskChunks(turn.taskId); this.resolveDeliveredTask(turn.taskId); }
+      catch (error) { this.logger.warn('orchestrator.stop_delivery_failed', { taskId: turn.taskId, error: String(error) }); }
+    }
+    if (this.activeTurns.get(scopeId) === turn) this.activeTurns.delete(scopeId);
+    if (!preserveRecovery) {
+      this.store.removeActiveTurnPreview(turn.previewKey);
+      if (turn.queueId) this.store.updateQueuedTurnInputStatus(turn.queueId, 'cancelled');
+      const task = this.store.taskJournal.get(turn.taskId)!;
+      if (!['cancelled', 'delivery_pending'].includes(task.state)) this.store.taskJournal.update(turn.taskId, 'cancelled');
     }
   }
 
   async stop(): Promise<void> {
-    this.bot.stop();
+    this.stopped = true;
+    this.inboundListeners.clear();
+    await this.bot.stop();
+    this.removeInboundConsumer?.();
+    this.removeInboundConsumer = null;
+    await this.intakeOperations.idle();
     for (const timer of this.stalePanelDeleteTimers.values()) clearTimeout(timer);
     this.stalePanelDeleteTimers.clear();
     for (const timer of this.recoveryTimers) clearTimeout(timer);
     this.recoveryTimers.clear();
-    for (const [scopeId, turn] of this.activeTurns.entries()) {
-      if (turn.flushTimer) clearTimeout(turn.flushTimer);
-      if (turn.typingTimer) clearInterval(turn.typingTimer);
-      turn.suppressQueueDrain = true;
-      turn.execution.cancel();
-      this.activeTurns.delete(scopeId);
-    }
+    await Promise.allSettled([...this.activeTurns.keys()].map(scopeId => this.cancelActiveTurn(scopeId, true)));
+    await this.scopeOperations.idle();
+    await Promise.allSettled([...this.settlements]);
+    await this.messageOperations.idle();
+    await this.backends.stop();
   }
+
+  isIdleForServiceUpdate(): boolean {
+    return !this.store.taskJournal.listUnfinished().some(task => this.ownsScope(task.event.scopeId)) && this.activeTurns.size === 0 && this.settlements.size === 0 && this.scopeOperations.isIdle() && this.messageOperations.isIdle() && this.getPendingApprovals() === 0 &&
+      !this.store.listQueuedTurnInputs().some(input => this.ownsScope(input.scopeId));
+  }
+
+  getPendingApprovals(): number { return this.backends.getPendingApprovals(); }
 
   getActiveTurnsCount(): number {
     return this.activeTurns.size;
   }
 
+  ownsScopeId(scopeId: string): boolean { return this.ownsScope(scopeId); }
+  hasExecutingTasks(): boolean { return this.activeTurns.size > 0 || !this.scopeOperations.isIdle() || this.settlements.size > 0; }
+
   hasActiveTurn(scopeId: string): boolean {
     return this.activeTurns.has(scopeId);
   }
 
-  async sendMessage(scopeId: string, text: string, keyboard?: InlineKeyboard): Promise<number> {
-    const chunks = chunkTelegramMessage(text);
+  async sendMessage(scopeId: string, text: string, keyboard?: ChannelInlineKeyboard): Promise<number> {
+    const chunks = chunkMessage(text, this.messaging.capabilities?.maxMessageLength);
     let lastMsgId = 0;
     for (let i = 0; i < chunks.length; i++) {
       const isLast = i === chunks.length - 1;
@@ -568,63 +664,78 @@ export class UnifiedChannelOrchestrator {
     return lastMsgId;
   }
 
-  async editMessage(scopeId: string, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<void> {
-    if (!messageId || messageId <= 0) {
-      await this.sendMessage(scopeId, text, keyboard);
-      return;
+  async editMessage(scopeId: string, messageId: number, text: string, keyboard?: ChannelInlineKeyboard): Promise<void> {
+    if (!messageId || messageId <= 0) { await this.sendMessage(scopeId, text, keyboard); return; }
+    await this.messageOperations.run(`${scopeId}:${messageId}`, () => this.messaging.editRichMarkdown(scopeId, messageId, text, keyboard));
+  }
+
+  private trackSettlement(work: () => Promise<void>): void {
+    const pending = work();
+    this.settlements.add(pending);
+    void pending.catch(error => this.logger.warn('orchestrator.settlement_failed', { error: String(error) }))
+      .finally(() => this.settlements.delete(pending));
+  }
+
+  private async deliverTaskChunks(taskId: string): Promise<void> {
+    let task = this.store.taskJournal.get(taskId)!;
+    while (task.deliveredChunks < task.delivery.length) {
+      if (this.stopped) throw new Error('Delivery interrupted by shutdown');
+      const index = task.deliveredChunks;
+      const chunk = task.delivery[index]!;
+      if (index === 0 && task.previewMessageId > 0 && this.messaging.capabilities?.editableMessages !== false) {
+        try { await this.editMessage(task.event.scopeId, task.previewMessageId, chunk, []); }
+        catch { await this.sendMessage(task.event.scopeId, chunk); }
+      } else await this.sendMessage(task.event.scopeId, chunk);
+      task = this.store.taskJournal.update(task.id, 'delivery_pending', { deliveredChunks: index + 1 });
     }
-    await this.messaging.editRichMarkdown(scopeId, messageId, text, keyboard);
   }
 
   private async safeDeliverChunks(scopeId: string, messageId: number, chunks: string[]): Promise<void> {
-    if (!chunks || chunks.length === 0) return;
-    try {
-      if (messageId > 0) {
-        await this.editMessage(scopeId, messageId, chunks[0]!).catch(async () => {
-          await this.sendMessage(scopeId, chunks[0]!).catch(() => {});
-        });
-      } else {
-        await this.sendMessage(scopeId, chunks[0]!).catch(() => {});
-      }
-      for (let i = 1; i < chunks.length; i++) {
-        await this.sendMessage(scopeId, chunks[i]!).catch(() => {});
-      }
-    } catch (err) {
-      this.logger.warn('orchestrator.safe_deliver_chunks_failed', { error: String(err) });
-    }
+    const active = this.activeTurns.get(scopeId);
+    if (!active || this.stopped || active.suppressQueueDrain) return;
+    await this.messageOperations.run(`${scopeId}:preview:${active.taskId}`, () => this.messaging.endTaskPreview?.(scopeId, active.taskId) ?? Promise.resolve());
+    const task = this.store.taskJournal.get(active.taskId)!;
+    messageId = active.messageId;
+    this.store.taskJournal.update(task.id, 'delivery_pending', { delivery: chunks, deliveredChunks: 0, previewMessageId: messageId });
+    await this.deliverTaskChunks(task.id);
   }
 
   private async safeDeliverMessage(scopeId: string, messageId: number, text: string): Promise<void> {
-    const chunks = chunkTelegramMessage(text);
-    await this.safeDeliverChunks(scopeId, messageId, chunks);
+    await this.safeDeliverChunks(scopeId, messageId, chunkMessage(text, this.messaging.capabilities?.maxMessageLength));
   }
 
-  async handleText(event: TelegramTextEvent): Promise<void> {
+  async handleText(event: ChannelTextEvent): Promise<void> {
+    if (this.stopped || !this.ownsScope(event.scopeId)) return;
+    const action = this.messaging.resolveAction?.(event);
+    if (action) { await this.handleCallback(action); return; }
     const scopeId = event.scopeId;
     const locale: AppLocale = this.store.getChatSettings(scopeId)?.locale ?? 'zh';
-    const isDefaultTopic = isDefaultTelegramScope({
-      chatType: event.chatType,
-      allowedChatId: this.config.tgAllowedChatId ?? null,
-      allowedTopicId: this.config.tgAllowedTopicId ?? null,
-      topicId: event.topicId ?? null,
-      requireExplicitGroupAddressing: false,
-    });
-
     const parsedCommand = parseCommand(event.text);
-    const addressing = resolveTelegramAddressing({
-      text: event.text,
-      attachmentsCount: event.attachments?.length ?? 0,
-      entities: event.entities,
-      command: parsedCommand,
-      botUsername: this.bot.username,
-      isDefaultTopic,
-      replyToBot: event.replyToBot,
-    });
+    const addressing = this.messaging.resolveIncoming?.(event, this.config, this.bot.username) ??
+      (parsedCommand ? { kind: 'command' as const, command: parsedCommand } :
+        event.text.trim() || event.attachments.length ? { kind: 'prompt' as const, text: event.text } : { kind: 'ignore' as const });
 
     if (addressing.kind === 'ignore') return;
 
-    if (this.customUi?.handleCustomInbound) {
-      const handled = await this.customUi.handleCustomInbound(event, locale);
+    if (addressing.kind === 'command') {
+      const name = addressing.command.name.toLowerCase();
+      const args = addressing.command.args.join(' ').trim();
+      if (name === 'choose') { await this.sendMessage(scopeId, locale === 'zh' ? '选择已过期或不属于此会话，请重新打开菜单。' : 'This choice expired or belongs to another scope. Open the menu again.'); return; }
+      if (name === 'recover') { await this.handleRecovery(scopeId, args, locale); return; }
+      if (await this.serviceUi?.handleCustomCommand?.(scopeId, name, args, locale, event)) return;
+      if (['backend', 'backends', 'engine', 'engines'].includes(name)) {
+        await this.handleBackendCommand(scopeId, args, locale);
+        return;
+      }
+    }
+    const backendId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    if (!this.backends.has(backendId)) {
+      await this.sendMessage(scopeId, locale === 'zh' ? `后端 \`${backendId}\` 当前不可用。发送 /backend 切换后端，原会话和设置已保留。` : `Backend \`${backendId}\` is unavailable. Use /backend to switch; its session and settings are preserved.`);
+      return;
+    }
+    const ui = this.backends.ui(this.getBackendDescriptorForScope(scopeId).id) ?? this.customUi;
+    if (ui?.handleCustomInbound) {
+      const handled = await ui.handleCustomInbound(event, locale);
       if (handled) return;
     }
 
@@ -632,8 +743,8 @@ export class UnifiedChannelOrchestrator {
       const commandName = addressing.command.name.toLowerCase();
       const argsString = addressing.command.args.join(' ').trim();
 
-      if (this.customUi?.handleCustomCommand) {
-        const handled = await this.customUi.handleCustomCommand(scopeId, commandName, argsString, locale, event);
+      if (ui?.handleCustomCommand) {
+        const handled = await ui.handleCustomCommand(scopeId, commandName, argsString, locale, event);
         if (handled) return;
       }
 
@@ -694,6 +805,8 @@ export class UnifiedChannelOrchestrator {
           await this.handleNewSession(scopeId, locale, argsString);
           return;
       }
+      await this.sendMessage(scopeId, locale === 'zh' ? `当前后端不支持 /${commandName}。发送 /help 查看可用操作。` : `This backend does not support /${commandName}. Send /help for available commands.`);
+      return;
     }
 
     if (addressing.kind === 'prompt') {
@@ -701,14 +814,29 @@ export class UnifiedChannelOrchestrator {
     }
   }
 
-  async handleCallback(event: TelegramCallbackEvent): Promise<void> {
+  async handleCallback(event: ChannelCallbackEvent): Promise<void> {
+    if (this.stopped || !this.ownsScope(event.scopeId)) return;
     const scopeId = event.scopeId;
-    const locale: AppLocale = 'zh';
+    const locale: AppLocale = this.store.getChatSettings(scopeId)?.locale ?? 'zh';
     const data = event.data || '';
     const messageId = event.messageId;
 
-    if (this.customUi?.handleCustomCallback) {
-      const handled = await this.customUi.handleCustomCallback(scopeId, data, locale, messageId, event);
+    if (data.startsWith('engine:stop:')) {
+      const status = await this.stopTask(scopeId, data.slice('engine:stop:'.length));
+      await this.messaging.answerCallback(event.callbackQueryId, status ? (locale === 'zh' ? '已停止，排队任务保留' : 'Stopped; queued tasks kept') : (locale === 'zh' ? '此任务已结束' : 'This task has ended'));
+      return;
+    }
+    if (data.startsWith('engine:recover:')) {
+      const [, , action, id] = data.split(':');
+      await this.handleRecovery(scopeId, `${action} ${id}`, locale);
+      await this.messaging.answerCallback(event.callbackQueryId, '');
+      return;
+    }
+
+    const backendId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    const ui = this.backends.callbackOwner(data) ?? this.backends.ui(backendId) ?? (this.backends.has(backendId) ? this.customUi : undefined);
+    if (ui?.handleCustomCallback) {
+      const handled = await ui.handleCustomCallback(scopeId, data, locale, messageId, event);
       if (handled) return;
     }
 
@@ -738,6 +866,10 @@ export class UnifiedChannelOrchestrator {
       return;
     }
 
+    if (!this.backends.has(backendId)) {
+      await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '后端不可用，请发送 /backend 重新选择。' : 'Backend unavailable; select one with /backend.');
+      return;
+    }
     if (data.startsWith('engine:m:') || data.startsWith('setup:model:')) {
       const rawModel = data.startsWith('engine:m:')
         ? data.slice('engine:m:'.length)
@@ -754,7 +886,11 @@ export class UnifiedChannelOrchestrator {
       const rawEffort = data.startsWith('engine:effort:')
         ? data.slice('engine:effort:'.length)
         : data.slice('setup:effort:'.length);
-      const targetEffort = rawEffort === 'default' ? null : (rawEffort as ReasoningEffortValue);
+      const targetEffort = rawEffort === 'default' ? null : rawEffort;
+      if (targetEffort && !(await this.supportedEfforts(scopeId)).includes(targetEffort)) {
+        await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '当前模型不支持此推理档位。' : 'This model does not support that reasoning effort.');
+        return;
+      }
       const settings = this.store.getChatSettings(scopeId);
       if (targetEffort !== 'high' && settings?.serviceTier === 'boost') {
         this.store.setChatServiceTier(scopeId, null);
@@ -774,6 +910,10 @@ export class UnifiedChannelOrchestrator {
         return;
       }
       if (sub === 'boost') {
+        if (this.getBackendDescriptorForScope(scopeId).defaults?.boost === false) {
+          await this.messaging.answerCallback(event.callbackQueryId, locale === 'zh' ? '当前后端不支持 Boost。' : 'Boost is not available on this backend.');
+          return;
+        }
         const isBoost = this.store.getChatSettings(scopeId)?.serviceTier === 'boost';
         const nextBoost = !isBoost;
         this.store.setChatServiceTier(scopeId, nextBoost ? 'boost' : null);
@@ -819,79 +959,114 @@ export class UnifiedChannelOrchestrator {
     }
   }
 
-  async startPromptTurn(
-    event: TelegramTextEvent,
-    prompt: string,
-    locale: AppLocale,
-    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined },
-  ): Promise<void> {
+  private captureTask(event: ChannelTextEvent, prompt: string, locale: AppLocale, stagedAttachments?: StagedAttachment[], queueId: string | null = null): JournalTask {
     const scopeId = event.scopeId;
     const binding = this.store.getBinding(scopeId);
-    const cwd = binding?.cwd || this.config.defaultCwd;
-    const threadId = options?.forcedThreadId ?? binding?.threadId ?? 'default';
+    const settings = this.store.getChatSettings(scopeId);
+    const backend = this.getBackendDescriptorForScope(scopeId);
+    const boost = settings?.serviceTier === 'boost' && backend.defaults?.boost !== false;
+    const task: JournalTask = {
+      id: randomUUID(), backendId: backend.id, state: 'accepted', event, sourcePrompt: prompt,
+      request: { scopeId, prompt: boost && !prompt.startsWith('[Boost Mode:')
+        ? `[Boost Mode: Proceed with deep thinking, strategic planning, multiple perspectives, and rigorous verification.]\n\n${prompt}` : prompt,
+        stagedAttachments, threadId: binding?.threadId || null, cwd: binding?.cwd || this.config.defaultCwd,
+        model: settings?.model || 'default', effort: boost ? 'high' : settings?.reasoningEffort ?? backend.defaults?.reasoningEffort ?? null,
+        serviceTier: boost ? 'boost' : settings?.serviceTier ?? null, locale, accessPreset: settings?.accessPreset ?? 'default' },
+      queueId, previewMessageId: 0, result: null, delivery: [], deliveredChunks: 0, error: null,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    this.store.taskJournal.insert(task);
+    return task;
+  }
 
-    let effectivePrompt = prompt;
-    let stagedAttachments: StagedTelegramAttachment[] | undefined;
-    if (event.attachments && event.attachments.length > 0) {
-      const nonDocJson = this.getAdapterForScope(scopeId).id === 'dsh' ? event.attachments : event.attachments.filter(
-        (a) => !(a.kind === 'document' && (a.fileName?.endsWith('.json') || a.mimeType?.includes('json'))),
-      );
-      if (nonDocJson.length > 0) {
-        const staged = await stageInboundAttachments(
-          this.messaging,
-          cwd,
-          threadId,
-          nonDocJson,
-          this.logger,
-        );
-        if (staged.length > 0) {
-          stagedAttachments = staged;
-          effectivePrompt = this.getAdapterForScope(scopeId).id === 'dsh' ? prompt : buildAttachmentPrompt(prompt, staged);
-        }
+  private recoveryBlocksScope(scopeId: string): boolean {
+    return this.store.taskJournal.listUnfinished(scopeId).some(task => task.state === 'awaiting_confirmation' || task.state === 'delivery_pending');
+  }
+
+  async startPromptTurn(
+    event: ChannelTextEvent, prompt: string, locale: AppLocale,
+    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined; taskId?: string | undefined },
+  ): Promise<void> {
+    if (this.stopped) return;
+    if (this.store.taskJournal.findReceipt(event, prompt)) return;
+    const task = this.captureTask(event, prompt, locale);
+    return this.scopeOperations.run(event.scopeId, () => this.startPromptTurnNow(event, prompt, locale, { ...options, taskId: task.id }));
+  }
+
+  private async startPromptTurnNow(
+    event: ChannelTextEvent,
+    prompt: string,
+    locale: AppLocale,
+    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined; taskId?: string | undefined },
+  ): Promise<void> {
+    if (this.stopped) return;
+    const scopeId = event.scopeId;
+    const binding = this.store.getBinding(scopeId);
+    const effectivePrompt = prompt;
+    const task = options?.taskId ? this.store.taskJournal.get(options.taskId)! : this.captureTask(event, prompt, locale);
+    const cwd = task.request.cwd;
+    const threadId = options?.forcedThreadId ?? binding?.threadId ?? task.request.threadId ?? 'default';
+    if (options?.forcedThreadId) task.request.threadId = options.forcedThreadId;
+    let stagedAttachments: StagedAttachment[] | undefined;
+    try {
+      if (event.attachments.length) {
+        stagedAttachments = await stageInboundAttachments(this.messaging, cwd, threadId, event.attachments, this.logger);
+        if (stagedAttachments.length !== event.attachments.length) throw new Error('Some attachments could not be saved; the task was not started');
       }
+      task.request.stagedAttachments = stagedAttachments;
+      this.store.taskJournal.update(task.id, 'accepted', { request: task.request });
+    } catch (error) {
+      this.store.taskJournal.update(task.id, 'failed', { error: String(error) });
+      await this.sendMessage(scopeId, `⚠️ ${String(error)}`);
+      return;
     }
+    const taskOptions = { ...options, taskId: task.id };
 
-    if (this.activeTurns.has(scopeId)) {
+    if (this.activeTurns.has(scopeId) || this.recoveryBlocksScope(scopeId)) {
       const settings = this.store.getChatSettings(scopeId);
       const mode = settings?.activeTurnMessageMode ?? 'queue';
 
-      if (mode === 'steer') {
-        const active = this.activeTurns.get(scopeId);
-        if (active) {
-          if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
-          active.execution.cancel();
-          if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
-          if (active.typingTimer) clearInterval(active.typingTimer);
-          if (active.flushTimer) clearTimeout(active.flushTimer);
-          this.activeTurns.delete(scopeId);
-        }
+      if (mode === 'steer' && !this.recoveryBlocksScope(scopeId)) {
+        await this.cancelActiveTurn(scopeId);
         await this.sendMessage(
           scopeId,
           locale === 'zh'
             ? `⚡ **已插话中断前置任务，立即开始新指令**：\n> ${effectivePrompt}`
             : `⚡ **Interrupted previous turn, executing new instruction**:\n> ${effectivePrompt}`,
         );
-        await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments, options);
+        await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments, taskOptions);
         return;
       }
 
-      await this.enqueuePromptTurn(event, effectivePrompt, locale);
+      await this.enqueuePromptTurn(event, effectivePrompt, locale, stagedAttachments, task.id);
       return;
     }
 
-    await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments, options);
+    await this.executeTurn(event, effectivePrompt, locale, 0, stagedAttachments, taskOptions);
+  }
+
+  private cancelQueuedWork(scopeId: string): number {
+    const count = this.store.cancelQueuedTurnInputs(scopeId);
+    for (const task of this.store.taskJournal.listUnfinished(scopeId)) {
+      if (task.state === 'queued' && task.queueId && this.store.getQueuedTurnInput(task.queueId)?.status === 'cancelled') this.store.taskJournal.update(task.id, 'cancelled');
+    }
+    return count;
   }
 
   private async enqueuePromptTurn(
-    event: TelegramTextEvent,
+    event: ChannelTextEvent,
     prompt: string,
     locale: AppLocale,
+    stagedAttachments: StagedAttachment[] = [],
+    taskId?: string,
   ): Promise<void> {
     const scopeId = event.scopeId;
-    const adapter = this.getAdapterForScope(scopeId);
+    const journalTask = taskId ? this.store.taskJournal.get(taskId) : null;
+    const adapter = journalTask ? this.getAdapterForBackend(journalTask.backendId) : this.getAdapterForScope(scopeId);
     const queueId = `${adapter.id}_q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const binding = this.store.getBinding(scopeId);
 
+    this.store.taskJournal.atomic(() => {
     this.store.saveQueuedTurnInput({
       queueId,
       scopeId,
@@ -899,7 +1074,7 @@ export class UnifiedChannelOrchestrator {
       chatType: event.chatType,
       topicId: event.topicId ?? null,
       threadId: binding?.threadId || '',
-      inputJson: JSON.stringify([{ type: 'text', text: prompt }]),
+      inputJson: JSON.stringify({ version: 1, prompt, backendId: journalTask?.backendId ?? this.getBackendDescriptorForScope(scopeId).id, cwd: journalTask?.request.cwd ?? binding?.cwd ?? this.config.defaultCwd, stagedAttachments }),
       sourceSummary: prompt,
       messageId: event.messageId ?? null,
       status: 'queued',
@@ -907,6 +1082,9 @@ export class UnifiedChannelOrchestrator {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       resolvedAt: null,
+    });
+
+    if (journalTask) this.store.taskJournal.update(journalTask.id, 'queued', { queueId, request: { ...journalTask.request, stagedAttachments } });
     });
 
     const queueCount = this.store.countQueuedTurnInputs(scopeId);
@@ -918,95 +1096,75 @@ export class UnifiedChannelOrchestrator {
     );
   }
 
-  private async drainNextQueuedTurn(event: TelegramTextEvent, locale: AppLocale): Promise<void> {
+  private async drainNextQueuedTurn(event: ChannelTextEvent, locale: AppLocale): Promise<void> {
     const scopeId = event.scopeId;
-    if (this.activeTurns.has(scopeId)) return;
-    try {
-      const nextQueued = this.store.peekQueuedTurnInput(scopeId);
-      if (!nextQueued) return;
-
-      this.store.updateQueuedTurnInputStatus(nextQueued.queueId, 'completed');
-      let parsedInput = nextQueued.sourceSummary;
-      try {
-        const arr = JSON.parse(nextQueued.inputJson);
-        if (Array.isArray(arr) && arr[0]?.text) {
-          parsedInput = arr[0].text;
+    await this.scopeOperations.run(scopeId, async () => {
+      while (!this.stopped && !this.activeTurns.has(scopeId) && !this.recoveryBlocksScope(scopeId)) {
+        const queued = this.store.peekQueuedTurnInput(scopeId);
+        if (!queued) return;
+        this.store.updateQueuedTurnInputStatus(queued.queueId, 'processing');
+        try {
+          const input = decodeQueuedEngineInput(queued.inputJson, queued.sourceSummary);
+          if ('backendId' in input && (input.backendId !== this.getBackendDescriptorForScope(scopeId).id || input.cwd !== (this.store.getBinding(scopeId)?.cwd || this.config.defaultCwd))) {
+            throw new Error('Queued task context changed; start a new task in the selected backend/directory');
+          }
+          await this.sendMessage(scopeId, locale === 'zh' ? `⏭️ **开始执行排队任务**：\n> ${input.prompt}` : `⏭️ **Executing queued task**:\n> ${input.prompt}`);
+          await this.executeTurn({ ...event, chatId: queued.chatId, topicId: queued.topicId, messageId: queued.messageId ?? 0, text: input.prompt, attachments: [] },
+            input.prompt, locale, 0, input.stagedAttachments, { queueId: queued.queueId, taskId: this.store.taskJournal.forQueue(queued.queueId)?.id });
+          return;
+        } catch (error) {
+          if (this.stopped) return; // Preserve processing for restart recovery.
+          this.store.updateQueuedTurnInputStatus(queued.queueId, 'failed', String(error));
+          const task = this.store.taskJournal.forQueue(queued.queueId);
+          if (task?.state === 'queued' || task?.state === 'accepted') this.store.taskJournal.update(task.id, 'failed', { error: String(error) });
+          this.logger.warn('orchestrator.drain_queue_failed', { error: String(error) });
+          await this.sendMessage(scopeId, `⚠️ ${String(error)}`).catch(() => {});
         }
-      } catch {
-        /* ignore */
       }
-
-      await this.sendMessage(
-        scopeId,
-        locale === 'zh'
-          ? `▶️ **开始执行排队任务**：\n> ${parsedInput}`
-          : `▶️ **Executing queued task**:\n> ${parsedInput}`,
-      );
-
-      void this.startPromptTurn(
-        {
-          ...event,
-          text: parsedInput,
-        },
-        parsedInput,
-        locale,
-      );
-    } catch (err) {
-      this.logger.warn('orchestrator.drain_queue_failed', { error: String(err) });
-    }
+    });
   }
 
   private async executeTurn(
-    event: TelegramTextEvent,
+    event: ChannelTextEvent,
     prompt: string,
     locale: AppLocale,
     retryCount = 0,
-    stagedAttachments?: StagedTelegramAttachment[],
-    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined },
+    stagedAttachments?: StagedAttachment[],
+    options?: { reuseMessageId?: number | undefined; forcedThreadId?: string | undefined; queueId?: string | undefined; taskId?: string | undefined },
   ): Promise<void> {
+    if (this.stopped) throw new Error('Orchestrator is stopped');
     const scopeId = event.scopeId;
     const binding = this.store.getBinding(scopeId);
-    const settings = this.store.getChatSettings(scopeId);
-    const adapter = this.getAdapterForScope(scopeId);
-
-    const cwd = binding?.cwd || this.config.defaultCwd;
-    const threadId = options?.forcedThreadId ?? binding?.threadId ?? null;
-    const model = settings?.model || 'default';
-    const isBoost = settings?.serviceTier === 'boost';
-    const effort = isBoost ? 'high' : (settings?.reasoningEffort ?? (adapter.id === 'dsh' ? null : 'high'));
-
-    const effectivePrompt = isBoost && !prompt.startsWith('[Boost Mode:')
-      ? `[Boost Mode: Proceed with deep thinking, strategic planning, multiple perspectives, and rigorous verification.]\n\n${prompt}`
-      : prompt;
+    let task = options?.taskId ? this.store.taskJournal.get(options.taskId) : null;
+    if (!task) task = this.captureTask(event, prompt, locale, stagedAttachments, options?.queueId ?? null);
+    const adapter = this.getAdapterForBackend(task.backendId);
+    const req = { ...task.request, threadId: options?.forcedThreadId ?? binding?.threadId ?? task.request.threadId,
+      stagedAttachments: stagedAttachments ?? task.request.stagedAttachments };
+    const { cwd, threadId } = req;
+    const isBoost = req.serviceTier === 'boost';
 
     let initialMsgId = 0;
     if (options?.reuseMessageId) {
       initialMsgId = options.reuseMessageId;
       try {
-        await this.editMessage(
-          scopeId,
-          initialMsgId,
-          locale === 'zh'
-            ? `🔄 **[重启恢复] ${adapter.name} 正在继续执行…**`
-            : `🔄 **[Resuming after restart] ${adapter.name} is continuing…**`,
-        );
-      } catch (editErr) {
-        this.logger.warn('orchestrator.reuse_message_failed', { error: String(editErr) });
-      }
+        const text = locale === 'zh' ? `🔄 [重启恢复] ${adapter.name} 正在继续执行…` : `🔄 ${adapter.name} is continuing…`;
+        if (this.messaging.beginTaskPreview) initialMsgId = await this.messaging.beginTaskPreview(scopeId, task.id, text, initialMsgId);
+        else await this.editMessage(scopeId, initialMsgId, text, [[{ text: '🛑 停止 / Stop', callback_data: `engine:stop:${task.id}` }]]);
+      } catch (editErr) { this.logger.warn('orchestrator.reuse_message_failed', { error: String(editErr) }); }
     } else {
       try {
-        initialMsgId = await this.sendMessage(
-          scopeId,
-          locale === 'zh'
-            ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
-            : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`),
-        );
+        const initialText = locale === 'zh'
+          ? (isBoost ? `🚀 ${adapter.name} (Boost 模式) 正在深度思考中…` : `⏳ ${adapter.name} 正在思考中…`)
+          : (isBoost ? `🚀 ${adapter.name} (Boost Mode) is thinking deeply…` : `⏳ ${adapter.name} is thinking…`);
+        initialMsgId = this.messaging.beginTaskPreview
+          ? await this.messaging.beginTaskPreview(scopeId, task.id, initialText)
+          : await this.sendMessage(scopeId, initialText, [[{ text: '🛑 停止 / Stop', callback_data: `engine:stop:${task.id}` }]]);
       } catch (sendErr) {
         this.logger.warn('orchestrator.initial_message_failed', { error: String(sendErr) });
       }
     }
 
-    const turnKey = `${adapter.id}_${scopeId}_${Date.now()}`;
+    const turnKey = `${adapter.id}_${task.id}`;
     try {
       this.store.saveActiveTurnPreview({
         turnId: turnKey,
@@ -1018,17 +1176,7 @@ export class UnifiedChannelOrchestrator {
       /* ignore */
     }
 
-    const req: EngineTurnRequest = {
-      scopeId,
-      prompt: effectivePrompt,
-      stagedAttachments,
-      threadId,
-      cwd,
-      model,
-      effort,
-      serviceTier: isBoost ? 'boost' : (settings?.serviceTier ?? null),
-      locale,
-    };
+    task = this.store.taskJournal.update(task.id, task.state, { request: req, previewMessageId: initialMsgId });
 
     if (adapter.preflightTurn) {
       try {
@@ -1038,7 +1186,15 @@ export class UnifiedChannelOrchestrator {
       }
     }
 
-    const execution = adapter.executeTurn(req);
+    if (this.stopped) {
+      await this.messaging.endTaskPreview?.(scopeId, task.id);
+      this.store.removeActiveTurnPreview(turnKey);
+      throw new Error('Orchestrator is stopped');
+    }
+    let execution: EngineTurnExecution;
+    task = this.store.taskJournal.update(task.id, 'running', { result: null, delivery: [], deliveredChunks: 0 });
+    try { execution = adapter.executeTurn(req); }
+    catch (error) { await this.messaging.endTaskPreview?.(scopeId, task.id); this.store.removeActiveTurnPreview(turnKey); this.store.taskJournal.update(task.id, 'failed', { error: String(error) }); throw error; }
 
     const activeTurn: UnifiedActiveTurn = {
       scopeId,
@@ -1054,6 +1210,9 @@ export class UnifiedChannelOrchestrator {
       toolCount: 0,
       currentTool: null,
       startTime: Date.now(),
+      previewKey: turnKey,
+      queueId: options?.queueId,
+      taskId: task.id,
     };
 
     this.activeTurns.set(scopeId, activeTurn);
@@ -1065,12 +1224,15 @@ export class UnifiedChannelOrchestrator {
     }, TYPING_INTERVAL_MS);
     activeTurn.typingTimer?.unref?.();
 
+    const ownsTurn = () => !this.stopped && !activeTurn.suppressQueueDrain && this.activeTurns.get(scopeId) === activeTurn;
     const scheduleFlush = () => {
+      if (!ownsTurn() || activeTurn.settling || this.messaging.capabilities?.editableMessages === false) return;
       if (activeTurn.flushTimer) return;
       const elapsed = Date.now() - activeTurn.lastFlushTime;
       const delay = Math.max(0, STREAM_THROTTLE_MS - elapsed);
       activeTurn.flushTimer = setTimeout(() => {
         activeTurn.flushTimer = null;
+        if (!ownsTurn() || activeTurn.settling) return;
         activeTurn.lastFlushTime = Date.now();
         const elapsedSeconds = Math.max(1, Math.floor((Date.now() - activeTurn.startTime) / 1000));
         const content = renderStreamPreviewContent({
@@ -1083,33 +1245,46 @@ export class UnifiedChannelOrchestrator {
           currentTool: activeTurn.currentTool,
           elapsedSeconds,
         });
-        this.editMessage(activeTurn.scopeId, activeTurn.messageId, content).catch(() => {});
+        void this.messageOperations.run(`${scopeId}:preview:${activeTurn.taskId}`, async () => {
+          if (!ownsTurn() || activeTurn.settling) return;
+          if (this.messaging.updateTaskPreview) {
+            const messageId = await this.messaging.updateTaskPreview(scopeId, activeTurn.taskId, activeTurn.messageId, content);
+            if (messageId !== activeTurn.messageId) {
+              activeTurn.messageId = messageId;
+              const journal = this.store.taskJournal.get(activeTurn.taskId)!;
+              this.store.taskJournal.update(journal.id, journal.state, { previewMessageId: messageId });
+              this.store.saveActiveTurnPreview({ turnId: activeTurn.previewKey, scopeId, threadId: activeTurn.threadId || '', messageId });
+            }
+          } else await this.messaging.editRichMarkdown(scopeId, activeTurn.messageId, content, [[{ text: '🛑 停止 / Stop', callback_data: `engine:stop:${activeTurn.taskId}` }]]);
+        }).catch(() => {});
       }, delay);
       activeTurn.flushTimer?.unref?.();
     };
 
     execution.on('delta', (delta) => {
+      if (!ownsTurn() || activeTurn.settling) return;
       activeTurn.accumulatedText += delta;
       scheduleFlush();
     });
 
     execution.on('tool', (tool) => {
+      if (!ownsTurn() || activeTurn.settling) return;
       if (tool.stepIndex && tool.stepIndex > 0) {
         activeTurn.stepIndex = tool.stepIndex;
       }
       const icon = tool.status === 'running' ? '⚙️' : tool.status === 'failed' ? '❌' : '✅';
-      const summaryText = tool.summary ? ` · ${escapeTelegramHtml(tool.summary)}` : '';
-      const line = `${icon} <code>${escapeTelegramHtml(tool.name)}</code>${summaryText}`;
+      const summaryText = tool.summary ? ` · ${escapeHtml(tool.summary.slice(0, 180))}` : '';
+      const line = `${icon} <code>${escapeHtml(tool.name.slice(0, 100))}</code>${summaryText}`;
 
       if (tool.status === 'running') {
         activeTurn.toolCount += 1;
-        activeTurn.currentTool = tool.summary ? `${tool.name} (${tool.summary})` : tool.name;
+        activeTurn.currentTool = tool.summary ? `${tool.name.slice(0, 100)} (${tool.summary.slice(0, 180)})` : tool.name;
         activeTurn.toolLines.push(line);
       } else {
         if (activeTurn.currentTool && activeTurn.currentTool.startsWith(tool.name)) {
           activeTurn.currentTool = null;
         }
-        const lastIdx = activeTurn.toolLines.findLastIndex((l) => l.includes(`<code>${escapeTelegramHtml(tool.name)}</code>`));
+        const lastIdx = activeTurn.toolLines.findLastIndex((l) => l.includes(`<code>${escapeHtml(tool.name.slice(0, 100))}</code>`));
         if (lastIdx !== -1) {
           activeTurn.toolLines[lastIdx] = line;
         } else {
@@ -1120,7 +1295,7 @@ export class UnifiedChannelOrchestrator {
     });
 
     execution.on('conversation', (convId: string) => {
-      if (!convId) return;
+      if (!convId || !ownsTurn() || activeTurn.settling) return;
       activeTurn.threadId = convId;
       this.store.setBinding(scopeId, convId, cwd);
       this.store.saveActiveTurnPreview({
@@ -1129,19 +1304,45 @@ export class UnifiedChannelOrchestrator {
         threadId: convId,
         messageId: activeTurn.messageId,
       });
+      this.store.taskJournal.update(activeTurn.taskId, 'running', { request: { ...req, threadId: convId } });
       this.syncCurrentBackendSettings(scopeId);
     });
 
     const retryTurn = async (nextRetryCount: number) => {
-      await this.executeTurn(event, prompt, locale, nextRetryCount, stagedAttachments, options);
+      await this.scopeOperations.run(scopeId, async () => {
+        if (!ownsTurn() || activeTurn.suppressQueueDrain) return;
+        await this.messageOperations.run(`${scopeId}:preview:${activeTurn.taskId}`, () => this.messaging.endTaskPreview?.(scopeId, activeTurn.taskId) ?? Promise.resolve());
+        this.activeTurns.delete(scopeId);
+        this.store.removeActiveTurnPreview(turnKey);
+        try { await this.executeTurn(event, prompt, locale, nextRetryCount, stagedAttachments, { ...options, reuseMessageId: activeTurn.messageId || undefined, taskId: activeTurn.taskId }); }
+        catch (error) {
+          if (!this.stopped && !this.activeTurns.has(scopeId)) this.activeTurns.set(scopeId, activeTurn);
+          throw error;
+        }
+      });
+    };
+    const finishTurn = async (status: EngineTurnResult['status'], error?: string) => {
+      if (!ownsTurn()) return;
+      this.activeTurns.delete(scopeId);
+      this.store.removeActiveTurnPreview(turnKey);
+      const task = this.store.taskJournal.get(activeTurn.taskId)!;
+      if (task.state === 'delivery_pending' && task.deliveredChunks < task.delivery.length) {
+        this.logger.warn('orchestrator.delivery_pending', { taskId: task.id, scopeId });
+        return;
+      }
+      this.store.taskJournal.update(task.id, status === 'SUCCESS' ? 'completed' : status === 'INTERRUPTED' ? 'cancelled' : 'failed', { error: error ?? null });
+      if (activeTurn.queueId) this.store.updateQueuedTurnInputStatus(activeTurn.queueId,
+        status === 'SUCCESS' ? 'completed' : status === 'INTERRUPTED' ? 'cancelled' : 'failed', error ?? null);
+      if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale);
     };
 
-    execution.on('result', async (res: EngineTurnResult) => {
+    execution.on('result', (res: EngineTurnResult) => { this.trackSettlement(async () => {
+      if (!ownsTurn() || activeTurn.settling) return;
+      activeTurn.settling = true;
+      this.store.taskJournal.update(activeTurn.taskId, 'running', { result: res, request: { ...req, threadId: res.conversationId || activeTurn.threadId } });
       try {
         if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
         if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
-        this.activeTurns.delete(scopeId);
-        this.store.removeActiveTurnPreview(turnKey);
 
         if (res.conversationId && (!binding?.threadId || binding.threadId !== res.conversationId)) {
           this.store.setBinding(scopeId, res.conversationId, cwd);
@@ -1177,7 +1378,6 @@ export class UnifiedChannelOrchestrator {
 
           const chunks = combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
           await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
-          if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
@@ -1247,12 +1447,11 @@ export class UnifiedChannelOrchestrator {
 
             const warningNote =
               errorText && errorText !== 'Unknown error' && errorText !== 'Antigravity execution failed'
-                ? `\n\n⚠️ <i>(注意：任务结束时伴随提示: ${escapeTelegramHtml(errorText.slice(0, 120))})</i>`
+                ? `\n\n⚠️ <i>(注意：任务结束时伴随提示: ${escapeHtml(errorText.slice(0, 120))})</i>`
                 : '';
             const chunks = combineSummaryAndResponse(foldedTools, finalText + warningNote);
             await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
-            if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
-            return;
+              return;
           }
 
           await this.safeDeliverMessage(
@@ -1260,7 +1459,6 @@ export class UnifiedChannelOrchestrator {
             activeTurn.messageId,
             `❌ **${adapter.name} 错误**:\n\`\`\`\n${errorText}\n\`\`\``,
           );
-          if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
@@ -1269,18 +1467,20 @@ export class UnifiedChannelOrchestrator {
           activeTurn.messageId,
           activeTurn.accumulatedText || '⚠️ 执行结束',
         );
-        if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
       } catch (fatalErr) {
         this.logger.error('orchestrator.turn_result_unhandled', { error: String(fatalErr) });
+      } finally {
+        await finishTurn(res.status, res.error).catch(error => this.logger.warn('orchestrator.finish_failed', { error: String(error) }));
       }
-    });
+    }); });
 
-    execution.on('error', async (err: Error) => {
+    execution.on('error', (err: Error) => { this.trackSettlement(async () => {
+      if (!ownsTurn() || activeTurn.settling) return;
+      activeTurn.settling = true;
+      this.store.taskJournal.update(activeTurn.taskId, 'running', { result: { kind: 'result', status: 'ERROR', response: activeTurn.accumulatedText, error: err.message, conversationId: activeTurn.threadId } });
       try {
         if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
         if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
-        this.activeTurns.delete(scopeId);
-        this.store.removeActiveTurnPreview(turnKey);
 
         if (adapter.handleTurnError) {
           try {
@@ -1330,10 +1530,9 @@ export class UnifiedChannelOrchestrator {
           });
           const fullAnswer =
             activeTurn.accumulatedText.trim() +
-            `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeTelegramHtml(err.message.slice(0, 120))})</i>`;
+            `\n\n⚠️ <i>(注意：任务执行中途异常中断: ${escapeHtml(err.message.slice(0, 120))})</i>`;
           const chunks = combineSummaryAndResponse(foldedTools, fullAnswer);
           await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
-          if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
           return;
         }
 
@@ -1342,38 +1541,47 @@ export class UnifiedChannelOrchestrator {
           activeTurn.messageId,
           `❌ **执行异常**:\n\`\`\`\n${err.message}\n\`\`\``,
         );
-        if (!activeTurn.suppressQueueDrain) await this.drainNextQueuedTurn(event, locale).catch(() => {});
       } catch (fatalErr) {
         this.logger.error('orchestrator.turn_error_unhandled', { error: String(fatalErr) });
+      } finally {
+        await finishTurn('ERROR', err.message).catch(error => this.logger.warn('orchestrator.finish_failed', { error: String(error) }));
       }
-    });
+    }); });
+  }
+
+  private async supportedEfforts(scopeId: string): Promise<readonly string[]> {
+    const backend = this.getBackendDescriptorForScope(scopeId);
+    const current = this.store.getChatSettings(scopeId)?.model;
+    const models = await backend.adapter.listModels(scopeId);
+    const selected = models.find(model => current ? model.id === current : model.isDefault);
+    return selected?.supportedReasoningEfforts ?? backend.defaults?.supportedReasoningEfforts ?? ['low', 'medium', 'high'];
   }
 
   private async handleEffortCommand(scopeId: string, args: string, locale: AppLocale): Promise<void> {
-    const target = args.trim().toLowerCase();
-    if (target === 'low' || target === 'medium' || target === 'high') {
-      const settings = this.store.getChatSettings(scopeId);
-      if (target !== 'high' && settings?.serviceTier === 'boost') {
-        this.store.setChatServiceTier(scopeId, null);
+    const supported = await this.supportedEfforts(scopeId);
+    const target = args.trim();
+    if (target) {
+      const effort = target === 'default' ? null : target;
+      if (effort && !supported.includes(effort)) {
+        await this.sendMessage(scopeId, locale === 'zh' ? `当前模型不支持推理档位 \`${effort}\`。可用：default ${supported.join(' ')}` : `Unsupported reasoning effort \`${effort}\`. Available: default ${supported.join(' ')}`);
+        return;
       }
-      this.store.setChatEffort(scopeId, target as 'low' | 'medium' | 'high');
+      const settings = this.store.getChatSettings(scopeId);
+      if (effort !== 'high' && settings?.serviceTier === 'boost') this.store.setChatServiceTier(scopeId, null);
+      this.store.setChatEffort(scopeId, effort);
       this.syncCurrentBackendSettings(scopeId);
-      await this.sendMessage(
-        scopeId,
-        locale === 'zh' ? `✅ 思考深度已设置为: \`${target}\`` : `✅ Reasoning effort set to: \`${target}\``,
-      );
+      await this.sendMessage(scopeId, locale === 'zh' ? `✅ 思考深度已设置为: \`${effort ?? 'default'}\`` : `✅ Reasoning effort set to: \`${effort ?? 'default'}\``);
     } else {
-      const current = this.store.getChatSettings(scopeId)?.reasoningEffort ?? 'high';
-      await this.sendMessage(
-        scopeId,
-        locale === 'zh'
-          ? `• **当前思考深度**: \`${current}\`\n\n用法: \`/effort <low|medium|high>\``
-          : `• **Current effort**: \`${current}\`\n\nUsage: \`/effort <low|medium|high>\``,
-      );
+      const current = this.store.getChatSettings(scopeId)?.reasoningEffort ?? 'default';
+      await this.sendMessage(scopeId, locale === 'zh' ? `当前思考深度: \`${current}\`\n可用：default ${supported.join(' ')}` : `Current effort: \`${current}\`\nAvailable: default ${supported.join(' ')}`);
     }
   }
 
   private async handleBoostCommand(scopeId: string, args: string, locale: AppLocale): Promise<void> {
+    if (this.getBackendDescriptorForScope(scopeId).defaults?.boost === false) {
+      await this.sendMessage(scopeId, locale === 'zh' ? '当前后端不支持 Boost。' : 'Boost is not available on this backend.');
+      return;
+    }
     const isBoost = this.store.getChatSettings(scopeId)?.serviceTier === 'boost';
     const target = args.trim().toLowerCase();
     let nextBoost = !isBoost;
@@ -1417,7 +1625,15 @@ export class UnifiedChannelOrchestrator {
     }
   }
 
-  private async handleQueueCommand(event: TelegramTextEvent, args: string, locale: AppLocale): Promise<void> {
+  private async handleQueueCommand(event: ChannelTextEvent, args: string, locale: AppLocale): Promise<void> {
+    const prompt = args.trim();
+    if (prompt && prompt.toLowerCase() !== 'clear' && this.store.taskJournal.findReceipt(event, prompt)) return;
+    const task = prompt && prompt.toLowerCase() !== 'clear' ? this.captureTask(event, prompt, locale) : null;
+    await this.scopeOperations.run(event.scopeId, () => this.handleQueueCommandNow(event, args, locale, task?.id));
+    if (args.trim() && args.trim().toLowerCase() !== 'clear' && !this.stopped) await this.drainNextQueuedTurn(event, locale);
+  }
+
+  private async handleQueueCommandNow(event: ChannelTextEvent, args: string, locale: AppLocale, taskId?: string): Promise<void> {
     const scopeId = event.scopeId;
     if (!args.trim()) {
       const count = this.store.countQueuedTurnInputs(scopeId);
@@ -1430,7 +1646,7 @@ export class UnifiedChannelOrchestrator {
       return;
     }
     if (args.trim().toLowerCase() === 'clear') {
-      const cleared = this.store.cancelQueuedTurnInputs(scopeId);
+      const cleared = this.cancelQueuedWork(scopeId);
       await this.sendMessage(
         scopeId,
         locale === 'zh'
@@ -1439,10 +1655,25 @@ export class UnifiedChannelOrchestrator {
       );
       return;
     }
-    await this.enqueuePromptTurn(event, args.trim(), locale);
+    const binding = this.store.getBinding(scopeId);
+    try {
+      const task = taskId ? this.store.taskJournal.get(taskId) : null;
+      const staged = event.attachments?.length ? await stageInboundAttachments(this.messaging, task?.request.cwd || binding?.cwd || this.config.defaultCwd, task?.request.threadId || binding?.threadId || 'default', event.attachments, this.logger) : [];
+      if (staged.length !== event.attachments.length) throw new Error('Some attachments could not be saved; the task was not queued');
+      await this.enqueuePromptTurn(event, args.trim(), locale, staged, taskId);
+    } catch (error) {
+      if (taskId) this.store.taskJournal.update(taskId, 'failed', { error: String(error) });
+      await this.sendMessage(scopeId, `⚠️ ${String(error)}`);
+    }
   }
 
-  private async handleSteerCommand(event: TelegramTextEvent, args: string, locale: AppLocale): Promise<void> {
+  private async handleSteerCommand(event: ChannelTextEvent, args: string, locale: AppLocale): Promise<void> {
+    if (this.stopped || (args.trim() && this.store.taskJournal.findReceipt(event, args.trim()))) return;
+    const task = args.trim() ? this.captureTask(event, args.trim(), locale) : null;
+    return this.scopeOperations.run(event.scopeId, () => this.handleSteerCommandNow(event, args, locale, task?.id));
+  }
+
+  private async handleSteerCommandNow(event: ChannelTextEvent, args: string, locale: AppLocale, taskId?: string): Promise<void> {
     const scopeId = event.scopeId;
     if (!args.trim()) {
       await this.sendMessage(
@@ -1453,12 +1684,7 @@ export class UnifiedChannelOrchestrator {
     }
     const active = this.activeTurns.get(scopeId);
     if (active) {
-      if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
-      active.execution.cancel();
-      if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
-      if (active.typingTimer) clearInterval(active.typingTimer);
-      if (active.flushTimer) clearTimeout(active.flushTimer);
-      this.activeTurns.delete(scopeId);
+      await this.cancelActiveTurn(scopeId);
       await this.sendMessage(
         scopeId,
         locale === 'zh'
@@ -1466,19 +1692,19 @@ export class UnifiedChannelOrchestrator {
           : `⚡ Interrupted active turn, executing steer instruction:\n> ${args.trim()}`,
       );
     }
-    await this.executeTurn(event, args.trim(), locale);
+    await this.startPromptTurnNow(event, args.trim(), locale, { taskId });
   }
 
   async handleInterrupt(scopeId: string, locale: AppLocale): Promise<void> {
+    return this.scopeOperations.run(scopeId, () => this.handleInterruptNow(scopeId, locale));
+  }
+
+  private async handleInterruptNow(scopeId: string, locale: AppLocale): Promise<void> {
     const active = this.activeTurns.get(scopeId);
     const queuedCount = this.store.countQueuedTurnInputs(scopeId);
     if (active) {
-      if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
-      active.execution.cancel();
-      if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
-      if (active.flushTimer) clearTimeout(active.flushTimer);
-      if (active.typingTimer) clearInterval(active.typingTimer);
-      this.activeTurns.delete(scopeId);
+      await this.cancelActiveTurn(scopeId);
+      if (this.messaging.beginTaskPreview) return;
       let extraMsg = '';
       if (queuedCount > 0) {
         extraMsg = locale === 'zh'
@@ -1490,7 +1716,7 @@ export class UnifiedChannelOrchestrator {
         (locale === 'zh' ? '🛑 已发送中断请求。' : '🛑 Interrupt request sent.') + extraMsg,
       );
     } else if (queuedCount > 0) {
-      const cleared = this.store.cancelQueuedTurnInputs(scopeId);
+      const cleared = this.cancelQueuedWork(scopeId);
       await this.sendMessage(
         scopeId,
         locale === 'zh' ? `🛑 当前无运行中任务，已清空 ${cleared} 条排队任务。` : `🛑 Cleared ${cleared} queued tasks.`,
@@ -1503,7 +1729,12 @@ export class UnifiedChannelOrchestrator {
     }
   }
 
-  async handleNewSession(scopeId: string, locale: AppLocale, targetCwdInput?: string): Promise<void> {
+  async handleNewSession(scopeId: string, locale: AppLocale, cwdArg = ''): Promise<void> {
+    return this.scopeOperations.run(scopeId, () => this.handleNewSessionNow(scopeId, locale, cwdArg));
+  }
+
+  private async handleNewSessionNow(scopeId: string, locale: AppLocale, targetCwdInput?: string): Promise<void> {
+    if (this.recoveryBlocksScope(scopeId)) { await this.sendMessage(scopeId, locale === 'zh' ? '先用 /recover 处理待确认或待发送的任务，再新建会话。' : 'Resolve the pending task with /recover before creating a session.'); return; }
     const rawTarget = targetCwdInput?.trim();
     const binding = this.store.getBinding(scopeId);
     let cwd = binding?.cwd || this.config.defaultCwd;
@@ -1540,17 +1771,9 @@ export class UnifiedChannelOrchestrator {
     }
 
     // Cancel queued turn inputs
-    this.store.cancelQueuedTurnInputs(scopeId);
+    this.cancelQueuedWork(scopeId);
 
-    const active = this.activeTurns.get(scopeId);
-    if (active) {
-      if (this.getAdapterForScope(scopeId).id === 'dsh') active.suppressQueueDrain = true;
-      active.execution.cancel();
-      if (this.getAdapterForScope(scopeId).id === 'dsh') await active.execution.waitForResult();
-      if (active.typingTimer) clearInterval(active.typingTimer);
-      if (active.flushTimer) clearTimeout(active.flushTimer);
-      this.activeTurns.delete(scopeId);
-    }
+    await this.cancelActiveTurn(scopeId);
 
     // Reset thread binding to empty/ready state with the target cwd
     this.store.setBinding(scopeId, '', cwd);
@@ -1572,14 +1795,15 @@ export class UnifiedChannelOrchestrator {
     const isBusy = this.activeTurns.has(scopeId);
     const backendDesc = this.getBackendDescriptorForScope(scopeId);
     const adapter = backendDesc.adapter;
-    const customStatus = this.customUi?.renderCustomStatus ? await this.customUi.renderCustomStatus(scopeId, locale) : '';
+    const ui = this.backends.ui(backendDesc.id) ?? this.customUi;
+    const customStatus = await ui?.renderCustomStatus?.(scopeId, locale);
 
     const totalUsage = this.store.getCumulativeTokenUsage();
     const tokenLine = formatTokenUsageSummary(totalUsage, locale);
     const allUsages = this.store.getAllBackendTokenUsages();
     const breakdown = formatBackendTokenUsageBreakdown(allUsages);
-    const usageText = backendDesc.engineType === 'dsh'
-      ? (locale === 'zh' ? '• **Token 消耗**: DSH ACP 未提供逐轮统计\n' : '• **Token usage**: Per-turn counts are not exposed by DSH ACP\n')
+    const usageText = backendDesc.defaults?.tokenUsage === false
+      ? (locale === 'zh' ? '• **Token 消耗**: 当前后端未提供逐轮统计\n' : '• **Token usage**: Per-turn counts are not exposed by this backend\n')
       : `${tokenLine}${breakdown}\n`;
 
     const text =
@@ -1601,10 +1825,10 @@ export class UnifiedChannelOrchestrator {
           `• **Directory**: \`${binding?.cwd || this.config.defaultCwd}\`` +
           (customStatus ? `\n${customStatus}` : '');
 
-    const keyboard: InlineKeyboard = [
+    const keyboard: ChannelInlineKeyboard = [
       [
         { text: '⚙️ 控制面板', callback_data: 'engine:setup:main' },
-        { text: '🧠 切换模型', callback_data: backendDesc.engineType === 'dsh' ? 'dsh:models' : 'engine:setup:models' },
+        { text: '🧠 切换模型', callback_data: 'engine:setup:models' },
       ],
     ];
 
@@ -1620,10 +1844,11 @@ export class UnifiedChannelOrchestrator {
   }
 
   async sendSetupMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
-    if (await this.customUi?.renderSetupMenu?.(scopeId, locale, editMessageId)) return;
+    const ui = this.backends.ui(this.getBackendDescriptorForScope(scopeId).id) ?? this.customUi;
+    if (await ui?.renderSetupMenu?.(scopeId, locale, editMessageId)) return;
     const settings = this.store.getChatSettings(scopeId);
     const mode = settings?.activeTurnMessageMode ?? 'queue';
-    const isBoost = settings?.serviceTier === 'boost';
+    const isBoost = settings?.serviceTier === 'boost' && this.getBackendDescriptorForScope(scopeId).defaults?.boost !== false;
     const backendDesc = this.getBackendDescriptorForScope(scopeId);
     const adapter = backendDesc.adapter;
     const allBackends = await this.listBackends();
@@ -1637,22 +1862,22 @@ export class UnifiedChannelOrchestrator {
           `• **当前引擎**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **当前模型**: \`${settings?.model || '默认'}\`\n` +
           `• **思考深度**: \`${currentEffort || '默认'}\`\n` +
-          `• **Boost 增强**: ${isBoost ? '🚀 已开启' : '⚪ 已关闭'}\n` +
+          (backendDesc.defaults?.boost !== false ? `• **Boost 增强**: ${isBoost ? '🚀 已开启' : '⚪ 已关闭'}\n` : '') +
           `• **运行中消息**: ${mode === 'steer' ? '⚡ 插话 (立即中断接管)' : '⏳ 排队 (完成后自动执行)'}\n\n` +
           `请选择要配置的项目：`
         : `⚙️ **${adapter.name} Setup Panel**\n\n` +
           `• **Engine**: \`${backendDesc.name}\` (\`${backendDesc.id}\`)${backendDesc.account ? ` · \`${backendDesc.account}\`` : ''}\n` +
           `• **Model**: \`${settings?.model || 'default'}\`\n` +
           `• **Effort**: \`${currentEffort || 'default'}\`\n` +
-          `• **Boost**: ${isBoost ? '🚀 Enabled' : '⚪ Disabled'}\n` +
+          (backendDesc.defaults?.boost !== false ? `• **Boost**: ${isBoost ? '🚀 Enabled' : '⚪ Disabled'}\n` : '') +
           `• **Active-Turn**: ${mode === 'steer' ? '⚡ Steer' : '⏳ Queue'}\n\n` +
           `Select setting to configure:`;
 
-    const keyboard: InlineKeyboard = [];
+    const keyboard: ChannelInlineKeyboard = [];
 
     // 1. Model choices (Codex style)
     const models = await adapter.listModels(scopeId);
-    const modelButtons: InlineKeyboard[0] = [
+    const modelButtons: ChannelInlineKeyboard[0] = [
       {
         text: `${!currentModel || currentModel === 'default' ? '• ' : ''}${locale === 'zh' ? '默认模型' : 'Default'}`,
         callback_data: 'engine:m:default',
@@ -1671,15 +1896,10 @@ export class UnifiedChannelOrchestrator {
     }
 
     // 2. Reasoning effort choices (Codex style)
-    const isAgy = backendDesc.engineType === 'antigravity' || backendDesc.id === 'antigravity';
-    const isCodex = backendDesc.engineType === 'codex' || backendDesc.id === 'codex';
-    const supportedEfforts: string[] = isAgy
-      ? ['low', 'medium', 'high']
-      : isCodex
-        ? ['low', 'medium', 'high', 'xhigh', 'max']
-        : ['low', 'medium', 'high'];
+    const selectedModel = models.find(model => currentModel ? model.id === currentModel : model.isDefault);
+    const supportedEfforts = selectedModel?.supportedReasoningEfforts ?? backendDesc.defaults?.supportedReasoningEfforts ?? ['low', 'medium', 'high'];
 
-    const effortButtons: InlineKeyboard[0] = [
+    const effortButtons: ChannelInlineKeyboard[0] = [
       {
         text: `${!currentEffort || (currentEffort as string) === 'default' ? '• ' : ''}${locale === 'zh' ? '默认深度' : 'Default'}`,
         callback_data: 'engine:effort:default',
@@ -1695,10 +1915,10 @@ export class UnifiedChannelOrchestrator {
 
     // 3. Boost & Active Mode row
     keyboard.push([
-      {
+      ...(backendDesc.defaults?.boost !== false ? [{
         text: isBoost ? (locale === 'zh' ? '🚀 Boost: 开启' : '🚀 Boost: On') : (locale === 'zh' ? '⚪ Boost: 关闭' : '⚪ Boost: Off'),
         callback_data: 'engine:setup:boost',
-      },
+      }] : []),
       {
         text: mode === 'steer' ? (locale === 'zh' ? '⚡ 插话模式' : '⚡ Steer') : (locale === 'zh' ? '⏳ 排队模式' : '⏳ Queue'),
         callback_data: 'engine:setup:active_mode',
@@ -1706,8 +1926,8 @@ export class UnifiedChannelOrchestrator {
     ]);
 
     // 4. Custom rows (Account & History)
-    if (this.customUi?.renderCustomSetupRows) {
-      const customRows = await this.customUi.renderCustomSetupRows(scopeId, locale);
+    if (ui?.renderCustomSetupRows) {
+      const customRows = await ui.renderCustomSetupRows(scopeId, locale);
       keyboard.push(...customRows);
     }
 
@@ -1732,15 +1952,16 @@ export class UnifiedChannelOrchestrator {
   }
 
   async sendModelsMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
-    if (await this.customUi?.renderModelsMenu?.(scopeId, locale, editMessageId)) return;
+    const ui = this.backends.ui(this.getBackendDescriptorForScope(scopeId).id) ?? this.customUi;
+    if (await ui?.renderModelsMenu?.(scopeId, locale, editMessageId)) return;
     const settings = this.store.getChatSettings(scopeId);
     const currentModel = settings?.model;
     const adapter = this.getAdapterForScope(scopeId);
     const models = await adapter.listModels(scopeId);
 
-    const keyboard: InlineKeyboard = [];
+    const keyboard: ChannelInlineKeyboard = [];
     for (let i = 0; i < models.length; i += 2) {
-      const row: InlineKeyboard[0] = [];
+      const row: ChannelInlineKeyboard[0] = [];
       const m1 = models[i]!;
       const isM1Active = m1.id === currentModel || (!currentModel && m1.isDefault);
       row.push({
@@ -1809,7 +2030,8 @@ export class UnifiedChannelOrchestrator {
 
   async sendBackendMenu(scopeId: string, locale: AppLocale, editMessageId?: number): Promise<void> {
     const backends = await this.listBackends();
-    const activeBackend = this.getBackendDescriptorForScope(scopeId);
+    const activeId = this.store.getActiveBackend(scopeId) || this.defaultBackendId;
+    const activeBackend = this.backends.get(activeId) ?? { id: activeId, name: `${activeId} (${locale === 'zh' ? '不可用' : 'unavailable'})`, engineType: activeId, adapter: this.adapter };
     const binding = this.store.getBinding(scopeId);
 
     const lines: string[] = [
@@ -1842,7 +2064,7 @@ export class UnifiedChannelOrchestrator {
 
     lines.push('', '───────────────────', locale === 'zh' ? '**可用后端列表**：' : '**Available Backends**:');
 
-    const keyboard: InlineKeyboard = [];
+    const keyboard: ChannelInlineKeyboard = [];
 
     backends.forEach((b, idx) => {
       const isCurrent = b.id === activeBackend.id;

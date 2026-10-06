@@ -17,7 +17,7 @@ import {
   isQuotaOrAuthError,
   isTransientNetworkError,
 } from './events.js';
-import { buildAttachmentPrompt } from '../telegram/media.js';
+import { buildAttachmentPrompt } from '../core/attachment_files.js';
 import { AntigravitySubagentTracker } from './subagents.js';
 import type { Logger } from '../logger.js';
 

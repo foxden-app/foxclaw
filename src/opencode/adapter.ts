@@ -10,7 +10,7 @@ import type {
 import type { OpencodeAppClient } from './client.js';
 import { formatSdkError } from './client.js';
 import type { OpencodeBridgeEvent } from './events.js';
-import { buildAttachmentPrompt } from '../telegram/media.js';
+import { buildAttachmentPrompt } from '../core/attachment_files.js';
 
 export class OpencodeEngineAdapter implements IEngineAdapter {
   readonly id = 'opencode';
@@ -59,6 +59,8 @@ export class OpencodeEngineAdapter implements IEngineAdapter {
 
     let finalResult: EngineTurnResult | null = null;
     let turnError: Error | null = null;
+    let accumulatedResponse = '';
+    let cleanup = () => {};
     const resultWaiters: Array<(res: EngineTurnResult | null) => void> = [];
 
     const resolveWaiters = (res: EngineTurnResult | null) => {
@@ -81,9 +83,8 @@ export class OpencodeEngineAdapter implements IEngineAdapter {
 
         if (cancelled) return;
 
-        let accumulatedResponse = '';
-
         const onEvent = (ev: OpencodeBridgeEvent) => {
+          if (cancelled) return;
           if ('sessionId' in ev && ev.sessionId === sessionId) {
             if (ev.kind === 'text') {
               if (ev.delta) {
@@ -123,7 +124,7 @@ export class OpencodeEngineAdapter implements IEngineAdapter {
           }
         };
 
-        const cleanup = () => {
+        cleanup = () => {
           this.client.off('event', onEvent);
         };
 
@@ -152,21 +153,34 @@ export class OpencodeEngineAdapter implements IEngineAdapter {
           this.client.watchSessionUntilIdle(sessionId, request.cwd);
         }
       } catch (err) {
+        cleanup();
         turnError = err instanceof Error ? err : new Error(String(err));
         emitter.emit('error', turnError);
         resolveWaiters(null);
       }
     };
 
-    void run();
+    const running = run();
+    let cancelling: Promise<void> | undefined;
 
     return {
-      turnId: sessionId ?? undefined,
+      get turnId() { return sessionId ?? undefined; },
       cancel: () => {
-        cancelled = true;
-        if (sessionId) {
-          void this.client.getClient().session.abort({ sessionID: sessionId }).catch(() => {});
-        }
+        if (finalResult) return Promise.resolve();
+        cancelling ??= (async () => {
+          cancelled = true;
+          await running;
+          if (finalResult) return;
+          if (sessionId) {
+            const result = await this.client.getClient().session.abort({ sessionID: sessionId });
+            if (result.error) throw new Error(formatSdkError(result.error));
+          }
+          cleanup();
+          finalResult = { kind: 'result', status: 'INTERRUPTED', response: accumulatedResponse, conversationId: sessionId };
+          emitter.emit('result', finalResult);
+          resolveWaiters(finalResult);
+        })();
+        return cancelling.catch(error => { cancelling = undefined; throw error; });
       },
       waitForResult: async () => {
         if (finalResult) return finalResult;

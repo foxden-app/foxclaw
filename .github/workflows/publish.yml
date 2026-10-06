@@ -25,11 +25,12 @@ jobs:
           git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
           git -c protocol.version=2 fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
           git checkout --detach FETCH_HEAD
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
       - name: Validate package version
         id: version
         shell: bash
@@ -58,10 +59,10 @@ jobs:
 
           echo "package=${package_name}" >> "${GITHUB_OUTPUT}"
           echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm pack --dry-run
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm pack --pack-destination "${{ runner.temp }}"
       - name: Configure npm token fallback
         shell: bash
         env:

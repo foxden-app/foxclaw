@@ -2,12 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import type { AppConfig } from '../../config.js';
-import type { BridgeSessionCore } from '../../controller/controller.js';
 import { toWeixinBridgeScopeId } from '../../core/bridge_scope.js';
 import type { Logger } from '../../logger.js';
 import type { BridgeStore } from '../../store/database.js';
-import type { TelegramTextEvent } from '../../telegram/gateway.js';
-import type { TelegramInboundAttachment } from '../../telegram/media.js';
+import type { ChannelTextEvent } from '../../core/channel_events.js';
+import type { InboundAttachment } from '../../core/attachment_types.js';
 import { getUpdates } from './ilink/api.js';
 import { DEFAULT_CDN_BASE_URL } from './ilink/constants.js';
 import { downloadWeixinImageItemToFile } from './ilink/media_image.js';
@@ -47,13 +46,13 @@ function isAllowedWeixinUser(config: AppConfig, fromUserId: string): boolean {
   return config.wxAllowedIlinkUserIds.includes(fromUserId);
 }
 
-function buildTelegramShapedEvent(params: {
+function buildInboundEvent(params: {
   scopeId: string;
   fromUserId: string;
   text: string;
   messageId: number;
-  attachments: TelegramInboundAttachment[];
-}): TelegramTextEvent {
+  attachments: InboundAttachment[];
+}): ChannelTextEvent {
   return {
     chatId: params.fromUserId,
     topicId: null,
@@ -78,7 +77,7 @@ function normalizeInboundBaseUrl(account: WeixinSavedAccount): string {
 }
 
 export interface IWeixinBridgeCore {
-  dispatchInboundLikeTelegramText(event: TelegramTextEvent): void;
+  dispatchInboundLikeTelegramText(event: ChannelTextEvent): void;
 }
 
 export class WeixinChannelAdapter {
@@ -86,7 +85,7 @@ export class WeixinChannelAdapter {
   private loops: Promise<void>[] = [];
 
   constructor(
-    private readonly core: BridgeSessionCore | IWeixinBridgeCore,
+    private readonly core: IWeixinBridgeCore,
     private readonly store: BridgeStore,
     private readonly config: AppConfig,
     private readonly logger: Logger,
@@ -257,7 +256,7 @@ export class WeixinChannelAdapter {
     }
 
     let text = '';
-    const attachments: TelegramInboundAttachment[] = [];
+    const attachments: InboundAttachment[] = [];
     const items = msg.item_list ?? [];
     for (const item of items) {
       if (item.type === MessageItemType.TEXT) {
@@ -304,7 +303,7 @@ export class WeixinChannelAdapter {
       attachments: attachments.length,
     });
 
-    const event = buildTelegramShapedEvent({
+    const event = buildInboundEvent({
       scopeId,
       fromUserId,
       text: trimmed,

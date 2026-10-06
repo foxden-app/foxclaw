@@ -1,3 +1,6 @@
+import { TextActions } from '../text_actions.js';
+import type { ChannelPort } from '../../core/channel_port.js';
+import type { ChannelTextEvent } from '../../core/channel_events.js';
 import { parseWeixinBridgeScope } from '../../core/bridge_scope.js';
 import type { BridgeStore } from '../../store/database.js';
 import { getConfig, sendTyping } from './ilink/api.js';
@@ -29,7 +32,11 @@ function stripHtmlBasic(html: string): string {
  * Weixin (iLink) outbound: addressed by `weixin:<accountId>:<peerUserId>` scope ids.
  * Editing/deleting Telegram messages is approximated as new plain text sends or no-ops.
  */
-export class WeixinMessagingPort {
+export class WeixinMessagingPort implements ChannelPort {
+  readonly capabilities = { editableMessages: false, inlineActions: false, maxMessageLength: 2000 };
+  private readonly actions = new TextActions();
+  private readonly callbackScopes = new Map<string, string>();
+
   private nextSyntheticId = 1;
 
   constructor(
@@ -45,7 +52,9 @@ export class WeixinMessagingPort {
   }
 
   async sendPlain(scopeId: string, text: string, keyboard?: ChannelInlineKeyboard): Promise<number> {
-    void keyboard;
+    const messageId = this.allocMessageId();
+    const choices = keyboard?.length ? this.actions.render(scopeId, messageId, keyboard) : '';
+    const rendered = choices ? `${text}\n\n${choices}` : text;
     const parsed = parseWeixinBridgeScope(scopeId);
     if (!parsed) {
       throw new Error(`Invalid weixin scope: ${scopeId}`);
@@ -57,21 +66,47 @@ export class WeixinMessagingPort {
     const contextToken = this.store.getWeixinContextToken(scopeId);
     await sendMessageWeixin({
       to: parsed.fromUserId,
-      text,
+      text: rendered,
       opts: {
         baseUrl: account.baseUrl,
         token: account.botToken,
         ...(contextToken !== null && contextToken !== '' ? { contextToken } : {}),
       },
     });
-    return this.allocMessageId();
+    return messageId;
   }
 
   async sendHtml(scopeId: string, html: string, keyboard?: ChannelInlineKeyboard): Promise<number> {
     return this.sendPlain(scopeId, stripHtmlBasic(html), keyboard);
   }
 
+  sendRichMarkdown(scopeId: string, text: string, keyboard?: ChannelInlineKeyboard): Promise<number> {
+    // Shared result summaries contain HTML fragments as well as Markdown.
+    return this.sendPlain(scopeId, stripHtmlBasic(text), keyboard);
+  }
+
+  async editRichMarkdown(scopeId: string, messageId: number, text: string, keyboard?: ChannelInlineKeyboard): Promise<void> {
+    this.actions.clearMessage(scopeId, messageId);
+    await this.sendRichMarkdown(scopeId, text, keyboard);
+  }
+
+  resolveAction(event: ChannelTextEvent) {
+    const action = this.actions.resolve(event);
+    if (action) this.callbackScopes.set(action.callbackQueryId, event.scopeId);
+    return action;
+  }
+
+  async answerCallback(callbackId: string, text: string): Promise<void> {
+    const scopeId = this.callbackScopes.get(callbackId);
+    this.callbackScopes.delete(callbackId);
+    if (scopeId && text) await this.sendPlain(scopeId, text);
+  }
+
+  async getFile(): Promise<never> { throw new Error('Weixin attachments must be downloaded by the inbound channel'); }
+  async downloadResolvedFile(): Promise<never> { throw new Error('Weixin attachments must be downloaded by the inbound channel'); }
+
   async editPlain(scopeId: string, _messageId: number, text: string, keyboard?: ChannelInlineKeyboard): Promise<void> {
+    this.actions.clearMessage(scopeId, _messageId);
     await this.sendPlain(scopeId, text, keyboard);
   }
 
@@ -80,8 +115,7 @@ export class WeixinMessagingPort {
   }
 
   async deleteMessage(scopeId: string, messageId: number): Promise<void> {
-    void scopeId;
-    void messageId;
+    this.actions.clearMessage(scopeId, messageId);
   }
 
   async sendTypingInScope(scopeId: string): Promise<void> {
@@ -120,8 +154,7 @@ export class WeixinMessagingPort {
   }
 
   async clearInlineKeyboard(scopeId: string, messageId: number): Promise<void> {
-    void scopeId;
-    void messageId;
+    this.actions.clearMessage(scopeId, messageId);
   }
 
   async sendDraft(scopeId: string, _draftId: number, text: string): Promise<void> {

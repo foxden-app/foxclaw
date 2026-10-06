@@ -1,72 +1,10 @@
-import crypto from 'node:crypto';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
+import { ListenerScope } from '../core/listener_scope.js';
+import { CodexLocalUsageService } from './local_usage_service.js';
+import { CodexAuthQuotaService } from './auth_quota_service.js';
+import { CodexNativePanelService } from './native_panel_service.js';
 import { externalWriterControl, type ExternalWriterIdentity } from '../codex_app/force_takeover.js';
-import type { AppConfig } from '../config.js';
-import {
-  TELEGRAM_VOICE_MAX_BYTES,
-  TELEGRAM_VOICE_SUPPORTED_EXTENSIONS,
-  telegramVoiceContentType,
-} from '../voice/files.js';
-import { normalizeLocale, t } from '../i18n.js';
-import type { Logger } from '../logger.js';
-import type {
-  ActiveTurnPreviewRecord,
-  BridgeStore,
-  CodexAuthCandidateState,
-  CodexAuthPoolStats,
-  CodexAuthQuotaSnapshotRecord,
-  PendingUserInputStoredRecord,
-} from '../store/database.js';
-import {
-  chatGptAuthMetadataMatchesCandidateName,
-  parseChatGptAuthMetadata,
-  readChatGptAuthRecord,
-  readChatGptAuthMetadata,
-  type ChatGptAuthMetadata,
-} from '../auth/mirror.js';
-import { readAccessTokenExpiresAtMs, type AuthSyncClusterAuditResult } from '../auth/cross_node_sync.js';
-import type {
-  AppLocale,
-  ActiveTurnMessageMode,
-  AccessPresetValue,
-  ChatSessionSettings,
-  CodexAccountInfo,
-  CodexAccountRateLimits,
-  CodexAppInfo,
-  CodexCollaborationMode,
-  CodexConfigRequirements,
-  CodexExperimentalFeature,
-  CodexFuzzyFileResult,
-  CodexHooksListEntry,
-  CodexMcpResourceContent,
-  CodexMcpServerStatus,
-  CodexModelProviderCapabilities,
-  CodexPluginDetail,
-  CodexPluginMarketplace,
-  CodexRateLimitSnapshot,
-  CodexRateLimitWindow,
-  CodexSkillMetadata,
-  CodexSkillsListEntry,
-  CodexThreadGoal,
-  CollaborationModeValue,
-  GuidedPlanSessionRecord,
-  AppThreadSnapshot,
-  AppTurnSnapshot,
-  ModelInfo,
-  PendingAttachmentBatchRecord,
-  PendingApprovalRecord,
-  QueuedTurnInputRecord,
-  ReasoningEffortValue,
-  ReviewTarget,
-  RuntimeStatus,
-  ThreadBinding,
-  ThreadGoalStatusValue,
-  ThreadSessionState,
-} from '../types.js';
-import { parseCommand } from './commands.js';
-import { shouldShowRuntimeLastUpdate } from '../update_status.js';
+import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
+import { type CodexLocalUsageSnapshot, type CodexLocalUsageStats } from '../codex_app/local_usage.js';
 import {
   buildAccessSettingsKeyboard,
   buildModelSettingsKeyboard,
@@ -97,8 +35,37 @@ import {
   type SetupFocusSection,
   type ThreadListPresentationState,
 } from './presentation.js';
-import { clampServiceTierToModel, resolveFastTierForModel } from './service_tier.js';
-import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
+import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
+import type { AppConfig } from '../config.js';
+import type { ActiveTurnPreviewRecord, BridgeStore } from '../store/database.js';
+import type { Logger } from '../logger.js';
+import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
+import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
+import { parseCommand } from './commands.js';
+import type {
+  AppLocale,
+  AccessPresetValue,
+  ChatSessionSettings,
+  CodexCollaborationMode,
+  CodexRateLimitSnapshot,
+  CodexSkillsListEntry,
+  CollaborationModeValue,
+  GuidedPlanSessionRecord,
+  AppThreadSnapshot,
+  AppTurnSnapshot,
+  ModelInfo,
+  PendingAttachmentBatchRecord,
+  PendingApprovalRecord,
+  QueuedTurnInputRecord,
+  ReasoningEffortValue,
+  RuntimeStatus,
+  ThreadBinding,
+  ThreadGoalStatusValue,
+  ThreadSessionState,
+} from '../types.js';
+import path from 'node:path';
+import os from 'node:os';
+import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
 import {
   TELEGRAM_BOT_API_DOWNLOAD_LIMIT_BYTES,
   buildAttachmentPrompt,
@@ -108,494 +75,239 @@ import {
   type StagedTelegramAttachment,
   type TelegramInboundAttachment,
 } from '../telegram/media.js';
-import {
-  TELEGRAM_MESSAGE_LIMIT,
-  chunkTelegramMessage,
-  chunkTelegramStreamMessage,
-  clipTelegramDraftMessage,
-} from '../telegram/text.js';
-import {
-  escapeTelegramHtml,
-  telegramBold,
-  telegramDetails,
-  telegramExpandableBlockquote,
-  telegramPre,
-  telegramPreCode,
-} from '../telegram/html.js';
-import { TELEGRAM_RICH_MESSAGE_TEXT_LIMIT } from '../telegram/rich.js';
-import { renderTelegramMarkdownRichHtml } from '../telegram/rich_markdown.js';
+import { normalizeLocale, t } from '../i18n.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
-import { BridgeMessagingRouter } from '../channels/bridge_messaging_router.js';
-import { BRIDGE_SCOPE_WEIXIN_PREFIX, parseTelegramTargetFromBridgeScope, parseWeixinBridgeScope } from '../core/bridge_scope.js';
-import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
-import { normalizeVoiceText, synthesizeTelegramVoice } from '../voice/tts.js';
-import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
-import {
-  readCodexLocalUsageSnapshot,
-  readCodexLocalUsageStats,
-  writeCodexLocalUsageSnapshot,
-  type CodexLocalUsageSnapshot,
-  type CodexLocalUsageStats,
-} from '../codex_app/local_usage.js';
-import {
-  normalizeTurnActivityEvent,
-  type RawExecCommandEvent,
-  type TurnActivityEvent,
-  type TurnOutputKind,
-} from './activity.js';
+import { shouldShowRuntimeLastUpdate } from '../update_status.js';
 import { normalizeAccessPreset, resolveAccessMode } from './access.js';
-import { diffObservedTurn, findLatestTurn, findLiveTurn, type ObservedTurnCursor } from './observer.js';
+import { normalizeTurnActivityEvent, type RawExecCommandEvent, type TurnActivityEvent } from './activity.js';
+import fs from 'node:fs/promises';
 import {
-  applySessionLog,
-  bootstrapSessionLog,
-  splitJsonlChunk,
-  type SessionLogCursor,
-} from './session_observer.js';
-import { renderActiveTurnStatus } from './status.js';
-import { formatMetricTokenCount } from '../store/token_usage.js';
+  chatGptAuthMetadataMatchesCandidateName,
+  parseChatGptAuthMetadata,
+  readChatGptAuthRecord,
+  readChatGptAuthMetadata,
+  type ChatGptAuthMetadata,
+} from '../auth/mirror.js';
+import crypto from 'node:crypto';
+import { clampServiceTierToModel, resolveFastTierForModel } from './service_tier.js';
+import { resolveTelegramRenderRoute } from '../telegram/rendering.js';
+import { TELEGRAM_MESSAGE_LIMIT, chunkTelegramMessage, chunkTelegramStreamMessage, clipTelegramDraftMessage } from '../telegram/text.js';
 import { writeRuntimeStatus } from '../runtime.js';
-import type { SelfUpdateRuntime, SelfUpdateStatus } from '../update.js';
+import { renderTelegramMarkdownRichHtml } from '../telegram/rich_markdown.js';
+import { escapeTelegramHtml, telegramBold, telegramDetails, telegramPre } from '../telegram/html.js';
+import { diffObservedTurn, findLatestTurn, findLiveTurn } from './observer.js';
+import { applySessionLog, bootstrapSessionLog, splitJsonlChunk } from './session_observer.js';
+import { TELEGRAM_VOICE_MAX_BYTES, TELEGRAM_VOICE_SUPPORTED_EXTENSIONS, telegramVoiceContentType } from '../voice/files.js';
+import { normalizeVoiceText, synthesizeTelegramVoice } from '../voice/tts.js';
 
-const AUTH_DELETE_REASON_NEEDS_REPAIR = 'needs_repair';
-const RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS = [3000, 7000, 15_000, 30_000, 45_000, 60_000, 60_000, 60_000];
-const TOOL_ARCHIVE_MAX_LINES = 12;
-const TOOL_ARCHIVE_LINE_LIMIT = 240;
-
-type AuthProactiveRefreshStatus = NonNullable<RuntimeStatus['authProactiveRefresh']>;
-
-export interface CoreCoordinator {
-  canSelfUpdate?: () => boolean;
-  authCandidateUpdated?: (runtimeId: string, candidateName: string) => Promise<void>;
-  authCandidateDeleted?: (runtimeId: string, candidateName: string, reason?: string | null) => Promise<void>;
-  recoverAuthCandidate?: (runtimeId: string, candidateName: string, options?: { crossNode?: boolean }) => Promise<boolean>;
-  acquireAuthRefreshLease?: (reason: string) => Promise<{ ok: boolean; leaseId: string | null; reason?: string | null }>;
-  releaseAuthRefreshLease?: (leaseId: string | null) => Promise<void>;
-  getAuthSyncStatus?: () => RuntimeStatus['authSync'];
-  authSyncSafeAll?: () => Promise<{ localSynced: number; localSkipped: number; sent: number; skipped: number }>;
-  authSyncPushAll?: () => Promise<{ sent: number; skipped: number }>;
-  authSyncTest?: () => Promise<{ sent: number; replied: number; missing: string[] }>;
-  authSyncAudit?: () => Promise<AuthSyncClusterAuditResult | null>;
-  statusUpdated?: (status: RuntimeStatus) => void;
-  getServiceStatus?: () => Promise<{
-    currentVersion?: string;
-    bots: NonNullable<RuntimeStatus['bots']>;
-    weixinRuntime?: RuntimeStatus['weixinRuntime'];
-    authMirror?: RuntimeStatus['authMirror'];
-    authSync?: RuntimeStatus['authSync'];
-    authProactiveRefresh?: AuthProactiveRefreshStatus | null;
-    lastUpdate?: SelfUpdateStatus | null;
-  }>;
-  selfUpdateCompleted?: (status: SelfUpdateStatus) => void;
-}
-
-type ServiceRuntimeStatus = NonNullable<Awaited<ReturnType<NonNullable<CoreCoordinator['getServiceStatus']>>>>;
-
-interface RenderedTelegramMessage {
-  messageId: number;
-  text: string;
-  richHtml?: string | null;
-  richFailedForText?: string | null;
-}
-
-interface ActiveTurnSegment {
-  itemId: string;
-  phase: string | null;
-  outputKind: TurnOutputKind;
-  isPlan: boolean;
-  text: string;
-  completed: boolean;
-  startedAtMs: number;
-  completedAtMs: number | null;
-  messages: RenderedTelegramMessage[];
-  voiceSnippetId: string | null;
-}
-
-interface ToolBatchCounts {
-  files: number;
-  searches: number;
-  edits: number;
-  commands: number;
-}
-
-interface ToolBatchState {
-  openCallIds: Set<string>;
-  actionKeys: Set<string>;
-  actionLines: string[];
-  counts: ToolBatchCounts;
-  finalizeTimer: NodeJS.Timeout | null;
-}
-
-interface ArchivedStatusContent {
-  text: string;
-  html: string | null;
-}
-
-interface SelfUpdateBroadcastSummary {
-  state: 'sent' | 'pending' | 'disabled';
-  sent: number;
-  peers: string[];
-}
-
-interface ToolDescriptor {
-  kind: keyof ToolBatchCounts;
-  key: string;
-  line: string;
-}
-
-interface ActiveTurn {
-  scopeId: string;
-  chatId: string;
-  chatType: string;
-  topicId: number | null;
-  renderRoute: TelegramRenderRoute;
-  isObserved: boolean;
-  threadId: string;
-  turnId: string;
-  queuedInputId: string | null;
-  previewMessageId: number;
-  previewActive: boolean;
-  draftId: number | null;
-  draftText: string | null;
-  richDraftDisabled: boolean;
-  buffer: string;
-  finalText: string | null;
-  interruptRequested: boolean;
-  authRetry: AuthRetryContext | null;
-  collaborationMode: CollaborationModeValue;
-  statusMessageText: string | null;
-  statusNeedsRebase: boolean;
-  segments: ActiveTurnSegment[];
-  reasoningActiveCount: number;
-  pendingApprovalKinds: Set<PendingApprovalRecord['kind']>;
-  toolBatch: ToolBatchState | null;
-  pendingArchivedStatus: ArchivedStatusContent | null;
-  renderRetryTimer: NodeJS.Timeout | null;
-  lastStreamFlushAt: number;
-  renderRequested: boolean;
-  forceStatusFlush: boolean;
-  forceStreamFlush: boolean;
-  renderTask: Promise<void> | null;
-  completion: Promise<void>;
-  archivedMessageIds: number[];
-  resolver: () => void;
-}
-
-interface ObservedThreadWatcher {
-  scopeId: string;
-  chatId: string;
-  chatType: string;
-  topicId: number | null;
-  threadId: string;
-  mode: 'app_snapshot' | 'session_file';
-  timer: NodeJS.Timeout | null;
-  cursor: ObservedTurnCursor | null;
-  activeTurnId: string | null;
-  waitingOnApproval: boolean;
-  sessionPath: string | null;
-  sessionOffset: number;
-  sessionRemainder: string;
-  sessionCursor: SessionLogCursor;
-  stopped: boolean;
-}
-
-interface PendingUserInputOption {
-  label: string;
-  description: string | null;
-}
-
-interface PendingUserInputQuestion {
-  id: string;
-  header: string | null;
-  question: string;
-  isOther: boolean;
-  isSecret: boolean;
-  options: PendingUserInputOption[];
-}
-
-type PendingUserInputStatus = 'pending' | 'submitted' | 'resolved' | 'interrupted';
-type ServerRequestId = string | number;
-
-interface PendingUserInputRequest {
-  localId: string;
-  serverRequestId: ServerRequestId;
-  chatId: string;
-  threadId: string;
-  turnId: string | null;
-  itemId: string;
-  questions: PendingUserInputQuestion[];
-  answers: Map<string, string>;
-  messageId: number | null;
-  status: PendingUserInputStatus;
-  createdAt: number;
-  submittedAt: number | null;
-}
-
-interface PendingMcpElicitation {
-  localId: string;
-  serverRequestId: ServerRequestId;
-  chatId: string;
-  threadId: string;
-  turnId: string | null;
-  serverName: string;
-  mode: 'form' | 'url';
-  message: string;
-  url: string | null;
-  requestedSchema: unknown;
-  content: unknown;
-  messageId: number | null;
-  createdAt: number;
-}
-
-interface PendingPlanImplementation {
-  localId: string;
-  scopeId: string;
-  chatId: string;
-  chatType: string;
-  topicId: number | null;
-  threadId: string;
-  turnId: string;
-  cwd: string | null;
-  planMarkdown: string;
-  messageId: number | null;
-  createdAt: number;
-}
-
-interface CodexAuthCandidate {
-  name: string;
-  path: string;
-  isCurrent: boolean;
-  disabled: boolean;
-  state: CodexAuthCandidateState;
-  mtimeMs: number;
-  credentialKind: 'chatgpt' | 'api-key' | 'invalid';
-  credentialLastRefreshMs: number | null;
-  credentialExpiresAtMs: number | null;
-  quota: CodexAuthQuotaSnapshot | null;
-}
-
-interface CodexAuthQuotaSnapshot {
-  capturedAtMs: number;
-  accountId?: string | null;
-  quotaIdentityId?: string | null;
-  planType: string | null;
-  primaryWindowDurationMins: number | null;
-  primaryRemainingPercent: number | null;
-  primaryResetsAt: number | null;
-  secondaryWindowDurationMins: number | null;
-  secondaryRemainingPercent: number | null;
-  secondaryResetsAt: number | null;
-}
-
-interface CodexAuthQuotaIdentity {
-  accountId: string;
-  quotaIdentityId: string;
-}
-
-interface CodexAuthState {
-  authDir: string;
-  authPath: string;
-  currentTargetPath: string | null;
-  currentLabel: string | null;
-  candidates: CodexAuthCandidate[];
-}
-
-interface CodexAuthSwitchResult {
-  fromLabel: string | null;
-  toLabel: string;
-}
-
-interface CodexAuthSwitchOutcome extends CodexAuthSwitchResult {
-  ok: boolean;
-  candidateName: string;
-  recovered: boolean;
-  error: string | null;
-  validationFailureKind: CodexAuthRotationReason | null;
-  restoredPrevious: boolean;
-  autoDeleted: boolean;
-  deleteRestarted: boolean;
-}
-
-interface CodexAuthRepairDisposition {
-  deleted: boolean;
-  restarted: boolean;
-}
-
-interface CodexAuthRefreshAllResult {
-  refreshed: string[];
-  skipped: string[];
-  failed: Array<{ name: string; error: string }>;
-}
-
-interface CodexAuthClusterAuditOutcome {
-  audit: AuthSyncClusterAuditResult;
-  refresh: CodexAuthRefreshAllResult;
-  push: { sent: number; skipped: number };
-  refreshSkippedReason: string | null;
-}
-
-interface CodexAuthSelection {
-  candidate: CodexAuthCandidate;
-  fromLabel: string | null;
-  toLabel: string;
-}
-
-type CodexAuthCandidateHealth = 'disabled' | 'needs_repair' | 'ready' | 'low' | 'exhausted' | 'stale' | 'unknown' | 'api-key' | 'invalid';
-type CodexAuthListFilter = 'all' | 'enabled' | 'attention';
-
-interface CodexAuthListView {
-  offset: number;
-  pageSize: number;
-  filter: CodexAuthListFilter;
-  searchTerm: string | null;
-}
-
-interface PendingAuthChoiceList extends CodexAuthListView {
-  localId: string;
-  chatId: string;
-  messageId: number | null;
-  candidates: CodexAuthCandidate[];
-  createdAt: number;
-}
-
-interface PendingThreadRename {
-  scopeId: string;
-  threadId: string;
-  messageId: number | null;
-  createdAt: number;
-}
-
-interface PendingThreadNewCwd {
-  scopeId: string;
-  messageId: number | null;
-  cwdToCreate: string | null;
-  confirmationMessageId: number | null;
-  createdAt: number;
-}
-
-interface PendingAuthAdd {
-  loginId: string;
-  scopeId: string;
-  name: string;
-  path: string;
-  previousTargetPath: string | null;
-  mode: 'add' | 'repair';
-  createdAt: number;
-}
-
-interface AuthRetryContext {
-  input: TurnInput[];
-  threadId: string;
-  cwd: string | null;
-  chatId: string;
-  chatType: string;
-  topicId: number | null;
-  collaborationMode: CollaborationModeValue | null | undefined;
-  failedAuthTargets: Set<string>;
-}
-
-type CodexAuthRotationReason = 'auth_invalid' | 'quota_limited';
-
-interface PendingAuthRotation {
-  scopeId: string;
-  reason: string;
-  reasonKind: CodexAuthRotationReason;
-  retry: AuthRetryContext | null;
-}
-
-interface RemoteControlStatusState {
-  status: string;
-  installationId: string | null;
-  environmentId: string | null;
-}
-
-type ApprovalAction = 'accept' | 'session' | 'deny';
-type McpElicitationAction = 'accept' | 'decline' | 'cancel';
-class UserFacingError extends Error {}
-const OBSERVED_THREAD_POLL_MS = 1500;
-const OBSERVED_CLI_USER_LABEL = 'codex-cli-user';
-const DEFAULT_COLLABORATION_MODE: CollaborationModeValue = 'default';
-const CODEX_LOCAL_USAGE_REFRESH_MS = 30 * 60_000;
-const CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME = 'codex-local-usage.json';
-const CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME = 'codex-auth-quota.json';
-const CODEX_AUTH_LIST_PAGE_SIZE = 8;
-const CODEX_AUTH_LOW_QUOTA_PERCENT = 10;
-const CODEX_AUTH_STALE_CREDENTIAL_DAYS = 8;
-const CODEX_AUTH_PROACTIVE_REFRESH_DAYS = 8;
-const CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS = 60 * 60_000;
-const CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS = 5 * 60_000;
-const USER_INPUT_SUBMITTED_NOTICE_MS = 90_000;
-const SELF_UPDATE_STATUS_POLL_MS = 1000;
-const ATTACHMENT_BATCH_MERGE_WINDOW_MS = 120_000;
-const PLAN_IMPLEMENTATION_CODING_MESSAGE = 'Implement the plan.';
-const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = 'A previous agent produced the plan below to accomplish the user\'s task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.';
-
-interface HelpCommandEntry {
-  key: string;
-  line: string;
-}
-
-const PINNED_HELP_COMMANDS: HelpCommandEntry[] = [
-  { key: 'help', line: '/help' },
-  { key: 'setup', line: '/setup' },
-  { key: 'status', line: '/status' },
-  { key: 'threads', line: '/threads [query]' },
-  { key: 'auth', line: '/auth' },
-];
-
-const DYNAMIC_HELP_COMMANDS: HelpCommandEntry[] = [
-  { key: 'fast', line: '/fast <on|off|toggle>' },
-  { key: 'active', line: '/active <steer|queue>' },
-  { key: 'rich', line: '/rich' },
-  { key: 'account', line: '/account' },
-  { key: 'quota', line: '/quota' },
-  { key: 'update', line: '/update' },
-  { key: 'login_device', line: '/login_device' },
-  { key: 'login_cancel', line: '/login_cancel' },
-  { key: 'cli', line: '/cli' },
-  { key: 'threads_archived', line: '/threads archived [query]' },
-  { key: 'open', line: '/open <n>' },
-  { key: 'goal', line: '/goal [objective|pause|resume|done|budget <tokens|off>|clear confirm]' },
-  { key: 'history', line: '/history [limit]' },
-  { key: 'files', line: '/files <query>' },
-  { key: 'remote', line: '/remote' },
-  { key: 'watch', line: '/watch' },
-  { key: 'unwatch', line: '/unwatch' },
-  { key: 'steer', line: '/steer <message>' },
-  { key: 'takeover', line: '/takeover <message>' },
-  { key: 'queue', line: '/queue <message>' },
-  { key: 'new', line: '/new [cwd]' },
-  { key: 'mode', line: '/mode [default|plan]' },
-  { key: 'plan', line: '/plan' },
-  { key: 'agent', line: '/agent' },
-  { key: 'auth_reload', line: '/auth_reload' },
-  { key: 'logout', line: '/logout confirm' },
-  { key: 'loaded', line: '/loaded' },
-  { key: 'skills', line: '/skills [query]' },
-  { key: 'skill', line: '/skill <name>' },
-  { key: 'hooks', line: '/hooks' },
-  { key: 'plugins', line: '/plugins [query]' },
-  { key: 'plugin', line: '/plugin <name>' },
-  { key: 'apps', line: '/apps' },
-  { key: 'features', line: '/features' },
-  { key: 'config', line: '/config' },
-  { key: 'requirements', line: '/requirements' },
-  { key: 'provider', line: '/provider' },
-  { key: 'mcp', line: '/mcp' },
-  { key: 'review', line: '/review' },
-  { key: 'fork', line: '/fork [name]' },
-  { key: 'undo', line: '/undo [n]' },
-  { key: 'rename', line: '/rename <name>' },
-  { key: 'compact', line: '/compact' },
-  { key: 'archive', line: '/archive' },
-  { key: 'models', line: '/models' },
-  { key: 'permissions', line: '/permissions' },
-  { key: 'permissions_arg', line: '/permissions <read-only|default|full-access>' },
-  { key: 'reveal', line: '/reveal' },
-  { key: 'where', line: '/where' },
-  { key: 'interrupt', line: '/interrupt' },
-];
+import { renderActiveTurnStatus } from './status.js';
+import {
+  ActiveTurn,
+  ObservedThreadWatcher,
+  PendingUserInputRequest,
+  PendingMcpElicitation,
+  PendingAuthAdd,
+  PendingAuthChoiceList,
+  PendingAuthRotation,
+  CodexAuthQuotaSnapshot,
+  RemoteControlStatusState,
+  PendingThreadRename,
+  PendingThreadNewCwd,
+  AuthProactiveRefreshStatus,
+  CoreCoordinator,
+  CODEX_AUTH_PROACTIVE_REFRESH_INITIAL_DELAY_MS,
+  DEFAULT_COLLABORATION_MODE,
+  DYNAMIC_HELP_COMMANDS,
+  PINNED_HELP_COMMANDS,
+  CodexAuthListFilter,
+  McpElicitationAction,
+  ApprovalAction,
+  PendingPlanImplementation,
+  PendingUserInputStatus,
+  PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX,
+  PLAN_IMPLEMENTATION_CODING_MESSAGE,
+  UserFacingError,
+  AuthRetryContext,
+  OBSERVED_CLI_USER_LABEL,
+  USER_INPUT_SUBMITTED_NOTICE_MS,
+  OBSERVED_THREAD_POLL_MS,
+  ServiceRuntimeStatus,
+  SELF_UPDATE_STATUS_POLL_MS,
+  SelfUpdateBroadcastSummary,
+  CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS,
+  CODEX_AUTH_PROACTIVE_REFRESH_DAYS,
+  CodexAuthClusterAuditOutcome,
+  CodexAuthRefreshAllResult,
+  CodexAuthCandidate,
+  CodexAuthSelection,
+  CodexAuthState,
+  CodexAuthSwitchResult,
+  CodexAuthRotationReason,
+  CodexAuthSwitchOutcome,
+  CodexAuthRepairDisposition,
+  AUTH_DELETE_REASON_NEEDS_REPAIR,
+  CodexAuthQuotaIdentity,
+  RESTART_PREVIEW_RECOVERY_RETRY_DELAYS_MS,
+  ArchivedStatusContent,
+  ToolBatchState,
+  ActiveTurnSegment,
+} from './state_types.js';
+import {
+  toErrorMeta,
+  formatUserError,
+  isThreadNotFoundError,
+  isThreadActiveWriterError,
+  normalizeHelpUsageKey,
+  normalizeApprovalTextAction,
+  isTelegramMessageGone,
+  stringOrNull,
+  cloneAuthRetryContext,
+  normalizeThreadStatusLabel,
+  formatThreadTokenUsage,
+  mapGoalNotification,
+  formatRawLabel,
+  attachedThreadKey,
+  isFileMissingError,
+  isCodexTransportFallbackWarning,
+  formatWarningNotification,
+  normalizePlanImplementationTextAction,
+  normalizeMcpElicitationTextAction,
+  resolveCollaborationMode,
+  activeTurnKey,
+  parseActiveTurnKey,
+  isReadableSessionPath,
+  isNoActiveTurnToSteerError,
+  isThreadQueueUnsupportedError,
+  normalizeRequestedCollaborationMode,
+  normalizeRequestedActiveTurnMessageMode,
+  parsePositiveInt,
+  parseReviewTarget,
+  formatShortStatusError,
+  formatLocalTimestamp,
+  formatTokenCount,
+  formatCodexTokenCountWithMetric,
+  formatCompactNumber,
+  formatWatchCallbackText,
+  isThreadNewCwdCreateConfirmation,
+  isThreadNewCwdCancelConfirmation,
+  turnHasRelayableOutcome,
+  isTelegramMessageTooLong,
+  firstLine,
+} from './shared_helpers.js';
+import {
+  formatCodexAuthPoolSummary,
+  formatRemoteStatusMessage,
+  isInvalidCodexAuthDeleteReason,
+  formatRichInternalMessage,
+  formatGoalMessage,
+  formatHistoryMessage,
+  formatFuzzyFilesMessage,
+  formatSelfUpdateBroadcastLine,
+  formatSelfUpdateVersionTransition,
+  formatCodexUpdateState,
+  renderTelegramTable,
+  formatRichDemoMessage,
+  formatRichDemoFallbackMessage,
+  formatRichDiffMessage,
+  formatDiffMessage,
+} from './native_panels.js';
+import {
+  formatAuthProactiveRefreshStatus,
+  selectCodexRateLimitSnapshot,
+  parseCodexAuthListRequest,
+  createPendingAuthChoiceList,
+  renderAuthListMessage,
+  authChoiceKeyboard,
+  formatAuthSyncStatus,
+  formatAuthSyncEvents,
+  formatAuthSyncTrace,
+  formatAuthClusterAuditResult,
+  authRefreshAllConfirmKeyboard,
+  formatAuthRefreshAllResult,
+  formatCodexAccountLabel,
+  formatPlanTypeLabel,
+  clampCodexAuthListOffset,
+  formatCodexAuthCandidateDisplayName,
+  authRepairKeyboard,
+  chatGptAuthMetadataCompatible,
+  formatRateLimitWindowLabel,
+  formatRemainingUsagePercent,
+} from './auth_presentation.js';
+import {
+  mapApprovalDecision,
+  parseStoredServerRequestId,
+  renderApprovalMessage,
+  approvalKeyboard,
+  resolveScopeMessageTarget,
+  parseServerRequestId,
+  stringifyServerRequestId,
+  sameServerRequestId,
+  renderUserInputMessage,
+  parseUserInputQuestions,
+  serializePendingUserInput,
+  userInputKeyboard,
+  stringifyPendingUserInputAnswers,
+  pendingUserInputCurrentQuestionIndex,
+  parseStoredPendingUserInput,
+  renderPlanImplementationPrompt,
+  planImplementationKeyboard,
+  renderMcpElicitationMessage,
+  mcpElicitationKeyboard,
+  findReusableStandaloneAttachmentBatch,
+  parseStagedTelegramAttachments,
+  mergeAttachmentBatchCaption,
+  summarizeStagedAttachmentInput,
+  shortId,
+  renderAttachmentBatchMessage,
+  attachmentBatchKeyboard,
+  observerCursorFromActiveTurn,
+  parseStoredTurnInput,
+  threadNewCwdCreateKeyboard,
+  whereKeyboard,
+  restartPreviewRecoveryKey,
+  seedObservedTurnCursor,
+  activeTurnKeyboard,
+} from './interactions.js';
+import {
+  isRetryableCodexTransportError,
+  formatCodexNotificationError,
+  classifyCodexAuthRotationError,
+  isCodexAuthInvalidError,
+  isCodexQuotaLimitError,
+} from './auth_errors.js';
+import {
+  truncateInline,
+  ensureTurnSegment,
+  extractLatestPlanMarkdown,
+  extractLatestProposedPlanMarkdown,
+  renderCollapsedCommentary,
+  formatToolBatchStatus,
+  createToolBatchState,
+  describeExecCommand,
+  incrementToolBatchCount,
+  renderArchivedToolBatchStatus,
+} from './turn_rendering.js';
+import {
+  pointCodexAuthAtTarget,
+  restoreCodexAuthTarget,
+  codexAuthCandidateNameFromAddName,
+  authPathDisplayLabel,
+  listCodexAuthState,
+  switchCodexAuth,
+  isCodexApiKeyAuthCandidate,
+} from './auth_files.js';
+export type { CoreCoordinator } from './state_types.js';
 
 export class BridgeSessionCore {
+  private readonly listeners = new ListenerScope();
+  private readonly controlOperations = new Set<Promise<void>>();
+  private controlPlaneStarted = false;
+  private recoverExecution = true;
+  private executionHost: { ownsScope(scopeId: string): boolean; hasExecutingTasks(): boolean } | null = null;
+  private readonly localUsage: CodexLocalUsageService;
+  private readonly authQuota: CodexAuthQuotaService;
+  private readonly nativePanels: CodexNativePanelService;
+
   private activeTurns = new Map<string, ActiveTurn>();
   private activeTurnsByTurnId = new Map<string, Set<string>>();
   private observedThreadWatchers = new Map<string, ObservedThreadWatcher>();
@@ -622,11 +334,11 @@ export class BridgeSessionCore {
   private externalAuthValidationInProgress = false;
   private turnStartInProgress = 0;
   private authRotationFailedTargets = new Set<string>();
-  private localUsageCache: CodexLocalUsageSnapshot | null = null;
-  private localUsageCacheLoaded = false;
-  private localUsageRefresh: Promise<void> | null = null;
-  private authQuotaSnapshots: Record<string, CodexAuthQuotaSnapshot> = {};
-  private authQuotaSnapshotsLoaded = false;
+
+
+
+
+
   private lastRemoteControlStatus: RemoteControlStatusState | null = null;
   private pendingThreadRenames = new Map<string, PendingThreadRename>();
   private pendingThreadNewCwds = new Map<string, PendingThreadNewCwd>();
@@ -665,7 +377,17 @@ export class BridgeSessionCore {
     private readonly ownsTelegramRuntime = true,
   ) {
     this.messaging = outbound;
+    this.localUsage = new CodexLocalUsageService(config, store);
+    this.authQuota = new CodexAuthQuotaService(config, store, logger, app, name => this.syncCodexAuthCandidate(name));
+    this.nativePanels = new CodexNativePanelService(config, store, logger, app, { sendMessage: (scope, text, keyboard) => this.sendMessage(scope, text, keyboard), editMessage: (scope, id, text, keyboard) => this.editMessage(scope, id, text, keyboard), scheduleStalePanelDeletion: (scope, id) => this.scheduleStalePanelDeletion(scope, id), answerCallback: (id, text) => this.messaging.answerCallback(id, text) });
+
   }
+
+  attachExecutionHost(host: { ownsScope(scopeId: string): boolean; hasExecutingTasks(): boolean }): void { this.executionHost = host; }
+  async startControlPlane(): Promise<void> { await this.startCodexApp({ recoverExecution: false }); }
+  async stopControlPlane(): Promise<void> { await this.stop({ keepTransports: true }); }
+  getPendingApprovalCount(): number { return this.pendingApprovalMessages.size; }
+  async dispatchBackendCommand(event: TelegramTextEvent): Promise<void> { await this.withLock(event.scopeId, () => this.handleText(event)); }
 
   /** Wire Telegram inbound events. Call before {@link startCodexApp}. */
   registerTelegramInboundHandlers(): void {
@@ -708,31 +430,31 @@ export class BridgeSessionCore {
   }
 
   /** Start Codex app-server transport and attach RPC listeners. */
-  async startCodexApp(): Promise<void> {
+  async startCodexApp(options?: { recoverExecution?: boolean }): Promise<void> {
+    if (this.controlPlaneStarted) return;
+    this.controlPlaneStarted = true;
+    this.recoverExecution = options?.recoverExecution !== false;
     this.stopping = false;
-    this.app.on('notification', (msg: JsonRpcNotification) => {
-      void this.handleNotification(msg).catch((error) => {
-        void this.handleAsyncError('codex.notification', error);
-      });
+    this.listeners.listen(this.app, 'notification', (msg: JsonRpcNotification) => {
+      this.trackControlOperation(this.handleNotification(msg).catch(error => this.handleAsyncError('codex.notification', error)));
     });
-    this.app.on('serverRequest', (msg: JsonRpcServerRequest) => {
-      void this.handleServerRequest(msg).catch((error) => {
-        void this.handleAsyncError('codex.server_request', error);
-      });
+    this.listeners.listen(this.app, 'serverRequest', (msg: JsonRpcServerRequest) => {
+      this.trackControlOperation(this.handleServerRequest(msg).catch(error => this.handleAsyncError('codex.server_request', error)));
     });
-    this.app.on('connected', () => {
+    this.listeners.listen(this.app, 'connected', () => {
       this.attachedThreads.clear();
       this.lastError = null;
       this.updateStatus();
     });
-    this.app.on('ready', () => {
+    this.listeners.listen(this.app, 'ready', () => {
+      if (!this.recoverExecution) return;
       if (!this.codexReconnectPending || this.stopping) {
         return;
       }
       this.codexReconnectPending = false;
       this.scheduleCodexReconnectRecovery();
     });
-    this.app.on('disconnected', () => {
+    this.listeners.listen(this.app, 'disconnected', () => {
       this.attachedThreads.clear();
       this.threadTokenUsageAlerts.clear();
       if (!this.stopping) {
@@ -751,7 +473,8 @@ export class BridgeSessionCore {
       this.updateStatus();
     });
 
-    await this.app.start();
+    if (typeof this.app.isConnected !== 'function' || !this.app.isConnected()) await this.app.start();
+    if (options?.recoverExecution !== false) {
     this.store.requeueInterruptedQueuedTurnInputs();
     await this.restorePendingUserInputs();
     await this.restoreGuidedPlanSessions();
@@ -759,6 +482,7 @@ export class BridgeSessionCore {
     void this.recoverQueuedTurns().catch((error) => {
       this.logger.warn('codex.queued_turn_recovery_failed', { error: toErrorMeta(error) });
     });
+    }
     void this.refreshCodexLocalUsageIfNeeded().catch((error) => {
       this.logger.warn('codex.local_usage_background_refresh_failed', { error: formatUserError(error) });
     });
@@ -781,8 +505,15 @@ export class BridgeSessionCore {
     await this.startTelegramPolling();
   }
 
-  async stop(): Promise<void> {
+  async stop(options?: { keepTransports?: boolean }): Promise<void> {
     this.stopping = true;
+    this.controlPlaneStarted = false;
+    this.listeners.clear();
+    this.clearObservedThreadWatchers();
+    this.clearSelfUpdateStatusPoll();
+    this.clearProactiveAuthRefreshTimer();
+    while (this.controlOperations.size) await Promise.allSettled([...this.controlOperations]);
+    await this.localUsage.stop();
     this.codexReconnectPending = false;
     this.pendingTurnErrors.clear();
     this.pendingUserInputs.clear();
@@ -805,7 +536,7 @@ export class BridgeSessionCore {
     this.turnStartInProgress = 0;
     this.clearObservedThreadWatchers();
     this.releaseActiveTurnsForBridgeShutdown();
-    this.bot.stop();
+    if (!options?.keepTransports && this.ownsTelegramRuntime) await this.bot.stop();
     for (const timer of this.approvalTimers.values()) {
       clearTimeout(timer);
     }
@@ -821,7 +552,7 @@ export class BridgeSessionCore {
       clearTimeout(timer);
     }
     this.stalePanelDeleteTimers.clear();
-    await this.app.stop({ terminateServer: false });
+    if (!options?.keepTransports) await this.app.stop({ terminateServer: false });
     this.updateStatus();
   }
 
@@ -850,6 +581,8 @@ export class BridgeSessionCore {
   }
 
   private async handleText(event: TelegramTextEvent): Promise<void> {
+    const action = this.messaging.resolveAction(event);
+    if (action) { await this.handleCallback(action); return; }
     const scopeId = event.scopeId;
     const locale = this.localeForChat(scopeId, event.languageCode);
     if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
@@ -1886,7 +1619,14 @@ export class BridgeSessionCore {
     await this.markApprovalResolvedForAllScopes(approval, action, scopeId);
   }
 
+  private trackControlOperation(operation: Promise<void>): void {
+    this.controlOperations.add(operation);
+    void operation.catch(error => this.logger.warn('codex.control_operation_failed', { error: toErrorMeta(error) }))
+      .finally(() => this.controlOperations.delete(operation));
+  }
+
   private async handleNotification(notification: JsonRpcNotification): Promise<void> {
+    if (this.stopping) return;
     const activity = normalizeTurnActivityEvent(notification);
     if (activity) {
       await this.handleTurnActivityEvent(activity);
@@ -1895,6 +1635,7 @@ export class BridgeSessionCore {
 
     switch (notification.method) {
       case 'sessionConfigured': {
+        if (!this.recoverExecution) return;
         const params = notification.params as any;
         const threadId = String(params.session_id || '');
         if (!threadId) return;
@@ -2014,6 +1755,9 @@ export class BridgeSessionCore {
   }
 
   private async handleServerRequest(request: JsonRpcServerRequest): Promise<void> {
+    if (this.stopping) return;
+    const threadId = (request.params as { threadId?: unknown } | null)?.threadId;
+    if (this.executionHost && typeof threadId === 'string' && !this.findChatByThread(threadId)) return;
     switch (request.method) {
       case 'item/commandExecution/requestApproval': {
         const params = request.params as any;
@@ -2170,6 +1914,12 @@ export class BridgeSessionCore {
     const turnId = stringOrNull(params?.turn?.id);
     const threadId = stringOrNull(params?.threadId);
     if (!turnId || !threadId) {
+      return;
+    }
+    if (!this.recoverExecution) {
+      for (const watcher of this.observedThreadWatchers.values()) {
+        if (!watcher.stopped && watcher.threadId === threadId) await this.ensureObservedActiveTurnState(watcher, turnId);
+      }
       return;
     }
     for (const scopeId of this.findAllChatsByThread(threadId)) {
@@ -2525,15 +2275,16 @@ export class BridgeSessionCore {
   }
 
   private scheduleAuthLoginRecovery(loginId: string): void {
+    if (this.stopping) return;
     const timer = setTimeout(() => {
       this.authLoginRecoveryTimers.delete(loginId);
-      void this.recoverAuthLogin(loginId).catch(error => {
+      this.trackControlOperation(this.recoverAuthLogin(loginId).catch(error => {
         this.logger.warn('codex.auth_login_recovery_failed', { error: toErrorMeta(error) });
       }).finally(() => {
         if (!this.stopping && this.pendingAuthAddsByLoginId.has(loginId)) {
           this.scheduleAuthLoginRecovery(loginId);
         }
-      });
+      }));
     }, 5_000);
     timer.unref();
     this.authLoginRecoveryTimers.set(loginId, timer);
@@ -2608,7 +2359,7 @@ export class BridgeSessionCore {
   }
 
   private async handleRateLimitsUpdated(): Promise<void> {
-    this.localUsageCache = null;
+    this.localUsage.invalidate();
   }
 
   private async handleSkillsChangedNotification(): Promise<void> {
@@ -3518,7 +3269,7 @@ export class BridgeSessionCore {
         sandboxMode: access.sandboxMode,
         cwd,
         model: settings?.model ?? null,
-        effort: settings?.reasoningEffort ?? null,
+        effort: normalizeRequestedEffort(settings?.reasoningEffort ?? ''),
         serviceTier,
         collaborationMode,
       });
@@ -3549,7 +3300,7 @@ export class BridgeSessionCore {
         sandboxMode: nextAccess.sandboxMode,
         cwd: replacementCwd,
         model: nextSettings?.model ?? null,
-        effort: nextSettings?.reasoningEffort ?? null,
+        effort: normalizeRequestedEffort(nextSettings?.reasoningEffort ?? ''),
         serviceTier: replacementServiceTier,
         collaborationMode: replacementCollaborationMode,
       });
@@ -4096,7 +3847,7 @@ export class BridgeSessionCore {
   }
 
   isIdleForServiceUpdate(): boolean {
-    return this.activeTurns.size === 0
+    return !this.executionHost?.hasExecutingTasks() && this.activeTurns.size === 0
       && this.pendingApprovalMessages.size === 0
       && this.pendingUserInputs.size === 0
       && this.pendingMcpElicitations.size === 0
@@ -4121,6 +3872,7 @@ export class BridgeSessionCore {
   }
 
   private ownsScope(scopeId: string): boolean {
+    if (this.executionHost) return this.executionHost.ownsScope(scopeId);
     if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
       return this.messaging.hasWeixinTransport;
     }
@@ -4575,7 +4327,7 @@ export class BridgeSessionCore {
   }
 
   private scheduleStalePanelDeletion(scopeId: string, messageId: number): void {
-    if (this.config.telegramPanelTtlMs <= 0 || parseWeixinBridgeScope(scopeId)) {
+    if (this.stopping || this.config.telegramPanelTtlMs <= 0 || parseWeixinBridgeScope(scopeId)) {
       return;
     }
     const key = `${scopeId}:${messageId}`;
@@ -4585,9 +4337,9 @@ export class BridgeSessionCore {
     }
     const timer = setTimeout(() => {
       this.stalePanelDeleteTimers.delete(key);
-      void this.deleteMessage(scopeId, messageId).catch(error => {
+      this.trackControlOperation(this.deleteMessage(scopeId, messageId).catch(error => {
         this.logger.warn('telegram.stale_panel_delete_failed', { scopeId, messageId, error: toErrorMeta(error) });
-      });
+      }));
     }, this.config.telegramPanelTtlMs);
     timer.unref();
     this.stalePanelDeleteTimers.set(key, timer);
@@ -4762,9 +4514,10 @@ export class BridgeSessionCore {
   }
 
   private armApprovalTimer(localId: string): void {
+    if (this.stopping) return;
     this.clearApprovalTimer(localId);
     const timer = setTimeout(() => {
-      void this.expireApproval(localId);
+      this.trackControlOperation(this.expireApproval(localId));
     }, 5 * 60 * 1000);
     this.approvalTimers.set(localId, timer);
   }
@@ -4777,14 +4530,15 @@ export class BridgeSessionCore {
   }
 
   private armSubmittedUserInputTimer(localId: string): void {
+    if (this.stopping) return;
     this.clearSubmittedUserInputTimer(localId);
     const timer = setTimeout(() => {
-      void this.notifySubmittedUserInputStillWaiting(localId).catch((error) => {
+      this.trackControlOperation(this.notifySubmittedUserInputStillWaiting(localId).catch((error) => {
         this.logger.warn('telegram.user_input_waiting_notice_failed', {
           localId,
           error: toErrorMeta(error),
         });
-      });
+      }));
     }, USER_INPUT_SUBMITTED_NOTICE_MS);
     timer.unref?.();
     this.submittedUserInputTimers.set(localId, timer);
@@ -4964,9 +4718,9 @@ export class BridgeSessionCore {
       }
     });
     this.codexReconnectRecovery = trackedRecovery;
-    void this.codexReconnectRecovery.catch((error) => {
+    this.trackControlOperation(this.codexReconnectRecovery.catch((error) => {
       this.logger.error('codex.reconnect_recovery_failed', { error: toErrorMeta(error) });
-    });
+    }));
   }
 
   private async recoverAfterCodexReconnect(): Promise<void> {
@@ -5202,12 +4956,12 @@ export class BridgeSessionCore {
   }
 
   private scheduleObservedThreadPoll(watcher: ObservedThreadWatcher): void {
-    if (watcher.stopped) {
+    if (watcher.stopped || this.stopping) {
       return;
     }
     watcher.timer = setTimeout(() => {
       watcher.timer = null;
-      void this.pollObservedThread(watcher).catch((error) => {
+      this.trackControlOperation(this.pollObservedThread(watcher).then(() => {}).catch((error) => {
         this.logger.error('codex.observe_thread_failed', {
           scopeId: watcher.scopeId,
           threadId: watcher.threadId,
@@ -5217,7 +4971,7 @@ export class BridgeSessionCore {
         if (!watcher.stopped && this.observedThreadWatchers.get(watcher.scopeId) === watcher) {
           this.scheduleObservedThreadPoll(watcher);
         }
-      });
+      }));
     }, OBSERVED_THREAD_POLL_MS);
   }
 
@@ -6187,15 +5941,15 @@ export class BridgeSessionCore {
   }
 
   private scheduleSelfUpdateStatusPoll(delay = SELF_UPDATE_STATUS_POLL_MS): void {
-    if (!this.selfUpdater || this.selfUpdatePollTimer) {
+    if (this.stopping || !this.selfUpdater || this.selfUpdatePollTimer) {
       return;
     }
     this.selfUpdatePollTimer = setTimeout(() => {
       this.selfUpdatePollTimer = null;
-      void this.pollSelfUpdateStatus().catch((error) => {
+      this.trackControlOperation(this.pollSelfUpdateStatus().catch((error) => {
         this.logger.error('self_update.poll_failed', { error: toErrorMeta(error) });
         this.scheduleSelfUpdateStatusPoll();
-      });
+      }));
     }, delay);
   }
 
@@ -6348,16 +6102,16 @@ export class BridgeSessionCore {
   }
 
   private scheduleProactiveAuthRefresh(delayMs = CODEX_AUTH_PROACTIVE_REFRESH_INTERVAL_MS): void {
-    if (this.proactiveAuthRefreshTimer) {
+    if (this.stopping || this.proactiveAuthRefreshTimer) {
       return;
     }
     this.proactiveAuthRefreshTimer = setTimeout(() => {
       this.proactiveAuthRefreshTimer = null;
-      void this.runProactiveAuthRefresh().catch((error) => {
+      this.trackControlOperation(this.runProactiveAuthRefresh().catch((error) => {
         this.logger.warn('codex.auth_proactive_refresh_failed', { error: toErrorMeta(error) });
       }).finally(() => {
         this.scheduleProactiveAuthRefresh();
-      });
+      }));
     }, delayMs);
     this.proactiveAuthRefreshTimer.unref();
   }
@@ -7265,239 +7019,58 @@ export class BridgeSessionCore {
     );
   }
 
-  private async handleLoadedCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    const threadIds = await this.app.listLoadedThreads();
-    await this.sendMessage(scopeId, formatLoadedThreadsMessage(locale, threadIds));
-  }
+  private async handleLoadedCommand(scopeId: string, locale: AppLocale): Promise<void> { return this.nativePanels.handleLoadedCommand(scopeId, locale); }
 
-  private async handleSkillsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const forceReload = args[0]?.toLowerCase() === 'reload';
-    const query = (forceReload ? args.slice(1) : args).join(' ').trim();
-    const entries = await this.listSkillsForScope(scopeId, forceReload);
-    await this.sendMessage(scopeId, formatSkillsMessage(locale, entries, query || null, forceReload));
-  }
+  private async handleSkillsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handleSkillsCommand(scopeId, locale, args); }
 
-  private async handleSkillCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const name = args.join(' ').trim();
-    if (!name) {
-      await this.sendMessage(scopeId, t(locale, 'usage_skill'));
-      return;
-    }
-    const skill = findSkill(await this.listSkillsForScope(scopeId, false), name);
-    if (!skill) {
-      await this.sendMessage(scopeId, t(locale, 'skill_not_found', { name }));
-      return;
-    }
-    await this.sendMessage(scopeId, formatSkillDetailMessage(locale, skill));
-  }
+  private async handleSkillCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handleSkillCommand(scopeId, locale, args); }
 
-  private async handleSkillConfigCommand(scopeId: string, locale: AppLocale, args: string[], enabled: boolean): Promise<void> {
-    const name = args.join(' ').trim();
-    if (!name) {
-      await this.sendMessage(scopeId, enabled ? t(locale, 'usage_skill_enable') : t(locale, 'usage_skill_disable'));
-      return;
-    }
-    await this.app.writeSkillConfig({ name }, enabled);
-    await this.sendMessage(scopeId, t(locale, enabled ? 'skill_enabled' : 'skill_disabled', { name }));
-  }
+  private async handleSkillConfigCommand(scopeId: string, locale: AppLocale, args: string[], enabled: boolean): Promise<void> { return this.nativePanels.handleSkillConfigCommand(scopeId, locale, args, enabled); }
 
-  private async handleHooksCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    const binding = this.store.getBinding(scopeId);
-    const entries = await this.app.listHooks(binding?.cwd ?? this.config.defaultCwd);
-    await this.sendMessage(scopeId, formatHooksMessage(locale, entries));
-  }
+  private async handleHooksCommand(scopeId: string, locale: AppLocale): Promise<void> { return this.nativePanels.handleHooksCommand(scopeId, locale); }
 
-  private async handlePluginsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const query = args.join(' ').trim() || null;
-    const binding = this.store.getBinding(scopeId);
-    const marketplaces = await this.app.listPlugins(binding?.cwd ?? this.config.defaultCwd);
-    await this.sendMessage(scopeId, formatPluginsMessage(locale, marketplaces, query));
-  }
+  private async handlePluginsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handlePluginsCommand(scopeId, locale, args); }
 
-  private async handlePluginCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const name = args.join(' ').trim();
-    if (!name) {
-      await this.sendMessage(scopeId, t(locale, 'usage_plugin'));
-      return;
-    }
-    const plugin = await this.app.readPlugin(name);
-    if (!plugin) {
-      await this.sendMessage(scopeId, t(locale, 'plugin_not_found', { name }));
-      return;
-    }
-    await this.sendMessage(scopeId, formatPluginDetailMessage(locale, plugin));
-  }
+  private async handlePluginCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handlePluginCommand(scopeId, locale, args); }
 
-  private async handlePluginSkillCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const [marketplace, plugin, ...skillParts] = args;
-    const skill = skillParts.join(' ').trim();
-    if (!marketplace || !plugin || !skill) {
-      await this.sendMessage(scopeId, t(locale, 'usage_plugin_skill'));
-      return;
-    }
-    const contents = await this.app.readPluginSkill(marketplace, plugin, skill);
-    await this.sendMessage(scopeId, formatPluginSkillMessage(locale, marketplace, plugin, skill, contents));
-  }
+  private async handlePluginSkillCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handlePluginSkillCommand(scopeId, locale, args); }
 
-  private async handleAppsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const forceRefetch = args[0]?.toLowerCase() === 'reload';
-    const binding = this.store.getBinding(scopeId);
-    const apps = await this.app.listApps(binding?.threadId ?? null, forceRefetch);
-    await this.sendMessage(scopeId, formatAppsMessage(locale, apps, forceRefetch));
-  }
+  private async handleAppsCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handleAppsCommand(scopeId, locale, args); }
 
-  private async handleFeaturesCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    const features = await this.app.listExperimentalFeatures();
-    await this.sendMessage(scopeId, formatFeaturesMessage(locale, features));
-  }
+  private async handleFeaturesCommand(scopeId: string, locale: AppLocale): Promise<void> { return this.nativePanels.handleFeaturesCommand(scopeId, locale); }
 
-  private async handleConfigCommand(scopeId: string, locale: AppLocale, args: string[] = []): Promise<void> {
-    const action = args[0]?.toLowerCase() ?? '';
-    if (['auth_auto_delete', 'auth-auto-delete', 'auto_delete_needs_repair', 'auto-delete-needs-repair'].includes(action)) {
-      const enabled = parseConfigBooleanArg(args[1]);
-      if (enabled === null) {
-        await this.sendMessage(scopeId, t(locale, 'config_auth_auto_delete_usage'));
-        return;
-      }
-      const update = await this.setFoxClawBooleanConfig('auth_auto_delete', enabled);
-      const binding = this.store.getBinding(scopeId);
-      const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-      const sentMessageId = await this.sendMessage(
-        scopeId,
-        `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
-        configKeyboard(locale, this.config),
-      );
-      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
-      return;
-    }
-    if (['delete_tool_details', 'delete-tool-details', 'tool_details', 'tool-details'].includes(action)) {
-      const enabled = parseConfigBooleanArg(args[1]);
-      if (enabled === null) {
-        await this.sendMessage(scopeId, t(locale, 'config_delete_tool_details_usage'));
-        return;
-      }
-      const update = await this.setFoxClawBooleanConfig('delete_tool_details', enabled);
-      const binding = this.store.getBinding(scopeId);
-      const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-      const sentMessageId = await this.sendMessage(
-        scopeId,
-        `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`,
-        configKeyboard(locale, this.config),
-      );
-      this.scheduleStalePanelDeletion(scopeId, sentMessageId);
-      return;
-    }
-    const binding = this.store.getBinding(scopeId);
-    const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-    const sentMessageId = await this.sendMessage(scopeId, formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats()), configKeyboard(locale, this.config));
-    this.scheduleStalePanelDeletion(scopeId, sentMessageId);
-  }
+  private async handleConfigCommand(scopeId: string, locale: AppLocale, args: string[] = []): Promise<void> { return this.nativePanels.handleConfigCommand(scopeId, locale, args); }
 
   private async handleConfigToggleCallback(
     event: TelegramCallbackEvent,
     key: 'auth_auto_delete' | 'delete_tool_details',
     enabled: boolean,
     locale: AppLocale,
-  ): Promise<void> {
-    const update = await this.setFoxClawBooleanConfig(key, enabled);
-    await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
-    const binding = this.store.getBinding(event.scopeId);
-    const result = await this.app.readConfig(binding?.cwd ?? this.config.defaultCwd, true);
-    const message = `${this.formatConfigToggleUpdate(locale, update)}\n\n${formatConfigMessage(locale, result, this.config, this.store.getCodexAuthPoolStats())}`;
-    if (event.messageId !== null) {
-      await this.editMessage(event.scopeId, event.messageId, message, configKeyboard(locale, this.config));
-      this.scheduleStalePanelDeletion(event.scopeId, event.messageId);
-    } else {
-      const sentMessageId = await this.sendMessage(event.scopeId, message, configKeyboard(locale, this.config));
-      this.scheduleStalePanelDeletion(event.scopeId, sentMessageId);
-    }
-  }
+  ): Promise<void> { return this.nativePanels.handleConfigToggleCallback(event, key, enabled, locale); }
 
   private async setFoxClawBooleanConfig(
     key: 'auth_auto_delete' | 'delete_tool_details',
     enabled: boolean,
-  ): Promise<{ key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envKey: string; envPath: string | null; envUpdated: boolean; envError: string | null }> {
-    const envKey = key === 'auth_auto_delete'
-      ? 'AUTH_AUTO_DELETE_NEEDS_REPAIR'
-      : 'TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL';
-    if (key === 'auth_auto_delete') {
-      this.config.authAutoDeleteNeedsRepair = enabled;
-    } else {
-      this.config.telegramDeleteToolDetailsAfterFinal = enabled;
-    }
-    const envPath = this.config.envPath;
-    if (!envPath) {
-      return { key, enabled, envKey, envPath: null, envUpdated: false, envError: null };
-    }
-    try {
-      await writeEnvBoolean(envPath, envKey, enabled);
-      return { key, enabled, envKey, envPath, envUpdated: true, envError: null };
-    } catch (error) {
-      this.logger.warn('config.env_update_failed', { key: envKey, envPath, error: toErrorMeta(error) });
-      return { key, enabled, envKey, envPath, envUpdated: false, envError: formatUserError(error) };
-    }
-  }
+  ): Promise<{ key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envKey: string; envPath: string | null; envUpdated: boolean; envError: string | null }> { return this.nativePanels.setFoxClawBooleanConfig(key, enabled); }
 
   private formatConfigToggleUpdate(
     locale: AppLocale,
     update: { key: 'auth_auto_delete' | 'delete_tool_details'; enabled: boolean; envPath: string | null; envUpdated: boolean; envError: string | null },
-  ): string {
-    const lines = [t(locale, update.key === 'auth_auto_delete' ? 'config_auth_auto_delete_updated' : 'config_delete_tool_details_updated', {
-      value: t(locale, update.enabled ? 'yes' : 'no'),
-    })];
-    if (update.envError) {
-      lines.push(t(locale, 'config_env_update_failed', { value: update.envPath ?? t(locale, 'unknown'), error: update.envError }));
-    }
-    return lines.join('\n');
-  }
+  ): string { return this.nativePanels.formatConfigToggleUpdate(locale, update); }
 
-  private async handleRequirementsCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    const requirements = await this.app.readConfigRequirements();
-    await this.sendMessage(scopeId, formatRequirementsMessage(locale, requirements));
-  }
+  private async handleRequirementsCommand(scopeId: string, locale: AppLocale): Promise<void> { return this.nativePanels.handleRequirementsCommand(scopeId, locale); }
 
-  private async handleProviderCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    const capabilities = await this.app.readModelProviderCapabilities();
-    await this.sendMessage(scopeId, formatProviderMessage(locale, capabilities));
-  }
+  private async handleProviderCommand(scopeId: string, locale: AppLocale): Promise<void> { return this.nativePanels.handleProviderCommand(scopeId, locale); }
 
-  private async handleMcpCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const detail = args[0]?.toLowerCase() === 'brief' ? 'toolsAndAuthOnly' : 'full';
-    const statuses = await this.app.listMcpServerStatus(detail);
-    await this.sendMessage(scopeId, formatMcpStatusMessage(locale, statuses));
-  }
+  private async handleMcpCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handleMcpCommand(scopeId, locale, args); }
 
-  private async handleMcpReloadCommand(scopeId: string, locale: AppLocale): Promise<void> {
-    await this.app.reloadMcpServers();
-    await this.sendMessage(scopeId, t(locale, 'mcp_reload_done'));
-  }
+  private async handleMcpReloadCommand(scopeId: string, locale: AppLocale): Promise<void> { return this.nativePanels.handleMcpReloadCommand(scopeId, locale); }
 
-  private async handleMcpLoginCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const name = args.join(' ').trim();
-    if (!name) {
-      await this.sendMessage(scopeId, t(locale, 'usage_mcp_login'));
-      return;
-    }
-    const url = await this.app.loginMcpServer(name);
-    await this.sendMessage(scopeId, t(locale, 'mcp_login_started', { name, url: url || t(locale, 'unknown') }));
-  }
+  private async handleMcpLoginCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handleMcpLoginCommand(scopeId, locale, args); }
 
-  private async handleMcpResourceCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
-    const [server, ...uriParts] = args;
-    const uri = uriParts.join(' ').trim();
-    if (!server || !uri) {
-      await this.sendMessage(scopeId, t(locale, 'usage_mcp_resource'));
-      return;
-    }
-    const binding = this.store.getBinding(scopeId);
-    const contents = await this.app.readMcpResource(server, uri, binding?.threadId ?? null);
-    await this.sendMessage(scopeId, formatMcpResourceMessage(locale, server, uri, contents));
-  }
+  private async handleMcpResourceCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> { return this.nativePanels.handleMcpResourceCommand(scopeId, locale, args); }
 
-  private async listSkillsForScope(scopeId: string, forceReload: boolean): Promise<CodexSkillsListEntry[]> {
-    const binding = this.store.getBinding(scopeId);
-    return this.app.listSkills(binding?.cwd ?? this.config.defaultCwd, forceReload);
-  }
+  private async listSkillsForScope(scopeId: string, forceReload: boolean): Promise<CodexSkillsListEntry[]> { return this.nativePanels.listSkillsForScope(scopeId, forceReload); }
 
   private async requireReadyBinding(scopeId: string, locale: AppLocale): Promise<ThreadBinding | null> {
     const binding = this.store.getBinding(scopeId);
@@ -8474,7 +8047,7 @@ export class BridgeSessionCore {
         mode,
         settings: {
           model,
-          reasoning_effort: reasoningEffort,
+          reasoning_effort: normalizeRequestedEffort(reasoningEffort ?? ''),
           developer_instructions: config.developerInstructions,
         },
       };
@@ -8610,214 +8183,39 @@ export class BridgeSessionCore {
     }
   }
 
-  private async readCachedCodexLocalUsageStats(): Promise<CodexLocalUsageSnapshot | null> {
-    if (this.localUsageCacheLoaded) {
-      return this.localUsageCache;
-    }
-    this.localUsageCache = await readCodexLocalUsageSnapshot(this.codexLocalUsageSnapshotPath());
-    this.localUsageCacheLoaded = true;
-    return this.localUsageCache;
-  }
+  private async readCachedCodexLocalUsageStats(): Promise<CodexLocalUsageSnapshot | null> { return this.localUsage.readCachedCodexLocalUsageStats(); }
 
-  private async refreshCodexLocalUsageIfNeeded(snapshot?: CodexLocalUsageSnapshot | null): Promise<void> {
-    const current = snapshot === undefined ? await this.readCachedCodexLocalUsageStats() : snapshot;
-    if (current && Date.now() - current.computedAtMs < CODEX_LOCAL_USAGE_REFRESH_MS) {
-      return;
-    }
-    if (this.localUsageRefresh) {
-      return;
-    }
-    this.localUsageRefresh = this.refreshCodexLocalUsageStats().finally(() => {
-      this.localUsageRefresh = null;
-    });
-    await this.localUsageRefresh;
-  }
+  private async refreshCodexLocalUsageIfNeeded(snapshot?: CodexLocalUsageSnapshot | null): Promise<void> { return this.localUsage.refreshCodexLocalUsageIfNeeded(snapshot); }
 
-  private async refreshCodexLocalUsageStats(): Promise<void> {
-    const stats = await readCodexLocalUsageStats(this.config.codexHome ?? undefined);
-    const snapshot = { computedAtMs: Date.now(), stats };
-    this.localUsageCache = snapshot;
-    this.localUsageCacheLoaded = true;
-    await writeCodexLocalUsageSnapshot(this.codexLocalUsageSnapshotPath(), snapshot);
-    this.store.setBackendCumulativeTokenUsage(
-      {
-        inputTokens: stats.totals.inputTokens,
-        outputTokens: stats.totals.outputTokens,
-        cachedTokens: stats.totals.cachedInputTokens,
-        totalTokens: stats.totals.totalTokens,
-        turnsCount: stats.turns,
-      },
-      'codex',
-    );
-  }
+  private async refreshCodexLocalUsageStats(): Promise<void> { return this.localUsage.refreshCodexLocalUsageStats(); }
 
-  private codexLocalUsageSnapshotPath(): string {
-    return path.join(path.dirname(this.config.statusPath), this.runtimeSnapshotFilename(CODEX_LOCAL_USAGE_SNAPSHOT_FILENAME));
-  }
+  private codexLocalUsageSnapshotPath(): string { return this.localUsage.codexLocalUsageSnapshotPath(); }
 
-  private async refreshCurrentCodexAuthQuota(state: CodexAuthState): Promise<void> {
-    const candidate = state.candidates.find(entry => entry.isCurrent);
-    if (!candidate) {
-      return;
-    }
-    if (candidate.state === 'needs_repair') {
-      return;
-    }
-    try {
-      const metadata = await readChatGptAuthMetadata(candidate.path);
-      if (!metadata || !chatGptAuthMetadataMatchesCandidateName(candidate.name, metadata)) {
-        return;
-      }
-      const snapshot = selectCodexRateLimitSnapshot(await this.app.readAccountRateLimits());
-      if (!snapshot) {
-        return;
-      }
-      const quota = authQuotaSnapshotFromRateLimit(
-        snapshot,
-        metadata?.accountId ?? null,
-        metadata?.quotaIdentityId ?? null,
-      );
-      candidate.quota = quota;
-      await this.recordCodexAuthQuotaSnapshot(candidate.name, metadata, snapshot);
-      await this.applySharedCodexAuthQuotaSnapshots(state);
-      await this.syncCodexAuthCandidate(candidate.name);
-    } catch (error) {
-      this.logger.warn('codex.auth_quota_refresh_failed', { error: formatUserError(error) });
-    }
-  }
+  private async refreshCurrentCodexAuthQuota(state: CodexAuthState): Promise<void> { return this.authQuota.refreshCurrentCodexAuthQuota(state); }
 
   private async applySharedCodexAuthQuotaSnapshots(
     state: CodexAuthState,
     candidateQuotaIdentities?: Map<string, CodexAuthQuotaIdentity>,
-  ): Promise<void> {
-    const quotaIdentities = candidateQuotaIdentities ?? await this.readCodexAuthCandidateQuotaIdentities(state.candidates);
-    const uniqueQuotaIdentityIds = [...new Set([...quotaIdentities.values()].map(identity => identity.quotaIdentityId))];
-    if (uniqueQuotaIdentityIds.length === 0) {
-      return;
-    }
-    const snapshotsByIdentity = new Map<string, CodexAuthQuotaSnapshot>();
-    for (const record of this.store.listCodexAuthQuotaSnapshots(uniqueQuotaIdentityIds)) {
-      if (!isFiniteCodexAuthQuotaSnapshotRecord(record)) {
-        continue;
-      }
-      snapshotsByIdentity.set(
-        record.quotaIdentityId,
-        mergeCodexAuthQuotaSnapshots(
-          snapshotsByIdentity.get(record.quotaIdentityId) ?? null,
-          codexAuthQuotaSnapshotFromRecord(record),
-        )!,
-      );
-    }
-    for (const candidate of state.candidates) {
-      const quotaIdentity = quotaIdentities.get(candidate.name);
-      if (!quotaIdentity) {
-        continue;
-      }
-      candidate.quota = mergeCodexAuthQuotaSnapshots(
-        candidate.quota,
-        snapshotsByIdentity.get(quotaIdentity.quotaIdentityId) ?? null,
-      );
-    }
-  }
+  ): Promise<void> { return this.authQuota.applySharedCodexAuthQuotaSnapshots(state, candidateQuotaIdentities); }
 
   private async recordCodexAuthQuotaSnapshot(
     candidateName: string,
     metadata: ChatGptAuthMetadata | null,
     snapshot: CodexRateLimitSnapshot,
-  ): Promise<void> {
-    const quota = authQuotaSnapshotFromRateLimit(
-      snapshot,
-      metadata?.accountId ?? null,
-      metadata?.quotaIdentityId ?? null,
-    );
-    this.authQuotaSnapshots[candidateName] = quota;
-    if (metadata) {
-      this.store.setCodexAuthQuotaSnapshot(
-        this.authRuntimeId(),
-        candidateName,
-        metadata.accountId,
-        metadata.quotaIdentityId,
-        quota,
-      );
-    }
-    await this.writeCodexAuthQuotaSnapshots();
-  }
+  ): Promise<void> { return this.authQuota.recordCodexAuthQuotaSnapshot(candidateName, metadata, snapshot); }
 
-  private async readCodexAuthCandidateQuotaIdentities(candidates: CodexAuthCandidate[]): Promise<Map<string, CodexAuthQuotaIdentity>> {
-    const entries = await Promise.all(candidates.map(async (candidate) => {
-      const record = await readChatGptAuthRecord(candidate.path);
-      const metadataMatchesName = record
-        ? chatGptAuthMetadataMatchesCandidateName(candidate.name, record)
-        : false;
-      candidate.credentialKind = record && metadataMatchesName
-        ? 'chatgpt'
-        : await isCodexApiKeyAuthCandidate(candidate.path)
-          ? 'api-key'
-          : 'invalid';
-      candidate.credentialLastRefreshMs = record && metadataMatchesName ? record.lastRefreshMs : null;
-      candidate.credentialExpiresAtMs = record && metadataMatchesName ? readAccessTokenExpiresAtMs(record.raw) : null;
-      return [candidate.name, record && metadataMatchesName ? {
-        accountId: record.accountId,
-        quotaIdentityId: record.quotaIdentityId,
-      } : null] as const;
-    }));
-    const quotaIdentities = new Map<string, CodexAuthQuotaIdentity>();
-    for (const [name, quotaIdentity] of entries) {
-      if (quotaIdentity) {
-        quotaIdentities.set(name, quotaIdentity);
-      }
-    }
-    return quotaIdentities;
-  }
+  private async readCodexAuthCandidateQuotaIdentities(candidates: CodexAuthCandidate[]): Promise<Map<string, CodexAuthQuotaIdentity>> { return this.authQuota.readCodexAuthCandidateQuotaIdentities(candidates); }
 
   private codexAuthQuotaSnapshotMatchesIdentity(
     snapshot: CodexAuthQuotaSnapshot | null,
     identity: CodexAuthQuotaIdentity | null,
-  ): snapshot is CodexAuthQuotaSnapshot {
-    if (!snapshot) {
-      return false;
-    }
-    const snapshotIdentityId = snapshot.quotaIdentityId ?? snapshot.accountId ?? null;
-    if (!snapshotIdentityId) {
-      return identity === null;
-    }
-    return identity !== null && snapshotIdentityId === identity.quotaIdentityId;
-  }
+  ): snapshot is CodexAuthQuotaSnapshot { return this.authQuota.codexAuthQuotaSnapshotMatchesIdentity(snapshot, identity); }
 
-  private async readCodexAuthQuotaSnapshots(): Promise<Record<string, CodexAuthQuotaSnapshot>> {
-    if (this.authQuotaSnapshotsLoaded) {
-      return this.authQuotaSnapshots;
-    }
-    this.authQuotaSnapshotsLoaded = true;
-    try {
-      const parsed = JSON.parse(await fs.readFile(this.codexAuthQuotaSnapshotPath(), 'utf8')) as unknown;
-      if (parsed && typeof parsed === 'object') {
-        for (const [name, value] of Object.entries(parsed)) {
-          if (isCodexAuthQuotaSnapshot(value)) {
-            this.authQuotaSnapshots[name] = normalizeCodexAuthQuotaSnapshot(value);
-          }
-        }
-      }
-    } catch {
-      // A missing or invalid historical cache should not block the auth panel.
-    }
-    return this.authQuotaSnapshots;
-  }
+  private async readCodexAuthQuotaSnapshots(): Promise<Record<string, CodexAuthQuotaSnapshot>> { return this.authQuota.readCodexAuthQuotaSnapshots(); }
 
-  private async writeCodexAuthQuotaSnapshots(): Promise<void> {
-    const snapshotPath = this.codexAuthQuotaSnapshotPath();
-    await fs.mkdir(path.dirname(snapshotPath), { recursive: true });
-    const temporaryPath = `${snapshotPath}.${process.pid}.tmp`;
-    await fs.writeFile(temporaryPath, `${JSON.stringify(this.authQuotaSnapshots, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
-    await fs.rename(temporaryPath, snapshotPath);
-  }
+  private async writeCodexAuthQuotaSnapshots(): Promise<void> { return this.authQuota.writeCodexAuthQuotaSnapshots(); }
 
-  private codexAuthQuotaSnapshotPath(): string {
-    return path.join(path.dirname(this.config.statusPath), this.runtimeSnapshotFilename(CODEX_AUTH_QUOTA_SNAPSHOT_FILENAME));
-  }
+  private codexAuthQuotaSnapshotPath(): string { return this.authQuota.codexAuthQuotaSnapshotPath(); }
 
   private runtimeSnapshotFilename(filename: string): string {
     if (!this.config.tgScopeBotId) {
@@ -8858,7 +8256,7 @@ export class BridgeSessionCore {
     const models = await this.app.listModels();
     if (raw === '' || raw.toLowerCase() === 'default' || raw.toLowerCase() === 'reset') {
       const defaultModel = resolveCurrentModel(models, null);
-      const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
+      const nextEffort = clampEffortToModel(defaultModel, normalizeRequestedEffort(settings?.reasoningEffort ?? ''));
       const nextTier = clampServiceTierToModel(defaultModel, settings?.serviceTier ?? null);
       this.store.setChatSettings(scopeId, null, nextEffort.effort);
       if (nextTier.adjusted) {
@@ -8887,7 +8285,7 @@ export class BridgeSessionCore {
       return;
     }
 
-    const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
+    const nextEffort = clampEffortToModel(selected, normalizeRequestedEffort(settings?.reasoningEffort ?? ''));
     const nextTier = clampServiceTierToModel(selected, settings?.serviceTier ?? null);
     this.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
     if (nextTier.adjusted) {
@@ -9691,7 +9089,7 @@ export class BridgeSessionCore {
     if (kind === 'model') {
       if (value === 'default') {
         const defaultModel = resolveCurrentModel(models, null);
-        const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
+        const nextEffort = clampEffortToModel(defaultModel, normalizeRequestedEffort(settings?.reasoningEffort ?? ''));
         const nextTier = clampServiceTierToModel(defaultModel, settings?.serviceTier ?? null);
         this.store.setChatSettings(scopeId, null, nextEffort.effort);
         if (nextTier.adjusted) {
@@ -9709,7 +9107,7 @@ export class BridgeSessionCore {
         await this.messaging.answerCallback(event.callbackQueryId, t(locale, 'model_no_longer_available'));
         return;
       }
-      const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
+      const nextEffort = clampEffortToModel(selected, normalizeRequestedEffort(settings?.reasoningEffort ?? ''));
       const nextTier = clampServiceTierToModel(selected, settings?.serviceTier ?? null);
       this.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
       if (nextTier.adjusted) {
@@ -11006,3381 +10404,6 @@ export class BridgeSessionCore {
         this.latestVoiceSnippetByScope.delete(oldest[1].scopeId);
       }
     }
-  }
-}
-
-function ensureTurnSegment(
-  active: ActiveTurn,
-  itemId: string,
-  phase?: string | null,
-  outputKind?: TurnOutputKind,
-  isPlan?: boolean,
-): ActiveTurnSegment {
-  let segment = active.segments.find((entry) => entry.itemId === itemId);
-  if (segment) {
-    if (phase !== undefined) {
-      segment.phase = phase;
-    }
-    if (outputKind !== undefined) {
-      segment.outputKind = outputKind;
-    }
-    if (isPlan !== undefined) {
-      segment.isPlan = segment.isPlan || isPlan;
-    }
-    return segment;
-  }
-  segment = {
-    itemId,
-    phase: phase ?? null,
-    outputKind: outputKind ?? 'commentary',
-    isPlan: Boolean(isPlan),
-    text: '',
-    completed: false,
-    startedAtMs: Date.now(),
-    completedAtMs: null,
-    messages: [],
-    voiceSnippetId: null,
-  };
-  active.segments.push(segment);
-  return segment;
-}
-
-function renderCollapsedCommentary(locale: AppLocale, segments: ActiveTurnSegment[]): string {
-  const firstAt = segments[0]?.startedAtMs ?? Date.now();
-  const lastSegment = segments[segments.length - 1];
-  const lastAt = lastSegment?.completedAtMs ?? lastSegment?.startedAtMs ?? firstAt;
-  const range = firstAt === lastAt
-    ? formatClockTimestamp(firstAt)
-    : `${formatClockTimestamp(firstAt)} - ${formatClockTimestamp(lastAt)}`;
-  const summary = locale === 'zh'
-    ? `过程汇报 · ${segments.length} 条 · ${range}`
-    : `Progress · ${segments.length} updates · ${range}`;
-  const maxBodyLength = TELEGRAM_RICH_MESSAGE_TEXT_LIMIT - summary.length - 1024;
-  const blocks: string[] = [];
-  let bodyLength = 0;
-  let omitted = 0;
-
-  for (const segment of segments) {
-    const endAt = segment.completedAtMs ?? segment.startedAtMs;
-    const timestamp = endAt === segment.startedAtMs
-      ? formatClockTimestamp(segment.startedAtMs)
-      : `${formatClockTimestamp(segment.startedAtMs)} - ${formatClockTimestamp(endAt)}`;
-    const block = `<h4>${escapeTelegramHtml(timestamp)}</h4>\n${renderTelegramMarkdownRichHtml(segment.text)}`;
-    if (bodyLength + block.length > maxBodyLength) {
-      omitted += 1;
-      continue;
-    }
-    blocks.push(block);
-    bodyLength += block.length;
-  }
-  if (omitted > 0) {
-    blocks.push(`<p>${escapeTelegramHtml(locale === 'zh' ? `另有 ${omitted} 条过长内容未收入归档` : `${omitted} oversized updates omitted`)}</p>`);
-  }
-  return telegramDetails(summary, blocks.join('\n'));
-}
-
-function formatClockTimestamp(timestampMs: number): string {
-  const date = new Date(timestampMs);
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-function createToolBatchState(): ToolBatchState {
-  return {
-    openCallIds: new Set<string>(),
-    actionKeys: new Set<string>(),
-    actionLines: [],
-    counts: { files: 0, searches: 0, edits: 0, commands: 0 },
-    finalizeTimer: null,
-  };
-}
-
-function incrementToolBatchCount(counts: ToolBatchCounts, kind: keyof ToolBatchCounts): void {
-  counts[kind] += 1;
-}
-
-function formatToolBatchStatus(
-  locale: AppLocale,
-  counts: ToolBatchCounts,
-  actionLines: string[],
-  inProgress: boolean,
-): string {
-  const heading = formatToolBatchHeading(locale, counts, inProgress);
-  const detailLines = actionLines.slice(0, 6);
-  if (detailLines.length === 0) {
-    return heading;
-  }
-  return [heading, ...detailLines].join('\n');
-}
-
-function renderArchivedToolBatchStatus(
-  locale: AppLocale,
-  counts: ToolBatchCounts,
-  actionLines: string[],
-): ArchivedStatusContent {
-  const text = formatToolBatchStatus(locale, counts, actionLines, false);
-  if (actionLines.length === 0) {
-    return { text, html: null };
-  }
-  const heading = formatToolBatchHeading(locale, counts, false);
-  const detailLines = actionLines
-    .slice(0, TOOL_ARCHIVE_MAX_LINES)
-    .map(line => truncateInline(line, TOOL_ARCHIVE_LINE_LIMIT));
-  const html = [
-    telegramBold(heading),
-    telegramExpandableBlockquote(detailLines.join('\n')),
-  ].join('\n');
-  return { text, html };
-}
-
-function formatToolBatchHeading(locale: AppLocale, counts: ToolBatchCounts, inProgress: boolean): string {
-  const parts = formatToolBatchCountParts(locale, counts);
-  const hasBrowse = counts.files > 0 || counts.searches > 0;
-  const hasEdit = counts.edits > 0;
-  const hasCommand = counts.commands > 0;
-  let verb: string;
-  if (hasEdit && !hasBrowse && !hasCommand) {
-    verb = locale === 'zh' ? (inProgress ? '正在编辑' : '已编辑') : (inProgress ? 'Editing' : 'Edited');
-  } else if (hasBrowse && !hasEdit && !hasCommand) {
-    verb = locale === 'zh' ? (inProgress ? '正在浏览' : '已浏览') : (inProgress ? 'Browsing' : 'Browsed');
-  } else if (hasCommand && !hasBrowse && !hasEdit) {
-    verb = locale === 'zh' ? (inProgress ? '正在运行' : '已运行') : (inProgress ? 'Running' : 'Ran');
-  } else {
-    verb = locale === 'zh' ? (inProgress ? '正在处理' : '已处理') : (inProgress ? 'Processing' : 'Processed');
-  }
-  if (parts.length === 0) {
-    return locale === 'zh'
-      ? `${verb}操作...`
-      : `${verb} operations...`;
-  }
-  return locale === 'zh'
-    ? `${verb} ${parts.join('，')}`
-    : `${verb} ${parts.join(', ')}`;
-}
-
-function formatToolBatchCountParts(locale: AppLocale, counts: ToolBatchCounts): string[] {
-  const parts: string[] = [];
-  if (counts.files > 0) {
-    parts.push(locale === 'zh' ? `${counts.files} 个文件` : pluralize(counts.files, 'file'));
-  }
-  if (counts.searches > 0) {
-    parts.push(locale === 'zh' ? `${counts.searches} 个搜索` : pluralize(counts.searches, 'search'));
-  }
-  if (counts.edits > 0) {
-    parts.push(locale === 'zh' ? `${counts.edits} 个编辑` : pluralize(counts.edits, 'edit'));
-  }
-  if (counts.commands > 0) {
-    parts.push(locale === 'zh' ? `${counts.commands} 个命令` : pluralize(counts.commands, 'command'));
-  }
-  return parts;
-}
-
-function pluralize(count: number, noun: string): string {
-  if (count === 1) {
-    return `1 ${noun}`;
-  }
-  const plural = noun === 'search'
-    ? 'searches'
-    : noun === 'file'
-      ? 'files'
-      : `${noun}s`;
-  return `${count} ${plural}`;
-}
-
-function describeExecCommand(event: RawExecCommandEvent): ToolDescriptor[] {
-  const descriptors = (event.parsedCmd ?? [])
-    .map((entry) => describeParsedCommand(entry))
-    .filter((entry): entry is ToolDescriptor => entry !== null);
-  if (descriptors.length > 0) {
-    return descriptors;
-  }
-  const commandText = renderShellCommand(event.command);
-  return [{
-    kind: 'commands',
-    key: `command:${commandText}`,
-    line: `$ ${commandText}`,
-  }];
-}
-
-function describeParsedCommand(entry: any): ToolDescriptor | null {
-  const type = typeof entry?.type === 'string' ? entry.type : '';
-  const path = compactPath(entry?.path ?? entry?.name ?? null);
-  const query = typeof entry?.query === 'string' ? entry.query : null;
-  switch (type) {
-    case 'search':
-      return {
-        kind: 'searches',
-        key: `search:${path ?? '.'}:${query ?? ''}`,
-        line: path ? `Searched for ${truncateInline(query || '', 80)} in ${path}` : `Searched for ${truncateInline(query || '', 80)}`,
-      };
-    case 'read':
-      return {
-        kind: 'files',
-        key: `read:${path ?? 'unknown'}`,
-        line: `Read ${path ?? 'file'}`,
-      };
-    case 'list_files':
-      return {
-        kind: 'files',
-        key: `list:${path ?? 'workspace'}`,
-        line: path ? `Listed ${path}` : 'Listed files',
-      };
-    case 'write':
-    case 'edit':
-    case 'apply_patch':
-      return {
-        kind: 'edits',
-        key: `${type}:${path ?? 'workspace'}`,
-        line: `Edited ${path ?? 'files'}`,
-      };
-    case 'move':
-      return {
-        kind: 'edits',
-        key: `${type}:${path ?? 'workspace'}`,
-        line: `Moved ${path ?? 'files'}`,
-      };
-    case 'copy':
-      return {
-        kind: 'edits',
-        key: `${type}:${path ?? 'workspace'}`,
-        line: `Copied ${path ?? 'files'}`,
-      };
-    case 'delete':
-      return {
-        kind: 'edits',
-        key: `${type}:${path ?? 'workspace'}`,
-        line: `Deleted ${path ?? 'files'}`,
-      };
-    case 'mkdir':
-      return {
-        kind: 'edits',
-        key: `${type}:${path ?? 'workspace'}`,
-        line: `Created ${path ?? 'files'}`,
-      };
-    default:
-      return null;
-  }
-}
-
-function compactPath(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) {
-    return null;
-  }
-  return value.replace(/^\.\//, '');
-}
-
-function renderShellCommand(command: string[]): string {
-  if (command.length >= 3 && (command[0] === '/bin/zsh' || command[0] === 'zsh') && command[1] === '-lc') {
-    return command[2] ?? command.join(' ');
-  }
-  return command.join(' ');
-}
-
-function truncateInline(value: string, limit: number): string {
-  if (value.length <= limit) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, limit - 1))}…`;
-}
-
-function firstLine(value: string): string {
-  return value.split(/\r?\n/, 1)[0]?.trim() || value.trim();
-}
-
-function parseReviewTarget(args: string[]): ReviewTarget | null {
-  if (args.length === 0) {
-    return { type: 'uncommittedChanges' };
-  }
-  const [kind, ...rest] = args;
-  if (kind === 'base') {
-    const branch = rest.join(' ').trim();
-    return branch ? { type: 'baseBranch', branch } : null;
-  }
-  if (kind === 'commit') {
-    const sha = rest[0]?.trim();
-    return sha ? { type: 'commit', sha, title: rest.slice(1).join(' ').trim() || null } : null;
-  }
-  if (kind === 'custom') {
-    const instructions = rest.join(' ').trim();
-    return instructions ? { type: 'custom', instructions } : null;
-  }
-  return { type: 'custom', instructions: args.join(' ').trim() };
-}
-
-function findSkill(entries: CodexSkillsListEntry[], name: string): CodexSkillMetadata | null {
-  const normalized = name.trim().toLowerCase();
-  for (const entry of entries) {
-    const skill = entry.skills.find(candidate =>
-      candidate.name.toLowerCase() === normalized
-      || candidate.displayName?.toLowerCase() === normalized);
-    if (skill) return skill;
-  }
-  return null;
-}
-
-function formatSkillsMessage(locale: AppLocale, entries: CodexSkillsListEntry[], query: string | null, forceReload: boolean): string {
-  const skills = entries.flatMap(entry => entry.skills.map(skill => ({ cwd: entry.cwd, skill })))
-    .filter(entry => !query
-      || entry.skill.name.toLowerCase().includes(query.toLowerCase())
-      || entry.skill.description.toLowerCase().includes(query.toLowerCase()));
-  const lines = [
-    t(locale, 'skills_title'),
-    forceReload ? t(locale, 'skills_reloaded') : null,
-    query ? t(locale, 'skills_filter', { value: query }) : null,
-  ].filter((line): line is string => Boolean(line));
-  if (skills.length === 0) {
-    lines.push(t(locale, 'skills_empty'));
-  } else {
-    for (const { skill } of skills.slice(0, 30)) {
-      const enabled = skill.enabled ? 'on' : 'off';
-      const label = skill.displayName || skill.name;
-      lines.push(`${skill.enabled ? '*' : '-'} ${label} (${enabled})`);
-      const desc = skill.shortDescription || skill.description;
-      if (desc) {
-        lines.push(`  ${truncateInline(desc, 120)}`);
-      }
-    }
-    if (skills.length > 30) {
-      lines.push(t(locale, 'list_truncated', { count: skills.length - 30 }));
-    }
-  }
-  const errors = entries.flatMap(entry => entry.errors);
-  if (errors.length > 0) {
-    lines.push('', t(locale, 'skills_errors'));
-    lines.push(...errors.slice(0, 5).map(error => `- ${truncateInline(error, 160)}`));
-  }
-  return lines.join('\n');
-}
-
-function formatSkillDetailMessage(locale: AppLocale, skill: CodexSkillMetadata): string {
-  return [
-    t(locale, 'skill_title', { name: skill.displayName || skill.name }),
-    t(locale, 'skill_name', { value: skill.name }),
-    t(locale, 'skill_enabled_state', { value: skill.enabled ? t(locale, 'yes') : t(locale, 'no') }),
-    t(locale, 'skill_scope', { value: skill.scope || t(locale, 'unknown') }),
-    t(locale, 'skill_path', { value: skill.path || t(locale, 'unknown') }),
-    '',
-    skill.description || skill.shortDescription || t(locale, 'empty'),
-    skill.defaultPrompt ? `\n${t(locale, 'skill_default_prompt', { value: skill.defaultPrompt })}` : '',
-  ].filter(Boolean).join('\n');
-}
-
-function formatMcpStatusMessage(locale: AppLocale, statuses: CodexMcpServerStatus[]): string {
-  const lines = [t(locale, 'mcp_title')];
-  if (statuses.length === 0) {
-    lines.push(t(locale, 'mcp_empty'));
-    return lines.join('\n');
-  }
-  for (const status of statuses) {
-    lines.push(`${status.name}: ${status.authStatus}`);
-    lines.push(`  tools: ${status.toolNames.length ? status.toolNames.slice(0, 12).join(', ') : '-'}`);
-    if (status.resourceUris.length > 0) {
-      lines.push(`  resources: ${status.resourceUris.slice(0, 5).join(', ')}`);
-    }
-    if (status.resourceTemplateUris.length > 0) {
-      lines.push(`  templates: ${status.resourceTemplateUris.slice(0, 5).join(', ')}`);
-    }
-  }
-  return lines.join('\n');
-}
-
-function formatMcpResourceMessage(
-  locale: AppLocale,
-  server: string,
-  uri: string,
-  contents: CodexMcpResourceContent[],
-): string {
-  const lines = [t(locale, 'mcp_resource_title', { server, uri })];
-  if (contents.length === 0) {
-    lines.push(t(locale, 'mcp_resource_empty'));
-    return lines.join('\n');
-  }
-  for (const content of contents.slice(0, 5)) {
-    lines.push(`- ${content.type}${content.mimeType ? ` (${content.mimeType})` : ''}${content.uri ? ` ${content.uri}` : ''}`);
-    if (content.text) {
-      lines.push(truncateInline(content.text, 1500));
-    } else if (content.blob) {
-      lines.push(t(locale, 'mcp_resource_blob', { size: content.blob.length }));
-    }
-  }
-  return lines.join('\n');
-}
-
-function formatDiffMessage(locale: AppLocale, diff: string): string {
-  const clipped = diff.length > 3500 ? `${diff.slice(0, 3500)}\n...` : diff;
-  return [
-    telegramBold(t(locale, 'diff_title')),
-    telegramExpandableBlockquote(clipped),
-  ].join('\n');
-}
-
-function formatRichDiffMessage(locale: AppLocale, diff: string): string {
-  const clipped = clipRichMessageText(diff, Math.min(24_000, TELEGRAM_RICH_MESSAGE_TEXT_LIMIT - 1024));
-  const summary = locale === 'zh' ? '展开 diff' : 'Expand diff';
-  const footer = locale === 'zh'
-    ? 'FoxClaw · sendRichMessage · details/pre/code'
-    : 'FoxClaw · sendRichMessage · details/pre/code';
-  return [
-    `<h3>${escapeTelegramHtml(t(locale, 'diff_title'))}</h3>`,
-    telegramDetails(summary, telegramPreCode(clipped, 'diff')),
-    `<footer>${escapeTelegramHtml(footer)}</footer>`,
-  ].join('\n');
-}
-
-function formatRichDemoMessage(locale: AppLocale): string {
-  const title = 'FoxClaw RichMessage';
-  const intro = locale === 'zh'
-    ? '这条消息通过 Telegram Bot API sendRichMessage 发送，用来验证 Rich Message 在真实客户端里的渲染。'
-    : 'This message is sent through Telegram Bot API sendRichMessage to verify Rich Message rendering in a real client.';
-  const detailsSummary = locale === 'zh' ? '展开 details + pre 示例' : 'Open details + pre sample';
-  const diffSample = [
-    'diff --git a/src/telegram/rich.ts b/src/telegram/rich.ts',
-    '+ sendRichMessage({ rich_message: { html } })',
-    '+ <details><summary>Expandable</summary>...</details>',
-    '+ <table bordered striped>...</table>',
-  ].join('\n');
-  const tableCaption = locale === 'zh' ? 'FoxClaw 可用 rich 面' : 'FoxClaw rich surfaces';
-  const surfaceHeader = locale === 'zh' ? '功能面' : 'Surface';
-  const richHeader = locale === 'zh' ? 'Rich 用法' : 'Rich usage';
-  const tableRows: Array<[string, string]> = locale === 'zh'
-    ? [
-        ['`/diff`', 'details + pre/code'],
-        ['工具状态', 'details/list'],
-        ['`/status`', 'table'],
-      ]
-    : [
-        ['`/diff`', 'details + pre/code'],
-        ['Tool status', 'details/list'],
-        ['`/status`', 'table'],
-      ];
-  const listItems = locale === 'zh'
-    ? ['Gateway 已接入 sendRichMessage', '/diff 已优先使用 RichMessage', '失败会回退到 Telegram HTML']
-    : ['Gateway now supports sendRichMessage', '/diff prefers RichMessage', 'Failures fall back to Telegram HTML'];
-  const detailBody = [
-    `<p>${escapeTelegramHtml(locale === 'zh' ? '下面是 rich pre/code block，客户端支持时会按代码块渲染。' : 'This is a rich pre/code block rendered as code by supported clients.')}</p>`,
-    telegramPreCode(diffSample, 'diff'),
-  ].join('\n');
-  return [
-    `<h2>${escapeTelegramHtml(title)}</h2>`,
-    `<p><b>Bot API 10.1</b> ${escapeTelegramHtml(intro)}</p>`,
-    '<hr/>',
-    '<table bordered striped>',
-    `<caption>${escapeTelegramHtml(tableCaption)}</caption>`,
-    `<tr><th>${escapeTelegramHtml(surfaceHeader)}</th><th>${escapeTelegramHtml(richHeader)}</th></tr>`,
-    ...tableRows.map(([surface, usage]) => `<tr><td>${escapeTelegramHtml(surface)}</td><td>${escapeTelegramHtml(usage)}</td></tr>`),
-    '</table>',
-    telegramDetails(detailsSummary, detailBody, true),
-    '<ul>',
-    ...listItems.map(item => `<li>${escapeTelegramHtml(item)}</li>`),
-    '</ul>',
-    '<footer>FoxClaw · sendRichMessage</footer>',
-  ].join('\n');
-}
-
-function formatRichDemoFallbackMessage(locale: AppLocale): string {
-  const lines = locale === 'zh'
-    ? [
-        'RichMessage fallback 预览',
-        'Gateway 已接入 sendRichMessage',
-        '/diff 已优先使用 RichMessage',
-        '如果你看到这条 HTML fallback，说明 Telegram rich API 返回了失败，正常功能仍可用。',
-      ]
-    : [
-        'RichMessage fallback preview',
-        'Gateway now supports sendRichMessage',
-        '/diff prefers RichMessage',
-        'If you see this HTML fallback, Telegram rich API failed but normal messaging still works.',
-      ];
-  return [
-    telegramBold('FoxClaw RichMessage'),
-    telegramExpandableBlockquote(lines.join('\n')),
-    telegramPreCode('sendRichMessage({ rich_message: { html } })', 'typescript'),
-  ].join('\n');
-}
-
-function formatRichInternalMessage(title: string, text: string): string {
-  const sections = splitRichInternalSections(text);
-  const body = sections.map(formatRichInternalSection).filter(Boolean).join('\n');
-  return [
-    `<h3>${escapeTelegramHtml(title)}</h3>`,
-    body || `<p>${escapeTelegramHtml(text)}</p>`,
-    telegramDetails('Plain text', telegramPreCode(text, 'text')),
-    '<footer>FoxClaw · RichMessage</footer>',
-  ].join('\n');
-}
-
-function splitRichInternalSections(text: string): string[][] {
-  const sections: string[][] = [];
-  let current: string[] = [];
-  for (const rawLine of text.split('\n')) {
-    const line = rawLine.trimEnd();
-    if (!line.trim()) {
-      if (current.length > 0) {
-        sections.push(current);
-        current = [];
-      }
-      continue;
-    }
-    current.push(line);
-  }
-  if (current.length > 0) {
-    sections.push(current);
-  }
-  return sections;
-}
-
-function formatRichInternalSection(lines: string[]): string {
-  const candidateRows = lines
-    .map(parseRichAuthCandidateRow)
-    .filter((row): row is RichAuthCandidateRow => row !== null);
-  if (candidateRows.length > 0) {
-    const nonCandidateLines = lines.filter(line => parseRichAuthCandidateRow(line) === null);
-    return [
-      nonCandidateLines.length > 0 ? formatRichInternalSectionWithoutCandidates(nonCandidateLines) : '',
-      formatRichAuthCandidateTable(candidateRows),
-    ].filter(Boolean).join('\n');
-  }
-  return formatRichInternalSectionWithoutCandidates(lines);
-}
-
-function formatRichInternalSectionWithoutCandidates(lines: string[]): string {
-  const rows = lines
-    .map(parseRichInternalKeyValue)
-    .filter((row): row is [string, string] => row !== null);
-  if (rows.length >= Math.max(2, Math.floor(lines.length * 0.6))) {
-    return [
-      '<table bordered striped>',
-      ...rows.map(([key, value]) => (
-        `<tr><td>${escapeTelegramHtml(key)}</td><td>${formatRichInternalValue(value)}</td></tr>`
-      )),
-      '</table>',
-    ].join('\n');
-  }
-  return [
-    '<ul>',
-    ...lines.map(line => `<li>${formatRichInternalValue(line.replace(/^\s*[-*]\s+/, '').replace(/^\s*\d+[.)]\s+/, ''))}</li>`),
-    '</ul>',
-  ].join('\n');
-}
-
-interface RichAuthCandidateRow {
-  index: string;
-  quotaA: string;
-  quotaAReset: string;
-  quotaB: string;
-  quotaBReset: string;
-  name: string;
-  current: boolean;
-  plan: string;
-  health: string;
-  refresh: string;
-  expiry: string;
-  risk: string;
-  enabled: boolean | null;
-}
-
-function parseRichAuthCandidateRow(line: string): RichAuthCandidateRow | null {
-  const match = line.match(/^\s*(\d+)\.\s+(.+)$/);
-  if (!match) {
-    return null;
-  }
-  let body = match[2]!.trim();
-  let status = '';
-  const statusMatch = body.match(/^(.*?)\s+(\[[^\]]+\])$/);
-  if (statusMatch) {
-    body = statusMatch[1]!.trim();
-    status = statusMatch[2]!.replace(/^\[|\]$/g, '');
-  }
-  const current = body.endsWith(' *');
-  if (current) {
-    body = body.slice(0, -2).trimEnd();
-  }
-  const parts = body.split('|');
-  const name = parts.pop()?.trim() ?? '';
-  if (!name) {
-    return null;
-  }
-  const quotas = parts.map(parseRichAuthQuotaCell);
-  const statusParts = splitRichAuthStatus(status);
-  return {
-    index: match[1]!,
-    quotaA: quotas[0]?.value ?? '-',
-    quotaAReset: quotas[0]?.reset ?? '-',
-    quotaB: quotas[1]?.value ?? '-',
-    quotaBReset: quotas[1]?.reset ?? '-',
-    name,
-    current,
-    enabled: statusParts.health === 'disabled' || statusParts.health === '已禁用'
-      ? false
-      : statusParts.health === '-' ? null : true,
-    ...statusParts,
-  };
-}
-
-function formatRichAuthCandidateTable(rows: RichAuthCandidateRow[]): string {
-  return [
-    '<table bordered striped>',
-    '<tr><th>#</th><th>Quota A</th><th>A reset</th><th>Quota B</th><th>B reset</th><th>Auth</th><th>Current</th><th>Plan</th><th>Health</th><th>Last refresh</th><th>Expiry</th><th>Risk</th><th>Command</th></tr>',
-    ...rows.map(row => [
-      '<tr>',
-      `<td>${escapeTelegramHtml(row.index)}</td>`,
-      `<td>${escapeTelegramHtml(row.quotaA)}</td>`,
-      `<td>${escapeTelegramHtml(row.quotaAReset)}</td>`,
-      `<td>${escapeTelegramHtml(row.quotaB)}</td>`,
-      `<td>${escapeTelegramHtml(row.quotaBReset)}</td>`,
-      `<td>${formatRichAuthCommandLink(`/auth use ${row.index}`, row.name)}</td>`,
-      `<td>${row.current ? 'yes' : '-'}</td>`,
-      `<td>${escapeTelegramHtml(row.plan)}</td>`,
-      `<td>${escapeTelegramHtml(row.health)}</td>`,
-      `<td>${escapeTelegramHtml(row.refresh)}</td>`,
-      `<td>${escapeTelegramHtml(row.expiry)}</td>`,
-      `<td>${escapeTelegramHtml(row.risk)}</td>`,
-      `<td>${formatRichAuthCommandCell(row)}</td>`,
-      '</tr>',
-    ].join('')),
-    '</table>',
-  ].join('\n');
-}
-
-function splitRichAuthStatus(status: string): Pick<RichAuthCandidateRow, 'plan' | 'health' | 'refresh' | 'expiry' | 'risk'> {
-  const parts = status.split(' · ').map(part => part.trim()).filter(Boolean);
-  const refreshIndex = parts.findIndex(part => /^(refreshed|刷新于)\b/i.test(part));
-  const refresh = refreshIndex >= 0 ? parts.splice(refreshIndex, 1)[0]! : '-';
-  const expiryIndex = parts.findIndex(part => /^(expires|过期于)\b/i.test(part));
-  const expiry = expiryIndex >= 0 ? parts.splice(expiryIndex, 1)[0]! : '-';
-  const plan = parts.length > 1 ? parts.shift()! : '-';
-  const health = parts.shift() ?? '-';
-  return {
-    plan,
-    health,
-    refresh,
-    expiry,
-    risk: formatRichAuthRisk(health),
-  };
-}
-
-function formatRichAuthRisk(health: string): string {
-  if (/not recently refreshed|长期未刷新/i.test(health)) {
-    return `stale >${CODEX_AUTH_STALE_CREDENTIAL_DAYS}d`;
-  }
-  if (/needs login repair|需要登录修复/i.test(health)) {
-    return 'repair';
-  }
-  if (/quota exhausted|额度耗尽/i.test(health)) {
-    return 'quota exhausted';
-  }
-  if (/invalid|无效/i.test(health)) {
-    return 'invalid';
-  }
-  if (/\blow\b|偏低|低/i.test(health)) {
-    return 'low quota';
-  }
-  if (/unknown|未知/i.test(health)) {
-    return 'unknown';
-  }
-  return '-';
-}
-
-function parseRichAuthQuotaCell(value: string): { value: string; reset: string } {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === '--' || trimmed === '—') {
-    return { value: '-', reset: '-' };
-  }
-  const [quotaPart, reset = '-'] = trimmed.split('@', 2);
-  const [windowLabel, percent] = quotaPart!.split(':');
-  if (!windowLabel || percent === undefined) {
-    return { value: quotaPart!, reset };
-  }
-  return { value: `${percent}%`, reset };
-}
-
-function formatRichAuthCommandCell(row: RichAuthCandidateRow): string {
-  const commands = [formatRichAuthCommandLink(`/auth use ${row.index}`, 'use')];
-  if (row.enabled === true) {
-    commands.push(formatRichAuthCommandLink(`/auth disable ${row.index}`, 'disable'));
-  } else if (row.enabled === false) {
-    commands.push(formatRichAuthCommandLink(`/auth enable ${row.index}`, 'enable'));
-  }
-  return commands.join(' ');
-}
-
-function formatRichAuthCommandLink(command: string, label: string): string {
-  const url = `tg://msg?text=${encodeURIComponent(command)}`;
-  return `<a href="${escapeTelegramHtml(url)}">${escapeTelegramHtml(label)}</a>`;
-}
-
-function parseRichInternalKeyValue(line: string): [string, string] | null {
-  const separator = line.includes('：') ? '：' : ':';
-  const index = line.indexOf(separator);
-  if (index <= 0) {
-    return null;
-  }
-  const key = line.slice(0, index).trim();
-  const value = line.slice(index + separator.length).trim();
-  if (!key || !value || key.length > 80) {
-    return null;
-  }
-  return [key, value];
-}
-
-function formatRichInternalValue(value: string): string {
-  const escaped = escapeTelegramHtml(value);
-  return escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
-}
-
-function renderTelegramTable(headers: string[], rows: string[][]): string {
-  return [
-    '<table bordered striped>',
-    `<thead><tr>${headers.map(header => `<th>${escapeTelegramHtml(header)}</th>`).join('')}</tr></thead>`,
-    `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${escapeTelegramHtml(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`,
-    '</table>',
-  ].join('');
-}
-
-function formatSelfUpdateVersionTransition(
-  fromVersion: string | null | undefined,
-  toVersion: string | null | undefined,
-  locale: AppLocale,
-): string {
-  if (!fromVersion && !toVersion) {
-    return locale === 'zh' ? '未检测' : 'Not detected';
-  }
-  return `${fromVersion ?? '?'} -> ${toVersion ?? '?'}`;
-}
-
-function formatCodexUpdateState(status: SelfUpdateStatus): string {
-  if (status.codexFromVersion && status.codexToVersion) {
-    if (status.codexFromVersion === status.codexToVersion) {
-      return status.locale === 'zh' ? '已是最新版本' : 'Already current';
-    }
-    return status.locale === 'zh' ? '升级完成' : 'Updated';
-  }
-  return status.codexUpdate ?? (status.locale === 'zh' ? '未执行升级' : 'Not updated');
-}
-
-function formatSelfUpdateBroadcastLine(
-  locale: AppLocale,
-  targetVersion: string | null,
-  broadcast: SelfUpdateBroadcastSummary,
-): string {
-  if (broadcast.state === 'disabled') {
-    return locale === 'zh' ? '未启用跨节点同步' : 'Cross-node sync is disabled';
-  }
-  if (broadcast.state === 'pending') {
-    return locale === 'zh'
-      ? `目标 ${targetVersion ?? '?'}，等待广播结果`
-      : `Target ${targetVersion ?? '?'}; waiting for broadcast result`;
-  }
-  if (broadcast.peers.length === 0) {
-    return locale === 'zh' ? '广播完成，无已配置 peer' : 'Broadcast completed; no configured peers';
-  }
-  return locale === 'zh'
-    ? `已发送 ${broadcast.sent} 个 peer：${broadcast.peers.join('、')}`
-    : `Sent to ${broadcast.sent} peers: ${broadcast.peers.join(', ')}`;
-}
-
-function clipRichMessageText(value: string, limit: number): string {
-  if (value.length <= limit) {
-    return value;
-  }
-  return `${value.slice(0, Math.max(0, limit - 4))}\n...`;
-}
-
-function formatLoadedThreadsMessage(locale: AppLocale, threadIds: string[]): string {
-  const lines = [t(locale, 'loaded_title')];
-  if (threadIds.length === 0) {
-    lines.push(t(locale, 'loaded_empty'));
-    return lines.join('\n');
-  }
-  for (const threadId of threadIds.slice(0, 30)) {
-    lines.push(`- ${threadId}`);
-  }
-  if (threadIds.length > 30) {
-    lines.push(t(locale, 'list_truncated', { count: threadIds.length - 30 }));
-  }
-  return lines.join('\n');
-}
-
-function formatHooksMessage(locale: AppLocale, entries: CodexHooksListEntry[]): string {
-  const hooks = entries.flatMap(entry => entry.hooks.map(hook => ({ cwd: entry.cwd, hook })));
-  const lines = [t(locale, 'hooks_title')];
-  if (hooks.length === 0) {
-    lines.push(t(locale, 'hooks_empty'));
-  } else {
-    for (const { hook } of hooks.slice(0, 30)) {
-      lines.push(`${hook.enabled ? '*' : '-'} ${hook.key} (${hook.eventName}, ${hook.trustStatus})`);
-      const detail = [hook.pluginId ? `plugin=${hook.pluginId}` : null, hook.statusMessage, hook.command].filter(Boolean).join(' · ');
-      if (detail) {
-        lines.push(`  ${truncateInline(detail, 140)}`);
-      }
-    }
-    if (hooks.length > 30) {
-      lines.push(t(locale, 'list_truncated', { count: hooks.length - 30 }));
-    }
-  }
-  const warnings = entries.flatMap(entry => entry.warnings);
-  const errors = entries.flatMap(entry => entry.errors);
-  if (warnings.length > 0) {
-    lines.push('', t(locale, 'hooks_warnings'));
-    lines.push(...warnings.slice(0, 5).map(warning => `- ${truncateInline(warning, 160)}`));
-  }
-  if (errors.length > 0) {
-    lines.push('', t(locale, 'hooks_errors'));
-    lines.push(...errors.slice(0, 5).map(error => `- ${truncateInline(`${error.path}: ${error.message}`, 180)}`));
-  }
-  return lines.join('\n');
-}
-
-function formatPluginsMessage(locale: AppLocale, marketplaces: CodexPluginMarketplace[], query: string | null): string {
-  const plugins = marketplaces.flatMap(marketplace => marketplace.plugins.map(plugin => ({ marketplace, plugin })))
-    .filter(entry => !query
-      || entry.plugin.name.toLowerCase().includes(query.toLowerCase())
-      || entry.plugin.id.toLowerCase().includes(query.toLowerCase()));
-  const lines = [t(locale, 'plugins_title')];
-  if (query) lines.push(t(locale, 'plugins_filter', { value: query }));
-  if (plugins.length === 0) {
-    lines.push(t(locale, 'plugins_empty'));
-  } else {
-    for (const { marketplace, plugin } of plugins.slice(0, 30)) {
-      const state = `${plugin.installed ? 'installed' : 'not-installed'}, ${plugin.enabled ? 'on' : 'off'}`;
-      lines.push(`${plugin.enabled ? '*' : '-'} ${plugin.name} (${state})`);
-      lines.push(`  ${plugin.id} · ${marketplace.displayName || marketplace.name}`);
-    }
-    if (plugins.length > 30) {
-      lines.push(t(locale, 'list_truncated', { count: plugins.length - 30 }));
-    }
-  }
-  return lines.join('\n');
-}
-
-function formatPluginDetailMessage(locale: AppLocale, plugin: CodexPluginDetail): string {
-  const lines = [
-    t(locale, 'plugin_title', { name: plugin.summary.name || plugin.summary.id }),
-    `id: ${plugin.summary.id}`,
-    `marketplace: ${plugin.marketplaceName}`,
-    `state: ${plugin.summary.installed ? 'installed' : 'not-installed'}, ${plugin.summary.enabled ? 'on' : 'off'}`,
-    plugin.description ? truncateInline(plugin.description, 400) : null,
-  ].filter((line): line is string => Boolean(line));
-  if (plugin.skills.length > 0) {
-    lines.push('', `skills: ${plugin.skills.slice(0, 12).map(skill => skill.name).join(', ')}`);
-  }
-  if (plugin.hooks.length > 0) {
-    lines.push(`hooks: ${plugin.hooks.slice(0, 12).map(hook => `${hook.eventName}:${hook.key}`).join(', ')}`);
-  }
-  if (plugin.apps.length > 0) {
-    lines.push(`apps: ${plugin.apps.slice(0, 12).map(app => app.name || app.id).join(', ')}`);
-  }
-  if (plugin.mcpServers.length > 0) {
-    lines.push(`mcp: ${plugin.mcpServers.slice(0, 12).join(', ')}`);
-  }
-  return lines.join('\n');
-}
-
-function formatPluginSkillMessage(locale: AppLocale, marketplace: string, plugin: string, skill: string, contents: string | null): string {
-  const lines = [t(locale, 'plugin_skill_title', { marketplace, plugin, skill })];
-  if (!contents) {
-    lines.push(t(locale, 'plugin_skill_empty'));
-    return lines.join('\n');
-  }
-  lines.push(truncateInline(contents, 3500));
-  return lines.join('\n');
-}
-
-function formatAppsMessage(locale: AppLocale, apps: CodexAppInfo[], forceRefetch: boolean): string {
-  const lines = [t(locale, 'apps_title')];
-  if (forceRefetch) lines.push(t(locale, 'apps_reloaded'));
-  if (apps.length === 0) {
-    lines.push(t(locale, 'apps_empty'));
-  } else {
-    for (const app of apps.slice(0, 30)) {
-      const state = `${app.isEnabled ? 'on' : 'off'}, ${app.isAccessible ? 'accessible' : 'blocked'}`;
-      lines.push(`${app.isEnabled ? '*' : '-'} ${app.name} (${state})`);
-      if (app.description) lines.push(`  ${truncateInline(app.description, 120)}`);
-    }
-    if (apps.length > 30) {
-      lines.push(t(locale, 'list_truncated', { count: apps.length - 30 }));
-    }
-  }
-  return lines.join('\n');
-}
-
-function formatFeaturesMessage(locale: AppLocale, features: CodexExperimentalFeature[]): string {
-  const lines = [t(locale, 'features_title')];
-  if (features.length === 0) {
-    lines.push(t(locale, 'features_empty'));
-    return lines.join('\n');
-  }
-  for (const feature of features.slice(0, 40)) {
-    lines.push(`${feature.enabled ? '*' : '-'} ${feature.displayName || feature.name} (${feature.stage})`);
-    if (feature.description) lines.push(`  ${truncateInline(feature.description, 120)}`);
-  }
-  if (features.length > 40) {
-    lines.push(t(locale, 'list_truncated', { count: features.length - 40 }));
-  }
-  return lines.join('\n');
-}
-
-function formatConfigMessage(
-  locale: AppLocale,
-  result: Record<string, unknown>,
-  appConfig: AppConfig,
-  authPoolStats: CodexAuthPoolStats,
-): string {
-  const config = result.config && typeof result.config === 'object' ? result.config as Record<string, unknown> : {};
-  const layers = Array.isArray(result.layers) ? result.layers : [];
-  const keys = ['model', 'model_provider', 'approval_policy', 'sandbox_mode', 'web_search', 'service_tier', 'profile', 'review_model'];
-  const lines = [t(locale, 'config_title')];
-  for (const key of keys) {
-    const value = config[key];
-    lines.push(`${key}: ${value === null || value === undefined ? '-' : formatConfigValue(value)}`);
-  }
-  lines.push(t(locale, 'config_layers', { count: layers.length }));
-  lines.push('');
-  lines.push(t(locale, 'config_foxclaw_title'));
-    lines.push(t(locale, 'config_auth_auto_delete_needs_repair', {
-      value: t(locale, appConfig.authAutoDeleteNeedsRepair ? 'yes' : 'no'),
-    }));
-    lines.push(`AUTH_AUTO_DELETE_NEEDS_REPAIR=${appConfig.authAutoDeleteNeedsRepair ? 'true' : 'false'}`);
-    lines.push(t(locale, 'config_delete_tool_details_after_final', {
-      value: t(locale, appConfig.telegramDeleteToolDetailsAfterFinal ? 'yes' : 'no'),
-    }));
-    lines.push(`TELEGRAM_DELETE_TOOL_DETAILS_AFTER_FINAL=${appConfig.telegramDeleteToolDetailsAfterFinal ? 'true' : 'false'}`);
-    lines.push(t(locale, 'config_panel_ttl', { value: formatDurationMs(locale, appConfig.telegramPanelTtlMs) }));
-    lines.push(`TELEGRAM_PANEL_TTL_MS=${appConfig.telegramPanelTtlMs}`);
-    lines.push(formatCodexAuthPoolSummary(locale, authPoolStats));
-    lines.push(...formatCodexApiProviderConfigLines(locale, appConfig));
-  return lines.join('\n');
-}
-
-function formatCodexApiProviderConfigLines(locale: AppLocale, appConfig: AppConfig): string[] {
-  if (appConfig.codexApiProviders.length === 0) {
-    return [t(locale, 'config_api_providers_none')];
-  }
-  const lines = [t(locale, 'config_api_providers_title')];
-  lines.push(t(locale, 'config_api_default_provider', { value: appConfig.codexApiDefaultProvider ?? '-' }));
-  for (const provider of appConfig.codexApiProviders) {
-    lines.push(t(locale, 'config_api_provider_line', {
-      id: provider.id,
-      model: provider.model ?? '-',
-      base: provider.baseUrl,
-      env: provider.apiKeyEnv,
-      key: process.env[provider.apiKeyEnv]?.trim() ? t(locale, 'yes') : t(locale, 'no'),
-    }));
-    if (provider.chatCompletionsOnly) {
-      lines.push(t(locale, 'config_api_provider_chat_warning', { id: provider.id }));
-    }
-  }
-  return lines;
-}
-
-function formatCodexAuthPoolSummary(locale: AppLocale, stats: CodexAuthPoolStats): string {
-  return t(locale, 'auth_pool_summary', {
-    total: stats.totalSeen,
-    alive: stats.alive,
-    deleted: stats.deletedInvalid,
-  });
-}
-
-function isInvalidCodexAuthDeleteReason(reason: string | null | undefined): boolean {
-  return reason === AUTH_DELETE_REASON_NEEDS_REPAIR;
-}
-
-function configKeyboard(locale: AppLocale, appConfig: AppConfig): Array<Array<{ text: string; callback_data: string }>> {
-  const authAutoDeleteEnabled = appConfig.authAutoDeleteNeedsRepair;
-  const deleteToolDetailsEnabled = appConfig.telegramDeleteToolDetailsAfterFinal;
-  return [
-    [{
-      text: t(locale, authAutoDeleteEnabled ? 'button_config_auth_auto_delete_off' : 'button_config_auth_auto_delete_on'),
-      callback_data: `config:auth_auto_delete:${authAutoDeleteEnabled ? 'off' : 'on'}`,
-    }],
-    [{
-      text: t(locale, deleteToolDetailsEnabled ? 'button_config_delete_tool_details_off' : 'button_config_delete_tool_details_on'),
-      callback_data: `config:delete_tool_details:${deleteToolDetailsEnabled ? 'off' : 'on'}`,
-    }],
-  ];
-}
-
-function formatDurationMs(locale: AppLocale, value: number): string {
-  if (value <= 0) {
-    return locale === 'zh' ? '关闭' : 'disabled';
-  }
-  if (value % 60_000 === 0) {
-    const minutes = value / 60_000;
-    return locale === 'zh' ? `${minutes} 分钟` : `${minutes} min`;
-  }
-  if (value % 1000 === 0) {
-    const seconds = value / 1000;
-    return locale === 'zh' ? `${seconds} 秒` : `${seconds} sec`;
-  }
-  return `${value}ms`;
-}
-
-function parseConfigBooleanArg(value: string | undefined): boolean | null {
-  const normalized = value?.trim().toLowerCase();
-  if (!normalized) return null;
-  if (['1', 'true', 'yes', 'on', 'enable', 'enabled'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off', 'disable', 'disabled'].includes(normalized)) return false;
-  return null;
-}
-
-async function writeEnvBoolean(envPath: string, key: string, enabled: boolean): Promise<void> {
-  await fs.mkdir(path.dirname(envPath), { recursive: true });
-  const nextLine = `${key}=${enabled ? 'true' : 'false'}`;
-  let contents = '';
-  try {
-    contents = await fs.readFile(envPath, 'utf8');
-  } catch {
-    await fs.writeFile(envPath, `${nextLine}\n`, { encoding: 'utf8', mode: 0o600 });
-    return;
-  }
-  const pattern = new RegExp(`(^|\\n)[ \\t#]*${escapeRegExp(key)}\\s*=.*(?=\\r?\\n|$)`);
-  const nextContents = pattern.test(contents)
-    ? contents.replace(pattern, (_match, prefix: string) => `${prefix}${nextLine}`)
-    : `${contents}${contents.endsWith('\n') || contents.length === 0 ? '' : '\n'}${nextLine}\n`;
-  await fs.writeFile(envPath, nextContents, { encoding: 'utf8', mode: 0o600 });
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function formatRequirementsMessage(locale: AppLocale, requirements: CodexConfigRequirements | null): string {
-  const lines = [t(locale, 'requirements_title')];
-  if (!requirements) {
-    lines.push(t(locale, 'requirements_empty'));
-    return lines.join('\n');
-  }
-  lines.push(`approval: ${requirements.allowedApprovalPolicies?.join(', ') ?? '-'}`);
-  lines.push(`sandbox: ${requirements.allowedSandboxModes?.join(', ') ?? '-'}`);
-  lines.push(`web_search: ${requirements.allowedWebSearchModes?.join(', ') ?? '-'}`);
-  lines.push(`residency: ${requirements.enforceResidency ?? '-'}`);
-  if (requirements.featureRequirements) {
-    const features = Object.entries(requirements.featureRequirements)
-      .map(([key, value]) => `${key}=${value ? 'on' : 'off'}`)
-      .join(', ');
-    lines.push(`features: ${truncateInline(features, 500)}`);
-  }
-  return lines.join('\n');
-}
-
-function formatProviderMessage(locale: AppLocale, capabilities: CodexModelProviderCapabilities): string {
-  return [
-    t(locale, 'provider_title'),
-    `webSearch: ${t(locale, capabilities.webSearch ? 'yes' : 'no')}`,
-    `imageGeneration: ${t(locale, capabilities.imageGeneration ? 'yes' : 'no')}`,
-    `namespaceTools: ${t(locale, capabilities.namespaceTools ? 'yes' : 'no')}`,
-  ].join('\n');
-}
-
-function formatGoalMessage(locale: AppLocale, goal: CodexThreadGoal | null, prefix?: string): string {
-  const lines = [t(locale, 'goal_title')];
-  if (prefix) {
-    lines.push(prefix);
-  }
-  if (!goal) {
-    lines.push(t(locale, 'goal_empty'));
-    return lines.join('\n');
-  }
-  lines.push(t(locale, 'goal_status', { value: formatGoalStatus(locale, goal.status) }));
-  lines.push(t(locale, 'goal_objective', { value: goal.objective || t(locale, 'empty') }));
-  lines.push(t(locale, 'goal_budget', {
-    value: goal.tokenBudget === null ? t(locale, 'none') : t(locale, 'goal_tokens', { value: formatTokenCount(goal.tokenBudget) }),
-  }));
-  lines.push(t(locale, 'goal_usage', {
-    tokens: formatTokenCount(goal.tokensUsed),
-    seconds: formatCompactNumber(goal.timeUsedSeconds),
-  }));
-  if (goal.updatedAt > 0) {
-    lines.push(t(locale, 'goal_updated_at', { value: formatLocalTimestamp(goal.updatedAt) }));
-  }
-  return lines.join('\n');
-}
-
-function formatHistoryMessage(locale: AppLocale, threadId: string, turns: AppTurnSnapshot[]): string {
-  const lines = [t(locale, 'history_title', { threadId })];
-  if (turns.length === 0) {
-    lines.push(t(locale, 'history_empty'));
-    return lines.join('\n');
-  }
-  for (const turn of turns.slice(0, 30)) {
-    const time = turn.startedAt ? formatLocalTimestamp(turn.startedAt) : t(locale, 'unknown');
-    const itemSummary = summarizeTurnItems(turn.items);
-    const error = turn.error ? ` · ${truncateInline(turn.error, 80)}` : '';
-    lines.push(`- ${turn.turnId} · ${turn.status} · ${time}${error}`);
-    if (itemSummary) {
-      lines.push(`  ${itemSummary}`);
-    }
-  }
-  return lines.join('\n');
-}
-
-function formatFuzzyFilesMessage(
-  locale: AppLocale,
-  query: string,
-  root: string,
-  files: CodexFuzzyFileResult[],
-): string {
-  const lines = [t(locale, 'files_title', { query, root })];
-  if (files.length === 0) {
-    lines.push(t(locale, 'files_empty'));
-    return lines.join('\n');
-  }
-  for (const file of files.slice(0, 25)) {
-    const displayPath = file.path || file.fileName || '(unknown)';
-    lines.push(`- ${displayPath}${file.matchType ? ` (${file.matchType})` : ''}`);
-  }
-  if (files.length > 25) {
-    lines.push(t(locale, 'list_truncated', { count: files.length - 25 }));
-  }
-  return lines.join('\n');
-}
-
-function formatRemoteStatusMessage(locale: AppLocale, status: RemoteControlStatusState | null): string {
-  const lines = [t(locale, 'remote_title')];
-  if (!status) {
-    lines.push(t(locale, 'remote_unknown'));
-    return lines.join('\n');
-  }
-  lines.push(t(locale, 'remote_status', { value: status.status }));
-  lines.push(t(locale, 'remote_environment', { value: status.environmentId ?? t(locale, 'none') }));
-  lines.push(t(locale, 'remote_installation', { value: status.installationId ?? t(locale, 'none') }));
-  return lines.join('\n');
-}
-
-function formatGoalStatus(locale: AppLocale, status: ThreadGoalStatusValue): string {
-  switch (status) {
-    case 'paused':
-      return t(locale, 'goal_status_paused');
-    case 'budgetLimited':
-      return t(locale, 'goal_status_budget_limited');
-    case 'complete':
-      return t(locale, 'goal_status_complete');
-    default:
-      return t(locale, 'goal_status_active');
-  }
-}
-
-function summarizeTurnItems(items: AppTurnSnapshot['items']): string {
-  const counts = new Map<string, number>();
-  for (const item of items) {
-    const type = item.type || 'item';
-    counts.set(type, (counts.get(type) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .slice(0, 8)
-    .map(([type, count]) => `${type}=${count}`)
-    .join(', ');
-}
-
-function turnHasRelayableOutcome(turn: AppTurnSnapshot): boolean {
-  if (turn.error?.trim()) {
-    return true;
-  }
-  return turn.items.some((item) => {
-    const type = item.type.toLowerCase();
-    if (!item.text?.trim()) {
-      return false;
-    }
-    if (type === 'plan') {
-      return true;
-    }
-    if (type !== 'agentmessage' && type !== 'assistantmessage') {
-      return false;
-    }
-    const phase = item.phase?.toLowerCase() ?? null;
-    return phase === null || phase.startsWith('final');
-  });
-}
-
-function mapGoalNotification(raw: any): CodexThreadGoal | null {
-  if (!raw || typeof raw !== 'object') {
-    return null;
-  }
-  const status = raw.status === 'paused' || raw.status === 'budgetLimited' || raw.status === 'complete'
-    ? raw.status
-    : 'active';
-  return {
-    threadId: String(raw.threadId ?? ''),
-    objective: String(raw.objective ?? ''),
-    status,
-    tokenBudget: numberOrNull(raw.tokenBudget),
-    tokensUsed: numberOrNull(raw.tokensUsed) ?? 0,
-    timeUsedSeconds: numberOrNull(raw.timeUsedSeconds) ?? 0,
-    createdAt: numberOrNull(raw.createdAt) ?? 0,
-    updatedAt: numberOrNull(raw.updatedAt) ?? 0,
-  };
-}
-
-function formatWarningNotification(locale: AppLocale, method: string, params: any): string {
-  if (method === 'configWarning') {
-    return [
-      t(locale, 'warning_config_title'),
-      String(params?.summary ?? t(locale, 'unknown')),
-      params?.path ? `path: ${String(params.path)}` : null,
-      params?.details ? truncateInline(String(params.details), 600) : null,
-    ].filter(Boolean).join('\n');
-  }
-  if (method === 'deprecationNotice') {
-    return [
-      t(locale, 'warning_deprecation_title'),
-      String(params?.summary ?? t(locale, 'unknown')),
-      params?.details ? truncateInline(String(params.details), 600) : null,
-    ].filter(Boolean).join('\n');
-  }
-  if (method === 'guardianWarning') {
-    return `${t(locale, 'warning_guardian_title')}\n${String(params?.message ?? t(locale, 'unknown'))}`;
-  }
-  return `${t(locale, 'warning_title')}\n${String(params?.message ?? t(locale, 'unknown'))}`;
-}
-
-function isCodexTransportFallbackWarning(method: string, params: any): boolean {
-  if (method !== 'warning') {
-    return false;
-  }
-  return /falling back from websockets? to https transport/i.test(String(params?.message ?? ''));
-}
-
-function normalizeThreadStatusLabel(raw: any): string {
-  if (typeof raw === 'string') {
-    return raw;
-  }
-  if (typeof raw?.type === 'string') {
-    return raw.type;
-  }
-  return 'unknown';
-}
-
-function formatThreadTokenUsage(raw: any): { percent: number; total: number; limit: number } | null {
-  const total = numberOrNull(raw?.last?.totalTokens ?? raw?.last?.total_tokens);
-  const limit = numberOrNull(raw?.modelContextWindow ?? raw?.model_context_window);
-  if (total === null || limit === null || total <= 0 || limit <= 0) {
-    return null;
-  }
-  const rawPercent = Math.round((total / limit) * 100);
-  const percent = Math.min(100, rawPercent);
-  return rawPercent >= 85 ? { percent, total, limit } : null;
-}
-
-function numberOrNull(value: unknown): number | null {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function parsePositiveInt(
-  value: string | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-): number | null {
-  if (value === undefined || value.trim() === '') {
-    return fallback;
-  }
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
-    return null;
-  }
-  return parsed;
-}
-
-function formatConfigValue(value: unknown): string {
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map(formatConfigValue).join(', ');
-  }
-  if (value && typeof value === 'object') {
-    const keys = Object.keys(value);
-    if (keys.length === 1) {
-      return keys[0]!;
-    }
-  }
-  return truncateInline(JSON.stringify(value), 160);
-}
-
-function formatRawLabel(value: unknown): string {
-  if (value === null || value === undefined) {
-    return 'unknown';
-  }
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  if (typeof value === 'object') {
-    const keys = Object.keys(value);
-    if (keys.length === 1) {
-      return keys[0]!;
-    }
-  }
-  return truncateInline(JSON.stringify(value), 160);
-}
-
-function renderMcpElicitationMessage(
-  locale: AppLocale,
-  record: PendingMcpElicitation,
-  decision?: McpElicitationAction,
-): string {
-  const lines = [
-    t(locale, 'mcp_elicitation_requested'),
-    t(locale, 'mcp_server_name', { value: record.serverName }),
-    t(locale, 'line_thread', { value: record.threadId }),
-  ];
-  if (record.turnId) lines.push(t(locale, 'line_turn', { value: record.turnId }));
-  lines.push(t(locale, 'mcp_elicitation_message', { value: record.message || t(locale, 'empty') }));
-  if (record.url) {
-    lines.push(t(locale, 'mcp_elicitation_url', { value: record.url }));
-  }
-  if (record.mode === 'form') {
-    lines.push(t(locale, 'mcp_elicitation_schema', { value: truncateInline(JSON.stringify(record.requestedSchema ?? {}), 1200) }));
-    lines.push(record.content === null
-      ? t(locale, 'mcp_elicitation_reply_json')
-      : t(locale, 'mcp_elicitation_json_ready'));
-  }
-  if (decision) {
-    lines.push(t(locale, 'line_decision', { value: decision }));
-  }
-  if (!decision && parseWeixinBridgeScope(record.chatId)) {
-    lines.push(
-      '',
-      t(locale, 'weixin_copy_paste_divider'),
-      t(locale, 'weixin_copy_mcp_title'),
-    );
-    if (record.mode === 'form') {
-      lines.push(t(locale, 'weixin_copy_mcp_json_hint'));
-    }
-    lines.push(
-      `/mcpel ${record.localId} accept`,
-      `/mcpel ${record.localId} decline`,
-      `/mcpel ${record.localId} cancel`,
-    );
-  }
-  return lines.join('\n');
-}
-
-function mcpElicitationKeyboard(locale: AppLocale, record: PendingMcpElicitation): Array<Array<{ text: string; callback_data: string }>> {
-  return [[
-    { text: t(locale, 'button_accept'), callback_data: `mcpel:${record.localId}:accept` },
-    { text: t(locale, 'button_decline'), callback_data: `mcpel:${record.localId}:decline` },
-    { text: t(locale, 'button_cancel'), callback_data: `mcpel:${record.localId}:cancel` },
-  ]];
-}
-
-function formatPermissionRequestSummary(locale: AppLocale, permissions: any): string {
-  const lines: string[] = [];
-  if (permissions?.network?.enabled !== undefined && permissions.network.enabled !== null) {
-    lines.push(t(locale, 'permission_network', { value: permissions.network.enabled ? t(locale, 'yes') : t(locale, 'no') }));
-  }
-  const fsPerms = permissions?.fileSystem;
-  if (fsPerms?.read?.length) {
-    lines.push(t(locale, 'permission_read_paths', { value: fsPerms.read.slice(0, 5).join(', ') }));
-  }
-  if (fsPerms?.write?.length) {
-    lines.push(t(locale, 'permission_write_paths', { value: fsPerms.write.slice(0, 5).join(', ') }));
-  }
-  if (Array.isArray(fsPerms?.entries) && fsPerms.entries.length > 0) {
-    lines.push(t(locale, 'permission_entries', { value: truncateInline(JSON.stringify(fsPerms.entries.slice(0, 5)), 500) }));
-  }
-  return lines.join('\n');
-}
-
-function resolveScopeMessageTarget(scopeId: string): { chatId: string; chatType: string; topicId: number | null } | null {
-  if (scopeId.startsWith(BRIDGE_SCOPE_WEIXIN_PREFIX)) {
-    const parsed = parseWeixinBridgeScope(scopeId);
-    return parsed ? { chatId: parsed.fromUserId, chatType: 'private', topicId: null } : null;
-  }
-  try {
-    const parsed = parseTelegramTargetFromBridgeScope(scopeId);
-    return { chatId: parsed.chatId, chatType: parsed.topicId === null ? 'private' : 'supergroup', topicId: parsed.topicId };
-  } catch {
-    return null;
-  }
-}
-
-function restartPreviewRecoveryKey(preview: Pick<ActiveTurnPreviewRecord, 'scopeId' | 'turnId' | 'messageId'>): string {
-  return `${preview.scopeId}:${preview.turnId}:${preview.messageId}`;
-}
-
-function seedObservedTurnCursor(turn: AppTurnSnapshot): ObservedTurnCursor {
-  const agentItems = turn.items.filter((item) => {
-    const type = item.type.toLowerCase();
-    return type === 'agentmessage' || type === 'assistantmessage' || type === 'plan';
-  });
-  const itemTexts: Record<string, string> = {};
-  for (const item of agentItems) {
-    itemTexts[item.itemId] = item.text ?? '';
-  }
-  return {
-    turnId: turn.turnId,
-    itemTexts,
-    completedItemIds: agentItems.map((item) => item.itemId),
-  };
-}
-
-function observerCursorFromActiveTurn(active: ActiveTurn): ObservedTurnCursor {
-  const itemTexts: Record<string, string> = {};
-  const completedItemIds: string[] = [];
-  for (const segment of active.segments) {
-    itemTexts[segment.itemId] = segment.text;
-    if (segment.completed) {
-      completedItemIds.push(segment.itemId);
-    }
-  }
-  return {
-    turnId: active.turnId,
-    itemTexts,
-    completedItemIds,
-  };
-}
-
-function approvalKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
-  return [[
-    { text: t(locale, 'button_allow'), callback_data: `approval:${localId}:accept` },
-    { text: t(locale, 'button_allow_session'), callback_data: `approval:${localId}:session` },
-    { text: t(locale, 'button_deny'), callback_data: `approval:${localId}:deny` },
-  ]];
-}
-
-function activeTurnKeyboard(locale: AppLocale, turnId: string): Array<Array<{ text: string; callback_data: string }>> {
-  return [[
-    { text: t(locale, 'button_interrupt'), callback_data: `turn:interrupt:${turnId}` },
-  ]];
-}
-
-function whereKeyboard(locale: AppLocale, hasBinding: boolean): Array<Array<{ text: string; callback_data: string }>> {
-  const firstRow = [
-    { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
-    { text: t(locale, 'button_models'), callback_data: 'nav:models' },
-  ];
-  const secondRow = [{ text: t(locale, 'button_threads'), callback_data: 'nav:threads' }];
-  if (!hasBinding) {
-    return [firstRow, secondRow];
-  }
-  return [
-    [{ text: t(locale, 'button_reveal'), callback_data: 'nav:reveal' }, { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }],
-    [{ text: t(locale, 'button_models'), callback_data: 'nav:models' }, { text: t(locale, 'button_threads'), callback_data: 'nav:threads' }],
-  ];
-}
-
-function renderApprovalMessage(
-  locale: AppLocale,
-  record: PendingApprovalRecord,
-  decision?: ApprovalAction,
-  renderScopeId = record.chatId,
-): string {
-  const lines = [
-    t(locale, 'approval_requested', {
-      kind: record.kind === 'fileChange'
-        ? t(locale, 'approval_kind_fileChange')
-        : record.kind === 'permissions'
-          ? t(locale, 'approval_kind_permissions')
-          : t(locale, 'approval_kind_command'),
-    }),
-    t(locale, 'line_thread', { value: record.threadId }),
-    t(locale, 'line_turn', { value: record.turnId }),
-  ];
-  if (record.command) lines.push(t(locale, 'line_command', { value: record.command }));
-  if (record.cwd) lines.push(t(locale, 'line_cwd', { value: record.cwd }));
-  if (record.reason) lines.push(t(locale, 'line_reason', { value: record.reason }));
-  if (record.kind === 'permissions') {
-    const permissions = parseApprovalPayload(record.payloadJson)?.permissions ?? {};
-    const summary = formatPermissionRequestSummary(locale, permissions);
-    if (summary) {
-      lines.push(summary);
-    }
-  }
-  if (decision) {
-    const decisionKey = decision === 'accept'
-      ? 'approval_decision_accept'
-      : decision === 'session'
-        ? 'approval_decision_session'
-        : 'approval_decision_deny';
-    lines.push(t(locale, 'line_decision', { value: t(locale, decisionKey) }));
-  }
-  if (!decision && parseWeixinBridgeScope(renderScopeId)) {
-    lines.push(
-      '',
-      t(locale, 'weixin_copy_paste_divider'),
-      t(locale, 'weixin_copy_approval_title'),
-      `/approve ${record.localId} allow`,
-      `/approve ${record.localId} session`,
-      `/approve ${record.localId} deny`,
-    );
-  }
-  return lines.join('\n');
-}
-
-function mapApprovalDecision(record: PendingApprovalRecord, action: ApprovalAction): unknown {
-  if (record.kind === 'permissions') {
-    const requested = parseApprovalPayload(record.payloadJson)?.permissions ?? {};
-    if (action === 'deny') {
-      return { permissions: {}, scope: 'turn' };
-    }
-    return {
-      permissions: grantedPermissionsFromRequest(requested),
-      scope: action === 'session' ? 'session' : 'turn',
-    };
-  }
-  const decision = action === 'accept'
-    ? 'accept'
-    : action === 'session'
-      ? 'acceptForSession'
-      : 'decline';
-  return { decision };
-}
-
-function parseApprovalPayload(payloadJson: string | null): any {
-  if (!payloadJson) return null;
-  try {
-    return JSON.parse(payloadJson);
-  } catch {
-    return null;
-  }
-}
-
-function grantedPermissionsFromRequest(requested: any): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  if (requested?.network) {
-    result.network = requested.network;
-  }
-  if (requested?.fileSystem) {
-    result.fileSystem = requested.fileSystem;
-  }
-  return result;
-}
-
-function toErrorMeta(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) {
-    return { message: error.message, stack: error.stack };
-  }
-  return { error: String(error) };
-}
-
-function formatUserError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-function normalizeRequestedCollaborationMode(value: string): CollaborationModeValue | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'plan' || normalized === '计划' || normalized === '规划') {
-    return 'plan';
-  }
-  if (normalized === 'default' || normalized === 'agent' || normalized === '默认') {
-    return 'default';
-  }
-  return null;
-}
-
-function normalizeRequestedActiveTurnMessageMode(value: string): ActiveTurnMessageMode | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'steer' || normalized === 'guide' || normalized === '引导') {
-    return 'steer';
-  }
-  if (normalized === 'queue' || normalized === '排队') {
-    return 'queue';
-  }
-  return null;
-}
-
-function normalizeApprovalTextAction(value: string): ApprovalAction | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'allow' || normalized === 'accept' || normalized === 'yes' || normalized === '同意' || normalized === '允许') {
-    return 'accept';
-  }
-  if (normalized === 'session' || normalized === 'allow_session' || normalized === '本会话' || normalized === '本会话允许') {
-    return 'session';
-  }
-  if (normalized === 'deny' || normalized === 'decline' || normalized === 'no' || normalized === '拒绝') {
-    return 'deny';
-  }
-  return null;
-}
-
-function normalizePlanImplementationTextAction(value: string): 'run' | 'fresh' | 'stay' | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'run' || normalized === 'execute' || normalized === '执行') {
-    return 'run';
-  }
-  if (normalized === 'fresh' || normalized === 'clear' || normalized === '新上下文') {
-    return 'fresh';
-  }
-  if (normalized === 'stay' || normalized === 'plan' || normalized === '继续规划') {
-    return 'stay';
-  }
-  return null;
-}
-
-function normalizeMcpElicitationTextAction(value: string): McpElicitationAction | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'accept' || normalized === 'allow' || normalized === '同意' || normalized === '接受') {
-    return 'accept';
-  }
-  if (normalized === 'decline' || normalized === 'deny' || normalized === '拒绝') {
-    return 'decline';
-  }
-  if (normalized === 'cancel' || normalized === '取消') {
-    return 'cancel';
-  }
-  return null;
-}
-
-function resolveCollaborationMode(mode: CollaborationModeValue | null | undefined): CollaborationModeValue {
-  return mode ?? DEFAULT_COLLABORATION_MODE;
-}
-
-function attachedThreadKey(scopeId: string, threadId: string): string {
-  return `${scopeId}:${threadId}`;
-}
-
-function activeTurnKey(scopeId: string, turnId: string): string {
-  return `${encodeURIComponent(scopeId)}:${encodeURIComponent(turnId)}`;
-}
-
-function parseActiveTurnKey(key: string): { scopeId: string; turnId: string } | null {
-  const split = key.indexOf(':');
-  if (split === -1) {
-    return null;
-  }
-  return {
-    scopeId: decodeURIComponent(key.slice(0, split)),
-    turnId: decodeURIComponent(key.slice(split + 1)),
-  };
-}
-
-function codexAuthDir(explicitAuthDir: string | null = null): string {
-  return explicitAuthDir || process.env.CODEX_AUTH_DIR || path.join(os.homedir(), '.codex');
-}
-
-async function listCodexAuthState(
-  disabledNames = new Set<string>(),
-  candidateStates = new Map<string, CodexAuthCandidateState>(),
-  explicitAuthDir: string | null = null,
-): Promise<CodexAuthState> {
-  const authDir = codexAuthDir(explicitAuthDir);
-  const authPath = path.join(authDir, 'auth.json');
-  const currentTargetPath = await resolveCurrentAuthTarget(authDir, authPath);
-  const candidates: CodexAuthCandidate[] = [];
-  const entries = await fs.readdir(authDir, { withFileTypes: true }).catch((error) => {
-    if (isFileMissingError(error)) {
-      return [];
-    }
-    throw error;
-  });
-
-  for (const entry of entries) {
-    if (!isCodexAuthCandidateName(entry.name)) {
-      continue;
-    }
-    const candidatePath = path.join(authDir, entry.name);
-    const stat = await fs.stat(candidatePath).catch(() => null);
-    if (!stat?.isFile()) {
-      continue;
-    }
-    candidates.push({
-      name: entry.name,
-      path: candidatePath,
-      isCurrent: currentTargetPath === candidatePath,
-      disabled: disabledNames.has(entry.name),
-      state: candidateStates.get(entry.name) ?? 'active',
-      mtimeMs: stat.mtimeMs,
-      credentialKind: 'invalid',
-      credentialLastRefreshMs: null,
-      credentialExpiresAtMs: null,
-      quota: null,
-    });
-  }
-
-  candidates.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }));
-  return {
-    authDir,
-    authPath,
-    currentTargetPath,
-    currentLabel: currentTargetPath ? await authPathDisplayLabel(currentTargetPath) : null,
-    candidates,
-  };
-}
-
-function isCodexAuthCandidateName(name: string): boolean {
-  if (name === 'auth.json' || name.startsWith('.auth.json.')) {
-    return false;
-  }
-  return name.startsWith('auth.json_') || name.startsWith('auth.json.') || name.startsWith('auth.json-');
-}
-
-async function isCodexApiKeyAuthCandidate(candidatePath: string): Promise<boolean> {
-  try {
-    const parsed = JSON.parse(await fs.readFile(candidatePath, 'utf8')) as { openai_api_key?: unknown };
-    return typeof parsed.openai_api_key === 'string' && parsed.openai_api_key.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
-function codexAuthCandidateNameFromAddName(raw: string): string | null {
-  const normalized = raw.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(normalized)) {
-    return null;
-  }
-  const name = normalized.startsWith('auth.json_')
-    || normalized.startsWith('auth.json.')
-    || normalized.startsWith('auth.json-')
-    ? normalized
-    : `auth.json_${normalized}`;
-  return isCodexAuthCandidateName(name) ? name : null;
-}
-
-async function resolveCurrentAuthTarget(authDir: string, authPath: string): Promise<string | null> {
-  const stat = await fs.lstat(authPath).catch(() => null);
-  if (!stat) {
-    return null;
-  }
-  if (stat.isSymbolicLink()) {
-    const target = await fs.readlink(authPath);
-    return path.resolve(authDir, target);
-  }
-  return authPath;
-}
-
-async function resolveAuthFinalTargetPath(startPath: string): Promise<string> {
-  let currentPath = startPath;
-  const seen = new Set<string>();
-  for (let depth = 0; depth < 20; depth += 1) {
-    const absolutePath = path.resolve(currentPath);
-    if (seen.has(absolutePath)) {
-      return currentPath;
-    }
-    seen.add(absolutePath);
-
-    const stat = await fs.lstat(currentPath).catch(() => null);
-    if (!stat?.isSymbolicLink()) {
-      return currentPath;
-    }
-    const target = await fs.readlink(currentPath);
-    currentPath = path.resolve(path.dirname(currentPath), target);
-  }
-  return currentPath;
-}
-
-async function authPathDisplayLabel(authPath: string): Promise<string> {
-  return path.basename(await resolveAuthFinalTargetPath(authPath));
-}
-
-async function pointCodexAuthAtTarget(authDir: string, authPath: string, targetPath: string): Promise<void> {
-  await fs.mkdir(authDir, { recursive: true });
-  const tempLink = path.join(authDir, `.auth.json.${process.pid}.${Date.now()}.tmp`);
-  try {
-    await fs.symlink(targetPath, tempLink);
-    await fs.rename(tempLink, authPath);
-  } catch (error) {
-    await fs.unlink(tempLink).catch(() => {});
-    throw error;
-  }
-}
-
-async function restoreCodexAuthTarget(
-  authDir: string,
-  authPath: string,
-  targetPath: string | null,
-  regularAuthContents: string | null,
-): Promise<void> {
-  if (regularAuthContents !== null) {
-    await fs.mkdir(authDir, { recursive: true });
-    const temporary = path.join(authDir, `.auth.json.${process.pid}.${Date.now()}.restore`);
-    try {
-      await fs.writeFile(temporary, regularAuthContents, { mode: 0o600 });
-      await fs.rename(temporary, authPath);
-    } catch (error) {
-      await fs.unlink(temporary).catch(() => undefined);
-      throw error;
-    }
-    return;
-  }
-  if (targetPath) {
-    await pointCodexAuthAtTarget(authDir, authPath, targetPath);
-    return;
-  }
-  await fs.unlink(authPath).catch((error) => {
-    if (!isFileMissingError(error)) {
-      throw error;
-    }
-  });
-}
-
-async function switchCodexAuth(targetPath: string, explicitAuthDir: string | null = null): Promise<CodexAuthSwitchResult> {
-  const state = await listCodexAuthState(new Set(), new Map(), explicitAuthDir);
-  const candidate = state.candidates.find(entry => entry.path === targetPath);
-  if (!candidate) {
-    throw new Error(`Auth candidate is no longer available: ${path.basename(targetPath)}`);
-  }
-  await pointCodexAuthAtTarget(state.authDir, state.authPath, candidate.path);
-  return {
-    fromLabel: state.currentLabel,
-    toLabel: await authPathDisplayLabel(candidate.path),
-  };
-}
-
-function parseCodexAuthListRequest(action: string, args: string[]): Partial<CodexAuthListView> | null {
-  if (action === 'list') {
-    return { searchTerm: args.slice(1).join(' ').trim() || null };
-  }
-  if (action === 'filter') {
-    const filter = args[1]?.toLowerCase();
-    return filter === 'all' || filter === 'enabled' || filter === 'attention'
-      ? { filter }
-      : null;
-  }
-  if (action === 'page') {
-    const page = Number.parseInt(args[1] ?? '', 10);
-    return Number.isFinite(page) && page > 0
-      ? { offset: (page - 1) * CODEX_AUTH_LIST_PAGE_SIZE }
-      : null;
-  }
-  return null;
-}
-
-function createPendingAuthChoiceList(
-  chatId: string,
-  candidates: CodexAuthCandidate[],
-  view: Partial<CodexAuthListView> = {},
-): PendingAuthChoiceList {
-  const record: PendingAuthChoiceList = {
-    localId: crypto.randomBytes(8).toString('hex'),
-    chatId,
-    messageId: null,
-    candidates,
-    createdAt: Date.now(),
-    offset: Math.max(0, view.offset ?? 0),
-    pageSize: CODEX_AUTH_LIST_PAGE_SIZE,
-    filter: view.filter ?? 'all',
-    searchTerm: view.searchTerm?.trim() || null,
-  };
-  clampCodexAuthListOffset(record);
-  return record;
-}
-
-function clampCodexAuthListOffset(view: PendingAuthChoiceList): void {
-  const filteredCount = filterCodexAuthCandidates(view.candidates, view).length;
-  const finalOffset = filteredCount > 0
-    ? Math.floor((filteredCount - 1) / view.pageSize) * view.pageSize
-    : 0;
-  view.offset = Math.min(Math.max(0, view.offset), finalOffset);
-}
-
-function codexAuthListPage(
-  candidates: CodexAuthCandidate[],
-  view: CodexAuthListView | null,
-): {
-  visible: Array<{ candidate: CodexAuthCandidate; index: number }>;
-  filteredCount: number;
-  offset: number;
-  pageIndex: number;
-  pageCount: number;
-  filter: CodexAuthListFilter;
-  searchTerm: string | null;
-} {
-  const pageSize = Math.max(1, view?.pageSize ?? CODEX_AUTH_LIST_PAGE_SIZE);
-  const filter = view?.filter ?? 'all';
-  const searchTerm = view?.searchTerm?.trim() || null;
-  const indexed = filterCodexAuthCandidates(candidates, { filter, searchTerm });
-  const finalOffset = indexed.length > 0
-    ? Math.floor((indexed.length - 1) / pageSize) * pageSize
-    : 0;
-  const offset = Math.min(Math.max(0, view?.offset ?? 0), finalOffset);
-  return {
-    visible: indexed.slice(offset, offset + pageSize),
-    filteredCount: indexed.length,
-    offset,
-    pageIndex: Math.floor(offset / pageSize),
-    pageCount: Math.max(1, Math.ceil(indexed.length / pageSize)),
-    filter,
-    searchTerm,
-  };
-}
-
-function filterCodexAuthCandidates(
-  candidates: CodexAuthCandidate[],
-  view: Pick<CodexAuthListView, 'filter' | 'searchTerm'>,
-): Array<{ candidate: CodexAuthCandidate; index: number }> {
-  const searchTerm = view.searchTerm?.trim().toLowerCase() || null;
-  return candidates
-    .map((candidate, index) => ({ candidate, index }))
-    .filter(({ candidate }) => !searchTerm || candidate.name.toLowerCase().includes(searchTerm))
-    .filter(({ candidate }) => view.filter === 'all'
-      || (view.filter === 'enabled' && !candidate.disabled && candidate.state !== 'needs_repair')
-      || (view.filter === 'attention' && codexAuthCandidateNeedsAttention(candidate)));
-}
-
-function renderAuthListMessage(
-  locale: AppLocale,
-  state: CodexAuthState,
-  botLabel: string | null = null,
-  includeWeixinCopyPaste = false,
-  view: CodexAuthListView | null = null,
-): string {
-  const lines = [
-    t(locale, 'auth_list_title'),
-  ];
-  if (botLabel) {
-    lines.push(t(locale, 'auth_bot', { value: botLabel }));
-  }
-  lines.push(
-    t(locale, 'auth_current', {
-      value: state.currentLabel
-        ? formatCodexAuthCandidateDisplayName(state.currentLabel)
-        : t(locale, 'none'),
-    }),
-    t(locale, 'auth_dir', { value: state.authDir }),
-  );
-  if (state.candidates.length === 0) {
-    lines.push(t(locale, 'auth_no_candidates'));
-    if (includeWeixinCopyPaste) {
-      lines.push(
-        '',
-        t(locale, 'weixin_copy_paste_divider'),
-        t(locale, 'weixin_copy_auth_title'),
-        '/login_device',
-        '/auth sync safe',
-        '/auth reload',
-        '/permissions',
-      );
-    }
-    return lines.join('\n');
-  }
-  lines.push(t(locale, 'auth_candidate_count', { value: state.candidates.length }));
-  lines.push(t(locale, 'auth_quota_legend'));
-  const page = codexAuthListPage(state.candidates, view);
-  if (page.searchTerm) {
-    lines.push(t(locale, 'auth_search', { value: page.searchTerm }));
-  }
-  if (page.filter !== 'all') {
-    lines.push(t(locale, 'auth_filter', { value: formatCodexAuthFilter(locale, page.filter) }));
-  }
-  if (page.filteredCount !== state.candidates.length || page.pageCount > 1) {
-    lines.push(t(locale, 'auth_page', {
-      from: page.filteredCount === 0 ? 0 : page.offset + 1,
-      to: page.offset + page.visible.length,
-      filtered: page.filteredCount,
-      total: state.candidates.length,
-      page: page.pageIndex + 1,
-      pages: page.pageCount,
-    }));
-  }
-  if (page.visible.length === 0) {
-    lines.push(t(locale, 'auth_no_matches'));
-  }
-  page.visible.forEach(({ candidate, index }) => {
-    const marker = candidate.isCurrent ? ' *' : '';
-    lines.push(`${index + 1}. ${formatAuthQuotaPrefix(locale, candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${marker} ${formatCodexAuthCandidateStatus(locale, candidate)}`);
-  });
-  if (includeWeixinCopyPaste) {
-    lines.push(
-        '',
-        t(locale, 'weixin_copy_paste_divider'),
-        t(locale, 'weixin_copy_auth_title'),
-      ...page.visible.map(({ index }) => `/auth use ${index + 1}`),
-      ...page.visible.map(({ candidate, index }) => candidate.disabled
-        ? `/auth enable ${index + 1}`
-        : `/auth disable ${index + 1}`),
-      '/auth filter all',
-      '/auth filter enabled',
-      '/auth filter attention',
-      '/auth list <keyword>',
-      '/login_device',
-      '/auth sync safe',
-      '/auth reload',
-      '/permissions',
-    );
-  }
-  return lines.join('\n');
-}
-
-function authChoiceKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
-  const page = codexAuthListPage(record.candidates, record);
-  const rows = page.visible.map(({ candidate, index }) => [
-    {
-      text: clipButtonText(`${candidate.state === 'needs_repair' ? '? ' : candidate.isCurrent ? '✅ ' : '🔐 '}${formatAuthQuotaButtonPrefix(candidate.quota)}|${formatCodexAuthCandidateDisplayName(candidate.name)}${candidate.disabled ? ' · off' : ''}`),
-      callback_data: candidate.state === 'needs_repair' ? `auth:${record.localId}:repair:${index}` : `auth:${record.localId}:${index}`,
-    },
-    {
-      text: candidate.state === 'needs_repair' ? '?' : t(locale, candidate.disabled ? 'button_auth_disable' : 'button_auth_enable'),
-      callback_data: candidate.state === 'needs_repair' ? `auth:${record.localId}:repair:${index}` : `auth:${record.localId}:toggle:${index}`,
-    },
-  ]);
-  const navigationRow = [];
-  if (page.offset > 0) {
-    navigationRow.push({ text: t(locale, 'button_prev_page'), callback_data: `auth:${record.localId}:page:prev` });
-  }
-  if (page.offset + page.visible.length < page.filteredCount) {
-    navigationRow.push({ text: t(locale, 'button_next_page'), callback_data: `auth:${record.localId}:page:next` });
-  }
-  if (navigationRow.length > 0) {
-    rows.push(navigationRow);
-  }
-  rows.push([
-    authFilterButton(locale, record, 'all'),
-    authFilterButton(locale, record, 'enabled'),
-    authFilterButton(locale, record, 'attention'),
-  ]);
-  if (record.searchTerm) {
-    rows.push([{ text: t(locale, 'button_clear_filter'), callback_data: `auth:${record.localId}:clear_search` }]);
-  }
-  rows.push([{ text: t(locale, 'button_login_device'), callback_data: `auth:${record.localId}:login_device` }]);
-  rows.push([{ text: t(locale, 'button_auth_safe_sync'), callback_data: `auth:${record.localId}:safe_sync` }]);
-  return rows;
-}
-
-function formatCodexAuthCandidateDisplayName(name: string): string {
-  const prefix = 'auth.json_';
-  return name.length > prefix.length && name.startsWith(prefix)
-    ? name.slice(prefix.length)
-    : name;
-}
-
-function authFilterButton(
-  locale: AppLocale,
-  record: PendingAuthChoiceList,
-  filter: CodexAuthListFilter,
-): { text: string; callback_data: string } {
-  const label = t(locale, `button_auth_filter_${filter}` as 'button_auth_filter_all' | 'button_auth_filter_enabled' | 'button_auth_filter_attention');
-  return {
-    text: record.filter === filter ? `☑️ ${label}` : label,
-    callback_data: `auth:${record.localId}:filter:${filter}`,
-  };
-}
-
-function codexAuthCandidateHealth(candidate: CodexAuthCandidate): CodexAuthCandidateHealth {
-  if (candidate.state === 'needs_repair') {
-    return 'needs_repair';
-  }
-  if (candidate.disabled) {
-    return 'disabled';
-  }
-  if (candidate.credentialKind === 'api-key') {
-    return 'api-key';
-  }
-  if (candidate.credentialKind === 'invalid') {
-    return 'invalid';
-  }
-  const remaining = [
-    candidate.quota?.primaryRemainingPercent,
-    candidate.quota?.secondaryRemainingPercent,
-  ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-  if (remaining.some(value => value <= 0)) {
-    return 'exhausted';
-  }
-  if (remaining.some(value => value <= CODEX_AUTH_LOW_QUOTA_PERCENT)) {
-    return 'low';
-  }
-  if (
-    candidate.credentialLastRefreshMs !== null
-    && candidate.credentialLastRefreshMs < Date.now() - CODEX_AUTH_STALE_CREDENTIAL_DAYS * 24 * 60 * 60_000
-  ) {
-    return 'stale';
-  }
-  if (remaining.length === 0) {
-    return 'unknown';
-  }
-  return 'ready';
-}
-
-function codexAuthCandidateNeedsAttention(candidate: CodexAuthCandidate): boolean {
-  const health = codexAuthCandidateHealth(candidate);
-  return health === 'stale'
-    || health === 'unknown'
-    || health === 'low'
-    || health === 'exhausted'
-    || health === 'needs_repair'
-    || health === 'invalid';
-}
-
-function formatCodexAuthCandidateStatus(locale: AppLocale, candidate: CodexAuthCandidate): string {
-  const details = [];
-  if (candidate.quota?.planType) {
-    details.push(formatPlanTypeLabel(candidate.quota.planType));
-  }
-  details.push(t(locale, `auth_candidate_health_${codexAuthCandidateHealth(candidate)}` as
-    | 'auth_candidate_health_disabled'
-    | 'auth_candidate_health_needs_repair'
-    | 'auth_candidate_health_ready'
-    | 'auth_candidate_health_low'
-    | 'auth_candidate_health_exhausted'
-    | 'auth_candidate_health_stale'
-    | 'auth_candidate_health_unknown'
-    | 'auth_candidate_health_api-key'
-    | 'auth_candidate_health_invalid'));
-  if (candidate.credentialLastRefreshMs !== null) {
-    details.push(t(locale, 'auth_candidate_last_refresh', {
-      value: formatCompactAge(locale, Date.now() - candidate.credentialLastRefreshMs),
-    }));
-  }
-  if (candidate.credentialExpiresAtMs !== null) {
-    details.push(t(locale, 'auth_candidate_expires_at', {
-      value: formatUtcDateTime(candidate.credentialExpiresAtMs),
-    }));
-  }
-  return `[${details.join(' · ')}]`;
-}
-
-function formatCodexAuthFilter(locale: AppLocale, filter: CodexAuthListFilter): string {
-  return t(locale, `auth_filter_${filter}` as 'auth_filter_all' | 'auth_filter_enabled' | 'auth_filter_attention');
-}
-
-function authRefreshAllConfirmKeyboard(locale: AppLocale, record: PendingAuthChoiceList): Array<Array<{ text: string; callback_data: string }>> {
-  return [
-    [{ text: t(locale, 'button_auth_refresh_all_confirm'), callback_data: `auth:${record.localId}:refresh_all_confirm` }],
-    [{ text: t(locale, 'button_cancel'), callback_data: `auth:${record.localId}:refresh_all_cancel` }],
-  ];
-}
-
-function authRepairKeyboard(locale: AppLocale, record: PendingAuthChoiceList, index: number): Array<Array<{ text: string; callback_data: string }>> {
-  return [
-    [{ text: t(locale, 'button_auth_repair_login'), callback_data: `auth:${record.localId}:repair_login:${index}` }],
-    [{ text: t(locale, 'button_auth_delete'), callback_data: `auth:${record.localId}:repair_delete:${index}` }],
-    [{ text: t(locale, 'button_cancel'), callback_data: `auth:${record.localId}:repair_cancel:${index}` }],
-  ];
-}
-
-function formatAuthRefreshAllResult(locale: AppLocale, result: CodexAuthRefreshAllResult, mode: 'manual' | 'proactive' = 'manual'): string {
-  const lines = [t(locale, mode === 'proactive' ? 'auth_proactive_refresh_done' : 'auth_refresh_all_done', {
-    refreshed: String(result.refreshed.length),
-    skipped: String(result.skipped.length),
-    failed: String(result.failed.length),
-  })];
-  if (result.refreshed.length > 0) {
-    lines.push(t(locale, 'auth_refresh_all_refreshed', { value: result.refreshed.join(', ') }));
-  }
-  if (result.skipped.length > 0) {
-    lines.push(t(locale, 'auth_refresh_all_skipped', { value: result.skipped.join(', ') }));
-  }
-  if (result.failed.length > 0) {
-    const details = result.failed
-      .slice(0, 5)
-      .map((failure) => `${failure.name}: ${failure.error}`)
-      .join('; ');
-    lines.push(t(locale, 'auth_refresh_all_failed', { value: details }));
-  }
-  return lines.join('\n');
-}
-
-function formatAuthClusterAuditResult(locale: AppLocale, outcome: CodexAuthClusterAuditOutcome): string {
-  const { audit, refresh, push } = outcome;
-  const lines = [t(locale, 'auth_cluster_audit_summary', {
-    responded: audit.nodesResponded,
-    expected: audit.nodesExpected,
-    checked: audit.checkedCandidates,
-    valid: audit.validCandidates,
-    invalid: audit.invalidCandidates,
-  })];
-  if (audit.synchronizedCandidates.length > 0) {
-    lines.push(t(locale, 'auth_cluster_audit_synced', { value: audit.synchronizedCandidates.join(', ') }));
-  }
-  if (audit.consensusInvalidCandidates.length > 0) {
-    lines.push(t(locale, 'auth_cluster_audit_repair', { value: audit.consensusInvalidCandidates.join(', ') }));
-  }
-  if (audit.missingPeers.length > 0) {
-    lines.push(t(locale, 'auth_cluster_audit_missing', { value: audit.missingPeers.join(', ') }));
-  }
-  if (audit.busyNodes.length > 0) {
-    lines.push(t(locale, 'auth_cluster_audit_busy', { value: audit.busyNodes.join(', ') }));
-  }
-  if (audit.identityConflicts.length > 0) {
-    lines.push(t(locale, 'auth_cluster_audit_conflicts', { value: audit.identityConflicts.join(', ') }));
-  }
-  if (outcome.refreshSkippedReason) {
-    lines.push(t(locale, 'auth_cluster_audit_refresh_skipped'));
-  } else {
-    lines.push(formatAuthRefreshAllResult(locale, refresh, 'proactive'));
-  }
-  lines.push(t(locale, 'auth_cluster_audit_push', { sent: push.sent, skipped: push.skipped }));
-  return lines.join('\n');
-}
-
-function formatAuthSyncStatus(
-  locale: AppLocale,
-  status: RuntimeStatus['authSync'],
-  proactiveRefresh: AuthProactiveRefreshStatus | null = null,
-): string {
-  if (!status?.enabled) {
-    return t(locale, 'auth_sync_disabled');
-  }
-  const lines = [
-    t(locale, 'auth_sync_status_title'),
-    t(locale, 'auth_sync_status_node', { value: status.nodeId ?? t(locale, 'unknown') }),
-    t(locale, 'auth_sync_status_transport', { value: status.transportLabel ?? t(locale, 'unknown') }),
-    t(locale, 'auth_sync_status_peers', { value: status.peers.length === 0 ? t(locale, 'none') : status.peers.join(', ') }),
-    t(locale, 'auth_sync_status_pending', { value: status.pendingImports }),
-    t(locale, 'auth_sync_status_sent', { value: status.lastSentAt ?? t(locale, 'none') }),
-    t(locale, 'auth_sync_status_received', { value: status.lastReceivedAt ?? t(locale, 'none') }),
-    t(locale, 'auth_sync_status_imported', {
-      value: status.lastImportedAt
-        ? `${status.lastImportCandidate ?? t(locale, 'unknown')} @ ${status.lastImportedAt}`
-        : t(locale, 'none'),
-    }),
-    t(locale, 'auth_sync_status_pull', {
-      value: status.lastPullAt
-        ? `${status.lastPullCandidate ?? t(locale, 'unknown')} @ ${status.lastPullAt}`
-        : t(locale, 'none'),
-    }),
-  ];
-  if (status.activeLeaseId) {
-    lines.push(t(locale, 'auth_sync_status_lease', { value: status.activeLeaseId }));
-  }
-  if (status.lastError) {
-    lines.push(t(locale, 'auth_sync_status_error', { value: status.lastError }));
-  }
-  if (proactiveRefresh) {
-    lines.push(t(locale, 'auth_sync_status_proactive_refresh', {
-      value: formatAuthProactiveRefreshStatus(locale, proactiveRefresh),
-    }));
-  }
-  if (status.peerStatuses?.length) {
-    lines.push(t(locale, 'auth_sync_status_peer_activity'));
-    for (const peer of status.peerStatuses.slice(0, 5)) {
-      lines.push(t(locale, 'auth_sync_status_peer_activity_item', {
-        peer: peer.peer,
-        time: peer.lastReceivedAt ?? t(locale, 'none'),
-      }));
-    }
-  }
-  if (status.candidateFailures?.length) {
-    lines.push(t(locale, 'auth_sync_status_candidate_failures'));
-    for (const failure of status.candidateFailures.slice(0, 5)) {
-      lines.push(t(locale, 'auth_sync_status_candidate_failure', {
-        candidate: failure.candidateName,
-        reason: failure.reason,
-        source: failure.sourceLabel ?? failure.sourceNodeId ?? t(locale, 'unknown'),
-        peer: failure.peer ?? t(locale, 'unknown'),
-        time: failure.updatedAt,
-      }));
-    }
-  }
-  const recentEvents = [...(status.recentEvents ?? [])].slice(-5);
-  if (recentEvents.length > 0) {
-    lines.push(t(locale, 'auth_sync_status_recent_events'));
-    for (const event of recentEvents) {
-      lines.push(formatAuthSyncEventLine(event));
-    }
-  }
-  return lines.join('\n');
-}
-
-function formatAuthProactiveRefreshStatus(
-  locale: AppLocale,
-  status: AuthProactiveRefreshStatus,
-): string {
-  const time = status.finishedAt ?? status.startedAt;
-  const candidates = formatLimitedList(status.candidates, 3);
-  const state = formatAuthProactiveRefreshState(locale, status.state);
-  const result = locale === 'zh'
-    ? `已刷新 ${status.refreshed}，已跳过 ${status.skipped}，失败 ${status.failed}`
-    : `refreshed ${status.refreshed}, skipped ${status.skipped}, failed ${status.failed}`;
-  const parts = [
-    `${state} @ ${time}`,
-    locale === 'zh' ? `候选 ${candidates}` : `candidates ${candidates}`,
-    result,
-  ];
-  if (status.error) {
-    parts.push(locale === 'zh'
-      ? `原因 ${formatShortStatusError(status.error)}`
-      : `reason ${formatShortStatusError(status.error)}`);
-  }
-  if (status.details.length > 0) {
-    parts.push(locale === 'zh'
-      ? `明细 ${formatLimitedList(status.details.map(formatShortStatusError), 2)}`
-      : `details ${formatLimitedList(status.details.map(formatShortStatusError), 2)}`);
-  }
-  return parts.join('; ');
-}
-
-function formatAuthProactiveRefreshState(
-  locale: AppLocale,
-  state: AuthProactiveRefreshStatus['state'],
-): string {
-  if (locale === 'zh') {
-    switch (state) {
-      case 'running': return '进行中';
-      case 'completed': return '已完成';
-      case 'lease_failed': return '锁未授予';
-      case 'failed': return '失败';
-    }
-  }
-  switch (state) {
-    case 'running': return 'running';
-    case 'completed': return 'completed';
-    case 'lease_failed': return 'lease not granted';
-    case 'failed': return 'failed';
-  }
-}
-
-function formatLimitedList(values: readonly string[], limit: number): string {
-  if (values.length === 0) return '-';
-  const shown = values.slice(0, limit).join(', ');
-  return values.length > limit ? `${shown}, +${values.length - limit}` : shown;
-}
-
-type AuthSyncRuntimeStatus = NonNullable<RuntimeStatus['authSync']>;
-type AuthSyncRuntimeEvent = NonNullable<AuthSyncRuntimeStatus['recentEvents']>[number];
-
-function formatAuthSyncEvents(locale: AppLocale, status: RuntimeStatus['authSync'], filter: string | null): string {
-  if (!status?.enabled) {
-    return t(locale, 'auth_sync_disabled');
-  }
-  const events = filterAuthSyncEvents(status.recentEvents ?? [], filter).slice(-15);
-  if (events.length === 0) {
-    return [
-      t(locale, 'auth_sync_events_title'),
-      t(locale, 'auth_sync_events_empty'),
-    ].join('\n');
-  }
-  return [
-    t(locale, 'auth_sync_events_title'),
-    ...events.map(formatAuthSyncEventLine),
-  ].join('\n');
-}
-
-function formatAuthSyncTrace(locale: AppLocale, status: RuntimeStatus['authSync'], requestId: string): string {
-  if (!status?.enabled) {
-    return t(locale, 'auth_sync_disabled');
-  }
-  const events = (status.recentEvents ?? [])
-    .filter(event => event.requestId === requestId || event.id === requestId)
-    .slice(-25);
-  if (events.length === 0) {
-    return [
-      t(locale, 'auth_sync_trace_title', { value: requestId }),
-      t(locale, 'auth_sync_events_empty'),
-    ].join('\n');
-  }
-  return [
-    t(locale, 'auth_sync_trace_title', { value: requestId }),
-    ...events.map(formatAuthSyncEventLine),
-  ].join('\n');
-}
-
-function filterAuthSyncEvents(events: AuthSyncRuntimeEvent[], filter: string | null): AuthSyncRuntimeEvent[] {
-  const normalized = filter?.trim().toLowerCase() ?? '';
-  if (!normalized) {
-    return events;
-  }
-  return events.filter((event) => [
-    event.id,
-    event.requestId,
-    event.candidateName,
-    event.peer,
-    event.kind,
-    event.stage,
-    event.detail,
-  ].some(value => value?.toLowerCase().includes(normalized)));
-}
-
-function formatAuthSyncEventLine(event: AuthSyncRuntimeEvent): string {
-  const fields = [
-    event.createdAt,
-    event.direction,
-    event.kind,
-    event.stage,
-    event.peer ? `peer=${event.peer}` : null,
-    event.requestId ? `requestId=${event.requestId}` : null,
-    event.candidateName ? `candidate=${event.candidateName}` : null,
-    event.detail ? truncateInline(event.detail, 160) : null,
-  ].filter(Boolean);
-  return `- ${fields.join(' | ')}`;
-}
-
-function normalizeHelpUsageKey(name: string): string | null {
-  const normalized = name.toLowerCase();
-  switch (normalized) {
-    case 'start':
-      return 'help';
-    case 'followup':
-      return 'active';
-    case 'login':
-      return 'login_device';
-    case 'codex_restart':
-      return 'auth_reload';
-    case 'file':
-      return 'files';
-    case 'rollback':
-      return 'undo';
-    case 'access':
-      return 'permissions';
-    case 'focus':
-      return 'reveal';
-    case 'model':
-      return 'models';
-    default:
-      if (PINNED_HELP_COMMANDS.some(entry => entry.key === normalized)) {
-        return normalized;
-      }
-      if (DYNAMIC_HELP_COMMANDS.some(entry => entry.key === normalized)) {
-        return normalized;
-      }
-      return null;
-  }
-}
-
-function formatWatchCallbackText(locale: AppLocale, mode: 'already' | 'active' | 'idle', threadId: string): string {
-  if (mode === 'already') {
-    return t(locale, 'watch_already_enabled', { threadId });
-  }
-  if (mode === 'active') {
-    return t(locale, 'watch_started_active', { threadId });
-  }
-  return t(locale, 'watch_started_idle', { threadId });
-}
-
-function cloneAuthRetryContext(context: AuthRetryContext): AuthRetryContext {
-  return {
-    input: context.input,
-    threadId: context.threadId,
-    cwd: context.cwd,
-    chatId: context.chatId,
-    chatType: context.chatType,
-    topicId: context.topicId,
-    collaborationMode: context.collaborationMode,
-    failedAuthTargets: new Set(context.failedAuthTargets),
-  };
-}
-
-function classifyCodexAuthRotationError(params: any): CodexAuthRotationReason | null {
-  const collected = collectCodexErrorText(params);
-  if (isChatGptBackendAccessBlocked(collected)) {
-    return null;
-  }
-  const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
-  const message = stringOrNull(params?.error?.message) ?? '';
-  const text = `${code ?? ''}\n${message}\n${collected}`;
-  if (isCodexAuthInvalidError(text)) {
-    return 'auth_invalid';
-  }
-  if (isCodexQuotaLimitError(text)) {
-    return 'quota_limited';
-  }
-  if (code && /auth|unauthorized|forbidden|login/i.test(code)) {
-    return 'auth_invalid';
-  }
-  return /(not authenticated|unauthorized|forbidden|sign in|log in|login|auth)/i.test(message)
-    ? 'auth_invalid'
-    : null;
-}
-
-function isCodexAuthInvalidError(text: string): boolean {
-  return /token[_\s-]?invalidated/i.test(text)
-    || /authentication token has been invalidated/i.test(text)
-    || /\b401\s+unauthorized\b/i.test(text)
-    || /\bunauthorized\b/i.test(text)
-    || /\bnot authenticated\b/i.test(text)
-    || /\bsign in again\b/i.test(text)
-    || /\blog in again\b/i.test(text);
-}
-
-function isCodexQuotaLimitError(text: string): boolean {
-  return /usageLimitExceeded/i.test(text)
-    || /you['’]?ve hit your usage limit/i.test(text)
-    || /\busage limit(?:s)?\b/i.test(text)
-    || /\brate limit(?:ed|s)?\b/i.test(text)
-    || /\btoo many requests\b/i.test(text)
-    || /\binsufficient[_\s-]?quota\b/i.test(text)
-    || /\bquota exceeded\b/i.test(text)
-    || /\bbilling hard limit\b/i.test(text)
-    || /\bcredits? exhausted\b/i.test(text)
-    || /\bout of credits?\b/i.test(text)
-    || /\bcredits? limit\b/i.test(text);
-}
-
-function formatCodexNotificationError(params: any): string {
-  const collected = collectCodexErrorText(params);
-  const known = formatKnownCodexAccessError(collected);
-  if (known) {
-    return known;
-  }
-  const message = stringOrNull(params?.error?.message);
-  if (message) {
-    return clipUserFacingError(cleanUserFacingError(message));
-  }
-  const code = stringOrNull(params?.error?.codexErrorInfo) ?? stringOrNull(params?.error?.code);
-  if (code) {
-    return clipUserFacingError(cleanUserFacingError(code));
-  }
-  return clipUserFacingError(cleanUserFacingError(JSON.stringify(params?.error ?? params ?? {})));
-}
-
-function isRetryableCodexTransportError(params: any): boolean {
-  if (params?.willRetry !== true) {
-    return false;
-  }
-  const errorInfo = params?.error?.codexErrorInfo;
-  return Boolean(errorInfo && typeof errorInfo === 'object' && 'responseStreamDisconnected' in errorInfo);
-}
-
-function collectCodexErrorText(params: any): string {
-  const parts = [
-    stringOrNull(params?.error?.message),
-    stringOrNull(params?.error?.additionalDetails),
-    stringOrNull(params?.additionalDetails),
-    stringOrNull(params?.error?.codexErrorInfo),
-    stringOrNull(params?.error?.code),
-  ].filter((part): part is string => part !== null);
-  if (parts.length > 0) {
-    return parts.join(' ');
-  }
-  try {
-    return JSON.stringify(params?.error ?? params ?? {});
-  } catch {
-    return String(params?.error ?? params ?? '');
-  }
-}
-
-function formatKnownCodexAccessError(raw: string): string | null {
-  if (!isChatGptBackendAccessBlocked(raw)) {
-    return null;
-  }
-  const ray = raw.match(/\bcf-ray:\s*([A-Za-z0-9-]+)/i)?.[1]
-    ?? raw.match(/\bRay ID:\s*([A-Za-z0-9-]+)/i)?.[1]
-    ?? null;
-  return `ChatGPT backend 403 Forbidden: service network/proxy/IP is blocked, not necessarily auth.json invalid. Check HTTP_PROXY/HTTPS_PROXY in the FoxClaw env file and restart FoxClaw${ray ? ` (cf-ray: ${ray})` : ''}.`;
-}
-
-function isChatGptBackendAccessBlocked(raw: string): boolean {
-  const value = raw.toLowerCase();
-  const targetsChatGptBackend = value.includes('chatgpt.com/backend-api')
-    || value.includes('wss://chatgpt.com/backend-api');
-  const isForbidden = value.includes('403 forbidden')
-    || value.includes('status 403')
-    || value.includes('httpstatuscode":403')
-    || value.includes('httpstatuscode:403');
-  const looksLikeHtmlBlock = value.includes('<html')
-    || value.includes('text/html')
-    || value.includes('cf-ray')
-    || value.includes('unable to load site')
-    || value.includes('if you are using a vpn');
-  return targetsChatGptBackend && isForbidden && looksLikeHtmlBlock;
-}
-
-function cleanUserFacingError(raw: string): string {
-  return raw
-    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function clipUserFacingError(raw: string, limit = 900): string {
-  const cleaned = raw.trim();
-  if (cleaned.length <= limit) {
-    return cleaned;
-  }
-  return `${cleaned.slice(0, limit - 3)}...`;
-}
-
-function parseUserInputQuestions(params: any): PendingUserInputQuestion[] {
-  const rawQuestions = Array.isArray(params?.questions)
-    ? params.questions
-    : params?.question
-      ? [params.question]
-      : [];
-  const seenIds = new Set<string>();
-  return rawQuestions
-    .map((raw: any, index: number): PendingUserInputQuestion | null => {
-      const fallbackId = `q${index + 1}`;
-      const rawId = stringOrNull(raw?.id) ?? fallbackId;
-      const id = seenIds.has(rawId) ? `${rawId}_${index + 1}` : rawId;
-      seenIds.add(id);
-      const header = stringOrNull(raw?.header);
-      const question = stringOrNull(raw?.question) ?? stringOrNull(raw?.prompt) ?? stringOrNull(raw?.text) ?? '';
-      const isOther = raw?.isOther === true || raw?.is_other === true;
-      const isSecret = raw?.isSecret === true || raw?.is_secret === true;
-      const options = Array.isArray(raw?.options)
-        ? raw.options
-            .map((option: any): PendingUserInputOption | null => {
-              const label = stringOrNull(option?.label) ?? stringOrNull(option?.value) ?? stringOrNull(option);
-              if (!label) {
-                return null;
-              }
-              return {
-                label,
-                description: stringOrNull(option?.description),
-              };
-            })
-            .filter((option: PendingUserInputOption | null): option is PendingUserInputOption => option !== null)
-        : [];
-      if (!header && !question && options.length === 0) {
-        return null;
-      }
-      return { id, header, question, isOther, isSecret, options };
-    })
-    .filter((question: PendingUserInputQuestion | null): question is PendingUserInputQuestion => question !== null);
-}
-
-function parseServerRequestId(raw: unknown): ServerRequestId | null {
-  if (typeof raw === 'string' || typeof raw === 'number') {
-    return raw;
-  }
-  return null;
-}
-
-function stringifyServerRequestId(id: ServerRequestId): string {
-  return String(id);
-}
-
-function sameServerRequestId(left: ServerRequestId, right: ServerRequestId): boolean {
-  return stringifyServerRequestId(left) === stringifyServerRequestId(right);
-}
-
-function parseStoredServerRequestId(raw: string): ServerRequestId {
-  if (/^(0|[1-9]\d*)$/.test(raw)) {
-    const value = Number(raw);
-    if (Number.isSafeInteger(value)) {
-      return value;
-    }
-  }
-  return raw;
-}
-
-function serializePendingUserInput(record: PendingUserInputRequest): PendingUserInputStoredRecord {
-  return {
-    localId: record.localId,
-    serverRequestId: stringifyServerRequestId(record.serverRequestId),
-    chatId: record.chatId,
-    threadId: record.threadId,
-    turnId: record.turnId,
-    itemId: record.itemId,
-    messageId: record.messageId,
-    questionsJson: JSON.stringify(record.questions),
-    answersJson: stringifyPendingUserInputAnswers(record.answers),
-    currentQuestionIndex: pendingUserInputCurrentQuestionIndex(record),
-    awaitingFreeText: false,
-    status: record.status,
-    createdAt: record.createdAt,
-    submittedAt: record.submittedAt,
-    resolvedAt: null,
-  };
-}
-
-function parseStoredPendingUserInput(record: PendingUserInputStoredRecord): PendingUserInputRequest | null {
-  const questions = parseStoredUserInputQuestions(record.questionsJson);
-  if (questions.length === 0) {
-    return null;
-  }
-  return {
-    localId: record.localId,
-    serverRequestId: parseStoredServerRequestId(record.serverRequestId),
-    chatId: record.chatId,
-    threadId: record.threadId,
-    turnId: record.turnId,
-    itemId: record.itemId,
-    questions,
-    answers: parseStoredUserInputAnswers(record.answersJson),
-    messageId: record.messageId,
-    status: normalizePendingUserInputStatus(record.status),
-    createdAt: record.createdAt,
-    submittedAt: record.submittedAt,
-  };
-}
-
-function normalizePendingUserInputStatus(raw: string | null | undefined): PendingUserInputStatus {
-  if (raw === 'submitted' || raw === 'resolved' || raw === 'interrupted') {
-    return raw;
-  }
-  return 'pending';
-}
-
-function parseStoredUserInputQuestions(rawJson: string): PendingUserInputQuestion[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawJson);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) {
-    return [];
-  }
-  return parsed
-    .map((raw: any, index): PendingUserInputQuestion | null => {
-      const id = stringOrNull(raw?.id) ?? `q${index + 1}`;
-      const question = stringOrNull(raw?.question) ?? '';
-      const options = Array.isArray(raw?.options)
-        ? raw.options
-            .map((option: any): PendingUserInputOption | null => {
-              const label = stringOrNull(option?.label);
-              if (!label) {
-                return null;
-              }
-              return {
-                label,
-                description: stringOrNull(option?.description),
-              };
-            })
-            .filter((option: PendingUserInputOption | null): option is PendingUserInputOption => option !== null)
-        : [];
-      return {
-        id,
-        header: stringOrNull(raw?.header),
-        question,
-        isOther: raw?.isOther === true,
-        isSecret: raw?.isSecret === true,
-        options,
-      };
-    })
-    .filter((question: PendingUserInputQuestion | null): question is PendingUserInputQuestion => question !== null);
-}
-
-function stringifyPendingUserInputAnswers(answers: Map<string, string>): string {
-  return JSON.stringify(Object.fromEntries(answers.entries()));
-}
-
-function parseStoredUserInputAnswers(rawJson: string): Map<string, string> {
-  const answers = new Map<string, string>();
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawJson);
-  } catch {
-    return answers;
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return answers;
-  }
-  for (const [id, rawAnswer] of Object.entries(parsed)) {
-    const answer = normalizeStoredUserInputAnswer(rawAnswer);
-    if (answer !== null) {
-      answers.set(id, answer);
-    }
-  }
-  return answers;
-}
-
-function normalizeStoredUserInputAnswer(rawAnswer: unknown): string | null {
-  if (typeof rawAnswer === 'string') {
-    return rawAnswer;
-  }
-  if (Array.isArray(rawAnswer)) {
-    const first = rawAnswer.find((entry): entry is string => typeof entry === 'string');
-    return first ?? null;
-  }
-  if (rawAnswer && typeof rawAnswer === 'object') {
-    const nested = (rawAnswer as { answers?: unknown }).answers;
-    return normalizeStoredUserInputAnswer(nested);
-  }
-  return null;
-}
-
-function pendingUserInputCurrentQuestionIndex(record: PendingUserInputRequest): number {
-  const index = record.questions.findIndex(question => !record.answers.has(question.id));
-  return index === -1 ? record.questions.length : index;
-}
-
-function renderUserInputMessage(
-  locale: AppLocale,
-  record: PendingUserInputRequest,
-): string {
-  const lines = [
-    t(locale, 'user_input_requested'),
-    t(locale, 'line_thread', { value: record.threadId }),
-  ];
-  if (record.turnId) {
-    lines.push(t(locale, 'line_turn', { value: record.turnId }));
-  }
-
-  record.questions.forEach((question, index) => {
-    lines.push('');
-    const title = question.header || question.question || question.id;
-    if (question.header && question.question) {
-      lines.push(`${index + 1}. **${title}** ${question.question}`);
-    } else {
-      lines.push(`${index + 1}. **${title}**`);
-    }
-    if (question.isOther) {
-      lines.push(`   - ${t(locale, 'user_input_other_hint')}`);
-    }
-    if (question.isSecret) {
-      lines.push(`   - ${t(locale, 'user_input_secret_warning')}`);
-    }
-    question.options.forEach((option, optionIndex) => {
-      const description = option.description ? ` - ${option.description}` : '';
-      lines.push(`   ${optionIndex + 1}. ${option.label}${description}`);
-    });
-    const answer = record.answers.get(question.id);
-    if (answer) {
-      lines.push(`   - ${t(locale, 'user_input_selected', { value: answer })}`);
-    }
-  });
-
-  lines.push('');
-  const statusKey = record.status === 'submitted'
-    ? 'user_input_submitted_waiting'
-    : record.status === 'interrupted'
-      ? 'user_input_interrupted'
-      : record.status === 'resolved'
-        ? 'user_input_submitted'
-        : 'user_input_reply_hint';
-  lines.push(t(locale, statusKey));
-  if (record.status === 'pending' && parseWeixinBridgeScope(record.chatId)) {
-    lines.push(
-      '',
-      t(locale, 'weixin_copy_paste_divider'),
-      t(locale, 'weixin_copy_answer_title'),
-    );
-    record.questions.forEach((question, questionIndex) => {
-      if (record.answers.has(question.id)) {
-        return;
-      }
-      if (question.options.length > 0) {
-        question.options.forEach((_option, optionIndex) => {
-          lines.push(`/answer ${record.localId} ${questionIndex + 1} ${optionIndex + 1}`);
-        });
-      }
-      lines.push(`/answer ${record.localId} ${questionIndex + 1} <text>`);
-    });
-  }
-  return lines.join('\n');
-}
-
-function userInputKeyboard(record: PendingUserInputRequest): Array<Array<{ text: string; callback_data: string }>> {
-  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
-  record.questions.forEach((question, questionIndex) => {
-    if (record.answers.has(question.id) || question.options.length === 0) {
-      return;
-    }
-    rows.push(question.options.map((option, optionIndex) => ({
-      text: clipButtonText(record.questions.length > 1 ? `${questionIndex + 1}. ${option.label}` : option.label),
-      callback_data: `ui:${record.localId}:${questionIndex}:${optionIndex}`,
-    })));
-  });
-  return rows;
-}
-
-function parseStoredTurnInput(inputJson: string): TurnInput[] {
-  const value = JSON.parse(inputJson) as unknown;
-  if (!Array.isArray(value)) {
-    throw new Error('Queued turn input is not an array');
-  }
-  return value as TurnInput[];
-}
-
-function parseStagedTelegramAttachments(attachmentsJson: string): StagedTelegramAttachment[] {
-  const value = JSON.parse(attachmentsJson) as unknown;
-  if (!Array.isArray(value)) {
-    throw new Error('Attachment batch payload is not an array');
-  }
-  return value.map((entry) => {
-    if (!entry || typeof entry !== 'object') {
-      throw new Error('Attachment batch contains an invalid entry');
-    }
-    const attachment = entry as Partial<StagedTelegramAttachment>;
-    if (typeof attachment.localPath !== 'string' || typeof attachment.relativePath !== 'string') {
-      throw new Error('Attachment batch entry is missing a local path');
-    }
-    return attachment as StagedTelegramAttachment;
-  });
-}
-
-function findReusableStandaloneAttachmentBatch(
-  batch: PendingAttachmentBatchRecord | null,
-  now: number,
-): PendingAttachmentBatchRecord | null {
-  if (!batch || batch.mediaGroupId !== null) {
-    return null;
-  }
-  return now - batch.updatedAt <= ATTACHMENT_BATCH_MERGE_WINDOW_MS ? batch : null;
-}
-
-function mergeAttachmentBatchCaption(existing: string, next: string): string {
-  const normalizedNext = next.trim();
-  if (!normalizedNext) {
-    return existing;
-  }
-  const normalizedExisting = existing.trim();
-  if (!normalizedExisting) {
-    return normalizedNext;
-  }
-  return normalizedExisting === normalizedNext ? normalizedExisting : `${normalizedExisting}\n\n${normalizedNext}`;
-}
-
-function summarizeStagedAttachmentInput(
-  text: string,
-  attachments: readonly StagedTelegramAttachment[],
-): string {
-  const lines = [text.trim() || '(no text)'];
-  if (attachments.length > 0) {
-    lines.push(`[attachments: ${attachments.map((attachment) => `${attachment.kind}:${attachment.fileName}`).join(', ')}]`);
-  }
-  return lines.join('\n');
-}
-
-function renderAttachmentBatchMessage(locale: AppLocale, record: PendingAttachmentBatchRecord): string {
-  const attachments = parseStagedTelegramAttachments(record.attachmentsJson);
-  const lines = [
-    t(locale, 'attachment_batch_staged', { count: attachments.length }),
-  ];
-  if (record.caption.trim()) {
-    lines.push('', t(locale, 'attachment_batch_caption', { value: truncateInline(record.caption.trim(), 600) }));
-  }
-  lines.push('');
-  for (const [index, attachment] of attachments.entries()) {
-    const name = attachment.fileName || attachment.fileUniqueId;
-    const size = attachment.fileSize === null ? '' : `, ${attachment.fileSize} bytes`;
-    lines.push(`${index + 1}. ${attachment.kind}: ${name}${size}`);
-  }
-  return lines.join('\n');
-}
-
-function attachmentBatchKeyboard(locale: AppLocale, batchId: string): Array<Array<{ text: string; callback_data: string }>> {
-  return [[
-    { text: t(locale, 'attachment_batch_button_analyze'), callback_data: `attach:${batchId}:analyze` },
-    { text: t(locale, 'attachment_batch_button_clear'), callback_data: `attach:${batchId}:clear` },
-  ]];
-}
-
-function shortId(value: string): string {
-  return value.slice(0, 8);
-}
-
-function renderPlanImplementationPrompt(locale: AppLocale, record: PendingPlanImplementation): string {
-  const lines = [
-    t(locale, 'plan_impl_title'),
-    t(locale, 'line_thread', { value: record.threadId }),
-    t(locale, 'line_turn', { value: record.turnId }),
-    '',
-    t(locale, 'plan_impl_prompt'),
-  ];
-  if (parseWeixinBridgeScope(record.scopeId)) {
-    lines.push(
-      '',
-      t(locale, 'weixin_copy_paste_divider'),
-      t(locale, 'weixin_copy_plan_title'),
-      `/planimpl ${record.localId} run`,
-      `/planimpl ${record.localId} fresh`,
-      `/planimpl ${record.localId} stay`,
-    );
-  }
-  return lines.join('\n');
-}
-
-function planImplementationKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
-  return [
-    [{ text: t(locale, 'plan_impl_button_run'), callback_data: `planimpl:${localId}:run` }],
-    [{ text: t(locale, 'plan_impl_button_fresh'), callback_data: `planimpl:${localId}:fresh` }],
-    [{ text: t(locale, 'plan_impl_button_stay'), callback_data: `planimpl:${localId}:stay` }],
-  ];
-}
-
-function threadNewCwdCreateKeyboard(locale: AppLocale): Array<Array<{ text: string; callback_data: string }>> {
-  return [[
-    { text: t(locale, 'button_create_dir'), callback_data: 'thread:newcwd:create' },
-    { text: t(locale, 'button_cancel'), callback_data: 'thread:newcwd:cancel' },
-  ]];
-}
-
-function extractLatestPlanMarkdown(active: ActiveTurn): string | null {
-  const segmentPlan = extractLatestPlanSegmentMarkdown(active);
-  if (segmentPlan) {
-    return segmentPlan;
-  }
-  return extractLatestProposedPlanMarkdown(active);
-}
-
-function extractLatestPlanSegmentMarkdown(active: ActiveTurn): string | null {
-  for (let index = active.segments.length - 1; index >= 0; index -= 1) {
-    const segment = active.segments[index]!;
-    if (!segment.isPlan) {
-      continue;
-    }
-    const text = segment.text.trim();
-    if (text) {
-      return text;
-    }
-  }
-  return null;
-}
-
-function extractLatestProposedPlanMarkdown(active: ActiveTurn): string | null {
-  return extractLatestProposedPlanBlock([
-    active.finalText,
-    active.buffer,
-    ...active.segments.map(segment => segment.text),
-  ].filter((text): text is string => typeof text === 'string' && text.length > 0).join('\n'));
-}
-
-function extractLatestProposedPlanBlock(text: string): string | null {
-  const pattern = /<proposed_plan\b[^>]*>([\s\S]*?)<\/proposed_plan>/gi;
-  let latest: string | null = null;
-  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
-    const plan = match[1]?.trim();
-    if (plan) {
-      latest = plan;
-    }
-  }
-  return latest;
-}
-
-function clipButtonText(text: string): string {
-  const trimmed = text.replace(/\s+/g, ' ').trim();
-  return trimmed.length > 48 ? `${trimmed.slice(0, 47)}...` : trimmed;
-}
-
-function stringOrNull(value: unknown): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function selectCodexRateLimitSnapshot(limits: CodexAccountRateLimits | null): CodexRateLimitSnapshot | null {
-  return limits?.rateLimitsByLimitId?.codex
-    ?? Object.values(limits?.rateLimitsByLimitId ?? {})[0]
-    ?? limits?.rateLimits
-    ?? null;
-}
-
-function formatCodexAccountLabel(account: CodexAccountInfo): string {
-  if (account.type === 'chatgpt') {
-    return 'ChatGPT';
-  }
-  if (account.type === 'apiKey') {
-    return 'API key';
-  }
-  if (account.type === 'amazonBedrock') {
-    return 'Amazon Bedrock';
-  }
-  return formatPlanTypeLabel(account.type || 'unknown');
-}
-
-function formatPlanTypeLabel(value: string): string {
-  const words = value
-    .replace(/[_-]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (words.length === 0) {
-    return 'Unknown';
-  }
-  return words
-    .map((word) => word.toLowerCase() === 'api' ? 'API' : `${word[0]!.toUpperCase()}${word.slice(1)}`)
-    .join(' ');
-}
-
-function formatRateLimitWindowLabel(locale: AppLocale, window: CodexRateLimitWindow, fallback: 'primary' | 'secondary'): string {
-  const minutes = window.windowDurationMins;
-  if (!minutes || minutes <= 0) {
-    return fallback === 'primary'
-      ? (locale === 'zh' ? '短周期' : 'Primary window')
-      : (locale === 'zh' ? '长周期' : 'Secondary window');
-  }
-  if (minutes % 10080 === 0) {
-    const days = minutes / 1440;
-    return locale === 'zh' ? `${formatCompactNumber(days)}天` : `${formatCompactNumber(days)}d window`;
-  }
-  if (minutes % 1440 === 0) {
-    const days = minutes / 1440;
-    return locale === 'zh' ? `${formatCompactNumber(days)}天` : `${formatCompactNumber(days)}d window`;
-  }
-  if (minutes % 60 === 0) {
-    const hours = minutes / 60;
-    return locale === 'zh' ? `${formatCompactNumber(hours)}小时` : `${formatCompactNumber(hours)}h window`;
-  }
-  return locale === 'zh' ? `${formatCompactNumber(minutes)}分钟` : `${formatCompactNumber(minutes)}m window`;
-}
-
-function formatCompactRateLimitWindowLabel(
-  locale: AppLocale,
-  minutes: number | null,
-  fallback: 'primary' | 'secondary',
-): string {
-  if (!minutes || minutes <= 0) {
-    return fallback === 'primary'
-      ? (locale === 'zh' ? '短' : 'P')
-      : (locale === 'zh' ? '长' : 'S');
-  }
-  if (minutes % 1440 === 0) {
-    return `${formatCompactNumber(minutes / 1440)}d`;
-  }
-  if (minutes % 60 === 0) {
-    return `${formatCompactNumber(minutes / 60)}h`;
-  }
-  return `${formatCompactNumber(minutes)}m`;
-}
-
-function formatCompactAge(locale: AppLocale, ageMs: number): string {
-  const minutes = Math.max(0, ageMs) / 60_000;
-  if (minutes >= 1440) {
-    const days = Math.floor(minutes / 1440);
-    return locale === 'zh' ? `${days}天前` : `${days}d ago`;
-  }
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    return locale === 'zh' ? `${hours}小时前` : `${hours}h ago`;
-  }
-  const roundedMinutes = Math.floor(minutes);
-  return locale === 'zh' ? `${roundedMinutes}分钟前` : `${roundedMinutes}m ago`;
-}
-
-function formatUtcDateTime(timestampMs: number): string {
-  if (!Number.isFinite(timestampMs)) {
-    return '-';
-  }
-  return `${new Date(timestampMs).toISOString().slice(0, 16).replace('T', ' ')}Z`;
-}
-
-function formatUsagePercent(value: number): string {
-  if (!Number.isFinite(value)) {
-    return '?';
-  }
-  return formatCompactNumber(value);
-}
-
-function formatRemainingUsagePercent(usedPercent: number): string {
-  const remainingPercent = remainingUsagePercent(usedPercent);
-  return remainingPercent === null ? '?' : formatUsagePercent(remainingPercent);
-}
-
-function authQuotaSnapshotFromRateLimit(
-  snapshot: CodexRateLimitSnapshot,
-  accountId: string | null = null,
-  quotaIdentityId: string | null = null,
-): CodexAuthQuotaSnapshot {
-  return {
-    capturedAtMs: Date.now(),
-    accountId,
-    quotaIdentityId,
-    planType: snapshot.planType,
-    primaryWindowDurationMins: snapshot.primary?.windowDurationMins ?? null,
-    primaryRemainingPercent: snapshot.primary ? remainingUsagePercent(snapshot.primary.usedPercent) : null,
-    primaryResetsAt: snapshot.primary?.resetsAt ?? null,
-    secondaryWindowDurationMins: snapshot.secondary?.windowDurationMins ?? null,
-    secondaryRemainingPercent: snapshot.secondary ? remainingUsagePercent(snapshot.secondary.usedPercent) : null,
-    secondaryResetsAt: snapshot.secondary?.resetsAt ?? null,
-  };
-}
-
-function codexAuthQuotaSnapshotFromRecord(record: CodexAuthQuotaSnapshotRecord): CodexAuthQuotaSnapshot {
-  return {
-    capturedAtMs: record.capturedAtMs,
-    accountId: record.accountId,
-    quotaIdentityId: record.quotaIdentityId,
-    planType: record.planType,
-    primaryWindowDurationMins: record.primaryWindowDurationMins,
-    primaryRemainingPercent: record.primaryRemainingPercent,
-    primaryResetsAt: record.primaryResetsAt,
-    secondaryWindowDurationMins: record.secondaryWindowDurationMins,
-    secondaryRemainingPercent: record.secondaryRemainingPercent,
-    secondaryResetsAt: record.secondaryResetsAt,
-  };
-}
-
-function mergeCodexAuthQuotaSnapshots(
-  current: CodexAuthQuotaSnapshot | null,
-  incoming: CodexAuthQuotaSnapshot | null,
-): CodexAuthQuotaSnapshot | null {
-  if (!current) {
-    return incoming;
-  }
-  if (!incoming) {
-    return current;
-  }
-  const freshest = incoming.capturedAtMs >= current.capturedAtMs ? incoming : current;
-  const older = freshest === incoming ? current : incoming;
-  return {
-    ...freshest,
-    accountId: freshest.accountId ?? older.accountId ?? null,
-    quotaIdentityId: freshest.quotaIdentityId ?? older.quotaIdentityId ?? null,
-  };
-}
-
-function isFiniteCodexAuthQuotaSnapshotRecord(record: CodexAuthQuotaSnapshotRecord): boolean {
-  return Number.isFinite(record.capturedAtMs)
-    && isNullableString(record.planType)
-    && isNullableFiniteNumber(record.primaryWindowDurationMins)
-    && isNullableFiniteNumber(record.primaryRemainingPercent)
-    && isNullableFiniteNumber(record.primaryResetsAt)
-    && isNullableFiniteNumber(record.secondaryWindowDurationMins)
-    && isNullableFiniteNumber(record.secondaryRemainingPercent)
-    && isNullableFiniteNumber(record.secondaryResetsAt);
-}
-
-function remainingUsagePercent(usedPercent: number): number | null {
-  if (!Number.isFinite(usedPercent)) {
-    return null;
-  }
-  return Math.max(0, Math.min(100, 100 - usedPercent));
-}
-
-function formatAuthQuotaPrefix(locale: AppLocale, snapshot: CodexAuthQuotaSnapshot | null): string {
-  if (!snapshot) {
-    return '--';
-  }
-  const windows = [
-    [snapshot.primaryWindowDurationMins, snapshot.primaryRemainingPercent, snapshot.primaryResetsAt, 'primary'],
-    [snapshot.secondaryWindowDurationMins, snapshot.secondaryRemainingPercent, snapshot.secondaryResetsAt, 'secondary'],
-  ] as const;
-  const values = windows
-    .filter(([duration, remaining, resetsAt]) => duration !== null || remaining !== null || resetsAt !== null)
-    .map(([duration, remaining, resetsAt, fallback]) => (
-      `${formatCompactRateLimitWindowLabel(locale, duration, fallback)}:${remaining === null ? '--' : formatUsagePercent(remaining)}${resetsAt === null ? '' : `@${formatLocalTimestamp(resetsAt)}`}`
-    ));
-  return values.length > 0 ? values.join('|') : '--';
-}
-
-function formatAuthQuotaButtonPrefix(snapshot: CodexAuthQuotaSnapshot | null): string {
-  return [
-    snapshot?.primaryRemainingPercent ?? null,
-    snapshot?.secondaryRemainingPercent ?? null,
-  ].map(formatAuthQuotaButtonValue).join('|');
-}
-
-function formatAuthQuotaButtonValue(value: number | null): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? formatUsagePercent(value)
-    : '—';
-}
-
-function isCodexAuthQuotaSnapshot(value: unknown): value is CodexAuthQuotaSnapshot {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const snapshot = value as Partial<CodexAuthQuotaSnapshot>;
-  return typeof snapshot.capturedAtMs === 'number'
-    && Number.isFinite(snapshot.capturedAtMs)
-    && (snapshot.accountId === undefined || snapshot.accountId === null || typeof snapshot.accountId === 'string')
-    && (snapshot.quotaIdentityId === undefined || snapshot.quotaIdentityId === null || typeof snapshot.quotaIdentityId === 'string')
-    && (snapshot.planType === undefined || isNullableString(snapshot.planType))
-    && (snapshot.primaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.primaryWindowDurationMins))
-    && isNullableFiniteNumber(snapshot.primaryRemainingPercent)
-    && (snapshot.primaryResetsAt === undefined || isNullableFiniteNumber(snapshot.primaryResetsAt))
-    && (snapshot.secondaryWindowDurationMins === undefined || isNullableFiniteNumber(snapshot.secondaryWindowDurationMins))
-    && isNullableFiniteNumber(snapshot.secondaryRemainingPercent)
-    && (snapshot.secondaryResetsAt === undefined || isNullableFiniteNumber(snapshot.secondaryResetsAt));
-}
-
-function normalizeCodexAuthQuotaSnapshot(snapshot: CodexAuthQuotaSnapshot): CodexAuthQuotaSnapshot {
-  return {
-    capturedAtMs: snapshot.capturedAtMs,
-    accountId: snapshot.accountId ?? null,
-    quotaIdentityId: snapshot.quotaIdentityId ?? snapshot.accountId ?? null,
-    planType: snapshot.planType ?? null,
-    primaryWindowDurationMins: snapshot.primaryWindowDurationMins ?? null,
-    primaryRemainingPercent: snapshot.primaryRemainingPercent,
-    primaryResetsAt: snapshot.primaryResetsAt ?? null,
-    secondaryWindowDurationMins: snapshot.secondaryWindowDurationMins ?? null,
-    secondaryRemainingPercent: snapshot.secondaryRemainingPercent,
-    secondaryResetsAt: snapshot.secondaryResetsAt ?? null,
-  };
-}
-
-function chatGptAuthMetadataCompatible(
-  left: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
-  right: Pick<ChatGptAuthMetadata, 'accountId' | 'quotaIdentityId'>,
-): boolean {
-  if (left.accountId !== right.accountId) {
-    return false;
-  }
-  if (left.quotaIdentityId === left.accountId || right.quotaIdentityId === right.accountId) {
-    return true;
-  }
-  return left.quotaIdentityId === right.quotaIdentityId;
-}
-
-function isNullableFiniteNumber(value: unknown): value is number | null {
-  return value === null || (typeof value === 'number' && Number.isFinite(value));
-}
-
-function isNullableString(value: unknown): value is string | null {
-  return value === null || typeof value === 'string';
-}
-
-function formatCompactNumber(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, '');
-}
-
-function formatTokenCount(value: number): string {
-  if (!Number.isFinite(value)) {
-    return '?';
-  }
-  return Math.round(value).toLocaleString('en-US');
-}
-
-function formatCodexTokenCountWithMetric(value: number): string {
-  if (value >= 1_000_000) {
-    return `${formatMetricTokenCount(value)} (${formatTokenCount(value)})`;
-  }
-  return formatTokenCount(value);
-}
-
-function formatLocalTimestamp(seconds: number): string {
-  const date = new Date(seconds * 1000);
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function formatShortStatusError(error: unknown): string {
-  const raw = formatUserError(error);
-  const known = formatKnownCodexAccessError(raw);
-  if (known) {
-    return known.length > 120 ? `${known.slice(0, 117)}...` : known;
-  }
-  const message = cleanUserFacingError(raw);
-  return message.length > 120 ? `${message.slice(0, 117)}...` : message;
-}
-
-function isThreadNotFoundError(error: unknown): boolean {
-  return error instanceof Error && /(thread not found|no rollout found for thread id)/i.test(error.message);
-}
-
-function isThreadActiveWriterError(error: unknown): boolean {
-  return error instanceof Error && /thread\s+\S+\s+already has an active writer/i.test(error.message);
-}
-
-function isNoActiveTurnToSteerError(error: unknown): boolean {
-  return error instanceof Error && /no active turn to steer/i.test(error.message);
-}
-
-function isThreadQueueUnsupportedError(error: unknown): boolean {
-  const message = formatUserError(error).toLowerCase();
-  return message.includes('method not found')
-    || message.includes('unknown method')
-    || message.includes('thread/queue/add') && message.includes('not supported');
-}
-
-function isThreadNewCwdCreateConfirmation(text: string): boolean {
-  return /^(y|yes|ok|okay|confirm|create|mkdir|确定|确认|创建|新建|好)$/i.test(text.trim());
-}
-
-function isThreadNewCwdCancelConfirmation(text: string): boolean {
-  return /^(n|no|cancel|stop|取消|不要|不用|算了)$/i.test(text.trim());
-}
-
-function isTelegramMessageGone(error: unknown): boolean {
-  const message = formatUserError(error).toLowerCase();
-  return message.includes('message to delete not found')
-    || message.includes('message to edit not found')
-    || message.includes('message not found');
-}
-
-function isTelegramMessageTooLong(error: unknown): boolean {
-  const message = formatUserError(error).toLowerCase();
-  return message.includes('message_too_long')
-    || message.includes('message is too long')
-    || message.includes('message too long');
-}
-
-function isFileMissingError(error: unknown): boolean {
-  return error instanceof Error && /enoent|no such file or directory/i.test(error.message);
-}
-
-async function isReadableSessionPath(sessionPath: string): Promise<boolean> {
-  try {
-    const stats = await fs.stat(sessionPath);
-    return stats.isFile();
-  } catch {
-    return false;
   }
 }
 
