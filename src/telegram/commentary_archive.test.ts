@@ -11,7 +11,7 @@ const archive: TaskCommentaryArchive = {
 
 test('a single closed archive contains token counts in the requested order and all timed summaries', () => {
   const rendered = buildTelegramCommentaryArchive(archive);
-  assert.match(rendered.html, /^<details><summary>总时间: 1m2s {2}Token（总\/入\/出\/缓存）: 1,200\/1,000\/200\/800<\/summary>/);
+  assert.match(rendered.html, /^<details><summary>总时间: 1m2s {2}Token（总\/入\/出\/缓存）: 1.2K\/1K\/200\/800<\/summary>/);
   assert.equal((rendered.html.match(/<details>/g) ?? []).length, 1);
   assert.doesNotMatch(rendered.html, /<details open|<unsafe>/);
   assert.match(rendered.html, /<b>First<\/b>/);

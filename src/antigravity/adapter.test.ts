@@ -468,3 +468,41 @@ test('AntigravityEngineAdapter tracks and emits subagent tool events during exec
 
 
 
+
+test('Antigravity collects real intermediate response steps and keeps the final response separate', () => {
+  const events = new EventEmitter();
+  const client = {
+    executeTurn: () => ({ conversationId: 'conv', cancel: () => {}, waitForResult: async () => null,
+      on: (name: string, listener: (...args: any[]) => void) => { events.on(name, listener); } }),
+  } as unknown as AntigravityAppClient;
+  const execution = new AntigravityEngineAdapter(client).executeTurn({ scopeId: 'a', prompt: 'fix', threadId: null, cwd: '/tmp', model: 'default', locale: 'zh' });
+  const summaries: Array<{ messageId: string; text: string }> = []; const results: any[] = [];
+  execution.on('commentary', item => summaries.push(item));
+  execution.on('result', item => results.push(item));
+  const text = (stepIndex: number, delta: string, accumulatedText = delta) => events.emit('event', { kind: 'text', conversationId: 'conv', stepIndex, delta, accumulatedText });
+  const tool = (stepIndex: number) => events.emit('event', { kind: 'tool', conversationId: 'conv', stepIndex, state: 'ACTIVE', toolName: 'view_file', parameters: {} });
+  text(1, 'I will '); text(1, 'inspect the code.', 'I will inspect the code.');
+  tool(2); tool(2);
+  text(1, 'late duplicate');
+  text(3, 'Found the cause.');
+  text(4, 'Fixed and verified.');
+  events.emit('event', { kind: 'result', conversationId: 'conv', status: 'SUCCESS', response: 'Fixed and verified.', durationSeconds: 1 });
+  assert.deepEqual(summaries.map(item => item.text), ['I will inspect the code.', 'Found the cause.']);
+  assert.equal(new Set(summaries.map(item => item.messageId)).size, 2);
+  assert.equal(results[0].response, 'Fixed and verified.');
+});
+
+test('Antigravity turns without intermediate response steps do not generate summaries', () => {
+  const events = new EventEmitter();
+  const client = {
+    executeTurn: () => ({ conversationId: 'conv', cancel: () => {}, waitForResult: async () => null,
+      on: (name: string, listener: (...args: any[]) => void) => { events.on(name, listener); } }),
+  } as unknown as AntigravityAppClient;
+  const execution = new AntigravityEngineAdapter(client).executeTurn({ scopeId: 'a', prompt: 'hello', threadId: null, cwd: '/tmp', model: 'default', locale: 'zh' });
+  const summaries: unknown[] = [];
+  execution.on('commentary', item => summaries.push(item));
+  events.emit('event', { kind: 'tool', conversationId: 'conv', stepIndex: 1, state: 'ACTIVE', toolName: 'view_file', parameters: {} });
+  events.emit('event', { kind: 'text', conversationId: 'conv', stepIndex: 2, delta: 'Final answer.', accumulatedText: 'Final answer.' });
+  events.emit('event', { kind: 'result', conversationId: 'conv', status: 'SUCCESS', response: 'Final answer.', durationSeconds: 1 });
+  assert.deepEqual(summaries, []);
+});

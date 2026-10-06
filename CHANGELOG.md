@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.9 - 2026-10-06
+
+### 中文
+
+- 小结归档的 Token 总/入/出/缓存采用人类可读单位：低于千保持整数，按量级使用 K、M、G，缺失计数保留“—”。
+- Antigravity 有中间响应步骤时，按原生步骤编号识别真实小结：进入后续工具或响应步骤后独立推送之前的说明，任务完成后合并为一条计时与用量归档，最终回答独立保留。忽略重复和迟到的已收纳步骤；只有最终回答的轮次保留原展示，不生成额外小结。DSH 继续按原生消息边界采用相同归档流程。
+
+### English
+
+- Format archive total/input/output/cached token counts using human-readable K, M, and G units, retaining raw counts below one thousand and “—” for unavailable values.
+- Recognize actual intermediate Antigravity responses by native step index. Send preceding explanations separately when a later tool or response step begins, then consolidate them into a timed usage archive while keeping the final answer separate. Ignore duplicate and late collected steps. Turns with only a final response keep their existing presentation. DSH continues using the same archive flow through native message boundaries.
+
 ## 0.13.8 - 2026-10-06
 
 ### 中文

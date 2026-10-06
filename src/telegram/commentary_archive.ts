@@ -1,6 +1,7 @@
 import type { TaskCommentaryArchive } from '../core/commentary_archive.js';
 import { escapeTelegramHtml } from './html.js';
 import { renderTelegramMarkdownRichHtml } from './rich_markdown.js';
+import { formatMetricTokenCount } from '../store/token_usage.js';
 
 export interface TelegramCommentaryArchive {
   html: string;
@@ -11,7 +12,7 @@ export function commentaryArchiveHeader(archive: TaskCommentaryArchive): string 
   const zh = archive.locale === 'zh';
   const seconds = Math.max(0, Math.round((archive.endedAt - archive.startedAt) / 1000));
   const duration = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${seconds % 60}s`;
-  const count = (n?: number) => typeof n === 'number' && Number.isFinite(n) ? Math.round(Math.max(0, n)).toLocaleString('en-US') : '—';
+  const count = (n?: number) => typeof n === 'number' && Number.isFinite(n) ? formatMetricTokenCount(n) : '—';
   const usage = archive.usage;
   const total = usage?.totalTokens ?? (usage?.inputTokens !== undefined && usage.outputTokens !== undefined ? usage.inputTokens + usage.outputTokens : undefined);
   return `${zh ? '总时间' : 'Total time'}: ${duration}  ${zh ? 'Token（总/入/出/缓存）' : 'Tokens (total/in/out/cache)'}: ${[total, usage?.inputTokens, usage?.outputTokens, usage?.cachedTokens].map(count).join('/')}`;

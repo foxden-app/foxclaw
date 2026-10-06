@@ -130,6 +130,16 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
     let subagentTracker: AntigravitySubagentTracker | null = null;
     let pollTimer: NodeJS.Timeout | null = null;
     let turnFinished = false;
+    let pendingResponse: { stepIndex: number; conversationId: string; text: string } | undefined;
+    const collectedResponses = new Set<number>();
+    const collectResponseBefore = (stepIndex: number) => {
+      if (!pendingResponse || stepIndex <= pendingResponse.stepIndex) return;
+      if (pendingResponse.text.trim() && !collectedResponses.has(pendingResponse.stepIndex)) {
+        collectedResponses.add(pendingResponse.stepIndex);
+        emitter.emit('commentary', { messageId: `agy:${pendingResponse.conversationId}:${pendingResponse.stepIndex}`, text: pendingResponse.text });
+      }
+      pendingResponse = undefined;
+    };
 
     const ensureTracker = (convId: string | null | undefined) => {
       if (!convId || subagentTracker) return;
@@ -193,9 +203,13 @@ export class AntigravityEngineAdapter implements IEngineAdapter {
       }
       switch (ev.kind) {
         case 'text':
+          if (collectedResponses.has(ev.stepIndex) || (pendingResponse && ev.stepIndex < pendingResponse.stepIndex)) break;
+          collectResponseBefore(ev.stepIndex);
+          pendingResponse = { stepIndex: ev.stepIndex, conversationId: ev.conversationId, text: ev.accumulatedText };
           emitter.emit('delta', ev.delta);
           break;
         case 'tool':
+          collectResponseBefore(ev.stepIndex);
           emitter.emit('tool', {
             name: ev.toolName,
             args: ev.parameters,
