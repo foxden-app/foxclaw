@@ -144,7 +144,12 @@ export class DshUi {
 
   private async threads(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number, cursor?: string): Promise<void> {
     const page = await this.adapter.listSessions(scopeId, cursor);
-    const rows: ChannelInlineKeyboard = page.sessions.map(session => [this.button(scopeId, 'open', session.sessionId, (session.title || session.sessionId).slice(0, 60), session.cwd)]);
+    const rows: ChannelInlineKeyboard = page.sessions.map(session => {
+      const workspace = session.cwd.split(/[\\/]/).filter(Boolean).at(-1) || session.cwd;
+      const fallback = `${this.copy(locale, '未命名会话', 'Untitled session')} · ${workspace} · ${session.sessionId.slice(-8)}`;
+      const title = session.title?.replace(/\s+/gu, ' ').trim() || fallback;
+      return [this.button(scopeId, 'open', session.sessionId, Array.from(title).slice(0, 60).join(''), session.cwd)];
+    });
     if (page.nextCursor) rows.push([this.button(scopeId, 'page', page.nextCursor, this.copy(locale, '下一页', 'Next page'))]);
     rows.push([{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }]);
     await this.panel(scopeId, this.copy(locale, '📁 **DSH 持久会话**', '📁 **Persistent DSH sessions**'), rows, orchestrator, messageId);

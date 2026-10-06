@@ -231,3 +231,21 @@ test('DSH approval buttons round trip native option IDs, enforce scope and settl
     assert.equal(f.ui.pendingApprovals, 0);
   } finally { await f.dispose(); }
 });
+
+test('DSH threads show readable native names and workspace fallbacks while opening the original session ID', async t => {
+  const f = await setup();
+  try {
+    const state = await f.ui.adapter.sessionForScope('a');
+    t.mock.method(f.ui.adapter, 'listSessions', async () => ({ sessions: [
+      { sessionId: state.sessionId, cwd: f.root, title: '修复\n  登录问题' },
+      { sessionId: 'session-untitled-12345678', cwd: '/projects/example', title: '  ' },
+    ], nextCursor: 'next-page' }));
+    await f.ui.command('a', 'threads', '', 'en', f.orchestrator);
+    const panel = f.messages.at(-1)!;
+    assert.equal(panel.keyboard[0]![0]!.text, '修复 登录问题');
+    assert.equal(panel.keyboard[1]![0]!.text, 'Untitled session · example · 12345678');
+    assert.equal(panel.keyboard[2]![0]!.text, 'Next page');
+    await f.callback('a', panel.keyboard[0]![0]!.callback_data);
+    assert.equal(f.store.getBinding('a')?.threadId, state.sessionId);
+  } finally { await f.dispose(); }
+});

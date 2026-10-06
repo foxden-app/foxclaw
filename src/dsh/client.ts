@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { ClientApp, ndJsonStream, PROTOCOL_VERSION, type ClientConnection, type SessionConfigOption, type SessionNotification, type RequestPermissionRequest, type RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import type { Logger } from '../logger.js';
@@ -32,6 +32,7 @@ export class DshClient extends EventEmitter {
   private policyPath = '';
   private policyWrite: Promise<void> = Promise.resolve();
   private stderr = '';
+  private titlesDirectory = '';
   permissionHandler?: (request: RequestPermissionRequest, signal: AbortSignal) => Promise<RequestPermissionResponse>;
   cancelPermissions?: () => void;
 
@@ -67,6 +68,10 @@ export class DshClient extends EventEmitter {
     let pluginPath = fileURLToPath(new URL('./permissions_plugin.js', import.meta.url));
     try { await fs.access(pluginPath); } catch { pluginPath = pluginPath.replace(/\.js$/, '.ts'); }
     await fs.writeFile(patchPath, `- insert:\n    - id: foxclaw-permissions\n      name: ${JSON.stringify(pathToFileURL(pluginPath).href)}\n      config:\n        policyPath: ${JSON.stringify(this.policyPath)}\n`, { mode: 0o600 });
+    this.titlesDirectory = path.join(path.dirname(this.policyPath), `titles-${randomUUID()}`);
+    let titlesPlugin = fileURLToPath(new URL('./session_titles_plugin.js', import.meta.url));
+    try { await fs.access(titlesPlugin); } catch { titlesPlugin = titlesPlugin.replace(/\.js$/, '.ts'); }
+    await fs.appendFile(patchPath, `- insert:\n    - id: foxclaw-session-titles\n      name: ${JSON.stringify(pathToFileURL(titlesPlugin).href)}\n      config:\n        directory: ${JSON.stringify(this.titlesDirectory)}\n`);
     if (this.options.credentialControl) {
       let credentialsPlugin = fileURLToPath(new URL('./credentials_plugin.js', import.meta.url));
       try { await fs.access(credentialsPlugin); } catch { credentialsPlugin = credentialsPlugin.replace(/\.js$/, '.ts'); }
@@ -163,7 +168,38 @@ export class DshClient extends EventEmitter {
   async listSessions(cursor?: string) {
     await this.start();
     if (!this.capabilities.list) throw new Error('This DSH profile cannot list sessions');
-    return this.agent.request('session/list', cursor ? { cursor } : {});
+    const page = await this.agent.request('session/list', cursor ? { cursor } : {});
+    const unnamed = page.sessions.filter(session => !session.title?.trim());
+    if (unnamed.length === 0) return page;
+    const titles = await this.readSessionTitles(unnamed.map(session => session.sessionId));
+    return { ...page, sessions: page.sessions.map(session => ({ ...session, title: session.title?.trim() ? session.title : titles[session.sessionId] })) };
+  }
+
+  private async readSessionTitles(ids: string[]): Promise<Record<string, string>> {
+    const directory = this.titlesDirectory;
+    try { await fs.access(path.join(directory, 'ready')); } catch { return {}; }
+    const requestPath = path.join(directory, `${randomUUID()}.request`);
+    const responsePath = requestPath.replace(/\.request$/, '.response');
+    try {
+      await fs.writeFile(`${requestPath}.tmp`, JSON.stringify(ids), { mode: 0o600 });
+      await fs.rename(`${requestPath}.tmp`, requestPath);
+      const deadline = Date.now() + 5000;
+      while (this.connected && Date.now() < deadline) {
+        try {
+          const result: unknown = JSON.parse(await fs.readFile(responsePath, 'utf8'));
+          if (result && typeof result === 'object' && !Array.isArray(result)) {
+            return Object.fromEntries(Object.entries(result).filter(([id, title]) => ids.includes(id) && typeof title === 'string'));
+          }
+          return {};
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      this.logger.warn('dsh.session_titles.timeout', { scopeId: this.scopeId });
+    } catch { this.logger.warn('dsh.session_titles.unavailable', { scopeId: this.scopeId }); }
+    finally { await Promise.all([requestPath, responsePath, `${requestPath}.tmp`].map(file => fs.rm(file, { force: true }).catch(() => {}))); }
+    return {};
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -182,7 +218,11 @@ export class DshClient extends EventEmitter {
     const connection = this.connection;
     this.connection = null;
     this.optionsBySession.clear();
-    if (!child || !child.pid) { connection?.close(); return; }
+    if (!child || !child.pid) {
+      connection?.close();
+      if (this.titlesDirectory) await fs.rm(this.titlesDirectory, { recursive: true, force: true });
+      return;
+    }
     const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
     child.stdin.end();
     let timer: ReturnType<typeof setTimeout>;
@@ -197,6 +237,7 @@ export class DshClient extends EventEmitter {
     }
     connection?.close();
     if (this.process === child) this.process = null;
+    if (this.titlesDirectory) await fs.rm(this.titlesDirectory, { recursive: true, force: true });
   }
 }
 

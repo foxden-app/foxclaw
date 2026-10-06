@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.5 - 2026-10-06
+
+### 中文
+
+- 修复 DSH `/threads` 只显示会话 ID：补充读取 DSH 原生持久化标题，旧会话无标题时使用首条用户消息；空会话显示未命名、工作目录和短编号。
+- 标题读取不恢复会话、不调用模型，单个历史会话读取失败不会影响列表；保留分页及原会话 ID 的打开行为。
+
+### English
+
+- Fixed DSH `/threads` displaying session IDs instead of readable names. Read native persisted titles, derive legacy names from the first human message, and show a workspace and short identifier for empty sessions.
+- Title reads do not resume sessions or invoke a model. Unreadable histories cannot break the list; pagination and opening by the original session ID are preserved.
+
 ## 0.13.4 - 2026-10-06
 
 ### 中文

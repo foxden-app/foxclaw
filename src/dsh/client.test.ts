@@ -53,3 +53,30 @@ test('DSH handshake timeout reaps the child and allows retry', async () => {
     assert.equal(client.connected, false);
   } finally { await client.stop(); await fixture.cleanup(); }
 });
+
+test('DSH ACP listing joins native history names and isolates concurrent title requests', async () => {
+  const { apply } = await import('./session_titles_plugin.js');
+  const fixture = await fakeDsh();
+  const client = fixture.createClient('titles');
+  let dispose: (() => Promise<void>) | undefined;
+  try {
+    const id = await client.session(fixture.root);
+    const [scopeDirectory] = await fs.readdir(fixture.options.runtimeDir);
+    const scopePath = path.join(fixture.options.runtimeDir, scopeDirectory!);
+    // A fake CLI does not load the injected plugin; run that same plugin here.
+    const patch = await fs.readFile(path.join(scopePath, 'bridge.patch.yml'), 'utf8');
+    const directory: string = JSON.parse(patch.match(/directory: (.+)/)![1]!);
+    await apply({
+      sessionQuery: {
+        readTitle: async () => ({ title: '恢复登录功能' }),
+        readSession: async () => ({ events: [] }),
+      },
+      effect: callback => { dispose = callback(); },
+    }, { directory });
+    const pages = await Promise.all([client.listSessions(), client.listSessions()]);
+    for (const page of pages) {
+      assert.deepEqual(page.sessions, [{ sessionId: id, cwd: fixture.root, title: '恢复登录功能' }]);
+    }
+    assert.deepEqual((await fs.readdir(directory)).filter(name => name.endsWith('.request') || name.endsWith('.response')), []);
+  } finally { await dispose?.(); await client.stop(); await fixture.cleanup(); }
+});
