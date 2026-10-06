@@ -52,8 +52,9 @@ test('discovery finds configured CLI/source paths without requiring DSH to be en
   const definition = createDshSetupDefinition(new Logger('error', path.join(fixture.root, 'setup.log')),
     { DSH_ENABLED: 'false', DSH_CLI_BIN: fixture.options.cliBin, DSH_SOURCE_DIR: source, PATH: '' }, path.join(fixture.root, 'managed'));
   try {
+    const realSource = await fs.realpath(source);
     const candidates = await definition.discover();
-    assert.ok(candidates.some(candidate => candidate.updates.DSH_SOURCE_DIR === source));
+    assert.ok(candidates.some(candidate => candidate.updates.DSH_SOURCE_DIR === realSource));
     assert.ok(candidates.some(candidate => candidate.updates.DSH_CLI_BIN === fixture.options.cliBin));
   } finally { await fixture.cleanup(); }
 });
