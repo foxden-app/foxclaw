@@ -31,7 +31,7 @@ export class TelegramMessagingPort implements ChannelPort {
     const target = parseTelegramTargetFromBridgeScope(scopeId);
     try {
       await this.gateway.editRichMessage(target.chatId, messageId,
-        telegramRichHtml(`<blockquote expandable>${renderTelegramMarkdownRichHtml(text)}</blockquote>`, { skipEntityDetection: true }), []);
+        telegramRichHtml(`<details><summary>过程小结</summary>${renderTelegramMarkdownRichHtml(text)}</details>`, { skipEntityDetection: true }), []);
     } catch {
       // The plain HTML endpoint has a smaller envelope than rich messages.
       if (text.length > 3000) throw new Error('Long commentary requires Telegram rich messages');

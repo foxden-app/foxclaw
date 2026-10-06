@@ -2,6 +2,16 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.7 - 2026-10-06
+
+### 中文
+
+- 修复短小结在任务结束后看起来未收纳：Telegram 富消息改用默认关闭的 details 展开块，只显示“过程小结”入口，展开后保留完整内容及格式。接口不支持富消息时仍回退到可折叠引用。
+
+### English
+
+- Fixed short progress summaries appearing unfolded after completion. Telegram rich messages now use a closed details block with a visible disclosure label, preserving the full formatted content when expanded. Fall back to expandable quotes when rich messages are unavailable.
+
 ## 0.13.6 - 2026-10-06
 
 ### 中文
