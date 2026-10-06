@@ -381,10 +381,13 @@ export class UnifiedChannelOrchestrator {
   private readonly intakeOperations = new ScopeOperations();
   private async receiveInbound(id: string, inbound: ChannelInbound): Promise<void> {
     if (this.stopped || !this.ownsScope(inbound.event.scopeId)) return;
-    if (!this.store.channelInbox.accept(id, inbound)) return;
+    const retained: ChannelInbound = inbound.kind === 'text' && (this.backends.sensitiveInboundOwner(inbound.event)
+      || (this.store.getServiceInteraction(inbound.event.scopeId, 'sensitive-input') && !parseCommand(inbound.event.text)))
+      ? { kind: 'text', event: { ...inbound.event, text: '', attachments: [], entities: [], redacted: true } } : inbound;
+    if (!this.store.channelInbox.accept(id, retained)) return;
     await this.intakeOperations.run(id, async () => {
       if (this.stopped) return;
-      if (!this.store.channelInbox.accept(id, inbound)) return;
+      if (!this.store.channelInbox.accept(id, retained)) return;
       if (inbound.kind === 'text') await this.handleText(inbound.event);
       else if (inbound.kind === 'callback') await this.handleCallback(inbound.event);
       else await this.stopTask(inbound.event.scopeId, inbound.event.taskId);
@@ -623,6 +626,7 @@ export class UnifiedChannelOrchestrator {
     await this.bot.stop();
     this.removeInboundConsumer?.();
     this.removeInboundConsumer = null;
+    await this.backends.stopPendingOperations();
     await this.intakeOperations.idle();
     for (const timer of this.stalePanelDeleteTimers.values()) clearTimeout(timer);
     this.stalePanelDeleteTimers.clear();
@@ -637,7 +641,7 @@ export class UnifiedChannelOrchestrator {
 
   isIdleForServiceUpdate(): boolean {
     return !this.store.taskJournal.listUnfinished().some(task => this.ownsScope(task.event.scopeId)) && this.activeTurns.size === 0 && this.settlements.size === 0 && this.scopeOperations.isIdle() && this.messageOperations.isIdle() && this.getPendingApprovals() === 0 &&
-      !this.store.listQueuedTurnInputs().some(input => this.ownsScope(input.scopeId));
+      this.backends.getPendingOperations() === 0 && !this.store.listQueuedTurnInputs().some(input => this.ownsScope(input.scopeId));
   }
 
   getPendingApprovals(): number { return this.backends.getPendingApprovals(); }
@@ -706,10 +710,29 @@ export class UnifiedChannelOrchestrator {
 
   async handleText(event: ChannelTextEvent): Promise<void> {
     if (this.stopped || !this.ownsScope(event.scopeId)) return;
-    const action = this.messaging.resolveAction?.(event);
-    if (action) { await this.handleCallback(action); return; }
     const scopeId = event.scopeId;
     const locale: AppLocale = this.store.getChatSettings(scopeId)?.locale ?? 'zh';
+    const sensitiveState = this.store.getServiceInteraction(scopeId, 'sensitive-input');
+    if (sensitiveState && parseCommand(event.text)) {
+      this.store.setServiceInteraction(scopeId, 'sensitive-input', null);
+    }
+    if (event.redacted) {
+      await this.messaging.deleteMessage(scopeId, event.messageId).catch(() => {});
+      await this.sendMessage(scopeId, locale === 'zh' ? '上次配置输入的敏感内容未保存。请重新打开配置面板并再次输入。' : 'The sensitive configuration input was not retained. Reopen its setup panel and enter it again.');
+      return;
+    }
+    const sensitiveOwner = this.backends.sensitiveInboundOwner(event);
+    if (sensitiveOwner) {
+      await sensitiveOwner.handleCustomInbound?.(event, locale);
+      return;
+    }
+    if (sensitiveState && !parseCommand(event.text)) {
+      await this.messaging.deleteMessage(scopeId, event.messageId).catch(() => {});
+      await this.sendMessage(scopeId, locale === 'zh' ? '对应配置入口当前不可用，此输入未交给模型。请重新打开配置面板，或发送 /cancel 取消。' : 'The configuration handler is unavailable. This input was not sent to a model. Reopen configuration or send /cancel.');
+      return;
+    }
+    const action = this.messaging.resolveAction?.(event);
+    if (action) { await this.handleCallback(action); return; }
     const parsedCommand = parseCommand(event.text);
     const addressing = this.messaging.resolveIncoming?.(event, this.config, this.bot.username) ??
       (parsedCommand ? { kind: 'command' as const, command: parsedCommand } :
@@ -738,8 +761,8 @@ export class UnifiedChannelOrchestrator {
     }
     const ui = this.backends.ui(this.getBackendDescriptorForScope(scopeId).id) ?? this.customUi;
     if (ui?.handleCustomInbound) {
-      const handled = await ui.handleCustomInbound(event, locale);
-      if (handled) return;
+      const handled = ui.handleCustomInbound(event, locale);
+      if (handled && await handled) return;
     }
 
     if (addressing.kind === 'command') {

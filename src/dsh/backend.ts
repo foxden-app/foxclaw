@@ -16,11 +16,15 @@ export function createDshBackend(config: AppConfig, store: BridgeStore, logger: 
     createUi: host => ({
       ownsCallback: data => data.startsWith('dsh:'),
       getPendingApprovals: () => ui.pendingApprovals,
+      getPendingOperations: () => ui.pendingOperations,
+      stopPendingOperations: () => ui.stopPendingOperations(),
       stop: () => ui.stop(),
       renderCustomStatus: async (scopeId, locale) => ui.status(scopeId, locale),
       renderSetupMenu: async (scopeId, locale, messageId) => { await ui.setup(scopeId, locale, host, messageId); return true; },
       renderModelsMenu: async (scopeId, locale, messageId) => { await ui.models(scopeId, locale, host, messageId); return true; },
       handleCustomCommand: (scopeId, command, args, locale) => ui.command(scopeId, command, args, locale, host),
+      isSensitiveInbound: event => ui.isSensitiveInbound(event),
+      handleCustomInbound: (event, locale) => ui.inbound(event, locale, host),
       handleCustomCallback: (scopeId, data, locale, _messageId, event) => ui.callback(scopeId, data, locale, host, event),
     }),
   };

@@ -22,11 +22,14 @@ export interface EngineCustomUiHook {
   handleCustomCallback?(scopeId: string, data: string, locale: AppLocale, messageId?: number, event?: ChannelCallbackEvent): Promise<boolean>;
   handleCustomCommand?(scopeId: string, command: string, args: string, locale: AppLocale, event?: ChannelTextEvent): Promise<boolean>;
   handleCustomInbound?(event: ChannelTextEvent, locale: AppLocale): boolean | Promise<boolean>;
+  isSensitiveInbound?(event: ChannelTextEvent): boolean;
 }
 
 export interface BackendUi extends EngineCustomUiHook {
   /** Recognize owned buttons even after the user switches to another backend (e.g. pending approvals). */
   ownsCallback?(data: string): boolean;
   getPendingApprovals?(): number;
+  getPendingOperations?(): number;
+  stopPendingOperations?(): Promise<void>;
   stop?(): Promise<void>;
 }

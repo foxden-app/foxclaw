@@ -390,6 +390,62 @@ test('durable intake recovers a message lost during classification and ignores a
   assert.equal(f.turns.length, 1);
 });
 
+test('sensitive configuration input is redacted before durable intake and never replayed as a task', async t => {
+  const f = await fixture(t);
+  f.backend.createUi = () => ({
+    isSensitiveInbound: input => input.scopeId === 'a',
+    handleCustomInbound: async () => true,
+  });
+  const core = await f.restart();
+  core.handleText = async () => { throw new Error('interrupted secret handler'); };
+  const key = 'sk-fixture-sensitive-value';
+  await assert.rejects((core as any).receiveInbound('channel:secret', { kind: 'text', event: event(key) }), /secret handler/);
+  const pending = f.store.channelInbox.pending();
+  assert.equal(pending.length, 1);
+  assert.doesNotMatch(JSON.stringify(pending), /sk-fixture-sensitive-value/);
+  assert.equal(pending[0]!.inbound.kind === 'text' && pending[0]!.inbound.event.redacted, true);
+  assert.equal((await fs.readFile(path.join(f.root, 'bridge.db'))).includes(Buffer.from(key)), false);
+  const recovered = await f.restart();
+  assert.equal(f.turns.length, 0);
+  assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+  assert.match(f.messages.at(-1)!, /敏感内容未保存/);
+  await (recovered as any).receiveInbound('channel:secret', { kind: 'text', event: event(key) });
+  assert.equal(f.turns.length, 0);
+});
+
+test('a missing credential backend still consumes private input and commands clear its pending intent', async t => {
+  const f = await fixture(t);
+  f.store.setServiceInteraction('a', 'sensitive-input', JSON.stringify({ owner: 'custom:key' }));
+  await (f.orchestrator as any).receiveInbound('channel:missing-key', { kind: 'text', event: event('sk-disabled-backend-value') });
+  assert.equal(f.turns.length, 0);
+  assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+  assert.match(f.messages.at(-1)!, /未交给模型/);
+  await f.orchestrator.handleText(event('/new'));
+  assert.equal(f.store.getServiceInteraction('a', 'sensitive-input'), null);
+});
+
+test('credential control work blocks self-update and is cancelled before shutdown joins intake', async t => {
+  const f = await fixture(t);
+  const entered = deferred(); const release = deferred();
+  let busy = 0;
+  f.backend.createUi = () => ({
+    isSensitiveInbound: input => input.scopeId === 'a',
+    handleCustomInbound: async () => { busy++; entered.resolve(); await release.promise; busy--; return true; },
+    getPendingOperations: () => busy,
+    stopPendingOperations: async () => { release.resolve(); },
+  });
+  const core = await f.restart();
+  try {
+    const inbound = (core as any).receiveInbound('channel:credential-control', { kind: 'text', event: event('fixture-private-input') });
+    await entered.promise;
+    assert.equal(core.isIdleForServiceUpdate(), false);
+    await core.stop();
+    await inbound;
+    assert.equal(busy, 0);
+    assert.equal(f.turns.length, 0);
+  } finally { release.resolve(); }
+});
+
 test('final delivery waits for an in-flight native preview, clears it, then sends one persistent result', async t => {
   const f = await fixture(t); const entered = deferred(); const release = deferred(); const lifecycle: string[] = [];
   f.messaging.beginTaskPreview = async () => { lifecycle.push('begin'); return 0; };

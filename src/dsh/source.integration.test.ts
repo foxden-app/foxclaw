@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { DshClient } from './client.js';
 import { Logger } from '../logger.js';
 import { optionChoices } from './adapter.js';
+import { DshCredentials } from './credentials.js';
 
 const sourceDir = process.env.FOXCLAW_DSH_TEST_SOURCE_DIR;
 
@@ -26,6 +27,12 @@ test('real DSH ACP profile loads the bridge plugin, selects models, persists per
   const logger = new Logger('error', path.join(root, 'test.log'));
   let client = new Client(options, 'source', logger);
   try {
+    const credentials = new DshCredentials(options, logger);
+    try {
+      assert.deepEqual(await credentials.describe(), { configured: false, writable: true });
+      assert.deepEqual(await credentials.set('fixture-key-not-used'), { configured: true, writable: true });
+      assert.deepEqual(await credentials.describe(), { configured: true, writable: true });
+    } finally { await credentials.stop(); }
     await client.setAccess('full-access');
     const id = await client.session(root);
     const models = optionChoices(client.configOptions(id).find(option => option.id === 'model'));

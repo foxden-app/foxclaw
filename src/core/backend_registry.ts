@@ -1,5 +1,6 @@
 import type { BackendDescriptor } from './engine_spi.js';
 import type { BackendUi, BackendUiHost } from './backend_ui.js';
+import type { ChannelTextEvent } from './channel_events.js';
 
 /** Owns backend definitions and their panel lifecycle. Discovery may refresh metadata, never execution identity. */
 export class BackendRegistry {
@@ -34,8 +35,17 @@ export class BackendRegistry {
   callbackOwner(data: string): BackendUi | undefined {
     return [...this.interfaces.values()].find(ui => ui.ownsCallback?.(data));
   }
+  sensitiveInboundOwner(event: ChannelTextEvent): BackendUi | undefined {
+    return [...this.interfaces.values()].find(ui => ui.isSensitiveInbound?.(event));
+  }
   getPendingApprovals(): number {
     return [...this.interfaces.values()].reduce((sum, ui) => sum + (ui.getPendingApprovals?.() ?? 0), 0);
+  }
+  getPendingOperations(): number {
+    return [...this.interfaces.values()].reduce((sum, ui) => sum + (ui.getPendingOperations?.() ?? 0), 0);
+  }
+  async stopPendingOperations(): Promise<void> {
+    await Promise.allSettled([...this.interfaces.values()].map(ui => ui.stopPendingOperations?.()));
   }
   stop(): Promise<void> {
     return this.stopping ??= this.stopInterfaces();

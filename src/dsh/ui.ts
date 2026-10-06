@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
-import type { AppConfig } from '../config.js';
+import { DEFAULT_ENV_PATH, type AppConfig } from '../config.js';
 import type { BridgeStore } from '../store/database.js';
 import type { Logger } from '../logger.js';
 import type { ChannelPort, ChannelInlineKeyboard } from '../core/channel_port.js';
@@ -11,6 +11,8 @@ import type { ChannelCallbackEvent } from '../core/channel_events.js';
 import type { BackendUiHost } from '../core/backend_ui.js';
 import { DshClient, type RequestPermissionRequest, type RequestPermissionResponse } from './client.js';
 import { DshEngineAdapter } from './adapter.js';
+import { DshCredentials } from './credentials.js';
+import type { ChannelTextEvent } from '../core/channel_events.js';
 
 type Action = { scopeId: string; kind: 'model' | 'effort' | 'access' | 'open' | 'page'; value: string; cwd?: string; expires: number };
 
@@ -19,12 +21,16 @@ export class DshUi {
   private readonly actions = new Map<string, Action>();
   private readonly approvals = new Map<string, { scopeId: string; resolve: (value: RequestPermissionResponse) => void; options: RequestPermissionRequest['options']; messageId: number | null }>();
   readonly adapter: DshEngineAdapter;
+  private readonly credentials: DshCredentials;
 
   get pendingApprovals(): number { return this.approvals.size; }
+  get pendingOperations(): number { return this.credentials.pendingOperations; }
+  stopPendingOperations(): Promise<void> { return this.credentials.stop(); }
 
   constructor(private readonly config: AppConfig, private readonly store: BridgeStore, private readonly logger: Logger, private readonly messaging: ChannelPort) {
     if (!config.dsh) throw new Error('DSH backend is not configured');
     const dsh = config.dsh;
+    this.credentials = new DshCredentials(dsh, logger);
     this.adapter = new DshEngineAdapter({
       createClient: scopeId => {
         const client = new DshClient(dsh, scopeId, logger);
@@ -83,13 +89,27 @@ export class DshUi {
   }
 
   async models(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number): Promise<void> {
-    const models = await this.adapter.listModels(scopeId);
+    const envPath = this.config.envPath || DEFAULT_ENV_PATH;
+    const guidance = this.copy(locale,
+      `首次使用 DeepSeek：点击“配置 API Key”，在与 Bot 的私聊中添加密钥。保存到 DSH 原生凭据存储，已有凭据直接复用。\n\n如果 \`${envPath}\` 中已设置 DEEPSEEK_API_KEY，则优先使用该环境配置，面板不能覆盖；其他供应商沿用 DSH 原生配置。`,
+      `First-time DeepSeek setup: select “Configure API Key” and add your key in a private chat with the bot. Keys are saved in DSH's native credential store; existing credentials are reused.\n\nDEEPSEEK_API_KEY in \`${envPath}\` takes precedence and cannot be overwritten here. Configure other providers through DSH.`);
+    const title = this.copy(locale, '🎯 **DSH 模型**', '🎯 **DSH models**');
+    const models = await this.adapter.listModels(scopeId).catch(async () => {
+      await this.panel(scopeId, `${title}\n\n${this.copy(locale, '暂时无法读取模型列表，请检查 DSH 配置后重试。', 'Model list unavailable. Check DSH configuration and retry.')}\n\n${guidance}`, [
+        [{ text: this.copy(locale, '🔑 配置 API Key', '🔑 Configure API Key'), callback_data: 'dsh:credentials' }],
+        [{ text: this.copy(locale, '🔄 重试', '🔄 Retry'), callback_data: 'dsh:models' }],
+        [{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }],
+      ], orchestrator, messageId);
+      return null;
+    });
+    if (!models) return;
     const current = this.store.getChatSettings(scopeId)?.model;
     const buttons = [this.button(scopeId, 'model', '', this.copy(locale, '默认模型', 'Default model')), ...models.map(model => this.button(scopeId, 'model', model.id, `${model.id === current ? '✓ ' : ''}${model.name}`))];
     const rows: ChannelInlineKeyboard = [];
     for (let index = 0; index < buttons.length; index += 2) rows.push(buttons.slice(index, index + 2));
+    rows.push([{ text: this.copy(locale, '🔑 配置 API Key', '🔑 Configure API Key'), callback_data: 'dsh:credentials' }]);
     rows.push([{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }]);
-    await this.panel(scopeId, this.copy(locale, '🎯 **DSH 模型**', '🎯 **DSH models**'), rows, orchestrator, messageId);
+    await this.panel(scopeId, `${title}\n\n${guidance}`, rows, orchestrator, messageId);
   }
 
   private async efforts(scopeId: string, locale: AppLocale, orchestrator: BackendUiHost, messageId?: number): Promise<void> {
@@ -166,6 +186,7 @@ export class DshUi {
   async command(scopeId: string, command: string, args: string, locale: AppLocale, orchestrator: BackendUiHost): Promise<boolean> {
     try {
       switch (command) {
+        case 'cancel': await orchestrator.sendMessage(scopeId, this.copy(locale, '配置输入已取消。', 'Configuration input cancelled.')); return true;
         case 'setup': await this.setup(scopeId, locale, orchestrator); return true;
         case 'models': await this.models(scopeId, locale, orchestrator); return true;
         case 'model': if (args) { await this.selectModel(scopeId, args === 'default' ? '' : args, orchestrator); await this.setup(scopeId, locale, orchestrator); } else await this.models(scopeId, locale, orchestrator); return true;
@@ -185,6 +206,7 @@ export class DshUi {
   }
 
   async callback(scopeId: string, data: string, locale: AppLocale, orchestrator: BackendUiHost, event?: ChannelCallbackEvent): Promise<boolean> {
+    this.clearKeyInput(scopeId);
     const answer = (text = '') => this.messaging.answerCallback(event?.callbackQueryId ?? '', text);
     if (!data.startsWith('dsh:')) {
       if (orchestrator.getBackendDescriptorForScope(scopeId).engineType === 'dsh' && data.startsWith('engine:') && !['engine:setup:main', 'engine:setup:models', 'engine:setup:active_mode', 'engine:setup:new', 'engine:setup:backend'].includes(data) && !data.startsWith('engine:backend:')) {
@@ -205,7 +227,22 @@ export class DshUi {
     if (orchestrator.getBackendDescriptorForScope(scopeId).engineType !== 'dsh') { await answer(this.copy(locale, '请先切换到 DSH', 'Switch to DSH first')); return true; }
     await answer();
     try {
-      if (data === 'dsh:models') await this.models(scopeId, locale, orchestrator, event?.messageId);
+      if (data === 'dsh:credentials' || data === 'dsh:credentials:add') {
+        if (!event || event.chatId !== event.userId) {
+          await orchestrator.sendMessage(scopeId, this.copy(locale, '请在与 Bot 的私聊中配置 API Key。', 'Configure API keys in a private chat with the bot.'));
+          return true;
+        }
+        const info = await this.credentials.describe();
+        if (data === 'dsh:credentials:add' && info.writable) {
+          this.store.setServiceInteraction(scopeId, 'sensitive-input', JSON.stringify({ owner: 'dsh:api-key', expires: Date.now() + 5 * 60_000 }));
+          await this.panel(scopeId, this.copy(locale, '🔑 发送 DeepSeek API Key（仅密钥本身）。\n输入消息会尝试删除，密钥不会进入模型或任务记录。保存后本机所有 DSH 会话共用；不会发起付费请求验证。\n发送 /cancel 或点击返回取消。', '🔑 Send your DeepSeek API Key only.\nWe will attempt to delete the input message; it will not enter models or task records. Local DSH sessions share the stored key. No paid validation request is made.\nSend /cancel or select Back to cancel.'), [[{ text: this.copy(locale, '返回模型', 'Back to models'), callback_data: 'dsh:models' }]], orchestrator, event.messageId);
+        } else {
+          const keyboard: ChannelInlineKeyboard = [];
+          if (info.writable) keyboard.push([{ text: this.copy(locale, info.configured ? '更新 API Key' : '添加 API Key', info.configured ? 'Update API Key' : 'Add API Key'), callback_data: 'dsh:credentials:add' }]);
+          keyboard.push([{ text: this.copy(locale, '返回模型', 'Back to models'), callback_data: 'dsh:models' }]);
+          await this.panel(scopeId, `🔑 **DeepSeek API Key**\n\n${this.copy(locale, info.configured ? '状态：已配置' : '状态：未配置', info.configured ? 'Status: configured' : 'Status: not configured')}\n${info.writable ? this.copy(locale, '由 DSH 保存，可从此面板添加或更新。', 'DSH stores the key; add or update it here.') : this.copy(locale, '来自启动环境，只读。请移除对应环境变量并重启后再使用面板管理。', 'Supplied by the launch environment, read-only. Remove that variable and restart to manage the key here.')}`, keyboard, orchestrator, event.messageId);
+        }
+      } else if (data === 'dsh:models') await this.models(scopeId, locale, orchestrator, event?.messageId);
       else if (data === 'dsh:efforts') await this.efforts(scopeId, locale, orchestrator, event?.messageId);
       else if (data === 'dsh:threads') await this.threads(scopeId, locale, orchestrator, event?.messageId);
       else if (data === 'dsh:plugins') await this.plugins(scopeId, locale, orchestrator);
@@ -247,6 +284,54 @@ export class DshUi {
   async stop(): Promise<void> {
     for (const pending of this.approvals.values()) pending.resolve({ outcome: { outcome: 'cancelled' } });
     this.actions.clear();
+    await this.credentials.stop();
     await this.adapter.stop();
+  }
+
+  isSensitiveInbound(event: ChannelTextEvent): boolean {
+    if (!this.keyInput(event.scopeId)) return false;
+    if (event.text.trim().startsWith('/')) { this.clearKeyInput(event.scopeId); return false; }
+    return true;
+  }
+
+  inbound(event: ChannelTextEvent, locale: AppLocale, host: BackendUiHost): boolean | Promise<boolean> {
+    if (!this.isSensitiveInbound(event)) return false;
+    return this.saveKey(event, locale, host);
+  }
+
+  private async saveKey(event: ChannelTextEvent, locale: AppLocale, host: BackendUiHost): Promise<boolean> {
+    const saved = this.keyInput(event.scopeId);
+    this.clearKeyInput(event.scopeId);
+    await this.messaging.deleteMessage(event.scopeId, event.messageId).catch(() => {});
+    const key = event.text.trim();
+    const expires = saved?.expires ?? 0;
+    if (event.chatType !== 'private' || expires < Date.now() || event.attachments.length || key.length < 8 || !/^[!-~]+$/.test(key)) {
+      await host.sendMessage(event.scopeId, this.copy(locale, '输入已过期或格式不正确，请从模型面板重新添加 API Key。', 'Input expired or invalid. Reopen the model panel to add a key.'), [[{ text: this.copy(locale, '配置 API Key', 'Configure API Key'), callback_data: 'dsh:credentials' }]]);
+      return true;
+    }
+    try {
+      await this.credentials.set(key);
+      await host.sendMessage(event.scopeId, this.copy(locale, '✅ API Key 已保存到 DSH。无需重启，下一次模型请求使用新凭据；尚未验证密钥是否有效。', '✅ API Key saved in DSH. No restart is needed; the next model request uses it. Key validity has not been tested.'), [[{ text: this.copy(locale, '返回模型选择', 'Choose model'), callback_data: 'dsh:models' }]]);
+    } catch {
+      await host.sendMessage(event.scopeId, this.copy(locale, '无法保存 API Key，请检查 DSH 凭据存储及环境覆盖后重试。', 'Cannot save the key. Check DSH credential storage and environment overrides, then retry.'), [[{ text: this.copy(locale, '配置 API Key', 'Configure API Key'), callback_data: 'dsh:credentials' }]]);
+    }
+    return true;
+  }
+
+  private clearKeyInput(scopeId: string): void {
+    const state = this.store.getServiceInteraction(scopeId, 'sensitive-input');
+    if (state) {
+      try { if ((JSON.parse(state) as { owner?: string }).owner === 'dsh:api-key') this.store.setServiceInteraction(scopeId, 'sensitive-input', null); }
+      catch { /* Another administrative interaction owns its own marker. */ }
+    }
+  }
+
+  private keyInput(scopeId: string): { expires: number } | null {
+    const text = this.store.getServiceInteraction(scopeId, 'sensitive-input');
+    if (!text) return null;
+    try {
+      const value = JSON.parse(text) as { owner?: unknown; expires?: unknown };
+      return value.owner === 'dsh:api-key' && typeof value.expires === 'number' && Number.isFinite(value.expires) ? { expires: value.expires } : null;
+    } catch { return null; }
   }
 }

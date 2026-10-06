@@ -49,6 +49,8 @@ DEFAULT_CWD=/absolute/path/to/workspace
 
 Provider 与 API key 沿用 DSH 配置。使用环境变量的 provider，可将相应变量（如 `DEEPSEEK_API_KEY`）加入 FoxClaw `.env`，DSH 子进程会继承。这里不使用 Codex/AGY 的账号轮转或认证同步。
 
+也可在 `/models` → **配置 API Key** 中添加或更新 DeepSeek 密钥：在与 Bot 的私聊中输入，FoxClaw 尝试删除输入消息，通过 DSH 原生凭据服务保存，下一次请求生效，无需重启。密钥不进入模型、任务记录或持久收件箱；服务重启后只恢复输入意图，未保存的密钥需要重新输入。保存确认不代表已经调用模型验证密钥。凭据在本机 DSH 会话间共用；启动环境提供的密钥优先且只读，其他供应商继续沿用 DSH 原生配置。
+
 | 操作 | 用途 |
 | --- | --- |
 | `/setup` | 模型、推理档位、权限、排队/中断接管、会话与插件配置面板 |

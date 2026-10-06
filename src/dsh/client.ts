@@ -18,6 +18,7 @@ export interface DshClientOptions {
   patches: string[];
   runtimeDir: string;
   startupTimeoutMs: number;
+  credentialControl?: { requestPath: string; resultPath: string };
 }
 
 /** An owned ACP process; protocol stdout stays separate from diagnostics. */
@@ -66,6 +67,11 @@ export class DshClient extends EventEmitter {
     let pluginPath = fileURLToPath(new URL('./permissions_plugin.js', import.meta.url));
     try { await fs.access(pluginPath); } catch { pluginPath = pluginPath.replace(/\.js$/, '.ts'); }
     await fs.writeFile(patchPath, `- insert:\n    - id: foxclaw-permissions\n      name: ${JSON.stringify(pathToFileURL(pluginPath).href)}\n      config:\n        policyPath: ${JSON.stringify(this.policyPath)}\n`, { mode: 0o600 });
+    if (this.options.credentialControl) {
+      let credentialsPlugin = fileURLToPath(new URL('./credentials_plugin.js', import.meta.url));
+      try { await fs.access(credentialsPlugin); } catch { credentialsPlugin = credentialsPlugin.replace(/\.js$/, '.ts'); }
+      await fs.appendFile(patchPath, `- insert:\n    - id: foxclaw-credentials\n      name: ${JSON.stringify(pathToFileURL(credentialsPlugin).href)}\n      config:\n        requestPath: ${JSON.stringify(this.options.credentialControl.requestPath)}\n        resultPath: ${JSON.stringify(this.options.credentialControl.resultPath)}\n`);
+    }
     const args = ['--profile', this.options.profile, ...this.options.patches.flatMap(p => ['--patch', path.resolve(p)]), '--patch', patchPath];
     const env: NodeJS.ProcessEnv = { ...process.env, ...(this.options.home ? { DSH_HOME: this.options.home } : {}) };
     let command = this.options.cliBin;

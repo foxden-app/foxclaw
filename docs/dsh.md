@@ -49,6 +49,8 @@ DEFAULT_CWD=/absolute/path/to/workspace
 
 Provider credentials remain managed by DSH. Provider environment variables such as `DEEPSEEK_API_KEY` can be placed in FoxClaw's `.env` and are inherited by DSH. Codex/AGY account rotation and auth synchronization are not used by this backend.
 
+Use `/models` → **Configure API Key** to add or update a DeepSeek key in a private chat with the bot. FoxClaw attempts to delete the input message and saves the key through DSH's native credential service. The next request uses it without restarting. Keys never enter model prompts, task records or the durable inbox; a restart retains only the input intent, requiring any unsaved key to be entered again. Saving does not make a paid request or verify key validity. Local DSH sessions share credentials. Launch-environment keys take precedence and are read-only; other providers continue using native DSH configuration.
+
 | Control | Purpose |
 | --- | --- |
 | `/setup` | Models, reasoning, permissions, queue/interrupt mode, sessions, and plugin configuration |

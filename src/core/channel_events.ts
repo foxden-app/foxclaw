@@ -9,6 +9,8 @@ export interface ChannelTextEvent {
   chatType: string;
   userId: string;
   text: string;
+  /** Durable replay marker for administrative input whose secret was not retained. */
+  redacted?: boolean;
   messageId: number;
   mediaGroupId?: string | null;
   attachments: InboundAttachment[];

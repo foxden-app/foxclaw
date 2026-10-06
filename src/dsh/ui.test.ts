@@ -16,11 +16,12 @@ async function setup(ownsScope?: (scopeId: string) => boolean) {
   const store = new BridgeStore(path.join(fixture.root, 'bridge.db'));
   const messages: Array<{ text: string; keyboard: InlineKeyboard }> = [];
   const answers: Array<{ id: string; text: string }> = [];
+  const deleted: number[] = [];
   const messaging = {
     sendRichMarkdown: async (_scope: string, text: string, keyboard: InlineKeyboard = []) => { messages.push({ text, keyboard }); return messages.length; },
     editRichMarkdown: async (_scope: string, _id: number, text: string, keyboard: InlineKeyboard = []) => { messages.push({ text, keyboard }); },
     answerCallback: async (id: string, text = '') => { answers.push({ id, text }); },
-    deleteMessage: async () => {},
+    deleteMessage: async (_scope: string, id: number) => { deleted.push(id); },
     sendTypingInScope: async () => {},
   } as unknown as TelegramMessagingPort;
   const config = { dsh: fixture.options, defaultCwd: fixture.root, defaultSandboxMode: 'workspace-write', telegramPanelTtlMs: 0 } as AppConfig;
@@ -32,6 +33,10 @@ async function setup(ownsScope?: (scopeId: string) => boolean) {
       defaults: { reasoningEffort: null, supportedReasoningEfforts: [], boost: false, tokenUsage: false },
       createUi: () => ({
       handleCustomCommand: (scope, command, args, locale) => ui.command(scope, command, args, locale, orchestrator),
+      isSensitiveInbound: event => ui.isSensitiveInbound(event),
+      getPendingOperations: () => ui.pendingOperations,
+      stopPendingOperations: () => ui.stopPendingOperations(),
+      handleCustomInbound: (event, locale) => ui.inbound(event, locale, orchestrator),
       renderCustomStatus: async (scope, locale) => ui.status(scope, locale),
       renderModelsMenu: async (scope, locale, messageId) => { await ui.models(scope, locale, orchestrator, messageId); return true; },
       handleCustomCallback: (scope, data, locale, _messageId, event) => ui.callback(scope, data, locale, orchestrator, event),
@@ -39,8 +44,37 @@ async function setup(ownsScope?: (scopeId: string) => boolean) {
   });
   const event = { callbackQueryId: 'real-query-id', messageId: 1 } as TelegramCallbackEvent;
   const callback = (scope: string, data: string) => ui.callback(scope, data, 'en', orchestrator, event);
-  return { ...fixture, store, messages, answers, ui, orchestrator, callback, dispose: async () => { await orchestrator.stop(); await ui.stop(); store.close(); await fixture.cleanup(); } };
+  return { ...fixture, store, messages, answers, deleted, ui, orchestrator, callback, dispose: async () => { await orchestrator.stop(); await ui.stop(); store.close(); await fixture.cleanup(); } };
 }
+
+test('DSH key entry stays private, deletes input and never becomes a model task, including expired entry', async t => {
+  const f = await setup();
+  const credentials = (f.ui as any).credentials;
+  const describe = t.mock.method(credentials, 'describe', async () => ({ configured: false, writable: true }));
+  const set = t.mock.method(credentials, 'set', async () => ({ configured: true, writable: true }));
+  const callback = { chatId: '1', userId: '1', messageId: 7, callbackQueryId: 'key-input' } as TelegramCallbackEvent;
+  const input = { scopeId: 'a', chatId: '1', userId: '1', chatType: 'private', topicId: null, messageId: 8,
+    text: 'sk-fixture-private-value', attachments: [], entities: [], replyToBot: false } as TelegramTextEvent;
+  try {
+    await f.ui.callback('a', 'dsh:credentials:add', 'en', f.orchestrator, { ...callback, chatId: '-1' });
+    assert.equal(describe.mock.callCount(), 0);
+    await f.ui.callback('a', 'dsh:credentials:add', 'en', f.orchestrator, callback);
+    await f.orchestrator.handleText(input);
+    assert.equal(set.mock.callCount(), 1);
+    assert.equal(set.mock.calls[0]!.arguments[0], input.text);
+    assert.ok(f.deleted.includes(input.messageId));
+    assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+    assert.doesNotMatch(JSON.stringify(f.messages), /sk-fixture-private-value/);
+    f.store.setServiceInteraction('a', 'sensitive-input', JSON.stringify({ owner: 'dsh:api-key', expires: Date.now() - 1 }));
+    await f.orchestrator.handleText({ ...input, messageId: 9 });
+    assert.equal(set.mock.callCount(), 1);
+    assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+    assert.ok(f.deleted.includes(9));
+    await f.ui.callback('a', 'dsh:credentials:add', 'en', f.orchestrator, callback);
+    await f.orchestrator.handleText({ ...input, text: '/cancel' });
+    assert.equal(f.store.getServiceInteraction('a', 'sensitive-input'), null);
+  } finally { await f.dispose(); }
+});
 
 test('DSH panel uses native models/efforts, persists choices and rejects foreign controls', async () => {
   const f = await setup();

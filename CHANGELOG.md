@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## Unreleased
+
+### 中文
+
+- DSH 模型面板新增 API Key 配置入口，支持私聊添加、更新和查看配置状态，通过 DSH 原生凭据服务保存并热生效。环境凭据显示为只读；读取模型列表失败时仍提供配置和重试入口。
+- 敏感输入在持久收件前脱敏，不进入模型或任务记录；输入消息尝试删除，跨重启只恢复配置意图。配置后端缺失时仍阻止输入落入其他模型，凭据操作支持关闭取消并阻止并行自升级。
+
+### English
+
+- Added DeepSeek API key configuration to the DSH model panel: add/update keys in private chat and inspect status using native DSH credential storage without restarting. Environment credentials are read-only; configuration and retry actions remain available if model discovery fails.
+- Redact sensitive input before durable intake, keep it out of models and task records, and attempt to delete its message. Restarts retain only configuration intent. Missing backends cannot route credential input to another model; credential operations cancel on shutdown and block concurrent service updates.
+
 ## 0.13.3 - 2026-10-06
 
 ### 中文
