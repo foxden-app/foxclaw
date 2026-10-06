@@ -2,7 +2,7 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
-## Unreleased
+## 0.13.4 - 2026-10-06
 
 ### 中文
 
