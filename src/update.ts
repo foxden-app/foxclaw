@@ -4,8 +4,11 @@ import os from 'node:os';
 import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import type { AppLocale } from './types.js';
+import { valid, lt } from 'semver';
 
-const PACKAGE_SPEC = '@foxden-app/foxclaw@latest';
+const PACKAGE_NAME = '@foxden-app/foxclaw';
+const PACKAGE_SPEC = `${PACKAGE_NAME}@latest`;
+const PACKAGE_REGISTRY = 'https://registry.npmjs.org';
 const CODEX_PACKAGE_SPEC = '@openai/codex@latest';
 const UPDATE_STATUS_FILENAME = 'self-update.json';
 export const SELF_UPDATE_PENDING_TIMEOUT_MS = 15 * 60_000;
@@ -267,6 +270,9 @@ export function readSelfUpdateStatus(statusFile: string): SelfUpdateStatus | nul
       ...(typeof parsed.codexUpdate === 'string' ? { codexUpdate: parsed.codexUpdate } : {}),
       ...(typeof parsed.codexFromVersion === 'string' ? { codexFromVersion: parsed.codexFromVersion } : {}),
       ...(typeof parsed.codexToVersion === 'string' ? { codexToVersion: parsed.codexToVersion } : {}),
+      ...(typeof parsed.agyUpdate === 'string' ? { agyUpdate: parsed.agyUpdate } : {}),
+      ...(typeof parsed.agyFromVersion === 'string' ? { agyFromVersion: parsed.agyFromVersion } : {}),
+      ...(typeof parsed.agyToVersion === 'string' ? { agyToVersion: parsed.agyToVersion } : {}),
       error: typeof parsed.error === 'string' ? parsed.error : null,
       updatedAt: parsed.updatedAt,
     };
@@ -443,25 +449,84 @@ export function buildSelfUpdateLaunchCommand(options: {
   };
 }
 
-export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdateOutcome {
+export function assertSelfUpdateVersion(current: string, candidate: string, expected?: string): void {
+  const from = valid(current);
+  const to = valid(candidate);
+  if (!from || !to) {
+    throw new Error(`Cannot verify FoxClaw update versions: ${current} -> ${candidate}.`);
+  }
+  if (lt(to, from)) {
+    throw new Error(`Refusing FoxClaw downgrade: ${current} -> ${candidate}.`);
+  }
+  if (expected && to !== valid(expected)) {
+    throw new Error(`Installed FoxClaw ${candidate} does not match requested ${expected}; service restart refused.`);
+  }
+}
+
+interface SelfUpdateOperations {
+  latestVersion: (installer: SelfUpdateInstaller, env: NodeJS.ProcessEnv) => string;
+  run: typeof runInherited;
+  entryPoint: typeof resolveUpdatedEntryPoint;
+  readVersion: typeof readInstalledPackageVersion;
+  updateCodex: typeof updateManagedCodexCli;
+  updateAgy: typeof updateManagedAgyCli;
+}
+
+function readLatestFoxclawVersion(installer: SelfUpdateInstaller, env: NodeJS.ProcessEnv): string {
+  // Read the same registry used by the exact-version install, bypassing stale local metadata.
+  const result = spawnSync(
+    installer.command,
+    ['view', PACKAGE_SPEC, 'version', '--json', `--registry=${PACKAGE_REGISTRY}`, '--prefer-online'],
+    { encoding: 'utf8', env, timeout: 30_000 },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error('Could not read the latest FoxClaw version from the npm registry.');
+  let version: unknown;
+  try {
+    version = JSON.parse(result.stdout.trim());
+  } catch {
+    throw new Error('Invalid latest FoxClaw version response.');
+  }
+  if (typeof version !== 'string' || !valid(version)) throw new Error('Invalid latest FoxClaw version response.');
+  return valid(version)!;
+}
+
+export function performSelfUpdate(options: PerformSelfUpdateOptions, overrides: Partial<SelfUpdateOperations> = {}): SelfUpdateOutcome {
   const env = options.env ?? process.env;
+  const operations: SelfUpdateOperations = {
+    latestVersion: readLatestFoxclawVersion,
+    run: runInherited,
+    entryPoint: resolveUpdatedEntryPoint,
+    readVersion: readInstalledPackageVersion,
+    updateCodex: updateManagedCodexCli,
+    updateAgy: updateManagedAgyCli,
+    ...overrides,
+  };
   let toVersion: string | null = null;
   let codexUpdate: CodexCliUpdateResult | null = null;
   let agyUpdate: AgyCliUpdateResult | null = null;
   try {
-    codexUpdate = updateManagedCodexCli(options.codexCliBin ?? env.CODEX_CLI_BIN ?? '', options.nodePath, env);
-    console.log(`[UPDATE] ${codexUpdate.message}`);
-    agyUpdate = updateManagedAgyCli(options.agyCliBin ?? env.AGY_CLI_BIN ?? '', env);
-    console.log(`[UPDATE] ${agyUpdate.message}`);
     const installer = resolveSelfUpdateInstaller(options.entryPoint, options.nodePath, fs.existsSync, env);
     const installerEnv = buildInstallerEnv(options.entryPoint, installer, env);
-    console.log(`[UPDATE] Installing ${PACKAGE_SPEC} with ${installer.manager}...`);
-    runInherited(installer.command, installer.installArgs, installerEnv);
-    const updatedEntryPoint = resolveUpdatedEntryPoint(installer, installerEnv);
-    toVersion = readInstalledPackageVersion(updatedEntryPoint);
+    const targetVersion = operations.latestVersion(installer, installerEnv);
+    assertSelfUpdateVersion(options.version, targetVersion);
+    const spec = `${PACKAGE_NAME}@${targetVersion}`;
+    const installArgs = [
+      ...installer.installArgs.map(arg => arg === PACKAGE_SPEC ? spec : arg),
+      `--registry=${PACKAGE_REGISTRY}`,
+    ];
+    console.log(`[UPDATE] Installing ${spec} with ${installer.manager}...`);
+    operations.run(installer.command, installArgs, installerEnv);
+    const updatedEntryPoint = operations.entryPoint(installer, installerEnv);
+    toVersion = operations.readVersion(updatedEntryPoint);
+    assertSelfUpdateVersion(options.version, toVersion, targetVersion);
+    codexUpdate = operations.updateCodex(options.codexCliBin ?? env.CODEX_CLI_BIN ?? '', options.nodePath, env);
+    console.log(`[UPDATE] ${codexUpdate.message}`);
+    agyUpdate = operations.updateAgy(options.agyCliBin ?? env.AGY_CLI_BIN ?? '', env);
+    console.log(`[UPDATE] ${agyUpdate.message}`);
     const releaseNotes = readInstalledReleaseNotes(updatedEntryPoint, toVersion, options.notificationFile);
     console.log('[UPDATE] Running checks and restarting the FoxClaw service...');
-    runInherited(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
+    operations.run(options.nodePath, [updatedEntryPoint, 'start'], installerEnv);
     completeNotification(options.notificationFile, 'succeeded', toVersion, codexUpdate, null, releaseNotes, agyUpdate);
     if (options.clusterBroadcastFile && env.FOXCLAW_SUPPRESS_UPDATE_BROADCAST !== '1') {
       writePendingClusterUpdateBroadcast(options.clusterBroadcastFile, {
@@ -471,22 +536,12 @@ export function performSelfUpdate(options: PerformSelfUpdateOptions): SelfUpdate
       });
     }
     console.log(`[OK] FoxClaw updated and restarted: ${options.version} -> ${toVersion}`);
-    return {
-      ok: true,
-      fromVersion: options.version,
-      toVersion,
-      error: null,
-    };
+    return { ok: true, fromVersion: options.version, toVersion, error: null };
   } catch (error) {
     const message = formatError(error);
     completeNotification(options.notificationFile, 'failed', toVersion, codexUpdate, message, null, agyUpdate);
     console.error(`[FAIL] FoxClaw update failed: ${message}`);
-    return {
-      ok: false,
-      fromVersion: options.version,
-      toVersion,
-      error: message,
-    };
+    return { ok: false, fromVersion: options.version, toVersion, error: message };
   }
 }
 
@@ -731,6 +786,7 @@ export function resolveFoxclawEntryPointFromPnpmHome(
   preferBin: boolean = false,
   exists: (target: string) => boolean = fs.existsSync,
   readText: (target: string) => string = (target) => fs.readFileSync(target, 'utf8'),
+  installationRoot?: string,
 ): string | null {
   const commandName = process.platform === 'win32' ? 'foxclaw.cmd' : 'foxclaw';
   const rootShim = path.join(pnpmHome, commandName);
@@ -747,10 +803,29 @@ export function resolveFoxclawEntryPointFromPnpmHome(
     const matches = contents.match(/(?:[A-Za-z]:[\\/]|\/)[^\r\n"']*?[\\/]node_modules[\\/]@foxden-app[\\/]foxclaw[\\/]dist[\\/]main\.js/g);
     const entryPoint = matches?.at(-1) ?? null;
     if (entryPoint && exists(entryPoint)) {
+      const relative = installationRoot ? path.relative(path.resolve(installationRoot), path.resolve(entryPoint)) : null;
+      if (relative !== null && (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`))) {
+        continue;
+      }
       return entryPoint;
     }
   }
   return null;
+}
+
+export function resolveFoxclawEntryPointFromInstallation(
+  globalRoot: string,
+  pnpmHome?: string,
+  exists: (target: string) => boolean = fs.existsSync,
+  readText: (target: string) => string = target => fs.readFileSync(target, 'utf8'),
+): string | null {
+  // The installer-owned root is authoritative. Another pnpm layout may have a stale shim.
+  const direct = resolveFoxclawEntryPointFromGlobalRoot(globalRoot, exists);
+  if (direct || !pnpmHome) return direct;
+  const installationRoot = path.basename(globalRoot) === 'node_modules' ? path.dirname(globalRoot) : globalRoot;
+  return resolveFoxclawEntryPointFromPnpmHome(
+    pnpmHome, /^v\d+$/.test(path.basename(globalRoot)), exists, readText, installationRoot,
+  );
 }
 
 function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.ProcessEnv): string {
@@ -765,10 +840,7 @@ function resolveUpdatedEntryPoint(installer: SelfUpdateInstaller, env: NodeJS.Pr
   if (!globalRoot) {
     throw new Error(`Could not locate the updated global package root using ${installer.manager}.`);
   }
-  const updatedEntryPoint = (installer.pnpmHome
-    ? resolveFoxclawEntryPointFromPnpmHome(installer.pnpmHome, /^v\d+$/.test(path.basename(globalRoot)))
-    : null)
-    ?? resolveFoxclawEntryPointFromGlobalRoot(globalRoot);
+  const updatedEntryPoint = resolveFoxclawEntryPointFromInstallation(globalRoot, installer.pnpmHome);
   if (!updatedEntryPoint) {
     throw new Error(
       `Updated FoxClaw entry point was not found below ${globalRoot} (checked direct and node_modules layouts).`,

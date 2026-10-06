@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.1 - 2026-10-06
+
+### 中文
+
+- **修复 `/update` 意外降级**：pnpm 10 与 pnpm 11 安装并存时，以本次安装的全局目录选择启动入口，禁止误用另一目录中的旧启动脚本。
+- 修复升级完成卡片丢失 Antigravity CLI 实际版本、回退显示升级前版本的问题。
+- **升级前后双重版本校验**：从官方仓库获取目标版本并按精确版本安装；拒绝降级，安装版本必须与目标一致才允许更新其他 CLI 和重启服务。校验失败不会发送升级成功或集群升级广播。
+
+### English
+
+- **Fixed accidental downgrades during `/update`**: when pnpm 10 and pnpm 11 installations coexist, resolve the entry point from the installer's global root instead of an older launcher from another layout.
+- Preserve the actual Antigravity CLI update versions in completion cards instead of falling back to the pre-update version.
+- **Verify versions before installation and restart**: fetch the target from the official registry and install that exact version. Reject downgrades and require the installed version to match before updating other CLIs or restarting. Failed checks never report success or broadcast a cluster update.
+
 ## 0.13.0 - 2026-10-06
 
 ### 中文

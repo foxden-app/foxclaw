@@ -4,6 +4,9 @@ import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  assertSelfUpdateVersion,
+  performSelfUpdate,
+  resolveFoxclawEntryPointFromInstallation,
   buildSelfUpdateLaunchCommand,
   clearPendingClusterUpdateBroadcast,
   createSelfUpdateRuntime,
@@ -381,4 +384,214 @@ test('pending cluster update broadcasts are stored atomically', () => {
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+
+test('installation root wins over a stale pnpm 11 shim when pnpm 10 uses a relative launcher', () => {
+  const home = '/home/user/.local/share/pnpm';
+  const root = `${home}/global/5/node_modules`;
+  const current = `${root}/@foxden-app/foxclaw/dist/main.js`;
+  const stale = `${home}/global/v11/old/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const files = new Set([current, stale, `${home}/foxclaw`, `${home}/bin/foxclaw`]);
+  const shims: Record<string, string> = {
+    [`${home}/foxclaw`]: '#!/bin/sh\nexec node "$basedir/global/5/node_modules/@foxden-app/foxclaw/dist/main.js" "$@"\n',
+    [`${home}/bin/foxclaw`]: `#!/bin/sh\n# cmd-shim-target=${stale}\n`,
+  };
+  const exists = (target: string) => files.has(target);
+  const read = (target: string) => shims[target] ?? '';
+
+  // Reproduce the previous shim-first selection, including pnpm 10's real relative launcher.
+  assert.equal(resolveFoxclawEntryPointFromPnpmHome(home, false, exists, read), stale);
+  assert.equal(resolveFoxclawEntryPointFromInstallation(root, home, exists, read), current);
+  files.delete(current);
+  assert.equal(resolveFoxclawEntryPointFromInstallation(root, home, exists, read), null);
+});
+
+test('pnpm 11 isolated shim fallback stays inside the installer-owned global root', () => {
+  const home = '/home/user/.local/share/pnpm';
+  const root = `${home}/global/v11`;
+  const current = `${root}/instance/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const stale = `${home}/global/5/.pnpm/old/node_modules/@foxden-app/foxclaw/dist/main.js`;
+  const files = new Set([current, stale, `${home}/foxclaw`, `${home}/bin/foxclaw`]);
+  const shims: Record<string, string> = {
+    [`${home}/foxclaw`]: `#!/bin/sh\n# cmd-shim-target=${stale}\n`,
+    [`${home}/bin/foxclaw`]: `#!/bin/sh\n# cmd-shim-target=${current}\n`,
+  };
+  const exists = (target: string) => files.has(target);
+  const read = (target: string) => shims[target] ?? '';
+  assert.equal(resolveFoxclawEntryPointFromInstallation(root, home, exists, read), current);
+  files.delete(current);
+  assert.equal(resolveFoxclawEntryPointFromInstallation(root, home, exists, read), null);
+});
+
+test('self-update version checks use semantic ordering and require the exact requested version', () => {
+  assert.doesNotThrow(() => assertSelfUpdateVersion('0.9.0', '0.10.0'));
+  assert.doesNotThrow(() => assertSelfUpdateVersion('0.13.0', '0.13.0', '0.13.0'));
+  assert.doesNotThrow(() => assertSelfUpdateVersion('0.13.1-rc.1', '0.13.1'));
+  assert.throws(() => assertSelfUpdateVersion('0.13.0', '0.11.1'), /downgrade/);
+  assert.throws(() => assertSelfUpdateVersion('0.13.1', '0.13.1-rc.1'), /downgrade/);
+  assert.throws(() => assertSelfUpdateVersion('unknown', '0.13.1'), /Cannot verify/);
+  assert.throws(() => assertSelfUpdateVersion('0.13.0', 'unknown'), /Cannot verify/);
+  assert.throws(() => assertSelfUpdateVersion('0.13.0', '0.14.0', '0.13.1'), /does not match/);
+});
+
+function updateFixture(t: test.TestContext) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'foxclaw-update-safety-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const notificationFile = path.join(directory, 'self-update.json');
+  const clusterBroadcastFile = path.join(directory, 'broadcast.json');
+  writeSelfUpdateStatus(notificationFile, {
+    state: 'pending', scopeId: 'telegram:99::root', locale: 'zh', fromVersion: '0.13.0',
+    toVersion: null, error: null, updatedAt: new Date().toISOString(),
+  });
+  const calls: { command: string; args: string[] }[] = [];
+  const cliUpdates: string[] = [];
+  const entry = path.join(directory, 'installed', 'dist', 'main.js');
+  const overrides = {
+    latestVersion: () => '0.13.1',
+    run: (command: string, args: string[]) => { calls.push({ command, args }); },
+    entryPoint: () => entry,
+    readVersion: () => '0.13.1',
+    updateCodex: () => { cliUpdates.push('codex'); return { message: 'Codex checked', fromVersion: '1.0.0', toVersion: '1.0.0' }; },
+    updateAgy: () => { cliUpdates.push('agy'); return { message: 'AGY checked', fromVersion: '1.0.0', toVersion: '1.0.0' }; },
+  };
+  const options = {
+    entryPoint: path.join(directory, 'lib', 'node_modules', '@foxden-app', 'foxclaw', 'dist', 'main.js'),
+    nodePath: process.execPath, version: '0.13.0', notificationFile, clusterBroadcastFile,
+    env: { PATH: path.dirname(process.execPath) },
+  };
+  return { directory, options, overrides, calls, cliUpdates, entry };
+}
+
+test('a registry downgrade fails before changing packages, CLIs or the running service', t => {
+  const fixture = updateFixture(t);
+  const outcome = performSelfUpdate(fixture.options, { ...fixture.overrides, latestVersion: () => '0.11.1' });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error!, /downgrade/);
+  assert.deepEqual(fixture.calls, []);
+  assert.deepEqual(fixture.cliUpdates, []);
+  assert.equal(readSelfUpdateStatus(fixture.options.notificationFile)?.state, 'failed');
+  assert.equal(readPendingClusterUpdateBroadcast(fixture.options.clusterBroadcastFile), null);
+});
+
+for (const installed of ['0.11.1', '0.14.0', 'unknown']) {
+  test(`an installed version of ${installed} cannot restart or report update success`, t => {
+    const fixture = updateFixture(t);
+    const outcome = performSelfUpdate(fixture.options, { ...fixture.overrides, readVersion: () => installed });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.toVersion, installed);
+    assert.equal(fixture.calls.length, 1);
+    assert.deepEqual(fixture.cliUpdates, []);
+    const status = readSelfUpdateStatus(fixture.options.notificationFile);
+    assert.equal(status?.state, 'failed');
+    assert.ok(status?.error);
+    assert.equal(readPendingClusterUpdateBroadcast(fixture.options.clusterBroadcastFile), null);
+  });
+}
+
+test('self-update installs a pinned target and reports success only after restarting that entry', t => {
+  const fixture = updateFixture(t);
+  const outcome = performSelfUpdate(fixture.options, fixture.overrides);
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.toVersion, '0.13.1');
+  assert.ok(fixture.calls[0]!.args.includes('@foxden-app/foxclaw@0.13.1'));
+  assert.ok(fixture.calls[0]!.args.includes('--registry=https://registry.npmjs.org'));
+  assert.ok(!fixture.calls[0]!.args.includes('@foxden-app/foxclaw@latest'));
+  assert.deepEqual(fixture.calls[1], { command: process.execPath, args: [fixture.entry, 'start'] });
+  assert.deepEqual(fixture.cliUpdates, ['codex', 'agy']);
+  const status = readSelfUpdateStatus(fixture.options.notificationFile);
+  assert.equal(status?.state, 'succeeded');
+  assert.equal(status?.agyUpdate, 'AGY checked');
+  assert.equal(status?.agyFromVersion, '1.0.0');
+  assert.equal(status?.agyToVersion, '1.0.0');
+  assert.equal(readPendingClusterUpdateBroadcast(fixture.options.clusterBroadcastFile)?.targetVersion, '0.13.1');
+});
+
+test('a service restart failure records failure without publishing a success broadcast', t => {
+  const fixture = updateFixture(t);
+  const outcome = performSelfUpdate(fixture.options, { ...fixture.overrides, run: (command, args) => {
+    fixture.overrides.run(command, args);
+    if (args.includes('start')) throw new Error('restart failed');
+  } });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error!, /restart failed/);
+  assert.equal(readSelfUpdateStatus(fixture.options.notificationFile)?.state, 'failed');
+  assert.equal(readPendingClusterUpdateBroadcast(fixture.options.clusterBroadcastFile), null);
+});
+
+test('real subprocess update resolves pnpm 10 root despite a stale pnpm 11 launcher', { skip: process.platform === 'win32' }, t => {
+  const fixture = updateFixture(t);
+  const home = path.join(fixture.directory, 'pnpm');
+  const globalRoot = path.join(home, 'global', '5', 'node_modules');
+  const entry = path.join(globalRoot, '@foxden-app', 'foxclaw', 'dist', 'main.js');
+  const stale = path.join(home, 'global', 'v11', 'old', 'node_modules', '@foxden-app', 'foxclaw', 'dist', 'main.js');
+  const bin = path.join(fixture.directory, 'bin');
+  const history = path.join(fixture.directory, 'commands.jsonl');
+  const started = path.join(fixture.directory, 'started.json');
+  fs.mkdirSync(path.dirname(stale), { recursive: true });
+  fs.writeFileSync(stale, 'throw new Error("stale pnpm 11 entry must never run");');
+  fs.mkdirSync(path.join(home, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'foxclaw'), '#!/bin/sh\nexec node "$basedir/global/5/node_modules/@foxden-app/foxclaw/dist/main.js" "$@"\n');
+  fs.writeFileSync(path.join(home, 'bin', 'foxclaw'), `#!/bin/sh\n# cmd-shim-target=${stale}\n`);
+  fs.mkdirSync(bin);
+  fs.symlinkSync(process.execPath, path.join(bin, 'node'));
+  const restartScript = 'import fs from "node:fs"; fs.writeFileSync(process.env.FIXTURE_STARTED, JSON.stringify(process.argv));';
+  fs.writeFileSync(path.join(bin, 'npm'), `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_HISTORY, JSON.stringify(args) + '\\n');
+if (args[0] === 'view') { console.log(JSON.stringify('0.13.1')); }
+else if (args[0] === 'exec' && args.includes('add')) {
+  if (!args.includes('@foxden-app/foxclaw@0.13.1')) process.exit(9);
+  const entry = process.env.FIXTURE_ENTRY;
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(path.resolve(path.dirname(entry), '../package.json'), JSON.stringify({ version: '0.13.1', type: 'module' }));
+  fs.writeFileSync(entry, ${JSON.stringify(restartScript)});
+}
+else if (args[0] === 'exec' && args.includes('root')) { console.log(process.env.FIXTURE_ROOT); }
+else { process.exit(8); }
+`, { mode: 0o755 });
+  const outcome = performSelfUpdate({
+    ...fixture.options,
+    entryPoint: path.join(home, 'global', '5', '.pnpm', 'old', 'node_modules', '@foxden-app', 'foxclaw', 'dist', 'main.js'),
+    nodePath: path.join(bin, 'node'),
+    env: { PATH: `${bin}:${process.env.PATH}`, FIXTURE_HISTORY: history, FIXTURE_ROOT: globalRoot,
+      FIXTURE_ENTRY: entry, FIXTURE_STARTED: started },
+  }, { updateCodex: fixture.overrides.updateCodex, updateAgy: fixture.overrides.updateAgy });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(started, 'utf8')).slice(1), [entry, 'start']);
+  const commands: string[][] = fs.readFileSync(history, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(commands.length, 3);
+  assert.equal(commands[0]![0], 'view');
+  assert.ok(commands[0]!.includes('--prefer-online'));
+  assert.ok(commands[0]!.includes('--registry=https://registry.npmjs.org'));
+  assert.ok(commands[1]!.includes('--package=pnpm@10'));
+  assert.ok(commands[1]!.includes('@foxden-app/foxclaw@0.13.1'));
+  assert.ok(commands[2]!.includes('root'));
+  assert.equal(readSelfUpdateStatus(fixture.options.notificationFile)?.toVersion, '0.13.1');
+});
+
+
+test('an unchanged FoxClaw version still allows the configured CLI updates', t => {
+  const fixture = updateFixture(t);
+  const outcome = performSelfUpdate(fixture.options, {
+    ...fixture.overrides, latestVersion: () => '0.13.0', readVersion: () => '0.13.0',
+  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(fixture.cliUpdates, ['codex', 'agy']);
+  assert.equal(fixture.calls.length, 2);
+});
+
+test('registry lookup failure leaves packages and service untouched', t => {
+  const fixture = updateFixture(t);
+  const outcome = performSelfUpdate(fixture.options, {
+    ...fixture.overrides, latestVersion: () => { throw new Error('registry unavailable'); },
+  });
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.error!, /registry unavailable/);
+  assert.deepEqual(fixture.calls, []);
+  assert.deepEqual(fixture.cliUpdates, []);
+  assert.equal(readSelfUpdateStatus(fixture.options.notificationFile)?.state, 'failed');
+  assert.equal(readPendingClusterUpdateBroadcast(fixture.options.clusterBroadcastFile), null);
 });

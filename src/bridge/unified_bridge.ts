@@ -481,9 +481,9 @@ export class UnifiedBridgeCore {
       const title = isZh ? '🎉 FoxClaw 全链路升级完成' : '🎉 FoxClaw Update Completed';
       const lines = [
         `**${title}**`,
-        `• FoxClaw: \`${status.fromVersion}\` ➔ \`${status.toVersion ?? '0.11.0'}\``,
-        `• Codex CLI: \`${status.codexFromVersion ?? '0.157.1'}\` ➔ \`${status.codexToVersion ?? '0.159.2'}\``,
-        `• Antigravity CLI: \`${status.agyFromVersion ?? '1.2.14'}\` (最新)`,
+        `• FoxClaw: \`${status.fromVersion}\` ➔ \`${status.toVersion ?? 'unknown'}\``,
+        `• Codex CLI: \`${status.codexFromVersion ?? 'unknown'}\` ➔ \`${status.codexToVersion ?? 'unknown'}\``,
+        `• Antigravity CLI: \`${status.agyFromVersion ?? 'unknown'}\` ➔ \`${status.agyToVersion ?? 'unknown'}\``,
       ];
       if (notes.length > 0) {
         lines.push('', isZh ? '**更新日志**:' : '**Release Notes**:');
