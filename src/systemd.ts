@@ -31,8 +31,7 @@ Description=FoxClaw local Codex execution bridge
 Documentation=https://github.com/foxden-app/foxclaw
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

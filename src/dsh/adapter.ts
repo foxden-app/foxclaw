@@ -106,6 +106,12 @@ export class DshEngineAdapter implements IEngineAdapter {
 
   async listSessions(scopeId: string, cursor?: string) { return (await this.sessionForScope(scopeId)).client.listSessions(cursor); }
 
+  async renameSession(scopeId: string, sessionId: string, cwd: string, title: string): Promise<string> {
+    const state = await this.sessionForScope(scopeId);
+    if (this.busy.has(scopeId)) throw new Error('DSH session is busy');
+    return state.client.renameSession(sessionId, cwd, title);
+  }
+
   isBusy(scopeId: string): boolean { return this.busy.has(scopeId); }
 
   executeTurn(request: EngineTurnRequest): EngineTurnExecution {
@@ -125,7 +131,10 @@ export class DshEngineAdapter implements IEngineAdapter {
       if (cancelled || notification.sessionId !== state?.sessionId) return;
       const update = notification.update;
       if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
-        if (update.messageId && update.messageId !== finalMessageId) { finalMessageId = update.messageId; finalMessage = ''; }
+        if (update.messageId && update.messageId !== finalMessageId) {
+          if (finalMessageId && finalMessage.trim()) emitter.emit('commentary', { messageId: finalMessageId, text: finalMessage });
+          finalMessageId = update.messageId; finalMessage = '';
+        }
         finalMessage += update.content.text;
         response += update.content.text;
         emitter.emit('delta', update.content.text);

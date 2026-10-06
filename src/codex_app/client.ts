@@ -149,6 +149,8 @@ export class CodexAppClient extends EventEmitter {
   private connected = false;
   private userAgent: string | null = null;
   private readonly requestTimeoutMs = 30_000;
+  private readonly startupTimeoutMs = 60_000;
+  private readonly handshakeTimeoutMs = 2000;
 
   constructor(
     private readonly codexCliBin: string,
@@ -776,20 +778,26 @@ export class CodexAppClient extends EventEmitter {
   private async connectWebSocket(): Promise<void> {
     const url = `ws://127.0.0.1:${this.port}`;
     const started = Date.now();
-    while (Date.now() - started < 10_000) {
+    while (Date.now() - started < this.startupTimeoutMs) {
       try {
         await new Promise<void>((resolve, reject) => {
           const ws = new WebSocket(url);
+          let settled = false;
           const timer = setTimeout(() => {
+            settled = true;
             ws.close();
             reject(new Error('WebSocket handshake timed out'));
-          }, 2000);
+          }, this.handshakeTimeoutMs);
           const onError = (event: Event) => {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
             ws.close();
             reject(new Error(`WebSocket connect failed: ${String(event.type)}`));
           };
           ws.addEventListener('open', () => {
+            if (settled) { ws.close(); return; }
+            settled = true;
             clearTimeout(timer);
             ws.removeEventListener('error', onError);
             this.socket = ws;

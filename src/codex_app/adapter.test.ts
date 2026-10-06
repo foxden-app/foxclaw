@@ -218,3 +218,59 @@ test('Codex buffers early notifications until the native turn id is known and ig
   assert.equal((await execution.waitForResult())?.response, 'early text');
   assert.equal(notifications.listenerCount('notification'), 0);
 });
+
+test('Codex relays completed commentary separately and keeps only final items in the result', async () => {
+  const notifications = new EventEmitter();
+  const client = {
+    startThread: async () => ({ thread: { threadId: 'thread' } }), startTurn: async () => ({ id: 'turn' }),
+    on: (name: string, listener: any) => notifications.on(name, listener), off: (name: string, listener: any) => notifications.off(name, listener),
+  } as unknown as CodexAppClient;
+  const execution = new CodexEngineAdapter(client).executeTurn({ scopeId: 'a', prompt: 'fix', threadId: null, cwd: '/tmp', model: 'default', locale: 'en' });
+  const commentary: any[] = [];
+  execution.on('commentary', value => commentary.push(value));
+  await new Promise(resolve => setImmediate(resolve));
+  const item = (method: string, id: string, phase: string, text?: string) => notifications.emit('notification', {
+    method, params: { threadId: 'thread', turnId: 'turn', item: { type: 'agentMessage', id, phase, text } },
+  });
+  item('item/started', 'progress', 'commentary');
+  notifications.emit('notification', { method: 'item/agentMessage/delta', params: { turnId: 'turn', itemId: 'progress', delta: 'Checking' } });
+  item('item/completed', 'progress', 'commentary', 'Checking the configuration.');
+  item('item/completed', 'progress', 'commentary', 'Checking the configuration.');
+  item('item/completed', 'final', 'final_answer', 'Fixed the configuration.');
+  notifications.emit('notification', { method: 'turn/completed', params: { turn: { id: 'turn' } } });
+  assert.deepEqual(commentary, [{ messageId: 'progress', text: 'Checking the configuration.' }]);
+  assert.equal((await execution.waitForResult())?.response, 'Fixed the configuration.');
+  assert.equal(notifications.listenerCount('disconnected'), 0);
+});
+
+test('Codex disconnect settles waiters with an unconfirmed outcome and removes native listeners', async () => {
+  const notifications = new EventEmitter();
+  const client = {
+    startThread: async () => ({ thread: { threadId: 'thread' } }), startTurn: async () => ({ id: 'turn' }),
+    on: (name: string, listener: any) => notifications.on(name, listener), off: (name: string, listener: any) => notifications.off(name, listener),
+  } as unknown as CodexAppClient;
+  const execution = new CodexEngineAdapter(client).executeTurn({ scopeId: 'a', prompt: 'fix', threadId: null, cwd: '/tmp', model: 'default', locale: 'en' });
+  await new Promise(resolve => setImmediate(resolve));
+  notifications.emit('disconnected', { source: 'websocket-close' });
+  const result = await execution.waitForResult();
+  assert.equal(result?.outcomeUnknown, true);
+  assert.equal(result?.status, 'ERROR');
+  assert.equal(notifications.listenerCount('notification'), 0);
+  assert.equal(notifications.listenerCount('disconnected'), 0);
+});
+
+test('Codex RPC outcome-unknown timeouts never become replayable execution errors', async () => {
+  const notifications = new EventEmitter();
+  const client = {
+    startThread: async () => ({ thread: { threadId: 'thread' } }),
+    startTurn: async () => { throw new Error('Codex RPC turn/start timed out; result is unknown'); },
+    on: (name: string, listener: any) => notifications.on(name, listener), off: (name: string, listener: any) => notifications.off(name, listener),
+  } as unknown as CodexAppClient;
+  const execution = new CodexEngineAdapter(client).executeTurn({ scopeId: 'a', prompt: 'fix', threadId: null, cwd: '/tmp', model: 'default', locale: 'en' });
+  let executionErrors = 0;
+  execution.on('error', () => { executionErrors++; });
+  const result = await execution.waitForResult();
+  assert.equal(result?.outcomeUnknown, true);
+  assert.equal(executionErrors, 0);
+  assert.equal(notifications.listenerCount('notification'), 0);
+});

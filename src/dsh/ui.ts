@@ -14,7 +14,7 @@ import { DshEngineAdapter } from './adapter.js';
 import { DshCredentials } from './credentials.js';
 import type { ChannelTextEvent } from '../core/channel_events.js';
 
-type Action = { scopeId: string; kind: 'model' | 'effort' | 'access' | 'open' | 'page'; value: string; cwd?: string; expires: number };
+type Action = { scopeId: string; kind: 'model' | 'effort' | 'access' | 'open' | 'page' | 'rename'; value: string; cwd?: string; expires: number };
 
 /** DSH controls shared by the unified bot and the optional dedicated bot. */
 export class DshUi {
@@ -22,10 +22,11 @@ export class DshUi {
   private readonly approvals = new Map<string, { scopeId: string; resolve: (value: RequestPermissionResponse) => void; options: RequestPermissionRequest['options']; messageId: number | null }>();
   readonly adapter: DshEngineAdapter;
   private readonly credentials: DshCredentials;
+  private readonly renames = new Set<Promise<string>>();
 
   get pendingApprovals(): number { return this.approvals.size; }
-  get pendingOperations(): number { return this.credentials.pendingOperations; }
-  stopPendingOperations(): Promise<void> { return this.credentials.stop(); }
+  get pendingOperations(): number { return this.credentials.pendingOperations + this.renames.size; }
+  async stopPendingOperations(): Promise<void> { await Promise.allSettled([...this.renames]); await this.credentials.stop(); }
 
   constructor(private readonly config: AppConfig, private readonly store: BridgeStore, private readonly logger: Logger, private readonly messaging: ChannelPort) {
     if (!config.dsh) throw new Error('DSH backend is not configured');
@@ -148,7 +149,8 @@ export class DshUi {
       const workspace = session.cwd.split(/[\\/]/).filter(Boolean).at(-1) || session.cwd;
       const fallback = `${this.copy(locale, '未命名会话', 'Untitled session')} · ${workspace} · ${session.sessionId.slice(-8)}`;
       const title = session.title?.replace(/\s+/gu, ' ').trim() || fallback;
-      return [this.button(scopeId, 'open', session.sessionId, Array.from(title).slice(0, 60).join(''), session.cwd)];
+      return [this.button(scopeId, 'open', session.sessionId, Array.from(title).slice(0, 60).join(''), session.cwd),
+        this.button(scopeId, 'rename', session.sessionId, '✏️', session.cwd)];
     });
     if (page.nextCursor) rows.push([this.button(scopeId, 'page', page.nextCursor, this.copy(locale, '下一页', 'Next page'))]);
     rows.push([{ text: this.copy(locale, '返回设置', 'Back'), callback_data: 'engine:setup:main' }]);
@@ -189,6 +191,8 @@ export class DshUi {
   }
 
   async command(scopeId: string, command: string, args: string, locale: AppLocale, orchestrator: BackendUiHost): Promise<boolean> {
+    this.clearKeyInput(scopeId);
+    this.store.setServiceInteraction(scopeId, 'dsh:rename', null);
     try {
       switch (command) {
         case 'cancel': await orchestrator.sendMessage(scopeId, this.copy(locale, '配置输入已取消。', 'Configuration input cancelled.')); return true;
@@ -212,6 +216,7 @@ export class DshUi {
 
   async callback(scopeId: string, data: string, locale: AppLocale, orchestrator: BackendUiHost, event?: ChannelCallbackEvent): Promise<boolean> {
     this.clearKeyInput(scopeId);
+    this.store.setServiceInteraction(scopeId, 'dsh:rename', null);
     const answer = (text = '') => this.messaging.answerCallback(event?.callbackQueryId ?? '', text);
     if (!data.startsWith('dsh:')) {
       if (orchestrator.getBackendDescriptorForScope(scopeId).engineType === 'dsh' && data.startsWith('engine:') && !['engine:setup:main', 'engine:setup:models', 'engine:setup:active_mode', 'engine:setup:new', 'engine:setup:backend'].includes(data) && !data.startsWith('engine:backend:')) {
@@ -258,6 +263,12 @@ export class DshUi {
         else if (action.kind === 'effort') await this.selectEffort(scopeId, action.value, orchestrator);
         else if (action.kind === 'access') await this.selectAccess(scopeId, action.value, orchestrator);
         else if (action.kind === 'open') await this.open(scopeId, action.value, action.cwd, orchestrator);
+        else if (action.kind === 'rename') {
+          if (orchestrator.hasActiveTurn(scopeId)) throw new Error(this.copy(locale, '请先结束当前任务再重命名。', 'Finish the active task before renaming.'));
+          this.store.setServiceInteraction(scopeId, 'dsh:rename', JSON.stringify({ sessionId: action.value, cwd: action.cwd, expires: Date.now() + 300000 }));
+          await orchestrator.sendMessage(scopeId, this.copy(locale, '✏️ 发送新的会话名称，或发送 /cancel 取消。', '✏️ Send the new session name, or /cancel to cancel.'));
+          return true;
+        }
         else if (action.kind === 'page') { await this.threads(scopeId, locale, orchestrator, event?.messageId, action.value); return true; }
         await this.setup(scopeId, locale, orchestrator, event?.messageId);
       }
@@ -289,7 +300,7 @@ export class DshUi {
   async stop(): Promise<void> {
     for (const pending of this.approvals.values()) pending.resolve({ outcome: { outcome: 'cancelled' } });
     this.actions.clear();
-    await this.credentials.stop();
+    await this.stopPendingOperations();
     await this.adapter.stop();
   }
 
@@ -300,8 +311,30 @@ export class DshUi {
   }
 
   inbound(event: ChannelTextEvent, locale: AppLocale, host: BackendUiHost): boolean | Promise<boolean> {
+    const rename = this.store.getServiceInteraction(event.scopeId, 'dsh:rename');
+    if (rename) {
+      if (event.text.trim().startsWith('/')) { this.store.setServiceInteraction(event.scopeId, 'dsh:rename', null); return false; }
+      return this.saveRename(event, locale, host, rename);
+    }
     if (!this.isSensitiveInbound(event)) return false;
     return this.saveKey(event, locale, host);
+  }
+
+  private async saveRename(event: ChannelTextEvent, locale: AppLocale, host: BackendUiHost, state: string): Promise<boolean> {
+    this.store.setServiceInteraction(event.scopeId, 'dsh:rename', null);
+    try {
+      const pending = JSON.parse(state) as { sessionId: string; cwd: string; expires: number };
+      if (pending.expires < Date.now()) throw new Error(this.copy(locale, '重命名已过期，请重新点击按钮。', 'Rename expired; select the button again.'));
+      if (event.attachments.length || !event.text.trim() || Array.from(event.text.trim()).length > 120) throw new Error(this.copy(locale, '名称须为 1–120 个字符的文本。', 'Enter a text name of 1–120 characters.'));
+      if (host.hasActiveTurn(event.scopeId)) throw new Error(this.copy(locale, '请先结束当前任务。', 'Finish the active task first.'));
+      const operation = this.adapter.renameSession(event.scopeId, pending.sessionId, pending.cwd, event.text.trim());
+      this.renames.add(operation);
+      let title: string;
+      try { title = await operation; } finally { this.renames.delete(operation); }
+      await host.sendMessage(event.scopeId, this.copy(locale, `✅ 已重命名：${title}`, `✅ Renamed: ${title}`));
+      await this.threads(event.scopeId, locale, host);
+    } catch (error) { await host.sendMessage(event.scopeId, `⚠️ ${error instanceof Error ? error.message : String(error)}`); }
+    return true;
   }
 
   private async saveKey(event: ChannelTextEvent, locale: AppLocale, host: BackendUiHost): Promise<boolean> {

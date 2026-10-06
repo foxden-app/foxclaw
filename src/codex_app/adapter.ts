@@ -14,6 +14,7 @@ import { resolveAccessMode } from '../core/access.js';
 import type { SandboxModeValue, ApprovalPolicyValue } from '../types.js';
 
 export class CodexEngineAdapter implements IEngineAdapter {
+  readonly supportsCommentary = true;
   readonly id: string;
   readonly name: string;
   private readonly defaultModel: string | undefined;
@@ -67,6 +68,9 @@ export class CodexEngineAdapter implements IEngineAdapter {
     }
 
     let accumulatedResponse = '';
+    const messages = new Map<string, { text: string; kind: string; sent: boolean }>();
+    const responseText = () => [...messages.values()].filter(message => message.kind !== 'commentary' && message.kind !== 'tool_summary').map(message => message.text).join('\n\n');
+
     let finalResult: EngineTurnResult | null = null;
     let turnError: Error | null = null;
     const resultWaiters: Array<(res: EngineTurnResult | null) => void> = [];
@@ -90,9 +94,27 @@ export class CodexEngineAdapter implements IEngineAdapter {
         if (!ev) return;
         if (ev.turnId && turnId && ev.turnId !== turnId) return;
 
-        if (ev.kind === 'agent_message_delta') {
-          accumulatedResponse += ev.delta;
-          emitter.emit('delta', ev.delta);
+        if (ev.kind === 'agent_message_started' || ev.kind === 'agent_message_delta' || ev.kind === 'agent_message_completed') {
+          const phase = ev.kind === 'agent_message_delta' ? msg.params?.phase ?? msg.params?.item?.phase : ev.phase;
+          const knownKind = Boolean(phase) || ev.isPlan;
+          let message = messages.get(ev.itemId);
+          if (!message) {
+            message = { text: '', kind: knownKind || ev.kind === 'agent_message_completed' ? ev.outputKind : 'unknown', sent: false };
+            messages.set(ev.itemId, message);
+          }
+          // Deltas often omit phase; started/completed items carry the authoritative phase.
+          if (knownKind || (ev.kind === 'agent_message_completed' && message.kind === 'unknown')) message.kind = ev.outputKind;
+          if (ev.kind === 'agent_message_delta') {
+            message.text += ev.delta;
+            if (message.kind !== 'commentary' && message.kind !== 'tool_summary') emitter.emit('delta', ev.delta);
+          } else if (ev.kind === 'agent_message_completed') {
+            if (ev.text !== null) message.text = ev.text;
+            if ((message.kind === 'commentary' || message.kind === 'tool_summary') && !message.sent && message.text.trim()) {
+              message.sent = true;
+              emitter.emit('commentary', { messageId: ev.itemId, text: message.text });
+            }
+          }
+          accumulatedResponse = responseText();
         } else if (ev.kind === 'tool_started') {
           const cmdName = Array.isArray(ev.exec?.command) ? ev.exec.command.join(' ') : 'command';
           emitter.emit('tool', {
@@ -107,9 +129,12 @@ export class CodexEngineAdapter implements IEngineAdapter {
           } satisfies EngineToolEvent);
         } else if (ev.kind === 'turn_completed') {
           cleanup();
+          const nativeTurn = msg.params?.turn;
+          const failure = nativeTurn?.error?.message ?? (nativeTurn?.status === 'failed' ? 'Codex turn failed' : undefined);
           finalResult = {
             kind: 'result',
-            status: ev.state === 'interrupted' ? 'INTERRUPTED' : 'SUCCESS',
+            status: failure ? 'ERROR' : nativeTurn?.status === 'interrupted' || ev.state === 'interrupted' ? 'INTERRUPTED' : 'SUCCESS',
+            ...(failure ? { error: String(failure) } : {}),
             response: accumulatedResponse,
             conversationId: threadId,
           };
@@ -123,10 +148,20 @@ export class CodexEngineAdapter implements IEngineAdapter {
 
     const cleanup = () => {
       this.client.off('notification', onNotification);
+      this.client.off('disconnected', onDisconnected);
       earlyNotifications.length = 0;
     };
 
+    const onDisconnected = () => {
+      if (finalResult || turnError) return;
+      cleanup();
+      finalResult = { kind: 'result', status: 'ERROR', response: responseText(),
+        error: 'Codex connection closed before the task outcome was confirmed.', outcomeUnknown: true, conversationId: threadId };
+      emitter.emit('result', finalResult);
+      resolveWaiters(finalResult);
+    };
     this.client.on('notification', onNotification);
+    this.client.on('disconnected', onDisconnected);
 
     const effectiveModel =
       request.model && request.model !== 'default'
@@ -156,7 +191,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
           }
         }
 
-        if (cancelled) {
+        if (cancelled || finalResult) {
           cleanup();
           return;
         }
@@ -187,7 +222,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
             errMsg.includes('stale') ||
             errMsg.includes('invalid thread')
           ) {
-            if (cancelled) throw turnErr;
+            if (cancelled || finalResult) throw turnErr;
             const session = await this.client.startThread({
               cwd: request.cwd,
               model: effectiveModel,
@@ -195,7 +230,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
               sandboxMode: access.sandboxMode,
             });
             threadId = session.thread.threadId;
-            if (cancelled) { cleanup(); return; }
+            if (cancelled || finalResult) { cleanup(); return; }
             emitter.emit('conversation', threadId);
             turn = await this.client.startTurn({
               threadId,
@@ -213,11 +248,19 @@ export class CodexEngineAdapter implements IEngineAdapter {
           }
         }
 
+        if (finalResult) return;
         turnId = turn.id;
         for (const notification of earlyNotifications.splice(0)) onNotification(notification);
       } catch (err) {
         cleanup();
-        turnError = err instanceof Error ? err : new Error(String(err));
+        if (finalResult) return;
+        const failure = err instanceof Error ? err : new Error(String(err));
+        if (failure.message.includes('result is unknown')) {
+          finalResult = { kind: 'result', status: 'ERROR', response: responseText(), error: failure.message,
+            outcomeUnknown: true, conversationId: threadId };
+          emitter.emit('result', finalResult); resolveWaiters(finalResult); return;
+        }
+        turnError = failure;
         emitter.emit('error', turnError);
         resolveWaiters(null);
       }

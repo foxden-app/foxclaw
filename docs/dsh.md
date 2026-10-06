@@ -57,7 +57,7 @@ Use `/models` → **Configure API Key** to add or update a DeepSeek key in a pri
 | `/models`, `/model <provider/model>` | Native model selection; `/model default` restores the session's initial model |
 | `/effort`, `/effort <level>` | Reasoning choices advertised by the current model; changing models resets reasoning to the new model's default |
 | `/permissions read-only\|default\|full-access` | Read-only, workspace-write, or full-access, also available as buttons |
-| `/threads`, `/open <session ID>` | List and resume persisted DSH sessions |
+| `/threads`, `/open <session ID>` | List and resume persisted DSH sessions; use ✏️ beside a session to rename it, or `/cancel` to cancel name entry |
 | `/new [directory]` | New session with an optional working directory |
 | `/active queue\|steer`, `/queue`, `/steer <message>`, `/interrupt` | Queueing, interruption, and takeover |
 | `/plugins` | Profile dependencies and configured patch paths |

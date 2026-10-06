@@ -249,3 +249,31 @@ test('DSH threads show readable native names and workspace fallbacks while openi
     assert.equal(f.store.getBinding('a')?.threadId, state.sessionId);
   } finally { await f.dispose(); }
 });
+
+test('DSH rename buttons prompt for input, persist native names, and reject foreign or expired actions', async t => {
+  const f = await setup();
+  try {
+    const state = await f.ui.adapter.sessionForScope('a');
+    let title = 'Original';
+    t.mock.method(f.ui.adapter, 'listSessions', async () => ({ sessions: [{ sessionId: state.sessionId, cwd: f.root, title }] }));
+    const rename = t.mock.method(f.ui.adapter, 'renameSession', async (_scope: string, _id: string, _cwd: string, value: string) => { title = value; return value; });
+    await f.ui.command('a', 'threads', '', 'en', f.orchestrator);
+    const button = f.messages.at(-1)!.keyboard[0]![1]!;
+    assert.equal(button.text, '✏️');
+    await f.callback('foreign', button.callback_data);
+    assert.equal(f.store.getServiceInteraction('foreign', 'dsh:rename'), null);
+    await f.callback('a', button.callback_data);
+    await f.orchestrator.handleText(textEvent('Login fixes'));
+    assert.equal(rename.mock.callCount(), 1);
+    assert.equal(title, 'Login fixes');
+    assert.equal(f.messages.at(-1)!.keyboard[0]![0]!.text, 'Login fixes');
+    assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+    await f.callback('a', button.callback_data);
+    await f.orchestrator.handleText(textEvent('/cancel'));
+    assert.equal(f.store.getServiceInteraction('a', 'dsh:rename'), null);
+    f.store.setServiceInteraction('a', 'dsh:rename', JSON.stringify({ sessionId: state.sessionId, cwd: f.root, expires: 0 }));
+    await f.orchestrator.handleText(textEvent('expired input'));
+    assert.equal(rename.mock.callCount(), 1);
+    assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+  } finally { await f.dispose(); }
+});

@@ -129,3 +129,25 @@ async function assertProcessExited(pid: number): Promise<void> {
   }
   assert.fail(`process ${pid} is still alive`);
 }
+
+test('a timed-out WebSocket cannot attach late or replace the successful retry', async t => {
+  const client = createRpcClient();
+  client.connected = false; client.port = 1234; client.startupTimeoutMs = 1000; client.handshakeTimeoutMs = 5;
+  const sockets: EventTarget[] = [];
+  class FakeWebSocket extends EventTarget {
+    constructor() {
+      super(); sockets.push(this);
+      setTimeout(() => this.dispatchEvent(new Event('open')), sockets.length === 1 ? 30 : 1);
+    }
+    close() {}
+  }
+  const nativeWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  t.after(() => { globalThis.WebSocket = nativeWebSocket; });
+  const connecting = client.connectWebSocket();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(client.connected, false, 'The first timed-out socket must remain detached');
+  await connecting;
+  assert.equal(client.socket, sockets[1]);
+  assert.equal(client.connected, true);
+});

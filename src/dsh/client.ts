@@ -176,30 +176,44 @@ export class DshClient extends EventEmitter {
   }
 
   private async readSessionTitles(ids: string[]): Promise<Record<string, string>> {
+    try {
+      const result = await this.titleRequest(ids);
+      return Object.fromEntries(Object.entries(result).filter((entry): entry is [string, string] => ids.includes(entry[0]) && typeof entry[1] === 'string'));
+    } catch { this.logger.warn('dsh.session_titles.unavailable', { scopeId: this.scopeId }); return {}; }
+  }
+
+  async renameSession(sessionId: string, cwd: string, title: string): Promise<string> {
+    await this.start();
+    const alreadyOpen = this.optionsBySession.has(sessionId);
+    await this.session(cwd, sessionId);
+    try {
+      const result = await this.titleRequest({ operation: 'rename', sessionId, title });
+      if (result.ok !== true || typeof result.title !== 'string') throw new Error(typeof result.error === 'string' ? result.error : 'DSH rename failed');
+      return result.title;
+    } finally { if (!alreadyOpen && this.connected) await this.closeSession(sessionId); }
+  }
+
+  private async titleRequest(request: unknown): Promise<Record<string, unknown>> {
     const directory = this.titlesDirectory;
-    try { await fs.access(path.join(directory, 'ready')); } catch { return {}; }
+    await fs.access(path.join(directory, 'ready'));
     const requestPath = path.join(directory, `${randomUUID()}.request`);
     const responsePath = requestPath.replace(/\.request$/, '.response');
     try {
-      await fs.writeFile(`${requestPath}.tmp`, JSON.stringify(ids), { mode: 0o600 });
+      await fs.writeFile(`${requestPath}.tmp`, JSON.stringify(request), { mode: 0o600 });
       await fs.rename(`${requestPath}.tmp`, requestPath);
-      const deadline = Date.now() + 5000;
+      const deadline = Date.now() + 10000;
       while (this.connected && Date.now() < deadline) {
         try {
           const result: unknown = JSON.parse(await fs.readFile(responsePath, 'utf8'));
-          if (result && typeof result === 'object' && !Array.isArray(result)) {
-            return Object.fromEntries(Object.entries(result).filter(([id, title]) => ids.includes(id) && typeof title === 'string'));
-          }
-          return {};
+          if (result && typeof result === 'object' && !Array.isArray(result)) return result as Record<string, unknown>;
+          throw new Error('Invalid DSH title response');
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         }
         await new Promise(resolve => setTimeout(resolve, 50));
       }
-      this.logger.warn('dsh.session_titles.timeout', { scopeId: this.scopeId });
-    } catch { this.logger.warn('dsh.session_titles.unavailable', { scopeId: this.scopeId }); }
-    finally { await Promise.all([requestPath, responsePath, `${requestPath}.tmp`].map(file => fs.rm(file, { force: true }).catch(() => {}))); }
-    return {};
+      throw new Error('DSH title operation timed out or disconnected');
+    } finally { await Promise.all([requestPath, responsePath, `${requestPath}.tmp`].map(file => fs.rm(file, { force: true }).catch(() => {}))); }
   }
 
   async closeSession(sessionId: string): Promise<void> {

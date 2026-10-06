@@ -16,6 +16,8 @@ export interface ChannelPort extends AttachmentDownloader {
   setScopeCommands?(scopeId: string, commands: Array<{ command: string; description: string }>): Promise<void>;
   beginTaskPreview?(scopeId: string, taskId: string, text: string, reuseMessageId?: number): Promise<number>;
   updateTaskPreview?(scopeId: string, taskId: string, messageId: number, html: string): Promise<number>;
+  sendTaskCommentary?(scopeId: string, text: string): Promise<number>;
+  foldTaskCommentary?(scopeId: string, messageId: number, text: string): Promise<void>;
   endTaskPreview?(scopeId: string, taskId: string): Promise<void>;
   resolveAction?(event: ChannelTextEvent): ChannelCallbackEvent | null;
   editPlain(scopeId: string, messageId: ChannelMessageRef, text: string, keyboard?: ChannelInlineKeyboard): Promise<void>;

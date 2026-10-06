@@ -25,6 +25,8 @@ test('buildFoxclawSystemdUnitText stops the full service control group', () => {
   });
 
   assert.match(unit, /^KillMode=control-group$/m);
+  assert.match(unit, /^StartLimitIntervalSec=0$/m);
+  assert.match(unit, /^RestartSec=10$/m);
   assert.doesNotMatch(unit, /^KillMode=process$/m);
 });
 

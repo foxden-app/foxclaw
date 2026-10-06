@@ -13,6 +13,10 @@ export interface JournalTask {
   queueId: string | null;
   previewMessageId: number;
   result: EngineTurnResult | null;
+  commentary?: Array<{ messageId: number; text: string; folded: boolean }>;
+  separateFinal?: boolean;
+  finalPreviewText?: string;
+  previewSettled?: boolean;
   delivery: string[];
   deliveredChunks: number;
   error: string | null;

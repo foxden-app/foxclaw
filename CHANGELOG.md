@@ -2,6 +2,22 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.6 - 2026-10-06
+
+### 中文
+
+- DSH `/threads` 每行右侧增加重命名按钮，输入新名称后通过原生标题服务保存并刷新列表，重启后保留；支持取消、过期及会话隔离。
+- 恢复 Codex 的小结与最终回答分离展示：工作中独立推送小结，完成后将之前的小结收纳为 Telegram 可展开消息，最终结论独立发送。长小结使用富消息保留全文，消息编号与收纳状态持久化；DSH 有明确消息边界时采用同样流程，Antigravity 保持现有展示。
+- 修复 Codex 断线后任务可能一直停留在工作中：释放实时任务并保留待确认状态与队列，使用 `/recover` 处理，避免自动重复执行结果未知的工具操作。正确识别原生失败结果及 RPC 结果未知的超时。
+- Codex 本机 WebSocket 启动等待由 10 秒延长到 60 秒，阻止超时握手迟到后污染连接；systemd 保留重启间隔，取消连续启动失败后的永久熔断，避免暂时不可用导致必须手动重启。
+
+### English
+
+- Added a rename button beside each DSH `/threads` entry. Save through the native title service and refresh the list, retaining names after restart; support cancellation, expiry, and scope isolation.
+- Restored separate Codex progress summaries and final answers. Send summaries as normal messages while working, fold earlier summaries into expandable Telegram messages at completion, and send the final answer separately. Preserve long summaries through rich messages and persist message IDs and fold state. DSH follows the same flow when message boundaries are available; Antigravity keeps its existing presentation.
+- Settle disconnected Codex executions without leaving a live task stuck. Keep unconfirmed outcomes and queued work for `/recover` instead of replaying tool operations automatically. Recognize native failed turns and RPC timeouts with unknown outcomes.
+- Allow 60 seconds instead of 10 for local Codex WebSocket startup and reject late handshakes from expired attempts. Keep systemd's restart delay while removing the start-limit lockout that required manual recovery after transient startup failures.
+
 ## 0.13.5 - 2026-10-06
 
 ### 中文

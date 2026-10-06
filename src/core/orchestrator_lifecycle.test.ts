@@ -517,3 +517,70 @@ test('shutdown during native preparation releases the allocated progress preview
   assert.equal(f.turns.length, 0);
   assert.equal(f.store.taskJournal.listUnfinished('a')[0]?.sourcePrompt, 'preserve me');
 });
+
+test('commentary stays independent while working and folds after a separate final answer', async t => {
+  const f = await fixture(t);
+  const operations: string[] = [];
+  Object.defineProperty(f.backend.adapter, 'supportsCommentary', { value: true });
+  f.messaging.beginTaskPreview = async () => 77;
+  f.messaging.endTaskPreview = async () => { operations.push('end'); };
+  f.messaging.foldTaskCommentary = async (_scope, id, text) => {
+    assert.equal(f.messages.at(-1), 'done', 'The final answer must arrive before earlier commentary is folded');
+    operations.push(`fold:${id}:${text}`);
+  };
+  f.messaging.editRichMarkdown = async (_scope, id, text) => { operations.push(`edit:${id}:${text}`); };
+  await f.orchestrator.handleText(event('input'));
+  f.turns[0]!.events.emit('commentary', { messageId: 'one', text: 'Checked the settings.' });
+  f.turns[0]!.events.emit('commentary', { messageId: 'one', text: 'Checked the settings.' });
+  await until(() => f.messages.length === 1);
+  assert.deepEqual(f.messages, ['Checked the settings.']);
+  assert.equal(operations.length, 0);
+  f.turns[0]!.events.emit('tool', { name: 'verify', status: 'completed' });
+  f.turns[0]!.complete();
+  await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.ok(operations.includes('fold:1:Checked the settings.'));
+  assert.equal(f.messages[1], 'done', 'Final answer is sent before collecting earlier messages');
+  assert.equal(f.messages.at(-1), 'done');
+  const task = f.store.taskJournal.findReceipt(event('input'), 'input')!;
+  assert.equal(task.state, 'completed');
+  assert.equal(task.commentary?.[0]?.folded, true);
+  assert.equal(task.separateFinal, true);
+});
+
+test('an unconfirmed disconnect frees the live task and pauses the queue without replay', async t => {
+  const f = await fixture(t);
+  await f.orchestrator.handleText(event('first'));
+  await f.orchestrator.handleText({ ...event('/queue second'), messageId: 2 });
+  f.turns[0]!.events.emit('result', { kind: 'result', status: 'ERROR', outcomeUnknown: true, error: 'Connection closed', response: '', conversationId: null });
+  await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.equal(f.store.taskJournal.listUnfinished('a').find(task => task.sourcePrompt === 'first')?.state, 'awaiting_confirmation');
+  assert.equal(f.store.countQueuedTurnInputs('a'), 1);
+  assert.equal(f.turns.length, 1);
+  assert.ok(f.messages.some(text => text.includes('/recover')));
+});
+
+test('restart resumes final delivery without resending or refolding already collected commentary', async t => {
+  const f = await fixture(t);
+  Object.defineProperty(f.backend.adapter, 'supportsCommentary', { value: true });
+  f.messaging.beginTaskPreview = async () => 0;
+  let folds = 0;
+  f.messaging.foldTaskCommentary = async () => { folds++; };
+  const send = f.messaging.sendRichMarkdown;
+  let failed = false;
+  f.messaging.sendRichMarkdown = async (scope, text, keyboard) => {
+    if (text === 'done' && !failed) { failed = true; throw new Error('Temporary delivery failure'); }
+    return send(scope, text, keyboard);
+  };
+  await f.orchestrator.handleText(event('input'));
+  f.turns[0]!.events.emit('commentary', { messageId: 'one', text: 'Progress before completion.' });
+  await until(() => f.messages.length === 1);
+  f.turns[0]!.complete();
+  await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.equal(f.store.taskJournal.listUnfinished('a')[0]?.state, 'delivery_pending');
+  const core = await f.restart();
+  assert.deepEqual(f.messages, ['Progress before completion.', 'done']);
+  assert.equal(folds, 1);
+  assert.equal(f.turns.length, 1);
+  assert.equal(core.getActiveTurnsCount(), 0);
+  assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+});

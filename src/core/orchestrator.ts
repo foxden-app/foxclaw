@@ -23,7 +23,7 @@ export type { EngineCustomUiHook } from './backend_ui.js';
 import { renderStreamPreviewContent, buildFoldedToolsSummary, combineSummaryAndResponse } from './stream_preview.js';
 import { formatTokenUsageSummary, formatBackendTokenUsageBreakdown } from '../store/token_usage.js';
 import { isTransientNetworkError } from './network_errors.js';
-import type { IEngineAdapter, EngineTurnExecution, EngineTurnResult, BackendDescriptor } from './engine_spi.js';
+import type { IEngineAdapter, EngineTurnExecution, EngineTurnResult, EngineCommentaryEvent, BackendDescriptor } from './engine_spi.js';
 
 export const STREAM_THROTTLE_MS = 700;
 export const TYPING_INTERVAL_MS = 4000;
@@ -47,6 +47,8 @@ export interface UnifiedActiveTurn {
   queueId?: string | undefined;
   taskId: string;
   settling?: boolean;
+  separateFinal?: boolean;
+  commentaryIds?: Set<string>;
 }
 
 export class UnifiedChannelOrchestrator {
@@ -456,8 +458,8 @@ export class UnifiedChannelOrchestrator {
       { text: zh ? '放弃' : 'Cancel', callback_data: `engine:recover:cancel:${task.id}` },
     ]];
     await this.sendMessage(task.event.scopeId, zh
-      ? `⚠️ **任务执行结果待确认**\n任务: \`${task.id}\`\n${task.error ? `恢复失败: ${task.error}。` : '服务重启前可能已执行工具。'}原始输入与附件已保留，队列暂停。\n> ${task.sourcePrompt}\n\n/recover continue · /recover retry · /recover cancel`
-      : `⚠️ **Task outcome requires confirmation**\nTask: \`${task.id}\`\n${task.error ? `Recovery failed: ${task.error}.` : 'Tools may already have run before the restart.'} Input and attachments are preserved; the queue is paused.\n> ${task.sourcePrompt}\n\n/recover continue · /recover retry · /recover cancel`, actions);
+      ? `⚠️ **任务执行结果待确认**\n任务: \`${task.id}\`\n${task.error ? `提示: ${task.error}。` : '服务重启前可能已执行工具。'}原始输入与附件已保留，队列暂停。\n> ${task.sourcePrompt}\n\n/recover continue · /recover retry · /recover cancel`
+      : `⚠️ **Task outcome requires confirmation**\nTask: \`${task.id}\`\n${task.error ? `Details: ${task.error}.` : 'Tools may already have run before the restart.'} Input and attachments are preserved; the queue is paused.\n> ${task.sourcePrompt}\n\n/recover continue · /recover retry · /recover cancel`, actions);
   }
 
   private async restoreDurableTasks(): Promise<void> {
@@ -467,8 +469,8 @@ export class UnifiedChannelOrchestrator {
       this.store.updateQueuedTurnInputStatus(task.queueId, 'queued');
     }
     // Claim uncertainty synchronously before recovering messages or starting any queued work.
-    for (const task of tasks) if (task.state === 'running' && !task.result) {
-      this.store.taskJournal.update(task.id, 'awaiting_confirmation');
+    for (const task of tasks) if (task.state === 'running' && (!task.result || task.result.outcomeUnknown)) {
+      this.store.taskJournal.update(task.id, 'awaiting_confirmation', { result: null });
     }
     // Import pre-journal previews and processing queues conservatively; their outcome is unknown.
     const journalScopes = new Set(tasks.filter(task => task.state !== 'queued').map(task => task.event.scopeId));
@@ -576,7 +578,7 @@ export class UnifiedChannelOrchestrator {
           await this.sendMessage(scopeId, locale === 'zh' ? '附件恢复失败，请稍后重试或放弃任务。' : 'Attachment recovery failed. Retry later or cancel this task.'); return;
         }
         if (task.request.threadId) this.store.setBinding(scopeId, task.request.threadId, task.request.cwd);
-        this.store.taskJournal.update(task.id, 'accepted', { request: { ...task.request, prompt, stagedAttachments }, result: null, delivery: [], deliveredChunks: 0, error: null });
+        this.store.taskJournal.update(task.id, 'accepted', { request: { ...task.request, prompt, stagedAttachments }, result: null, delivery: [], deliveredChunks: 0, previewSettled: false, separateFinal: this.getAdapterForBackend(task.backendId).supportsCommentary === true, error: null });
         await this.executeTurn(task.event, prompt, locale, 0, stagedAttachments, { taskId: task.id, queueId: task.queueId ?? undefined, reuseMessageId: task.previewMessageId || undefined, forcedThreadId: task.request.threadId ?? undefined });
       }
     });
@@ -607,7 +609,7 @@ export class UnifiedChannelOrchestrator {
       const task = this.store.taskJournal.get(turn.taskId)!;
       const folded = buildFoldedToolsSummary({ toolLines: turn.toolLines, toolCount: turn.toolCount, stepIndex: turn.stepIndex, startTime: turn.startTime, locale: task.request.locale });
       const response = `${task.request.locale === 'zh' ? '🛑 已停止任务；排队任务保留。' : '🛑 Task stopped; queued tasks kept.'}${turn.accumulatedText.trim() ? `\n\n${turn.accumulatedText.trim()}` : ''}`;
-      this.store.taskJournal.update(turn.taskId, 'delivery_pending', { result: { kind: 'result', status: 'INTERRUPTED', response, conversationId: turn.threadId }, delivery: combineSummaryAndResponse(folded, response), deliveredChunks: 0, previewMessageId: turn.messageId });
+      this.store.taskJournal.update(turn.taskId, 'delivery_pending', { result: { kind: 'result', status: 'INTERRUPTED', response, conversationId: turn.threadId }, delivery: combineSummaryAndResponse(folded, response), deliveredChunks: 0, previewMessageId: turn.messageId, separateFinal: turn.separateFinal === true });
       try { await this.deliverTaskChunks(turn.taskId); this.resolveDeliveredTask(turn.taskId); }
       catch (error) { this.logger.warn('orchestrator.stop_delivery_failed', { taskId: turn.taskId, error: String(error) }); }
     }
@@ -686,11 +688,30 @@ export class UnifiedChannelOrchestrator {
       if (this.stopped) throw new Error('Delivery interrupted by shutdown');
       const index = task.deliveredChunks;
       const chunk = task.delivery[index]!;
-      if (index === 0 && task.previewMessageId > 0 && this.messaging.capabilities?.editableMessages !== false) {
+      if (!task.separateFinal && index === 0 && task.previewMessageId > 0 && this.messaging.capabilities?.editableMessages !== false) {
         try { await this.editMessage(task.event.scopeId, task.previewMessageId, chunk, []); }
         catch { await this.sendMessage(task.event.scopeId, chunk); }
       } else await this.sendMessage(task.event.scopeId, chunk);
       task = this.store.taskJournal.update(task.id, 'delivery_pending', { deliveredChunks: index + 1 });
+    }
+    if (task.separateFinal) {
+      for (let index = 0; index < (task.commentary?.length ?? 0); index++) {
+        const item = task.commentary![index]!;
+        if (item.folded || this.messaging.capabilities?.editableMessages === false) continue;
+        try {
+          if (this.messaging.foldTaskCommentary) await this.messaging.foldTaskCommentary(task.event.scopeId, item.messageId, item.text);
+          else await this.editMessage(task.event.scopeId, item.messageId, `<blockquote expandable>${escapeHtml(item.text)}</blockquote>`, []);
+          const commentary = [...task.commentary!]; commentary[index] = { ...item, folded: true };
+          task = this.store.taskJournal.update(task.id, 'delivery_pending', { commentary });
+        } catch (error) { this.logger.warn('orchestrator.commentary_fold_failed', { taskId, messageId: item.messageId, error: String(error) }); }
+      }
+      if (!task.previewSettled) {
+        if (task.previewMessageId > 0 && this.messaging.capabilities?.editableMessages !== false) {
+          if (task.finalPreviewText) await this.editMessage(task.event.scopeId, task.previewMessageId, task.finalPreviewText, []);
+          else await this.messaging.deleteMessage(task.event.scopeId, task.previewMessageId).catch(() => {});
+        }
+        task = this.store.taskJournal.update(task.id, 'delivery_pending', { previewSettled: true });
+      }
     }
   }
 
@@ -700,7 +721,7 @@ export class UnifiedChannelOrchestrator {
     await this.messageOperations.run(`${scopeId}:preview:${active.taskId}`, () => this.messaging.endTaskPreview?.(scopeId, active.taskId) ?? Promise.resolve());
     const task = this.store.taskJournal.get(active.taskId)!;
     messageId = active.messageId;
-    this.store.taskJournal.update(task.id, 'delivery_pending', { delivery: chunks, deliveredChunks: 0, previewMessageId: messageId });
+    this.store.taskJournal.update(task.id, 'delivery_pending', { delivery: chunks, deliveredChunks: 0, previewMessageId: messageId, separateFinal: active.separateFinal === true });
     await this.deliverTaskChunks(task.id);
   }
 
@@ -1000,7 +1021,7 @@ export class UnifiedChannelOrchestrator {
         stagedAttachments, threadId: binding?.threadId || null, cwd: binding?.cwd || this.config.defaultCwd,
         model: settings?.model || 'default', effort: boost ? 'high' : settings?.reasoningEffort ?? backend.defaults?.reasoningEffort ?? null,
         serviceTier: boost ? 'boost' : settings?.serviceTier ?? null, locale, accessPreset: settings?.accessPreset ?? 'default' },
-      queueId, previewMessageId: 0, result: null, delivery: [], deliveredChunks: 0, error: null,
+      queueId, previewMessageId: 0, result: null, delivery: [], deliveredChunks: 0, previewSettled: false, separateFinal: this.getBackendDescriptorForScope(event.scopeId).adapter.supportsCommentary === true, error: null,
       createdAt: Date.now(), updatedAt: Date.now(),
     };
     this.store.taskJournal.insert(task);
@@ -1220,7 +1241,7 @@ export class UnifiedChannelOrchestrator {
       throw new Error('Orchestrator is stopped');
     }
     let execution: EngineTurnExecution;
-    task = this.store.taskJournal.update(task.id, 'running', { result: null, delivery: [], deliveredChunks: 0 });
+    task = this.store.taskJournal.update(task.id, 'running', { result: null, delivery: [], deliveredChunks: 0, previewSettled: false, separateFinal: adapter.supportsCommentary === true });
     try { execution = adapter.executeTurn(req); }
     catch (error) { await this.messaging.endTaskPreview?.(scopeId, task.id); this.store.removeActiveTurnPreview(turnKey); this.store.taskJournal.update(task.id, 'failed', { error: String(error) }); throw error; }
 
@@ -1241,6 +1262,8 @@ export class UnifiedChannelOrchestrator {
       previewKey: turnKey,
       queueId: options?.queueId,
       taskId: task.id,
+      separateFinal: adapter.supportsCommentary === true,
+      commentaryIds: new Set(),
     };
 
     this.activeTurns.set(scopeId, activeTurn);
@@ -1265,7 +1288,7 @@ export class UnifiedChannelOrchestrator {
         const elapsedSeconds = Math.max(1, Math.floor((Date.now() - activeTurn.startTime) / 1000));
         const content = renderStreamPreviewContent({
           toolLines: activeTurn.toolLines,
-          accumulatedText: activeTurn.accumulatedText,
+          accumulatedText: activeTurn.separateFinal ? '' : activeTurn.accumulatedText,
           isBoost,
           engineName: adapter.name,
           stepIndex: activeTurn.stepIndex,
@@ -1292,6 +1315,27 @@ export class UnifiedChannelOrchestrator {
     execution.on('delta', (delta) => {
       if (!ownsTurn() || activeTurn.settling) return;
       activeTurn.accumulatedText += delta;
+      scheduleFlush();
+    });
+
+    execution.on('commentary', (message: EngineCommentaryEvent) => {
+      if (!ownsTurn() || activeTurn.settling || !message.text.trim() || activeTurn.commentaryIds?.has(message.messageId)) return;
+      activeTurn.commentaryIds?.add(message.messageId);
+      activeTurn.separateFinal = true;
+      activeTurn.accumulatedText = '';
+      void this.messageOperations.run(`${scopeId}:preview:${activeTurn.taskId}`, async () => {
+        if (!ownsTurn()) return;
+        const limit = this.messaging.sendTaskCommentary ? 30000 : Math.min(3000, this.messaging.capabilities?.maxMessageLength ?? 3000);
+        for (const text of chunkMessage(message.text, limit)) {
+          const messageId = this.messaging.sendTaskCommentary
+            ? await this.messaging.sendTaskCommentary(scopeId, text)
+            : await this.messaging.sendRichMarkdown(scopeId, text);
+          const current = this.store.taskJournal.get(activeTurn.taskId)!;
+          this.store.taskJournal.update(current.id, current.state, {
+            commentary: [...(current.commentary ?? []), { messageId, text, folded: false }], separateFinal: true,
+          });
+        }
+      }).catch(error => this.logger.warn('orchestrator.commentary_send_failed', { taskId: activeTurn.taskId, error: String(error) }));
       scheduleFlush();
     });
 
@@ -1354,6 +1398,7 @@ export class UnifiedChannelOrchestrator {
       this.activeTurns.delete(scopeId);
       this.store.removeActiveTurnPreview(turnKey);
       const task = this.store.taskJournal.get(activeTurn.taskId)!;
+      if (task.state === 'awaiting_confirmation') return;
       if (task.state === 'delivery_pending' && task.deliveredChunks < task.delivery.length) {
         this.logger.warn('orchestrator.delivery_pending', { taskId: task.id, scopeId });
         return;
@@ -1389,6 +1434,15 @@ export class UnifiedChannelOrchestrator {
           );
         }
 
+        if (res.outcomeUnknown) {
+          await this.messageOperations.run(`${scopeId}:preview:${activeTurn.taskId}`, () => this.messaging.endTaskPreview?.(scopeId, activeTurn.taskId) ?? Promise.resolve());
+          const waiting = this.store.taskJournal.update(activeTurn.taskId, 'awaiting_confirmation', { result: null, error: res.error ?? null });
+          if (activeTurn.messageId > 0) await this.editMessage(scopeId, activeTurn.messageId,
+            locale === 'zh' ? '⚠️ 后端连接中断，任务结果尚未确认。使用 /recover 处理；排队任务已保留。' : '⚠️ Backend disconnected; task outcome unconfirmed. Use /recover; queued tasks are kept.', []).catch(() => {});
+          await this.showRecovery(waiting);
+          return;
+        }
+
         if (res.status === 'SUCCESS') {
           let finalText = (res.response || '').trim();
           if (!finalText && activeTurn.accumulatedText) {
@@ -1404,7 +1458,10 @@ export class UnifiedChannelOrchestrator {
             locale,
           });
 
-          const chunks = combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
+          if (activeTurn.separateFinal) this.store.taskJournal.update(activeTurn.taskId, 'running', { finalPreviewText: foldedTools });
+          const chunks = activeTurn.separateFinal
+            ? chunkMessage(finalText || '(无输出 / No output)', this.messaging.capabilities?.maxMessageLength)
+            : combineSummaryAndResponse(foldedTools, finalText || '(无输出 / No output)');
           await this.safeDeliverChunks(scopeId, activeTurn.messageId, chunks);
           return;
         }

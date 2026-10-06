@@ -32,11 +32,15 @@ export interface EngineToolEvent {
   summary?: string | undefined;
 }
 
+export interface EngineCommentaryEvent { messageId: string; text: string; }
+
 export interface EngineTurnResult {
   kind: 'result';
   status: 'SUCCESS' | 'ERROR' | 'INTERRUPTED';
   response: string;
   error?: string | undefined;
+  /** The connection ended before a native outcome was confirmed. */
+  outcomeUnknown?: boolean;
   conversationId: string | null;
   usage?: {
     inputTokens?: number | undefined;
@@ -52,6 +56,7 @@ export interface EngineTurnExecution {
   cancel(): void | Promise<void>;
   waitForResult(): Promise<EngineTurnResult | null>;
   on(event: 'delta', listener: (text: string) => void): void;
+  on(event: 'commentary', listener: (message: EngineCommentaryEvent) => void): void;
   on(event: 'tool', listener: (tool: EngineToolEvent) => void): void;
   on(event: 'result', listener: (result: EngineTurnResult) => void): void;
   on(event: 'error', listener: (error: Error) => void): void;
@@ -71,6 +76,7 @@ export interface EngineTurnErrorContext {
 export interface IEngineAdapter {
   readonly id: string;
   readonly name: string;
+  readonly supportsCommentary?: boolean;
   listModels(scopeId?: string): Promise<EngineModel[]>;
   executeTurn(request: EngineTurnRequest): EngineTurnExecution;
   preflightTurn?(request: EngineTurnRequest): Promise<void>;

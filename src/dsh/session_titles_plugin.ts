@@ -7,11 +7,13 @@ interface SessionQuery {
 }
 interface Context {
   sessionQuery: SessionQuery;
+  sessions?: { get(id: string): unknown; flush(session: unknown): Promise<unknown> };
+  sessionTitle?: { rename(session: unknown, title: string): { title: string } };
   effect(callback: () => () => Promise<void>): void;
 }
 
 export const name = 'foxclaw-session-titles';
-export const inject = ['sessionQuery'];
+export const inject = ['sessionQuery', 'sessions', 'sessionTitle'];
 
 /** Read native log-backed names without resuming sessions or invoking a model. */
 export async function readSessionTitle(query: SessionQuery, id: string): Promise<string | undefined> {
@@ -36,18 +38,29 @@ export async function apply(ctx: Context, config: { directory: string }): Promis
       if (!/^[a-f0-9-]+\.request$/.test(file)) continue;
       const requestPath = path.join(config.directory, file);
       const responsePath = requestPath.replace(/\.request$/, '.response');
-      let titles: Record<string, string> = Object.create(null);
+      let response: unknown = {};
       try {
-        const ids: unknown = JSON.parse(await fs.readFile(requestPath, 'utf8'));
-        if (!Array.isArray(ids) || ids.length > 1000 || !ids.every(id => typeof id === 'string')) throw new Error('Invalid session title request');
-        const results = await Promise.allSettled(ids.map(async id => ({ id, title: await readSessionTitle(ctx.sessionQuery, id) })));
-        titles = Object.create(null);
-        for (const result of results) {
-          if (result.status === 'fulfilled' && result.value.title) titles[result.value.id] = result.value.title;
+        const request: unknown = JSON.parse(await fs.readFile(requestPath, 'utf8'));
+        if (Array.isArray(request)) {
+          if (request.length > 1000 || !request.every(id => typeof id === 'string')) throw new Error('Invalid session title request');
+          const results = await Promise.allSettled(request.map(async id => ({ id, title: await readSessionTitle(ctx.sessionQuery, id) })));
+          const titles: Record<string, string> = Object.create(null);
+          for (const result of results) {
+            if (result.status === 'fulfilled' && result.value.title) titles[result.value.id] = result.value.title;
+          }
+          response = titles;
+        } else {
+          const rename = request as { operation?: unknown; sessionId?: unknown; title?: unknown };
+          if (rename?.operation !== 'rename' || typeof rename.sessionId !== 'string' || typeof rename.title !== 'string') throw new Error('Invalid rename request');
+          const session = ctx.sessions?.get(rename.sessionId);
+          if (!session || !ctx.sessionTitle) throw new Error('DSH session is unavailable for rename');
+          const accepted = ctx.sessionTitle.rename(session, rename.title);
+          await ctx.sessions!.flush(session);
+          response = { ok: true, title: accepted.title };
         }
-      } catch { /* Metadata failure must not break native session listing. */ }
+      } catch (error) { response = { ok: false, error: error instanceof Error ? error.message : 'DSH title operation failed' }; }
       if (!stopped) {
-        await fs.writeFile(`${responsePath}.tmp`, JSON.stringify(titles), { mode: 0o600 });
+        await fs.writeFile(`${responsePath}.tmp`, JSON.stringify(response), { mode: 0o600 });
         await fs.rename(`${responsePath}.tmp`, responsePath);
       }
       await fs.rm(requestPath, { force: true });

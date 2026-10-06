@@ -8,6 +8,8 @@ import { parseTelegramTargetFromBridgeScope } from '../../core/bridge_scope.js';
 import type { ChannelPort } from '../../core/channel_port.js';
 import type { TelegramGateway } from '../../telegram/gateway.js';
 import type { TelegramRemoteFile } from '../../telegram/api.js';
+import { renderTelegramMarkdownRichHtml } from '../../telegram/rich_markdown.js';
+import { escapeTelegramHtml } from '../../telegram/html.js';
 import { telegramRichHtml, telegramRichMarkdown } from '../../telegram/rich.js';
 
 export type InlineKeyboard = Array<Array<{ text: string; callback_data: string }>>;
@@ -21,6 +23,21 @@ export class TelegramMessagingPort implements ChannelPort {
   beginTaskPreview(scopeId: string, taskId: string, text: string, reuseMessageId = 0) { return this.taskPreviews.begin(scopeId, taskId, text, reuseMessageId); }
   updateTaskPreview(scopeId: string, taskId: string, messageId: number, html: string) { return this.taskPreviews.update(scopeId, taskId, messageId, html); }
   endTaskPreview(scopeId: string, taskId: string) { return this.taskPreviews.end(scopeId, taskId); }
+
+  async sendTaskCommentary(scopeId: string, text: string): Promise<number> {
+    return this.sendRichMarkdown(scopeId, text);
+  }
+  async foldTaskCommentary(scopeId: string, messageId: number, text: string): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(scopeId);
+    try {
+      await this.gateway.editRichMessage(target.chatId, messageId,
+        telegramRichHtml(`<blockquote expandable>${renderTelegramMarkdownRichHtml(text)}</blockquote>`, { skipEntityDetection: true }), []);
+    } catch {
+      // The plain HTML endpoint has a smaller envelope than rich messages.
+      if (text.length > 3000) throw new Error('Long commentary requires Telegram rich messages');
+      await this.gateway.editHtmlMessage(target.chatId, messageId, `<blockquote expandable>${escapeTelegramHtml(text)}</blockquote>`, []);
+    }
+  }
 
   readonly capabilities = { editableMessages: true, inlineActions: true, maxMessageLength: 4000 };
 
