@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { ClientApp, ndJsonStream, PROTOCOL_VERSION, type ClientConnection, type SessionConfigOption, type SessionNotification, type RequestPermissionRequest, type RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import type { Logger } from '../logger.js';
 import type { AccessPresetValue } from '../types.js';
@@ -66,18 +67,25 @@ export class DshClient extends EventEmitter {
     try { await fs.access(pluginPath); } catch { pluginPath = pluginPath.replace(/\.js$/, '.ts'); }
     await fs.writeFile(patchPath, `- insert:\n    - id: foxclaw-permissions\n      name: ${JSON.stringify(pathToFileURL(pluginPath).href)}\n      config:\n        policyPath: ${JSON.stringify(this.policyPath)}\n`, { mode: 0o600 });
     const args = ['--profile', this.options.profile, ...this.options.patches.flatMap(p => ['--patch', path.resolve(p)]), '--patch', patchPath];
+    const env: NodeJS.ProcessEnv = { ...process.env, ...(this.options.home ? { DSH_HOME: this.options.home } : {}) };
     let command = this.options.cliBin;
-    let cwd = process.cwd();
+    // DSH reads .env in its launch directory. The service directory belongs to
+    // FoxClaw; session/new supplies the actual workspace independently.
+    const cwd = path.dirname(this.policyPath);
     if (this.options.sourceDir) {
-      cwd = path.resolve(this.options.sourceDir);
+      const sourceDir = path.resolve(this.options.sourceDir);
+      const tsx = createRequire(path.join(sourceDir, 'package.json')).resolve('tsx/esm');
+      env.TSX_TSCONFIG_PATH = path.join(sourceDir, 'tsconfig.json');
       command = process.execPath;
-      args.unshift('--import', 'tsx/esm', path.join(cwd, 'apps/cli/src/bin.ts'));
+      args.unshift('--import', pathToFileURL(tsx).href, path.join(sourceDir, 'apps/cli/src/bin.ts'));
     } else if (/\.[cm]?js$/.test(command)) {
       args.unshift(path.resolve(command));
       command = process.execPath;
+    } else if (command.includes('/') || command.includes('\\')) {
+      command = path.resolve(command);
     }
     signal?.throwIfAborted();
-    const child = spawn(command, args, { cwd, env: { ...process.env, ...(this.options.home ? { DSH_HOME: this.options.home } : {}) }, stdio: 'pipe', windowsHide: true });
+    const child = spawn(command, args, { cwd, env, stdio: 'pipe', windowsHide: true });
     this.process = child;
     this.stderr = '';
     this.optionsBySession.clear();

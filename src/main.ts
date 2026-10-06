@@ -847,6 +847,7 @@ async function runServeCli(): Promise<void> {
     const backendSetup = new BackendSetupManager(
       [createDshSetupDefinition(logger)], config.envPath ?? DEFAULT_ENV_PATH,
       async () => (await selfUpdater.readStatus())?.state !== 'pending',
+      logger,
     );
     supervisor.register('backend-setup', { stop: () => backendSetup.stop() });
     sharedAntigravityAuth = new AntigravityAuthManager(config.antigravityAuthDir, logger);

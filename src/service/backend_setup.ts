@@ -39,7 +39,8 @@ export class BackendSetupManager {
   private active: { controller: AbortController; done: Promise<void> } | null = null;
   private stopped = false;
   constructor(definitions: BackendSetupDefinition[], private readonly envPath: string,
-    private readonly canConfigure: () => Promise<boolean> = async () => true) {
+    private readonly canConfigure: () => Promise<boolean> = async () => true,
+    private readonly logger?: Logger) {
     this.definitions = new Map(definitions.map(definition => [definition.id, definition]));
   }
   get busy(): boolean { return this.active !== null; }
@@ -58,16 +59,27 @@ export class BackendSetupManager {
     let finish!: () => void;
     const done = new Promise<void>(resolve => { finish = resolve; });
     this.active = { controller, done };
+    const started = Date.now();
+    let stage = 'preflight';
     try {
       if (!await this.canConfigure()) throw new Error('A service update is running; try again when it finishes');
       controller.signal.throwIfAborted();
+      stage = candidate ? 'validate' : 'install';
+      this.logger?.info('backend.setup.started', { backendId: id, stage });
       const selected = candidate ?? await definition.install?.(controller.signal);
       if (!selected) throw new Error('This backend requires a local installation');
+      stage = 'validate';
+      this.logger?.info('backend.setup.validate', { backendId: id });
       await definition.validate(selected, controller.signal);
       controller.signal.throwIfAborted();
       const factory = definition.factory(selected);
+      stage = 'activate';
       writeBackendEnv(this.envPath, selected.updates);
       for (const target of this.targets) target(factory);
+      this.logger?.info('backend.setup.succeeded', { backendId: id, durationMs: Date.now() - started });
+    } catch (error) {
+      this.logger?.error('backend.setup.failed', { backendId: id, stage, durationMs: Date.now() - started, error: safeSetupError(error) });
+      throw error;
     } finally { this.active = null; finish(); }
   }
   async stop(): Promise<void> {

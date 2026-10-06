@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.3 - 2026-10-06
+
+### 中文
+
+- 修复从 Telegram 添加 DSH 时，安装成功却因读取 FoxClaw `.env` 中的代理变量而启动失败。DSH 在独立运行目录启动，继续继承服务环境；会话工作目录由 ACP 单独指定。
+- 源码模式显式加载 DSH 的 tsx 和 TypeScript 配置，保持源码模块解析正常。补充后端安装、启动校验、启用及失败阶段日志，方便定位面板接入问题。
+
+### English
+
+- Fixed DSH setup failing after installation when its launch directory caused it to read proxy settings from FoxClaw's `.env`. Launch in an isolated runtime directory, inherit the service environment, and pass session workspaces separately through ACP.
+- Resolve the DSH source checkout's tsx loader and TypeScript configuration explicitly. Added provisioning stage, duration and failure logs for backend setup diagnostics.
+
 ## 0.13.2 - 2026-10-06
 
 ### 中文
