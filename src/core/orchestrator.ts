@@ -49,6 +49,7 @@ export interface UnifiedActiveTurn {
   settling?: boolean;
   separateFinal?: boolean;
   commentaryIds?: Set<string>;
+  lastCommentaryTime?: number;
 }
 
 export class UnifiedChannelOrchestrator {
@@ -609,7 +610,7 @@ export class UnifiedChannelOrchestrator {
       const task = this.store.taskJournal.get(turn.taskId)!;
       const folded = buildFoldedToolsSummary({ toolLines: turn.toolLines, toolCount: turn.toolCount, stepIndex: turn.stepIndex, startTime: turn.startTime, locale: task.request.locale });
       const response = `${task.request.locale === 'zh' ? '🛑 已停止任务；排队任务保留。' : '🛑 Task stopped; queued tasks kept.'}${turn.accumulatedText.trim() ? `\n\n${turn.accumulatedText.trim()}` : ''}`;
-      this.store.taskJournal.update(turn.taskId, 'delivery_pending', { result: { kind: 'result', status: 'INTERRUPTED', response, conversationId: turn.threadId }, delivery: combineSummaryAndResponse(folded, response), deliveredChunks: 0, previewMessageId: turn.messageId, separateFinal: turn.separateFinal === true });
+      this.store.taskJournal.update(turn.taskId, 'delivery_pending', { result: { kind: 'result', status: 'INTERRUPTED', response, conversationId: turn.threadId }, taskEndedAt: Date.now(), delivery: turn.separateFinal ? chunkMessage(response) : combineSummaryAndResponse(folded, response), deliveredChunks: 0, previewMessageId: turn.messageId, separateFinal: turn.separateFinal === true });
       try { await this.deliverTaskChunks(turn.taskId); this.resolveDeliveredTask(turn.taskId); }
       catch (error) { this.logger.warn('orchestrator.stop_delivery_failed', { taskId: turn.taskId, error: String(error) }); }
     }
@@ -695,19 +696,45 @@ export class UnifiedChannelOrchestrator {
       task = this.store.taskJournal.update(task.id, 'delivery_pending', { deliveredChunks: index + 1 });
     }
     if (task.separateFinal) {
-      for (let index = 0; index < (task.commentary?.length ?? 0); index++) {
-        const item = task.commentary![index]!;
-        if (item.folded || this.messaging.capabilities?.editableMessages === false) continue;
-        try {
-          if (this.messaging.foldTaskCommentary) await this.messaging.foldTaskCommentary(task.event.scopeId, item.messageId, item.text);
-          else await this.editMessage(task.event.scopeId, item.messageId, `<blockquote expandable>${escapeHtml(item.text)}</blockquote>`, []);
+      if (task.commentary?.length && this.messaging.archiveTaskCommentary && this.messaging.capabilities?.editableMessages !== false) {
+        const messageId = task.commentaryArchiveMessageId ?? task.commentary[0]!.messageId;
+        if (!task.commentaryArchiveReady) {
+          const entries: Array<{ text: string; startedAt?: number | undefined; endedAt?: number | undefined }> = [];
+          let previousSource: string | undefined;
+          for (const item of task.commentary) {
+            if (item.sourceMessageId && item.sourceMessageId === previousSource) entries.at(-1)!.text += `\n${item.text}`;
+            else entries.push({ text: item.text, startedAt: item.startedAt, endedAt: item.endedAt });
+            previousSource = item.sourceMessageId;
+          }
+          await this.messaging.archiveTaskCommentary(task.event.scopeId, messageId, {
+            startedAt: task.taskStartedAt ?? task.createdAt, endedAt: task.taskEndedAt ?? task.updatedAt,
+            locale: task.request.locale, usage: task.result?.usage, entries,
+          });
+          task = this.store.taskJournal.update(task.id, 'delivery_pending', { commentaryArchiveMessageId: messageId, commentaryArchiveReady: true, commentary: task.commentary.map(item => ({ ...item, folded: false })) });
+        }
+        for (let index = 0; index < task.commentary!.length; index++) {
+          const item = task.commentary![index]!;
+          if (item.folded) continue;
+          if (item.messageId !== messageId) await this.messaging.deleteMessage(task.event.scopeId, item.messageId);
           const commentary = [...task.commentary!]; commentary[index] = { ...item, folded: true };
           task = this.store.taskJournal.update(task.id, 'delivery_pending', { commentary });
-        } catch (error) { this.logger.warn('orchestrator.commentary_fold_failed', { taskId, messageId: item.messageId, error: String(error) }); }
+        }
+      } else {
+        for (let index = 0; index < (task.commentary?.length ?? 0); index++) {
+          const item = task.commentary![index]!;
+          if (item.folded || this.messaging.capabilities?.editableMessages === false) continue;
+          try {
+            if (this.messaging.foldTaskCommentary) await this.messaging.foldTaskCommentary(task.event.scopeId, item.messageId, item.text);
+            else await this.editMessage(task.event.scopeId, item.messageId, `<blockquote expandable>${escapeHtml(item.text)}</blockquote>`, []);
+            const commentary = [...task.commentary!]; commentary[index] = { ...item, folded: true };
+            task = this.store.taskJournal.update(task.id, 'delivery_pending', { commentary });
+          } catch (error) { this.logger.warn('orchestrator.commentary_fold_failed', { taskId, messageId: item.messageId, error: String(error) }); }
+        }
       }
       if (!task.previewSettled) {
         if (task.previewMessageId > 0 && this.messaging.capabilities?.editableMessages !== false) {
-          if (task.finalPreviewText) await this.editMessage(task.event.scopeId, task.previewMessageId, task.finalPreviewText, []);
+          if (task.finalPreviewText && !task.commentaryArchiveReady) await this.editMessage(task.event.scopeId, task.previewMessageId, task.finalPreviewText, []);
+          else if (task.commentaryArchiveReady) await this.messaging.deleteMessage(task.event.scopeId, task.previewMessageId);
           else await this.messaging.deleteMessage(task.event.scopeId, task.previewMessageId).catch(() => {});
         }
         task = this.store.taskJournal.update(task.id, 'delivery_pending', { previewSettled: true });
@@ -1241,7 +1268,8 @@ export class UnifiedChannelOrchestrator {
       throw new Error('Orchestrator is stopped');
     }
     let execution: EngineTurnExecution;
-    task = this.store.taskJournal.update(task.id, 'running', { result: null, delivery: [], deliveredChunks: 0, previewSettled: false, separateFinal: adapter.supportsCommentary === true });
+    const taskStartedAt = task.taskStartedAt ?? Date.now();
+    task = this.store.taskJournal.update(task.id, 'running', { result: null, delivery: [], deliveredChunks: 0, previewSettled: false, separateFinal: adapter.supportsCommentary === true, taskStartedAt });
     try { execution = adapter.executeTurn(req); }
     catch (error) { await this.messaging.endTaskPreview?.(scopeId, task.id); this.store.removeActiveTurnPreview(turnKey); this.store.taskJournal.update(task.id, 'failed', { error: String(error) }); throw error; }
 
@@ -1258,12 +1286,13 @@ export class UnifiedChannelOrchestrator {
       stepIndex: 1,
       toolCount: 0,
       currentTool: null,
-      startTime: Date.now(),
+      startTime: taskStartedAt,
       previewKey: turnKey,
       queueId: options?.queueId,
       taskId: task.id,
       separateFinal: adapter.supportsCommentary === true,
       commentaryIds: new Set(),
+      lastCommentaryTime: task.commentary?.at(-1)?.endedAt ?? taskStartedAt,
     };
 
     this.activeTurns.set(scopeId, activeTurn);
@@ -1323,6 +1352,9 @@ export class UnifiedChannelOrchestrator {
       activeTurn.commentaryIds?.add(message.messageId);
       activeTurn.separateFinal = true;
       activeTurn.accumulatedText = '';
+      const endedAt = Date.now();
+      const startedAt = activeTurn.lastCommentaryTime ?? activeTurn.startTime;
+      activeTurn.lastCommentaryTime = endedAt;
       void this.messageOperations.run(`${scopeId}:preview:${activeTurn.taskId}`, async () => {
         if (!ownsTurn()) return;
         const limit = this.messaging.sendTaskCommentary ? 30000 : Math.min(3000, this.messaging.capabilities?.maxMessageLength ?? 3000);
@@ -1332,7 +1364,7 @@ export class UnifiedChannelOrchestrator {
             : await this.messaging.sendRichMarkdown(scopeId, text);
           const current = this.store.taskJournal.get(activeTurn.taskId)!;
           this.store.taskJournal.update(current.id, current.state, {
-            commentary: [...(current.commentary ?? []), { messageId, text, folded: false }], separateFinal: true,
+            commentary: [...(current.commentary ?? []), { messageId, text, folded: false, sourceMessageId: message.messageId, startedAt, endedAt }], separateFinal: true,
           });
         }
       }).catch(error => this.logger.warn('orchestrator.commentary_send_failed', { taskId: activeTurn.taskId, error: String(error) }));
@@ -1399,7 +1431,9 @@ export class UnifiedChannelOrchestrator {
       this.store.removeActiveTurnPreview(turnKey);
       const task = this.store.taskJournal.get(activeTurn.taskId)!;
       if (task.state === 'awaiting_confirmation') return;
-      if (task.state === 'delivery_pending' && task.deliveredChunks < task.delivery.length) {
+      if (task.state === 'delivery_pending' && (task.deliveredChunks < task.delivery.length
+        || (task.separateFinal && this.messaging.archiveTaskCommentary && this.messaging.capabilities?.editableMessages !== false && task.commentary?.length && (!task.commentaryArchiveReady || task.commentary.some(item => !item.folded)))
+        || (task.separateFinal && !task.previewSettled))) {
         this.logger.warn('orchestrator.delivery_pending', { taskId: task.id, scopeId });
         return;
       }
@@ -1412,7 +1446,7 @@ export class UnifiedChannelOrchestrator {
     execution.on('result', (res: EngineTurnResult) => { this.trackSettlement(async () => {
       if (!ownsTurn() || activeTurn.settling) return;
       activeTurn.settling = true;
-      this.store.taskJournal.update(activeTurn.taskId, 'running', { result: res, request: { ...req, threadId: res.conversationId || activeTurn.threadId } });
+      this.store.taskJournal.update(activeTurn.taskId, 'running', { result: res, taskEndedAt: Date.now(), request: { ...req, threadId: res.conversationId || activeTurn.threadId } });
       try {
         if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
         if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);
@@ -1562,7 +1596,7 @@ export class UnifiedChannelOrchestrator {
     execution.on('error', (err: Error) => { this.trackSettlement(async () => {
       if (!ownsTurn() || activeTurn.settling) return;
       activeTurn.settling = true;
-      this.store.taskJournal.update(activeTurn.taskId, 'running', { result: { kind: 'result', status: 'ERROR', response: activeTurn.accumulatedText, error: err.message, conversationId: activeTurn.threadId } });
+      this.store.taskJournal.update(activeTurn.taskId, 'running', { taskEndedAt: Date.now(), result: { kind: 'result', status: 'ERROR', response: activeTurn.accumulatedText, error: err.message, conversationId: activeTurn.threadId } });
       try {
         if (activeTurn.flushTimer) clearTimeout(activeTurn.flushTimer);
         if (activeTurn.typingTimer) clearInterval(activeTurn.typingTimer);

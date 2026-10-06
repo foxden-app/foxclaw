@@ -584,3 +584,99 @@ test('restart resumes final delivery without resending or refolding already coll
   assert.equal(core.getActiveTurnsCount(), 0);
   assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
 });
+
+test('completion consolidates all commentary before deleting originals and the working preview', async t => {
+  const f = await fixture(t); const operations: string[] = [];
+  Object.defineProperty(f.backend.adapter, 'supportsCommentary', { value: true });
+  f.messaging.beginTaskPreview = async () => 77;
+  f.messaging.archiveTaskCommentary = async (_scope, id, archive) => {
+    assert.equal(f.messages.at(-1), 'done');
+    assert.equal(id, 1);
+    assert.deepEqual(archive.entries.map(item => item.text), ['First summary', 'Second summary']);
+    assert.ok(archive.endedAt >= archive.startedAt);
+    assert.ok(archive.entries.every(item => item.endedAt! >= item.startedAt!));
+    operations.push('archive');
+  };
+  f.messaging.deleteMessage = async (_scope, id) => { operations.push(`delete:${id}`); };
+  await f.orchestrator.handleText(event('input'));
+  f.turns[0]!.events.emit('commentary', { messageId: 'one', text: 'First summary' });
+  f.turns[0]!.events.emit('commentary', { messageId: 'two', text: 'Second summary' });
+  await until(() => f.messages.length === 2);
+  f.turns[0]!.complete();
+  await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.deepEqual(operations, ['archive', 'delete:2', 'delete:77']);
+  assert.deepEqual(f.messages, ['First summary', 'Second summary', 'done']);
+  const task = f.store.taskJournal.findReceipt(event('input'), 'input')!;
+  assert.equal(task.state, 'completed');
+  assert.equal(task.commentaryArchiveReady, true);
+  assert.ok(task.commentary?.every(item => item.folded));
+});
+
+test('failed consolidation preserves all originals and retries delivery without replaying the turn', async t => {
+  const f = await fixture(t); let attempts = 0; const deleted: number[] = [];
+  f.messaging.beginTaskPreview = async () => 0;
+  f.messaging.archiveTaskCommentary = async () => { if (++attempts === 1) throw new Error('temporary archive failure'); };
+  f.messaging.deleteMessage = async (_scope, id) => { deleted.push(id); };
+  await f.orchestrator.handleText(event('input'));
+  f.turns[0]!.events.emit('commentary', { messageId: 'one', text: 'First summary' });
+  f.turns[0]!.events.emit('commentary', { messageId: 'two', text: 'Second summary' });
+  await until(() => f.messages.length === 2);
+  f.turns[0]!.complete(); await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.equal(f.store.taskJournal.listUnfinished('a')[0]?.state, 'delivery_pending');
+  assert.deepEqual(deleted, []);
+  await f.restart();
+  assert.equal(attempts, 2);
+  assert.deepEqual(deleted, [2]);
+  assert.equal(f.turns.length, 1);
+  assert.equal(f.messages.filter(text => text === 'done').length, 1);
+  assert.equal(f.store.taskJournal.listUnfinished('a').length, 0);
+});
+
+test('restart resumes partial commentary cleanup without editing the archive or deleting twice', async t => {
+  const f = await fixture(t); let archives = 0; let fail = true; const deleted: number[] = [];
+  f.messaging.beginTaskPreview = async () => 0;
+  f.messaging.archiveTaskCommentary = async () => { archives++; };
+  f.messaging.deleteMessage = async (_scope, id) => {
+    if (id === 3 && fail) { fail = false; throw new Error('temporary delete failure'); }
+    deleted.push(id);
+  };
+  await f.orchestrator.handleText(event('input'));
+  for (let n = 1; n <= 3; n++) f.turns[0]!.events.emit('commentary', { messageId: String(n), text: `Summary ${n}` });
+  await until(() => f.messages.length === 3);
+  f.turns[0]!.complete(); await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.deepEqual(deleted, [2]);
+  await f.restart();
+  assert.equal(archives, 1);
+  assert.deepEqual(deleted, [2, 3]);
+  assert.equal(f.messages.filter(text => text === 'done').length, 1);
+});
+
+test('chunked commentary is one timed entry in the archive', async t => {
+  const f = await fixture(t);
+  f.messaging.beginTaskPreview = async () => 0;
+  let entryCount = 0;
+  const text = 'original text '.repeat(400) + 'complete tail';
+  f.messaging.archiveTaskCommentary = async (_scope, _id, archive) => {
+    entryCount = archive.entries.length;
+    assert.match(archive.entries[0]!.text, /^original text/);
+    assert.match(archive.entries[0]!.text, /complete tail$/);
+  };
+  await f.orchestrator.handleText(event('input'));
+  f.turns[0]!.events.emit('commentary', { messageId: 'one-long-summary', text });
+  await until(() => f.messages.length === 2);
+  f.turns[0]!.complete(); await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.equal(entryCount, 1);
+});
+
+test('a channel without message editing completes without waiting for an impossible archive', async t => {
+  const f = await fixture(t);
+  Object.defineProperty(f.backend.adapter, 'supportsCommentary', { value: true });
+  Object.defineProperty(f.messaging, 'capabilities', { value: { editableMessages: false, inlineActions: false, maxMessageLength: 4000 } });
+  f.messaging.beginTaskPreview = async () => 0;
+  f.messaging.archiveTaskCommentary = async () => { throw new Error('Must not attempt an edit'); };
+  await f.orchestrator.handleText(event('input'));
+  f.turns[0]!.events.emit('commentary', { messageId: 'one', text: 'Summary' });
+  await until(() => f.store.taskJournal.findReceipt(event('input'), 'input')?.commentary?.length === 1);
+  f.turns[0]!.complete(); await until(() => f.orchestrator.getActiveTurnsCount() === 0);
+  assert.equal(f.store.taskJournal.findReceipt(event('input'), 'input')?.state, 'completed');
+});

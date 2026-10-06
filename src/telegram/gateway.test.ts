@@ -301,3 +301,32 @@ test('stoppable rich draft serializes native flags and polling acknowledges only
   assert.ok(requests.find(r => r.method === 'getUpdates')!.body.allowed_updates.includes('stopped_message_generation'));
   await gateway.stop();
 });
+
+test('archive document editing uploads within the existing message and deletion is retry-safe', async t => {
+  const previousBase = process.env.TELEGRAM_BOT_API_BASE_URL;
+  const requests: Array<{ url: string; body: string }> = [];
+  const server = http.createServer((request, response) => {
+    let body = '';
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      requests.push({ url: request.url!, body });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(request.url!.endsWith('/deleteMessage')
+        ? { ok: false, description: 'Bad Request: message to delete not found' }
+        : { ok: true, result: { message_id: 42 } }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  process.env.TELEGRAM_BOT_API_BASE_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(() => { server.closeAllConnections(); server.close(); if (previousBase === undefined) delete process.env.TELEGRAM_BOT_API_BASE_URL; else process.env.TELEGRAM_BOT_API_BASE_URL = previousBase; });
+  const gateway = new TelegramGateway('1234567890:secret', '42', null, 1000, storeStub as any, loggerStub as any, true);
+  await gateway.editRichMessageWithDocument('99', 42, '<details><summary>Stats</summary><tg-document src="tg://document?id=commentary_archive"></tg-document></details>', {
+    filename: 'all-summaries.html', contents: Buffer.from('<html>complete archive</html>'), contentType: 'text/html',
+  });
+  assert.ok(requests[0]!.url.endsWith('/editMessageText'));
+  assert.match(requests[0]!.body, /attach:\/\/commentary_archive/);
+  assert.match(requests[0]!.body, /name="message_id"\r\n\r\n42/);
+  assert.match(requests[0]!.body, /name="commentary_archive"; filename="all-summaries.html"/);
+  assert.match(requests[0]!.body, /<html>complete archive<\/html>/);
+  await assert.doesNotReject(gateway.deleteMessage('99', 43));
+});

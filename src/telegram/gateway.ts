@@ -316,6 +316,19 @@ export class TelegramGateway extends EventEmitter {
     }
   }
 
+  async editRichMessageWithDocument(chatId: string, messageId: number, html: string,
+    document: { filename: string; contents: Buffer; contentType: string }): Promise<void> {
+    const result = await callTelegramMultipartApi(this.botToken, 'editMessageText', {
+      chat_id: chatId, message_id: String(messageId),
+      rich_message: JSON.stringify({ html, skip_entity_detection: true,
+        media: [{ id: 'commentary_archive', media: { type: 'document', media: 'attach://commentary_archive' } }] }),
+      reply_markup: JSON.stringify({ inline_keyboard: [] }),
+    }, [{ fieldName: 'commentary_archive', ...document }]);
+    if (!result.ok && !String(result.description || '').includes('message is not modified')) {
+      throw new Error(result.description || 'Failed to attach commentary archive');
+    }
+  }
+
   async clearMessageInlineKeyboard(chatId: string, messageId: number): Promise<void> {
     const result = await callTelegramApi(this.botToken, 'editMessageReplyMarkup', {
       chat_id: chatId,
@@ -373,7 +386,7 @@ export class TelegramGateway extends EventEmitter {
       chat_id: chatId,
       message_id: messageId,
     });
-    if (!result.ok) {
+    if (!result.ok && !String(result.description || '').includes('message to delete not found')) {
       throw new Error(result.description || 'Failed to delete Telegram message');
     }
   }

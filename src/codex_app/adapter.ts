@@ -61,6 +61,8 @@ export class CodexEngineAdapter implements IEngineAdapter {
     let turnId: string | null = null;
     let cancelled = false;
     const earlyNotifications: any[] = [];
+    let usage: EngineTurnResult['usage'];
+    let lastUsageTotal: string | undefined;
 
     let promptText = request.prompt;
     if (request.stagedAttachments && request.stagedAttachments.length > 0 && !request.prompt.includes('Telegram attachments:')) {
@@ -90,6 +92,23 @@ export class CodexEngineAdapter implements IEngineAdapter {
         return;
       }
       try {
+        if (msg.method === 'thread/tokenUsage/updated') {
+          if (msg.params?.turnId && msg.params.turnId !== turnId) return;
+          const native = msg.params?.tokenUsage;
+          const current = native?.last;
+          if (!current) return;
+          // `last` is one model request; `total` is cumulative for the thread.
+          // Repeated notifications with the same cumulative counters are not new usage.
+          const signature = native.total ? JSON.stringify(native.total) : undefined;
+          if (signature && signature === lastUsageTotal) return;
+          lastUsageTotal = signature;
+          usage ??= {};
+          for (const [key, nativeKey] of [['inputTokens', 'inputTokens'], ['outputTokens', 'outputTokens'], ['cachedTokens', 'cachedInputTokens'], ['totalTokens', 'totalTokens']] as const) {
+            const value = current[nativeKey];
+            if (typeof value === 'number' && Number.isFinite(value) && value >= 0) usage[key] = (usage[key] ?? 0) + value;
+          }
+          return;
+        }
         const ev = normalizeTurnActivityEvent(msg);
         if (!ev) return;
         if (ev.turnId && turnId && ev.turnId !== turnId) return;
@@ -137,6 +156,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
             ...(failure ? { error: String(failure) } : {}),
             response: accumulatedResponse,
             conversationId: threadId,
+            usage,
           };
           emitter.emit('result', finalResult);
           resolveWaiters(finalResult);
@@ -156,7 +176,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
       if (finalResult || turnError) return;
       cleanup();
       finalResult = { kind: 'result', status: 'ERROR', response: responseText(),
-        error: 'Codex connection closed before the task outcome was confirmed.', outcomeUnknown: true, conversationId: threadId };
+        error: 'Codex connection closed before the task outcome was confirmed.', outcomeUnknown: true, conversationId: threadId, usage };
       emitter.emit('result', finalResult);
       resolveWaiters(finalResult);
     };
@@ -279,7 +299,7 @@ export class CodexEngineAdapter implements IEngineAdapter {
           if (finalResult) return;
           if (threadId && turnId) await this.client.interruptTurn(threadId, turnId);
           cleanup();
-          finalResult = { kind: 'result', status: 'INTERRUPTED', response: accumulatedResponse, conversationId: threadId };
+          finalResult = { kind: 'result', status: 'INTERRUPTED', response: accumulatedResponse, conversationId: threadId, usage };
           emitter.emit('result', finalResult);
           resolveWaiters(finalResult);
         })();

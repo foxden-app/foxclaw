@@ -11,6 +11,8 @@ import type { TelegramRemoteFile } from '../../telegram/api.js';
 import { renderTelegramMarkdownRichHtml } from '../../telegram/rich_markdown.js';
 import { escapeTelegramHtml } from '../../telegram/html.js';
 import { telegramRichHtml, telegramRichMarkdown } from '../../telegram/rich.js';
+import type { TaskCommentaryArchive } from '../../core/commentary_archive.js';
+import { buildTelegramCommentaryArchive } from '../../telegram/commentary_archive.js';
 
 export type InlineKeyboard = Array<Array<{ text: string; callback_data: string }>>;
 
@@ -26,6 +28,15 @@ export class TelegramMessagingPort implements ChannelPort {
 
   async sendTaskCommentary(scopeId: string, text: string): Promise<number> {
     return this.sendRichMarkdown(scopeId, text);
+  }
+  async archiveTaskCommentary(scopeId: string, messageId: number, archive: TaskCommentaryArchive): Promise<void> {
+    const target = parseTelegramTargetFromBridgeScope(scopeId);
+    const rendered = buildTelegramCommentaryArchive(archive);
+    if (rendered.document) {
+      await this.gateway.editRichMessageWithDocument(target.chatId, messageId, rendered.html, rendered.document);
+    } else {
+      await this.gateway.editRichMessage(target.chatId, messageId, telegramRichHtml(rendered.html, { skipEntityDetection: true }), []);
+    }
   }
   async foldTaskCommentary(scopeId: string, messageId: number, text: string): Promise<void> {
     const target = parseTelegramTargetFromBridgeScope(scopeId);

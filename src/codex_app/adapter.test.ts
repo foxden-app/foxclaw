@@ -274,3 +274,27 @@ test('Codex RPC outcome-unknown timeouts never become replayable execution error
   assert.equal(executionErrors, 0);
   assert.equal(notifications.listenerCount('notification'), 0);
 });
+
+test('Codex usage sums model requests in this turn and ignores duplicate and foreign notifications', async () => {
+  const notifications = new EventEmitter();
+  const client = {
+    startThread: async () => ({ thread: { threadId: 'thread' } }),
+    startTurn: async () => ({ id: 'turn' }),
+    on: (name: string, listener: any) => notifications.on(name, listener), off: (name: string, listener: any) => notifications.off(name, listener),
+  } as unknown as CodexAppClient;
+  const execution = new CodexEngineAdapter(client).executeTurn({ scopeId: 'a', prompt: 'fix', threadId: null, cwd: '/tmp', model: 'default', locale: 'en' });
+  await new Promise(resolve => setImmediate(resolve));
+  const update = (turnId: string, total: number, input: number, output: number, cache: number, threadId = 'thread') => notifications.emit('notification', {
+    method: 'thread/tokenUsage/updated', params: { threadId, turnId, tokenUsage: {
+      total: { totalTokens: total }, last: { totalTokens: input + output, inputTokens: input, outputTokens: output, cachedInputTokens: cache },
+    } },
+  });
+  update('old-turn', 1000, 900, 100, 800);
+  update('turn', 1110, 100, 10, 90);
+  update('turn', 1110, 100, 10, 90);
+  update('turn', 1330, 200, 20, 180);
+  update('turn', 9999, 800, 100, 700, 'other-thread');
+  notifications.emit('notification', { method: 'turn/completed', params: { threadId: 'thread', turn: { id: 'turn', status: 'completed' } } });
+  const result = await execution.waitForResult();
+  assert.deepEqual(result?.usage, { totalTokens: 330, inputTokens: 300, outputTokens: 30, cachedTokens: 270 });
+});

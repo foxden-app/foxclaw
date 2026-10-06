@@ -1,6 +1,6 @@
 {
   "name": "@foxden-app/foxclaw",
-  "version": "0.13.7",
+  "version": "0.13.8",
   "description": "Foxden local execution claw for controlling Codex, OpenCode, Antigravity, and DeepSeek Harness from trusted chat interfaces.",
   "type": "module",
   "main": "dist/main.js",

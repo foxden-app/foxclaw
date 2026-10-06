@@ -2,6 +2,20 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## 0.13.8 - 2026-10-06
+
+### 中文
+
+- 任务结束后将所有过程小结合并为一条默认收起的 Telegram 归档消息：收起显示总耗时与 Token 总/入/出/缓存，展开按时间段展示全部小结；最终结论独立保留，移除其他小结和工作状态卡。
+- Codex 按本轮模型请求累计原生 Token 用量，忽略重复及其他会话/轮次通知；未提供的计数显示“—”。记录任务与小结时间，交付重试不增加耗时。
+- 超过富消息文字或内容块上限时，在同一归档内显示几条预览及“查看全部小结”HTML 文件，保留完整内容，不额外发布消息或公开网页。合并成功后才删除原消息，持久化清理进度；失败可通过重启或 `/recover` 继续，避免丢失小结或重发最终结论。
+
+### English
+
+- Consolidate all progress summaries into one closed Telegram archive at completion. Its header shows duration and total/input/output/cached tokens; expand to see timed summaries. Keep the final answer separate and remove other summaries and the working card.
+- Accumulate native Codex token usage for this turn's model requests, excluding duplicate and foreign notifications. Show unavailable counters as “—”. Persist task and summary timing so delivery retries do not inflate duration.
+- When rich message text or block limits are exceeded, embed previews and a complete HTML archive in the same message. No extra messages or public hosting. Delete originals only after successful consolidation and persist cleanup checkpoints; resume failures after restart or through `/recover` without losing summaries or resending the final answer.
+
 ## 0.13.7 - 2026-10-06
 
 ### 中文

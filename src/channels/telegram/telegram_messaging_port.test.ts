@@ -39,3 +39,16 @@ test('unsupported rich disclosures fall back to escaped HTML quotes', async () =
   await new TelegramMessagingPort(gateway).foldTaskCommentary('telegram:bot1:123::root', 42, '<unsafe>');
   assert.equal(html, '<blockquote expandable>&lt;unsafe&gt;</blockquote>');
 });
+
+test('a combined archive edits only the retained message and attaches overflow without a separate send', async () => {
+  const calls: string[] = [];
+  const gateway = {
+    editRichMessage: async (_chat: string, id: number, rich: { html: string }) => { calls.push(`edit:${id}`); assert.match(rich.html, /First/); assert.match(rich.html, /Second/); },
+    editRichMessageWithDocument: async (_chat: string, id: number, html: string, document: { contents: Buffer }) => { calls.push(`document:${id}`); assert.match(html, /查看全部小结/); assert.match(document.contents.toString(), /complete tail/); },
+  } as unknown as TelegramGateway;
+  const port = new TelegramMessagingPort(gateway);
+  const archive = { startedAt: 0, endedAt: 30000, locale: 'zh' as const, entries: [{ text: 'First' }, { text: 'Second' }] };
+  await port.archiveTaskCommentary('telegram:bot1:123::root', 42, archive);
+  await port.archiveTaskCommentary('telegram:bot1:123::root', 42, { ...archive, entries: [{ text: 'body '.repeat(8000) + 'complete tail' }] });
+  assert.deepEqual(calls, ['edit:42', 'document:42']);
+});

@@ -3,6 +3,7 @@ import type { AppLocale } from '../types.js';
 import type { ChannelTextEvent, ChannelCallbackEvent, ChannelInbound } from './channel_events.js';
 import type { ParsedCommand } from '../controller/commands.js';
 import type { AttachmentDownloader } from './attachments.js';
+import type { TaskCommentaryArchive } from './commentary_archive.js';
 
 /** Bridge-local handles; a transport maps these to its native message identifiers. */
 export type ChannelMessageRef = number;
@@ -18,6 +19,7 @@ export interface ChannelPort extends AttachmentDownloader {
   updateTaskPreview?(scopeId: string, taskId: string, messageId: number, html: string): Promise<number>;
   sendTaskCommentary?(scopeId: string, text: string): Promise<number>;
   foldTaskCommentary?(scopeId: string, messageId: number, text: string): Promise<void>;
+  archiveTaskCommentary?(scopeId: string, messageId: number, archive: TaskCommentaryArchive): Promise<void>;
   endTaskPreview?(scopeId: string, taskId: string): Promise<void>;
   resolveAction?(event: ChannelTextEvent): ChannelCallbackEvent | null;
   editPlain(scopeId: string, messageId: ChannelMessageRef, text: string, keyboard?: ChannelInlineKeyboard): Promise<void>;

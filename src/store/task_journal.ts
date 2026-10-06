@@ -13,7 +13,11 @@ export interface JournalTask {
   queueId: string | null;
   previewMessageId: number;
   result: EngineTurnResult | null;
-  commentary?: Array<{ messageId: number; text: string; folded: boolean }>;
+  commentary?: Array<{ messageId: number; text: string; folded: boolean; sourceMessageId?: string; startedAt?: number; endedAt?: number }>;
+  taskStartedAt?: number;
+  taskEndedAt?: number;
+  commentaryArchiveMessageId?: number;
+  commentaryArchiveReady?: boolean;
   separateFinal?: boolean;
   finalPreviewText?: string;
   previewSettled?: boolean;
