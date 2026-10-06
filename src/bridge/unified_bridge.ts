@@ -3,6 +3,7 @@ import { AntigravityAccountUi } from '../antigravity/account_ui.js';
 import type { AntigravityWatcher } from '../antigravity/conversation_ui.js';
 import { createCodexBackendUi } from '../codex_app/backend_ui.js';
 import type { ChannelPort } from '../core/channel_port.js';
+import { BackendSetupManager, BackendSetupUi, safeSetupError } from '../service/backend_setup.js';
 
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
@@ -82,6 +83,7 @@ import {
 
 
 export interface UnifiedBridgeCoreOptions {
+  backendSetup?: BackendSetupManager | undefined;
   codexApp?: CodexAppClient | undefined;
   codexAdapter?: CodexEngineAdapter | undefined;
   codexCore?: BridgeSessionCore | undefined;
@@ -97,6 +99,9 @@ export interface UnifiedBridgeCoreOptions {
 }
 
 export class UnifiedBridgeCore {
+  private readonly backendSetup?: BackendSetupManager | undefined;
+  private readonly backendSetupUi?: BackendSetupUi | undefined;
+  private readonly detachBackendSetup?: (() => void) | undefined;
   private readonly conversationUi: AntigravityConversationUi;
   private readonly accountUi: AntigravityAccountUi;
 
@@ -144,6 +149,7 @@ export class UnifiedBridgeCore {
     this.codexApp = options?.codexApp;
     this.defaultBackendId = options?.defaultBackendId ?? 'antigravity';
     this.selfUpdater = options?.selfUpdater;
+    this.backendSetup = options?.backendSetup;
 
     this.codexCore = options?.codexCore;
     if (!this.codexCore && options?.codexApp) {
@@ -284,12 +290,42 @@ export class UnifiedBridgeCore {
       }),
       backendProvider: () => this.getBackendDescriptors(),
       messaging: this.messaging,
-      serviceUi: { handleCustomCommand: (scopeId, cmd, args, locale, event) => this.handleServiceCommand(scopeId, cmd, args, locale, event) },
+      serviceUi: {
+        handleCustomCommand: (scopeId, cmd, args, locale, event) => this.handleServiceCommand(scopeId, cmd, args, locale, event),
+        renderBackendMenuRows: async (_scopeId, locale) => this.backendSetupUi?.rows(locale) ?? [],
+        handleCustomInbound: (event, locale) => this.backendSetupUi?.inbound(event, locale) ?? false,
+        handleCustomCallback: async (scopeId, data, locale, messageId, event) => {
+          if (!this.backendSetupUi) return false;
+          if (!data.startsWith('backend-setup:')) return this.backendSetupUi.callback(scopeId, data, locale, messageId);
+          if (event) await this.messaging.answerCallback(event.callbackQueryId, '');
+          try { await this.backendSetupUi.callback(scopeId, data, locale, messageId); }
+          catch (error) { await this.sendMessage(scopeId, `❌ ${safeSetupError(error)}`); }
+          return true;
+        },
+      },
 
     });
     const panels = { sendMessage: this.sendMessage.bind(this), editMessage: this.editMessage.bind(this), scheduleStalePanelDeletion: this.scheduleStalePanelDeletion.bind(this) };
     this.conversationUi = new AntigravityConversationUi(config, store, logger, this.conversations, panels, this.orchestrator);
     this.accountUi = new AntigravityAccountUi(config, store, logger, this.auth, panels, this.orchestrator);
+
+    if (this.backendSetup) {
+      this.backendSetupUi = new BackendSetupUi(this.backendSetup, {
+        listBackends: () => this.orchestrator.listBackends(),
+        readPathState: scopeId => this.store.getServiceInteraction(scopeId, 'backend-setup:path'),
+        writePathState: (scopeId, state) => this.store.setServiceInteraction(scopeId, 'backend-setup:path', state),
+        send: async (scopeId, text, keyboard, messageId) => {
+          if (messageId) await this.editMessage(scopeId, messageId, text, keyboard);
+          else await this.sendMessage(scopeId, text, keyboard);
+        },
+      });
+      this.detachBackendSetup = this.backendSetup.attach(factory => {
+        const backend = factory({ config: this.config, store: this.store, logger: this.logger, messaging: this.messaging });
+        if (this.backendDefinitions.some(existing => existing.id === backend.id)) return;
+        this.orchestrator.registerBackend(backend);
+        this.backendDefinitions.push(backend);
+      });
+    }
 
   }
 
@@ -423,6 +459,8 @@ export class UnifiedBridgeCore {
 
   async stop(): Promise<void> {
     this.clearSelfUpdateStatusPoll();
+    this.detachBackendSetup?.();
+    this.backendSetupUi?.stop();
     try { await this.orchestrator.stop(); }
     finally {
       await this.auth.stopKeepAlive();
@@ -521,7 +559,7 @@ export class UnifiedBridgeCore {
   }
 
   isIdleForServiceUpdate(): boolean {
-    return this.orchestrator.isIdleForServiceUpdate();
+    return !this.backendSetup?.busy && this.orchestrator.isIdleForServiceUpdate();
   }
 
   async getCurrentAuthLabel(): Promise<string | null> {
@@ -850,7 +888,12 @@ export class UnifiedBridgeCore {
   private async handleServiceCommand(
     scopeId: string, cmd: string, _args: string, locale: AppLocale, _event?: TelegramTextEvent,
   ): Promise<boolean> {
+    if (await this.backendSetupUi?.command(scopeId, cmd, _args, locale)) return true;
     if (cmd.toLowerCase() === 'update') {
+      if (this.backendSetup?.busy) {
+        await this.sendMessage(scopeId, locale === 'zh' ? '⏳ 正在添加后端，请完成后再升级。' : '⏳ Backend setup is running. Update after it finishes.');
+        return true;
+      }
       if (this.selfUpdater) {
         const status = await this.selfUpdater.readStatus();
         if (status?.state === 'pending') {

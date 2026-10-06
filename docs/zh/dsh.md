@@ -4,6 +4,14 @@ FoxClaw 直接启动 DSH 的 `acp` profile，复用 Telegram 的任务进度、�
 
 ## 接入现有 Bot
 
+也可以直接在 Telegram 的 `/setup` → 后端列表 → **添加后端** 中选择 DSH，或发送 `/backend add dsh`：
+
+- 接入检测到的本机 CLI / 源码，或发送它的绝对路径。
+- 没有本机安装时，点击“下载官方 CLI 并接入”。FoxClaw 使用 pnpm 在 `~/.foxclaw/backends/dsh` 安装官方 `@deepseek-ai/dsh`，不改动全局 CLI。
+- 启动检查通过后保存配置，并直接接入本机所有统一 Codex / Antigravity Bot，无需重启。当前任务、会话和后端保持原状；点击“切换至新后端”后才切换。
+
+DSH 模型账号和 API Key 沿用其本机配置。安装或启动检查失败时不会启用后端；面板显示原因，可以重新选择本机路径或重试。`/backend cancel` 取消路径输入，其他命令也会退出路径输入。
+
 在 FoxClaw 的 `.env` 中增加：
 
 ```dotenv
@@ -80,4 +88,4 @@ DSH_TELEMETRY_DISABLED=1 node --test --import tsx src/dsh/source.integration.tes
 
 联调使用临时 home 和会话目录，验证模型/推理设置、原生权限日志、恢复、工具事件和取消。未配置源码路径时跳过此项。
 
-先执行 `npm run build`，再追加 `FOXCLAW_DSH_TEST_BUILT=1` 可验证编译后的后端和随包发布的权限插件。
+先执行 `pnpm build`，再追加 `FOXCLAW_DSH_TEST_BUILT=1` 可验证编译后的后端和随包发布的权限插件。

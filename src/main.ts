@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { RuntimeSupervisor } from './core/runtime_supervisor.js';
+import { BackendSetupManager } from './service/backend_setup.js';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -733,6 +734,7 @@ async function runServeCli(): Promise<void> {
     { OpencodeTelegramRuntime },
     { DshTelegramRuntime },
     { createDshBackend },
+    { createDshSetupDefinition },
     { UnifiedBridgeCore },
     { AntigravityAppClient },
     { AntigravityAuthManager, linkAntigravityAuthTokens },
@@ -754,6 +756,7 @@ async function runServeCli(): Promise<void> {
     import('./opencode/runtime.js'),
     import('./dsh/runtime.js'),
     import('./dsh/backend.js'),
+    import('./dsh/setup.js'),
     import('./bridge/unified_bridge.js'),
     import('./antigravity/client.js'),
     import('./antigravity/auth.js'),
@@ -841,6 +844,11 @@ async function runServeCli(): Promise<void> {
       codexCliBin: config.codexCliBin,
       agyCliBin: config.antigravityCliBin,
     });
+    const backendSetup = new BackendSetupManager(
+      [createDshSetupDefinition(logger)], config.envPath ?? DEFAULT_ENV_PATH,
+      async () => (await selfUpdater.readStatus())?.state !== 'pending',
+    );
+    supervisor.register('backend-setup', { stop: () => backendSetup.stop() });
     sharedAntigravityAuth = new AntigravityAuthManager(config.antigravityAuthDir, logger);
     sharedAntigravityApp = new AntigravityAppClient(config.antigravityCliBin, logger);
     if (config.codexCliBin) {
@@ -1214,6 +1222,7 @@ async function runServeCli(): Promise<void> {
             antigravityApp: seed.antigravityApp,
             antigravityAuth: seed.antigravityAuth,
             defaultBackendId: seed.defaultBackend,
+            backendSetup,
             backends: seed.config.dsh ? [createDshBackend(seed.config, store, logger, telegramMessaging)] : [],
             selfUpdater,
           },

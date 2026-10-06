@@ -90,6 +90,12 @@ export class BridgeStore {
     this.taskJournal = new TaskJournal(this.db);
     this.channelInbox = new ChannelInbox(this.db);
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS service_interactions (
+        scope_id TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (scope_id, namespace)
+      );
       CREATE TABLE IF NOT EXISTS telegram_offsets (
         bot_key TEXT PRIMARY KEY,
         update_id INTEGER NOT NULL
@@ -1279,6 +1285,19 @@ export class BridgeStore {
 
   insertAudit(direction: 'inbound' | 'outbound', chatId: string, eventType: string, summary: string): void {
     this.db.prepare('INSERT INTO audit_logs (direction, chat_id, event_type, summary, created_at) VALUES (?, ?, ?, ?, ?)').run(direction, chatId, eventType, summary, Date.now());
+  }
+
+  getServiceInteraction(scopeId: string, namespace: string): string | null {
+    const row = this.db.prepare('SELECT payload FROM service_interactions WHERE scope_id = ? AND namespace = ?').get(scopeId, namespace);
+    return row ? String(row.payload) : null;
+  }
+
+  setServiceInteraction(scopeId: string, namespace: string, payload: string | null): void {
+    if (payload === null) {
+      this.db.prepare('DELETE FROM service_interactions WHERE scope_id = ? AND namespace = ?').run(scopeId, namespace);
+    } else {
+      this.db.prepare('INSERT INTO service_interactions (scope_id, namespace, payload) VALUES (?, ?, ?) ON CONFLICT(scope_id, namespace) DO UPDATE SET payload = excluded.payload').run(scopeId, namespace, payload);
+    }
   }
 
   close(): void {

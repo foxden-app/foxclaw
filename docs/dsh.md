@@ -4,6 +4,14 @@ FoxClaw launches DSH's shipped `acp` profile and reuses Telegram progress, tool 
 
 ## Existing bot
 
+Open Telegram `/setup` → backend list → **Add backend** and select DSH, or send `/backend add dsh`:
+
+- Use a discovered local CLI / source tree, or supply an absolute local path.
+- If none is installed, choose “Install official CLI and enable”. FoxClaw uses pnpm to install official `@deepseek-ai/dsh` under `~/.foxclaw/backends/dsh`, leaving global CLIs unchanged.
+- After checking startup, save configuration and register DSH on all unified Codex / Antigravity bots on this machine without restarting. Existing tasks, sessions and selected backends stay unchanged. Switch explicitly using the completion button.
+
+Model accounts and API keys use DSH's existing local configuration. Failed installation or startup checks do not enable the backend; the panel shows the error and lets you retry or choose another local path. `/backend cancel` or another command exits path input.
+
 Add to FoxClaw's `.env`:
 
 ```dotenv
@@ -80,4 +88,4 @@ DSH_TELEMETRY_DISABLED=1 node --test --import tsx src/dsh/source.integration.tes
 
 This uses temporary DSH home/session directories and verifies model/reasoning selection, native permission logs, resume, tools, and cancellation without paid model calls. It is skipped when the source path is unset.
 
-Run `npm run build` first and add `FOXCLAW_DSH_TEST_BUILT=1` to verify the compiled backend and packaged permission plugin.
+Run `pnpm build` first and add `FOXCLAW_DSH_TEST_BUILT=1` to verify the compiled backend and packaged permission plugin.

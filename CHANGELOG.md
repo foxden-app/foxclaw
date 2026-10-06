@@ -2,6 +2,18 @@
 
 All notable FoxClaw changes are listed here. Each release note is bilingual so GitHub Releases and the npm package are useful to both Chinese and English readers.
 
+## Unreleased
+
+### 中文
+
+- Telegram 后端列表新增“添加后端”，首次支持接入 DSH。本机 CLI、源码路径及官方安装包均可从面板操作，也可发送 `/backend add dsh`。
+- DSH 启动检查通过后保存配置并直接接入本机所有统一 Bot，保留当前任务和会话；明确选择后才切换。安装与配置操作统一归属服务，覆盖跨 Bot 并发、失败、过期按钮及关闭时取消。
+
+### English
+
+- Added Telegram backend setup, initially supporting DSH through a local CLI, source path or official package. Open “Add backend” or send `/backend add dsh`.
+- Verify startup before saving configuration and registering DSH on every unified bot without restarting or switching sessions. One service owns provisioning, including cross-bot concurrency, failures, expired actions and shutdown cancellation.
+
 ## 0.13.1 - 2026-10-06
 
 ### 中文

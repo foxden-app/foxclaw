@@ -717,6 +717,9 @@ export class UnifiedChannelOrchestrator {
 
     if (addressing.kind === 'ignore') return;
 
+    const serviceInbound = this.serviceUi?.handleCustomInbound?.(event, locale);
+    if (serviceInbound && await serviceInbound) return;
+
     if (addressing.kind === 'command') {
       const name = addressing.command.name.toLowerCase();
       const args = addressing.command.args.join(' ').trim();
@@ -820,6 +823,8 @@ export class UnifiedChannelOrchestrator {
     const locale: AppLocale = this.store.getChatSettings(scopeId)?.locale ?? 'zh';
     const data = event.data || '';
     const messageId = event.messageId;
+
+    if (this.serviceUi?.handleCustomCallback && await this.serviceUi.handleCustomCallback(scopeId, data, locale, messageId, event)) return;
 
     if (data.startsWith('engine:stop:')) {
       const status = await this.stopTask(scopeId, data.slice('engine:stop:'.length));
@@ -2085,6 +2090,9 @@ export class UnifiedChannelOrchestrator {
       ]);
     });
 
+    if (this.serviceUi?.renderBackendMenuRows) {
+      keyboard.push(...await this.serviceUi.renderBackendMenuRows(scopeId, locale));
+    }
     keyboard.push([{ text: '◀️ 返回控制面板', callback_data: 'engine:setup:main' }]);
 
     const text = lines.join('\n');
@@ -2132,6 +2140,7 @@ export class UnifiedChannelOrchestrator {
         locale === 'zh'
           ? `❌ 未找到后端: \`${argsString}\`。可用列表: ${backends.map((b) => `\`${b.id}\``).join(', ')}`
           : `❌ Backend not found: \`${argsString}\`. Available: ${backends.map((b) => `\`${b.id}\``).join(', ')}`,
+        await this.serviceUi?.renderBackendMenuRows?.(scopeId, locale),
       );
       return;
     }

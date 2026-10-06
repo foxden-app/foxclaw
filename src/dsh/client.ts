@@ -50,13 +50,14 @@ export class DshClient extends EventEmitter {
     await fs.rename(temporary, this.policyPath);
   }
 
-  start(): Promise<void> {
+  start(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (this.connection && !this.connection.signal.aborted) return Promise.resolve();
-    this.starting ??= this.launch().finally(() => { this.starting = null; });
+    this.starting ??= this.launch(signal).finally(() => { this.starting = null; });
     return this.starting;
   }
 
-  private async launch(): Promise<void> {
+  private async launch(signal?: AbortSignal): Promise<void> {
     if (this.stopping) await this.stopping;
     if (this.process) await this.stop();
     if (!this.policyPath) await this.setAccess('default');
@@ -75,6 +76,7 @@ export class DshClient extends EventEmitter {
       args.unshift(path.resolve(command));
       command = process.execPath;
     }
+    signal?.throwIfAborted();
     const child = spawn(command, args, { cwd, env: { ...process.env, ...(this.options.home ? { DSH_HOME: this.options.home } : {}) }, stdio: 'pipe', windowsHide: true });
     this.process = child;
     this.stderr = '';
@@ -96,17 +98,24 @@ export class DshClient extends EventEmitter {
       this.emit('disconnected');
     });
     const controller = new AbortController();
+    const abortInitialization = (): void => connection.close(new Error('DSH startup cancelled'));
+    signal?.addEventListener('abort', abortInitialization, { once: true });
+    if (signal?.aborted) abortInitialization();
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => { controller.abort(); reject(new Error('DSH initialization timed out')); }, this.options.startupTimeoutMs);
     });
     try {
-      const initialized = await Promise.race([connection.agent.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {}, clientInfo: { name: 'foxclaw', version: '1' } }, { cancellationSignal: controller.signal }), timeout]);
+      const cancellationSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+      const initialized = await Promise.race([connection.agent.request('initialize', { protocolVersion: PROTOCOL_VERSION, clientCapabilities: {}, clientInfo: { name: 'foxclaw', version: '1' } }, { cancellationSignal }), timeout]);
       this.capabilities = { image: initialized.agentCapabilities?.promptCapabilities?.image === true, resume: initialized.agentCapabilities?.sessionCapabilities?.resume != null, list: initialized.agentCapabilities?.sessionCapabilities?.list != null };
     } catch (error) {
       await this.stop();
       throw new Error(`Cannot start DSH: ${error instanceof Error ? error.message : String(error)}${this.stderr ? `\n${this.stderr}` : ''}`);
-    } finally { clearTimeout(timer!); }
+    } finally {
+      clearTimeout(timer!);
+      signal?.removeEventListener('abort', abortInitialization);
+    }
   }
 
   get connected(): boolean { return this.connection !== null && !this.connection.signal.aborted; }

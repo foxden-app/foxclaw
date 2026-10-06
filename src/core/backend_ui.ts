@@ -18,9 +18,10 @@ export interface EngineCustomUiHook {
   renderModelsMenu?(scopeId: string, locale: AppLocale, messageId?: number): Promise<boolean>;
   renderCustomStatus?(scopeId: string, locale: AppLocale): Promise<string | null>;
   renderCustomSetupRows?(scopeId: string, locale: AppLocale): Promise<ChannelInlineKeyboard>;
+  renderBackendMenuRows?(scopeId: string, locale: AppLocale): Promise<ChannelInlineKeyboard>;
   handleCustomCallback?(scopeId: string, data: string, locale: AppLocale, messageId?: number, event?: ChannelCallbackEvent): Promise<boolean>;
   handleCustomCommand?(scopeId: string, command: string, args: string, locale: AppLocale, event?: ChannelTextEvent): Promise<boolean>;
-  handleCustomInbound?(event: ChannelTextEvent, locale: AppLocale): Promise<boolean>;
+  handleCustomInbound?(event: ChannelTextEvent, locale: AppLocale): boolean | Promise<boolean>;
 }
 
 export interface BackendUi extends EngineCustomUiHook {
